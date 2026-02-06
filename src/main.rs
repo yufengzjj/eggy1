@@ -15,21 +15,53 @@ define_language! {
         "&" = And([Id; 2]),
         "^" = Xor([Id; 2]),
         "|" = Or([Id; 2]),
+        "~" = Not([Id; 1]),
+        "-" = Neg([Id; 1]),
          Symbol(Symbol),
     }
 }
 
 fn make_rules() -> Vec<Rewrite<OperatorLanguage, ()>> {
-    vec![
+    let mut rules = vec![
         rw!("commute-add"; "(+ ?a ?b)" => "(+ ?b ?a)"),
         rw!("commute-mul"; "(* ?a ?b)" => "(* ?b ?a)"),
         rw!("commute-and"; "(& ?a ?b)" => "(& ?b ?a)"),
         rw!("commute-xor"; "(^ ?a ?b)" => "(^ ?b ?a)"),
         rw!("commute-or"; "(| ?a ?b)" => "(| ?b ?a)"),
         rw!("add-0"; "(+ ?a 0)" => "?a"),
+        rw!("sub-0"; "(- ?a 0)" => "?a"),
         rw!("mul-0"; "(* ?a 0)" => "0"),
         rw!("mul-1"; "(* ?a 1)" => "?a"),
-    ]
+        rw!("dev-1"; "(/ ?a 1)" => "?a"),
+        rw!("div-0"; "(/ 0 ?a)" => "0"),
+        rw!("assoc-mul"; "(* ?x (* ?y ?z))" => "(* (* ?x ?y) ?z)"),
+        rw!("assoc-add"; "(+ ?x (+ ?y ?z))" => "(+ (+ ?x ?y) ?z)"),
+        rw!("assoc-and"; "(& ?x (& ?y ?z))" => "(& (& ?x ?y) ?z)"),
+        rw!("assoc-xor"; "(^ ?x (^ ?y ?z))" => "(^ (^ ?x ?y) ?z)"),
+        rw!("assoc-or"; "(| ?x (| ?y ?z))" => "(| (| ?x ?y) ?z)"),
+    ];
+    rules.extend(
+        vec![
+            rw!("not-mul"; "(~ (* ?x ?y))" <=> "(+ (* (~ ?x) ?y) (- ?y 1))"),
+            rw!("not-add"; "(~ (+ ?x ?y))" <=> "(+ (~ ?x) (+ (~ ?y) 1))"),
+            rw!("not-sub"; "(~ (- ?x ?y))" <=> "(- (~ ?x) (+ (~ ?y) 1))"),
+            rw!("not-and"; "(~ (& ?x ?y))" <=> "(| (~ ?x) (~ ?y))"),
+            rw!("not-xor"; "(~ (^ ?x ?y))" <=> "(| (& ?x ?y) (~ (| ?x ?y)))"),
+            rw!("not-or"; "(~ (| ?x ?y))" <=> "(& (~ ?x) (~ ?y))"),
+            rw!("neg-mul"; "(- (* ?x ?y))" <=> "(* (- ?x) ?y)"),
+            rw!("sub-to-add-neg"; "(- ?x ?y)" <=> "(+ ?x (- ?y))"),
+            rw!("neg-to-not-plus-one"; "(- ?x)" <=> "(+ (~ ?x) 1)"),
+            rw!("distribute-mul-add"; "(* (+ ?x ?y) ?z)" <=> "(+ (* ?x ?z) (* ?y ?z))"),
+            rw!("distribute-mul-sub"; "(* (- ?x ?y) ?z)" <=> "(- (* ?x ?z) (* ?y ?z))"),
+            rw!("factor-mul-add"; "(+ (* ?x ?y) (* ?x ?z))" <=> "(* ?x (+ ?y ?z))"),
+            rw!("factor-mul-sub"; "(- (* ?x ?y) (* ?x ?z))" <=> "(* ?x (- ?y ?z))"),
+            rw!("factor-add-mul"; "(+ (* ?x ?y) ?y)" <=> "(* (+ ?x 1) ?y)"),
+            rw!("double-to-mul"; "(+ ?x ?x)" <=> "(* 2 ?x)"),
+            rw!("neg-add"; "(- (+ ?x ?y))" <=> "(+ (- ?x) (- ?y))"),
+        ]
+        .concat(),
+    );
+    rules
 }
 
 fn simplify(s: &str) -> String {
