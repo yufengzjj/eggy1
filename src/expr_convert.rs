@@ -2,6 +2,8 @@
 //! Supports operators: +, -, *, / and parentheses.
 //! Variables consist of letters, numbers consist of digits.
 
+use crate::expr_convert::Token::RParen;
+
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     Operand(String),
@@ -54,7 +56,7 @@ fn tokenize(expr: &str) -> Vec<Token> {
             _ if c.is_ascii_alphabetic() => {
                 let mut ident = String::new();
                 while let Some(&ch) = chars.peek() {
-                    if ch.is_ascii_alphanumeric() {
+                    if ch == '_' || ch.is_ascii_alphanumeric() {
                         ident.push(ch);
                         chars.next();
                     } else {
@@ -65,15 +67,27 @@ fn tokenize(expr: &str) -> Vec<Token> {
             }
             _ if c.is_ascii_digit() => {
                 let mut num = String::new();
+                let mut count = 0;
+                let mut first = '_';
                 while let Some(&ch) = chars.peek() {
-                    if ch.is_ascii_digit() {
+                    if (count == 1 && first == '0' && ch == 'x') || ch.is_ascii_digit() {
                         num.push(ch);
+                        if count == 0 {
+                            first = ch;
+                        }
                         chars.next();
                     } else {
                         break;
                     }
+                    count += 1;
                 }
-                tokens.push(Token::Operand(num));
+                if num.starts_with("0x") {
+                    tokens.push(Token::Operand(
+                        u64::from_str_radix(&num[2..], 16).unwrap().to_string(),
+                    ));
+                } else {
+                    tokens.push(Token::Operand(num));
+                }
             }
             _ => {
                 // Unknown character, skip (could also panic)
@@ -141,7 +155,7 @@ fn parse_atom(tokens: &[Token]) -> (Ast, &[Token]) {
         Some(Token::Operand(s)) => (Ast::Operand(s.clone()), &tokens[1..]),
         Some(Token::LParen) => {
             let (expr, rest) = parse_infix_expr(&tokens[1..], 0);
-            if let Some(Token::RParen) = rest.first() {
+            if let Some(RParen) = rest.first() {
                 (expr, &rest[1..])
             } else {
                 panic!("Mismatched parentheses");
@@ -173,7 +187,7 @@ fn ast_to_prefix(ast: &Ast) -> String {
     match ast {
         Ast::Operand(s) => s.clone(),
         Ast::UnaryOp(op, operand) => {
-            format!("{}{}", op, ast_to_prefix(operand))
+            format!("({} {})", op, ast_to_prefix(operand))
         }
         Ast::BinaryOp(op, left, right) => {
             format!("({} {} {})", op, ast_to_prefix(left), ast_to_prefix(right))
@@ -181,15 +195,25 @@ fn ast_to_prefix(ast: &Ast) -> String {
     }
 }
 
-fn parse_prefix_binary(tokens: &[Token]) -> (Ast, &[Token]) {
+fn parse_prefix_op(tokens: &[Token]) -> (Ast, &[Token]) {
     match tokens.first() {
         Some(&Token::Operator(ref op)) => {
             let (left, rest1) = parse_prefix_expr(&tokens[1..], 0);
-            let (right, rest2) = parse_prefix_expr(rest1, 0);
-            (
-                Ast::BinaryOp(op.clone(), Box::new(left), Box::new(right)),
-                rest2,
-            )
+            match rest1.first() {
+                None => {
+                    panic!("Mismatched operand for operator:{}", op);
+                }
+                Some(v) => match v {
+                    RParen => (Ast::UnaryOp(op.clone(), Box::new(left)), rest1),
+                    _ => {
+                        let (right, rest2) = parse_prefix_expr(rest1, 0);
+                        (
+                            Ast::BinaryOp(op.clone(), Box::new(left), Box::new(right)),
+                            rest2,
+                        )
+                    }
+                },
+            }
         }
         _ => panic!("Expected binary operator, found {:?}", tokens.first()),
     }
@@ -201,7 +225,7 @@ fn parse_prefix_expr(tokens: &[Token], _min_prec: u8) -> (Ast, &[Token]) {
         Some(Token::Operand(s)) => (Ast::Operand(s.clone()), &tokens[1..]),
         Some(Token::LParen) => {
             // parentheses enclose a binary operator expression
-            let (ast, rest) = parse_prefix_binary(&tokens[1..]);
+            let (ast, rest) = parse_prefix_op(&tokens[1..]);
             if let Some(Token::RParen) = rest.first() {
                 (ast, &rest[1..])
             } else {
@@ -304,23 +328,23 @@ mod tests {
         assert_eq!(infix_to_prefix("a + b & c"), "(& (+ a b) c)");
         assert_eq!(infix_to_prefix("a & b * c"), "(& a (* b c))");
 
-        assert_eq!(infix_to_prefix("-a"), "-a");
-        assert_eq!(infix_to_prefix("+a"), "+a");
-        assert_eq!(infix_to_prefix("~a"), "~a");
+        assert_eq!(infix_to_prefix("-a"), "(- a)");
+        assert_eq!(infix_to_prefix("+a"), "(+ a)");
+        assert_eq!(infix_to_prefix("~a"), "(~ a)");
 
-        assert_eq!(infix_to_prefix("-a + b"), "(+ -a b)");
+        assert_eq!(infix_to_prefix("-a + b"), "(+ (- a) b)");
 
-        assert_eq!(infix_to_prefix("-(a + b)"), "-(+ a b)");
+        assert_eq!(infix_to_prefix("-(a + b)"), "(- (+ a b))");
 
-        assert_eq!(infix_to_prefix("~-a"), "~-a");
-        assert_eq!(infix_to_prefix("-~a"), "-~a");
-        assert_eq!(infix_to_prefix("~~a"), "~~a");
+        assert_eq!(infix_to_prefix("~-a"), "(~ (- a))");
+        assert_eq!(infix_to_prefix("-~a"), "(- (~ a))");
+        assert_eq!(infix_to_prefix("~~a"), "(~ (~ a))");
 
-        assert_eq!(infix_to_prefix("~a + b"), "(+ ~a b)");
-        assert_eq!(infix_to_prefix("a & ~b"), "(& a ~b)");
+        assert_eq!(infix_to_prefix("~a + b"), "(+ (~ a) b)");
+        assert_eq!(infix_to_prefix("a & ~b"), "(& a (~ b))");
 
-        assert_eq!(infix_to_prefix("~(a + b)"), "~(+ a b)");
-        assert_eq!(infix_to_prefix("~(a & b)"), "~(& a b)");
+        assert_eq!(infix_to_prefix("~(a + b)"), "(~ (+ a b))");
+        assert_eq!(infix_to_prefix("~(a & b)"), "(~ (& a b))");
     }
 
     #[test]
@@ -461,7 +485,7 @@ mod tests {
         );
         assert_eq!(
             infix_to_prefix("(-(a & b) + ~(c * d))"),
-            "(+ -(& a b) ~(* c d))"
+            "(+ (- (& a b)) (~ (* c d)))"
         );
 
         // 深度嵌套表达式（与多重嵌套相同，已包含）
@@ -478,7 +502,7 @@ mod tests {
 
         // 多重一元操作符（移除 ! 的支持）
         assert_eq!(prefix_to_infix("(+ ~-a -~b)"), "(~-a + -~b)");
-        assert_eq!(infix_to_prefix("(~-a + -~b)"), "(+ ~-a -~b)");
+        assert_eq!(infix_to_prefix("(~-a + -~b)"), "(+ (~ (- a)) (- (~ b)))");
 
         // 嵌套括号和优先级
         assert_eq!(
