@@ -158,7 +158,7 @@ fn parse_infix_expr(tokens: &[Token], min_prec: u8) -> (Ast, &[Token]) {
 }
 
 fn is_unary_op(op: &str) -> bool {
-    matches!(op, "-" | "~")
+    matches!(op, "-" | "~" | "Num")
 }
 
 fn parse_atom(tokens: &[Token]) -> (Ast, &[Token]) {
@@ -240,6 +240,7 @@ fn egg2sym_op(op: &str) -> &'static str {
         "Shr" => ">>",
         "Neg" => "-",
         "Not" => "~",
+        "Num" => "Num",
         _ => "_",
     }
 }
@@ -273,7 +274,6 @@ fn parse_prefix_op(tokens: &[Token]) -> (Ast, &[Token]) {
 }
 
 fn parse_prefix_expr(tokens: &[Token], _min_prec: u8) -> (Ast, &[Token]) {
-    // _min_prec ignored for prefix parsing
     match tokens.first() {
         Some(Token::Num(num)) => (Ast::Num(num.clone()), &tokens[1..]),
         Some(Token::Operand(s)) => (Ast::Operand(s.clone()), &tokens[1..]),
@@ -286,7 +286,6 @@ fn parse_prefix_expr(tokens: &[Token], _min_prec: u8) -> (Ast, &[Token]) {
             }
         }
         Some(Token::Operator(op)) if is_unary_op(op) => {
-            // unary operator without parentheses
             let (operand, rest) = parse_prefix_expr(&tokens[1..], 0);
             (Ast::UnaryOp(op.clone(), Box::new(operand)), rest)
         }
@@ -303,7 +302,7 @@ fn ast_to_infix(ast: &Ast) -> String {
         Ast::Operand(s) => s.clone(),
         Ast::UnaryOp(op, operand) => {
             let operand_str = ast_to_infix(operand);
-            format!("{}{}", op, operand_str)
+            format!("{}{}", if op == "Num" { "" } else { op }, operand_str)
         }
         Ast::BinaryOp(op, left, right) => {
             let left_str = ast_to_infix(left);
@@ -334,6 +333,9 @@ fn ast_to_egglog(ast: &Ast, is_expr: bool) -> String {
                 }
                 "~" => {
                     format!("(Not {})", operand_str)
+                }
+                "Num" => {
+                    format!("(Num {})", operand_str)
                 }
                 _ => panic!("Unexpected unary operator {}", op),
             }

@@ -133,9 +133,11 @@ fn make_egg(num_type: &str) -> String {
     egg.push_str(&rewrite!("~(x*y)"=>"((~x*y)+(y-1))";"canonicalization"));
     egg.push_str(&rewrite!("~(x+y)"=>"(~x+(~y+1))";"canonicalization"));
     egg.push_str(&rewrite!("~(x-y)"=>"(~x-(~y+1))";"canonicalization"));
+    egg.push_str(&rewrite!("~(x&y)"=>"-(x&y)-1";"canonicalization"));
     egg.push_str(&rewrite!("~(x&y)"=>"(~x|~y)";"canonicalization"));
     egg.push_str(&rewrite!("~(x^y)"=>"((x&y)|~(x|y))";"canonicalization"));
     egg.push_str(&rewrite!("~(x|y)"=>"(~x&~y)";"canonicalization"));
+    egg.push_str(&rewrite!("(x|y)"=>"(x ^ y) + (x & y)";"canonicalization"));
 
     egg.push_str(&rewrite!("a+b"=>"b+a"));
     egg.push_str(&rewrite!("a*b"=>"b*a"));
@@ -165,6 +167,9 @@ fn make_egg(num_type: &str) -> String {
     egg.push_str(&rewrite!("(a & b) ^ (a & ~b)" => "a";"simplify"));
     egg.push_str(&rewrite!("2*(x | y) + (x ^ ~y)" => "(x + y) - 1";"simplify"));
     egg.push_str(&rewrite!("(x | ~y) + y" => "(x & y) - 1";"simplify"));
+    egg.push_str(&rewrite!("(x + y) + ~(x & y)" => "(x | y) - 1";"simplify"));
+    egg.push_str(&rewrite!("(x ^ y) + 2*(x & y)" => "x + y";"simplify"));
+    egg.push_str(&rewrite!("((x & 0xFF) ^ (Num c1)) + 2*(x & (Num c2))" => "(x & 0xFF) + (Num c1)";"simplify :when ((= (& c1 255) c2))"));
     egg
 }
 fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
@@ -213,6 +218,10 @@ fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
+    #[arg(short, long, default_value_t = false)]
+    rule_compile: bool,
+    #[arg(short, long, default_value_t = false)]
+    expr_compile: bool,
     #[arg(short, long, default_value = "i64")]
     num_type: String,
     #[arg(short, long, default_value_t = 30)]
@@ -223,6 +232,14 @@ fn main() {
     let cli = Cli::parse();
     if cli.expr.is_empty() {
         println!("please enter a expression");
+        return;
+    }
+    if cli.rule_compile {
+        println!("{}",infix_to_egglog(&cli.expr, false));
+        return;
+    }
+    if cli.expr_compile {
+        println!("{}",infix_to_egglog(&cli.expr, true));
         return;
     }
     let egg_expr = infix_to_egglog(&cli.expr, true);
@@ -244,8 +261,10 @@ mod tests {
     #[test]
     fn test_formal_simplify() {
         let cli = Cli {
+            rule_compile: false,
+            expr_compile: false,
             num_type: "i64".to_string(),
-            iter_limit: 20,
+            iter_limit: 15,
             expr: "".to_string(),
         };
         let test_pairs = vec![
