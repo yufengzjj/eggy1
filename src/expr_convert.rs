@@ -6,6 +6,7 @@ use crate::expr_convert::Token::RParen;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
+    Num(String),
     Operand(String),
     Operator(String),
     LParen,
@@ -20,7 +21,7 @@ fn tokenize(expr: &str) -> Vec<Token> {
 
     while let Some(&c) = chars.peek() {
         match c {
-            ' ' => {
+            ' ' | '"' => {
                 chars.next();
             }
             '(' => {
@@ -31,7 +32,7 @@ fn tokenize(expr: &str) -> Vec<Token> {
                 tokens.push(Token::RParen);
                 chars.next();
             }
-            '+' | '-' | '*' | '/' | '%' | '&' | '|' | '^' | '!' | '~' => {
+            '+' | '-' | '*' | '/' | '%' | '&' | '|' | '^' | '~' => {
                 tokens.push(Token::Operator(c.to_string()));
                 chars.next();
             }
@@ -41,7 +42,7 @@ fn tokenize(expr: &str) -> Vec<Token> {
                     chars.next(); // consume second '<'
                     tokens.push(Token::Operator("<<".to_string()));
                 } else {
-                    tokens.push(Token::Operator("<".to_string()));
+                    break;
                 }
             }
             '>' => {
@@ -50,10 +51,10 @@ fn tokenize(expr: &str) -> Vec<Token> {
                     chars.next(); // consume second '>'
                     tokens.push(Token::Operator(">>".to_string()));
                 } else {
-                    tokens.push(Token::Operator(">".to_string()));
+                    break;
                 }
             }
-            _ if c.is_ascii_alphabetic() => {
+            _ if c == '_' || c.is_ascii_alphabetic() => {
                 let mut ident = String::new();
                 while let Some(&ch) = chars.peek() {
                     if ch == '_' || ch.is_ascii_alphanumeric() {
@@ -63,14 +64,22 @@ fn tokenize(expr: &str) -> Vec<Token> {
                         break;
                     }
                 }
-                tokens.push(Token::Operand(ident));
+                let sym_op = egg2sym_op(&ident);
+                if sym_op == "_" {
+                    tokens.push(Token::Operand(ident));
+                } else {
+                    tokens.push(Token::Operator(sym_op.to_string()));
+                }
             }
             _ if c.is_ascii_digit() => {
                 let mut num = String::new();
                 let mut count = 0;
                 let mut first = '_';
                 while let Some(&ch) = chars.peek() {
-                    if (count == 1 && first == '0' && ch == 'x') || ch.is_ascii_digit() {
+                    if (count == 1 && first == '0' && ch == 'x')
+                        || ch.is_ascii_digit()
+                        || (num.starts_with("0x") && ch.is_ascii_hexdigit())
+                    {
                         num.push(ch);
                         if count == 0 {
                             first = ch;
@@ -82,15 +91,16 @@ fn tokenize(expr: &str) -> Vec<Token> {
                     count += 1;
                 }
                 if num.starts_with("0x") {
-                    tokens.push(Token::Operand(
-                        u64::from_str_radix(&num[2..], 16).unwrap().to_string(),
+                    tokens.push(Token::Num(
+                        u64::from_str_radix(&num[2..], 16)
+                            .expect(&format!("fail to parse num:{}", num))
+                            .to_string(),
                     ));
                 } else {
-                    tokens.push(Token::Operand(num));
+                    tokens.push(Token::Num(num));
                 }
             }
             _ => {
-                // Unknown character, skip (could also panic)
                 chars.next();
             }
         }
@@ -100,6 +110,7 @@ fn tokenize(expr: &str) -> Vec<Token> {
 
 #[derive(Debug)]
 enum Ast {
+    Num(String),
     Operand(String),
     BinaryOp(String, Box<Ast>, Box<Ast>),
     UnaryOp(String, Box<Ast>),
@@ -147,11 +158,12 @@ fn parse_infix_expr(tokens: &[Token], min_prec: u8) -> (Ast, &[Token]) {
 }
 
 fn is_unary_op(op: &str) -> bool {
-    matches!(op, "-" | "+" | "~")
+    matches!(op, "-" | "~")
 }
 
 fn parse_atom(tokens: &[Token]) -> (Ast, &[Token]) {
     match tokens.first() {
+        Some(Token::Num(num)) => (Ast::Operand(num.clone()), &tokens[1..]),
         Some(Token::Operand(s)) => (Ast::Operand(s.clone()), &tokens[1..]),
         Some(Token::LParen) => {
             let (expr, rest) = parse_infix_expr(&tokens[1..], 0);
@@ -175,8 +187,26 @@ pub fn infix_to_prefix(expr: &str) -> String {
     assert!(rest.is_empty(), "Unconsumed tokens: {:?}", rest);
     ast_to_prefix(&ast)
 }
-
+#[allow(dead_code)]
 pub fn prefix_to_infix(expr: &str) -> String {
+    let tokens = tokenize(expr);
+    let (ast, rest) = parse_prefix_expr(&tokens, 0);
+    assert!(rest.is_empty(), "Unconsumed tokens: {:?}", rest);
+    ast_to_infix(&ast)
+}
+
+pub fn prefix_to_egglog(expr: &str, is_expr: bool) -> String {
+    let tokens = tokenize(expr);
+    let (ast, rest) = parse_prefix_expr(&tokens, 0);
+    assert!(rest.is_empty(), "Unconsumed tokens: {:?}", rest);
+    ast_to_egglog(&ast, is_expr)
+}
+
+pub fn infix_to_egglog(expr: &str, is_expr: bool) -> String {
+    let expr = infix_to_prefix(expr);
+    prefix_to_egglog(&expr, is_expr)
+}
+pub fn egglog_to_infix(expr: &str) -> String {
     let tokens = tokenize(expr);
     let (ast, rest) = parse_prefix_expr(&tokens, 0);
     assert!(rest.is_empty(), "Unconsumed tokens: {:?}", rest);
@@ -185,6 +215,7 @@ pub fn prefix_to_infix(expr: &str) -> String {
 
 fn ast_to_prefix(ast: &Ast) -> String {
     match ast {
+        Ast::Num(s) => s.clone(),
         Ast::Operand(s) => s.clone(),
         Ast::UnaryOp(op, operand) => {
             format!("({} {})", op, ast_to_prefix(operand))
@@ -195,9 +226,27 @@ fn ast_to_prefix(ast: &Ast) -> String {
     }
 }
 
+fn egg2sym_op(op: &str) -> &'static str {
+    match op {
+        "Add" => "+",
+        "Sub" => "-",
+        "Mul" => "*",
+        "Div" => "/",
+        "Mod" => "%",
+        "And" => "&",
+        "Or" => "|",
+        "Xor" => "^",
+        "Shl" => "<<",
+        "Shr" => ">>",
+        "Neg" => "-",
+        "Not" => "~",
+        _ => "_",
+    }
+}
+
 fn parse_prefix_op(tokens: &[Token]) -> (Ast, &[Token]) {
     match tokens.first() {
-        Some(&Token::Operator(ref op)) => {
+        Some(Token::Operator(op)) => {
             let (left, rest1) = parse_prefix_expr(&tokens[1..], 0);
             match rest1.first() {
                 None => {
@@ -215,6 +264,10 @@ fn parse_prefix_op(tokens: &[Token]) -> (Ast, &[Token]) {
                 },
             }
         }
+        Some(Token::Operand(op)) => match op.as_str() {
+            "Num" | "Var" => parse_prefix_expr(&tokens[1..], 0),
+            _ => panic!("Unexpected operand {}", op),
+        },
         _ => panic!("Expected binary operator, found {:?}", tokens.first()),
     }
 }
@@ -222,11 +275,11 @@ fn parse_prefix_op(tokens: &[Token]) -> (Ast, &[Token]) {
 fn parse_prefix_expr(tokens: &[Token], _min_prec: u8) -> (Ast, &[Token]) {
     // _min_prec ignored for prefix parsing
     match tokens.first() {
+        Some(Token::Num(num)) => (Ast::Num(num.clone()), &tokens[1..]),
         Some(Token::Operand(s)) => (Ast::Operand(s.clone()), &tokens[1..]),
         Some(Token::LParen) => {
-            // parentheses enclose a binary operator expression
             let (ast, rest) = parse_prefix_op(&tokens[1..]);
-            if let Some(Token::RParen) = rest.first() {
+            if let Some(RParen) = rest.first() {
                 (ast, &rest[1..])
             } else {
                 panic!("Mismatched parentheses");
@@ -246,6 +299,7 @@ fn parse_prefix_expr(tokens: &[Token], _min_prec: u8) -> (Ast, &[Token]) {
 
 fn ast_to_infix(ast: &Ast) -> String {
     match ast {
+        Ast::Num(s) => s.clone(),
         Ast::Operand(s) => s.clone(),
         Ast::UnaryOp(op, operand) => {
             let operand_str = ast_to_infix(operand);
@@ -256,6 +310,70 @@ fn ast_to_infix(ast: &Ast) -> String {
             let right_str = ast_to_infix(right);
             let expr = format!("{} {} {}", left_str, op, right_str);
             format!("({})", expr)
+        }
+    }
+}
+
+fn ast_to_egglog(ast: &Ast, is_expr: bool) -> String {
+    match ast {
+        Ast::Num(s) => {
+            format!("(Num {})", s)
+        }
+        Ast::Operand(s) => {
+            if is_expr {
+                format!("(Var \"{}\")", s)
+            } else {
+                s.clone()
+            }
+        }
+        Ast::UnaryOp(op, operand) => {
+            let operand_str = ast_to_egglog(operand, is_expr);
+            match op.as_str() {
+                "-" => {
+                    format!("(Neg {})", operand_str)
+                }
+                "~" => {
+                    format!("(Not {})", operand_str)
+                }
+                _ => panic!("Unexpected unary operator {}", op),
+            }
+        }
+        Ast::BinaryOp(op, left, right) => {
+            let left_str = ast_to_egglog(left, is_expr);
+            let right_str = ast_to_egglog(right, is_expr);
+            match op.as_str() {
+                "+" => {
+                    format!("(Add {} {})", left_str, right_str)
+                }
+                "-" => {
+                    format!("(Sub {} {})", left_str, right_str)
+                }
+                "*" => {
+                    format!("(Mul {} {})", left_str, right_str)
+                }
+                "/" => {
+                    format!("(Div {} {})", left_str, right_str)
+                }
+                "%" => {
+                    format!("(Mod {} {})", left_str, right_str)
+                }
+                "&" => {
+                    format!("(And {} {})", left_str, right_str)
+                }
+                "|" => {
+                    format!("(Or {} {})", left_str, right_str)
+                }
+                "^" => {
+                    format!("(Xor {} {})", left_str, right_str)
+                }
+                "<<" => {
+                    format!("(Shl {} {})", left_str, right_str)
+                }
+                ">>" => {
+                    format!("(Shr {} {})", left_str, right_str)
+                }
+                _ => panic!("Unexpected binary operator {}", op),
+            }
         }
     }
 }
@@ -329,7 +447,6 @@ mod tests {
         assert_eq!(infix_to_prefix("a & b * c"), "(& a (* b c))");
 
         assert_eq!(infix_to_prefix("-a"), "(- a)");
-        assert_eq!(infix_to_prefix("+a"), "(+ a)");
         assert_eq!(infix_to_prefix("~a"), "(~ a)");
 
         assert_eq!(infix_to_prefix("-a + b"), "(+ (- a) b)");
@@ -389,7 +506,6 @@ mod tests {
     #[test]
     fn test_prefix_to_infix_unary() {
         assert_eq!(prefix_to_infix("-a"), "-a");
-        assert_eq!(prefix_to_infix("+a"), "+a");
         assert_eq!(prefix_to_infix("~a"), "~a");
         assert_eq!(prefix_to_infix("-(+ a b)"), "-(a + b)");
         assert_eq!(prefix_to_infix("~(+ a b)"), "~(a + b)");
