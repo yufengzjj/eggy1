@@ -85,7 +85,7 @@ eggy1 "((a + b) * (a - b)) - (a * a - b * b)"
 
 #### 规则编译模式
 
-为表达式生成 egglog 规则：
+从表达式生成 egglog 规则：
 
 ```bash
 eggy1 -r "x * (y + z)"
@@ -94,7 +94,7 @@ eggy1 -r "x * (y + z)"
 
 #### 表达式编译模式
 
-输出表达式的编译格式：
+从表达式生成egglog的表达式：
 
 ```bash
 eggy1 -e "a + b * c"

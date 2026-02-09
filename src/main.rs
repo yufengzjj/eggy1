@@ -122,11 +122,11 @@ fn make_egg(_num_type: &str) -> String {
     egg.push_str(&rewrite!("a|(a&b)"=>"a";"identity-zero-element"));
 
     egg.push_str(&rewrite!("a-b"=>"a+-b";"canonicalization"));
-    egg.push_str(&rewrite!("a/b"<=>"a*(1/b)";"canonicalization"));
+    egg.push_str(&rewrite!("a/b"=>"a*(1/b)";"canonicalization"));
     egg.push_str(&rewrite!("~a+1"=>"-a";"canonicalization"));
     egg.push_str(&rewrite!("a*-1"=>"-a";"canonicalization"));
     egg.push_str(&rewrite!("~(x*y)"=>"((~x*y)+(y-1))";"canonicalization"));
-    egg.push_str(&rewrite!("~(x+y)"=>"(~x+(~y+1))";"canonicalization"));
+    egg.push_str(&rewrite!("~(x+y)"=>"((~y+1)+~x)";"canonicalization"));
     egg.push_str(&rewrite!("~(x-y)"=>"(~x-(~y+1))";"canonicalization"));
     egg.push_str(&rewrite!("~(x&y)"=>"-(x&y)-1";"canonicalization"));
     egg.push_str(&rewrite!("~(x&y)"=>"(~x|~y)";"canonicalization"));
@@ -142,8 +142,8 @@ fn make_egg(_num_type: &str) -> String {
     egg.push_str(&rewrite!("(a+b)*(a+b)"=>"a*a+2*a*b+b*b";"canonicalization"));
     egg.push_str(&rewrite!("((x+y)*z)"=>"(x*z+y*z)";"canonicalization"));
     egg.push_str(&rewrite!("((x-y)*z)"=>"(x*z-y*z)";"canonicalization"));
-    egg.push_str(&rewrite!("((x*y)+(x*z))"=>"(x*(y+z))";"canonicalization"));
-    egg.push_str(&rewrite!("((x*y)-(x*z))"=>"(x*(y-z))";"canonicalization"));
+    egg.push_str(&rewrite!("((x*y)+(x*z))"=>"((y+z)*x)";"canonicalization"));
+    egg.push_str(&rewrite!("((x*y)-(x*z))"=>"((y-z)*x)";"canonicalization"));
     egg.push_str(&rewrite!("((x*y)+y)"=>"((x+1)*y)";"canonicalization"));
     egg.push_str(&rewrite!("(x+x)"=>"(2*x)";"canonicalization"));
     egg.push_str(&rewrite!("a>>b>>c"=>"a>>(b+c)";"canonicalization"));
@@ -304,14 +304,13 @@ mod tests {
             ("0 * a", "0"),
             ("a + a", "(a + a)"),
             ("a + a + a", "(3 * a)"),
-            ("a * 2 + a * 3", "(a * 5)"),
-            ("2 * a + 3 * a", "(a * 5)"),
+            ("2 * a + 3 * a", "(5 * a)"),
             ("5 + 3", "8"),
             ("17 - 8", "9"),
             ("4 * 6", "24"),
             ("a + 5 - 5", "a"),
             ("a * 8 / 8", "a"),
-            ("3 * a + 5 * a + 2 * a", "(a * 10)"),
+            ("3 * a + 5 * a + 2 * a", "(10 * a)"),
             ("12 + a + 8 + b - 20", "(a + b)"),
             ("a & a", "a"),
             ("a | a", "a"),
@@ -339,7 +338,7 @@ mod tests {
             ("((a + b) * c - d) + (d - a * c)", "(b * c)"),
             (
                 "a * b + a * c + b * a + b * c",
-                "((a * (b + (b + c))) + (b * c))",
+                "(((b + (b + c)) * a) + (b * c))",
             ),
             (
                 "(a + b + c) * (a + b + c)",
