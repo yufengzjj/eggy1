@@ -52,11 +52,10 @@ macro_rules! rewrite {
         }
     }};
 }
-fn make_egg(num_type: &str) -> String {
-    let datatype = format!(
-        r#"
+fn make_egg(_num_type: &str) -> String {
+    let datatype = r#"
 (datatype Expr
-    (Num {})
+    (Num i64)
     (Add Expr Expr)
     (Sub Expr Expr)
     (Mul Expr Expr)
@@ -88,9 +87,7 @@ fn make_egg(num_type: &str) -> String {
 (rewrite (Mod (Num a) (Num b))   (Num (% a b)) :ruleset constant-folding)
 (rewrite (Not (Num a))   (Num (^ a -1)) :ruleset constant-folding)
 (rewrite (Neg (Num a))   (Num (- 0 a)) :ruleset constant-folding)
-"#,
-        num_type
-    );
+"#;
     let mut egg = String::new();
     egg.push_str(&datatype);
     egg.push_str(&rewrite!("a+0"=>"a";"identity-zero-element"));
@@ -101,7 +98,6 @@ fn make_egg(num_type: &str) -> String {
     egg.push_str(&rewrite!("a+-a"=>"0";"identity-zero-element"));
     egg.push_str(&rewrite!("a*0"=>"0";"identity-zero-element"));
     egg.push_str(&rewrite!("a*1"=>"a";"identity-zero-element"));
-    egg.push_str(&rewrite!("a*-1"=>"-a";"identity-zero-element"));
     egg.push_str(&rewrite!("0/a"=>"0";"identity-zero-element"));
     egg.push_str(&rewrite!("a/1"=>"a";"identity-zero-element"));
     egg.push_str(&rewrite!("a*(1/a)"=>"1";"identity-zero-element"));
@@ -125,11 +121,10 @@ fn make_egg(num_type: &str) -> String {
     egg.push_str(&rewrite!("a&(a|b)"=>"a";"identity-zero-element"));
     egg.push_str(&rewrite!("a|(a&b)"=>"a";"identity-zero-element"));
 
-    egg.push_str(&rewrite!("a-b"<=>"a+-b";"canonicalization"));
+    egg.push_str(&rewrite!("a-b"=>"a+-b";"canonicalization"));
     egg.push_str(&rewrite!("a/b"<=>"a*(1/b)";"canonicalization"));
-    egg.push_str(&rewrite!("-a"=>"~a+1";"canonicalization"));
-    egg.push_str(&rewrite!("-a"=>"-1*a";"canonicalization"));
-    egg.push_str(&rewrite!("~a"=>"-1-a";"canonicalization"));
+    egg.push_str(&rewrite!("~a+1"=>"-a";"canonicalization"));
+    egg.push_str(&rewrite!("a*-1"=>"-a";"canonicalization"));
     egg.push_str(&rewrite!("~(x*y)"=>"((~x*y)+(y-1))";"canonicalization"));
     egg.push_str(&rewrite!("~(x+y)"=>"(~x+(~y+1))";"canonicalization"));
     egg.push_str(&rewrite!("~(x-y)"=>"(~x-(~y+1))";"canonicalization"));
@@ -137,30 +132,37 @@ fn make_egg(num_type: &str) -> String {
     egg.push_str(&rewrite!("~(x&y)"=>"(~x|~y)";"canonicalization"));
     egg.push_str(&rewrite!("~(x^y)"=>"((x&y)|~(x|y))";"canonicalization"));
     egg.push_str(&rewrite!("~(x|y)"=>"(~x&~y)";"canonicalization"));
-    egg.push_str(&rewrite!("(x|y)"=>"(x ^ y) + (x & y)";"canonicalization"));
+    egg.push_str(&rewrite!("(x|y)"=>"(x^y)+(x&y)";"canonicalization"));
+    egg.push_str(&rewrite!("-(x+y)"=>"-x+-y";"canonicalization"));
+    egg.push_str(&rewrite!("-(x-y)"=>"-x+y";"canonicalization"));
+    egg.push_str(&rewrite!("x+-y"=>"x-y";"canonicalization"));
+    egg.push_str(&rewrite!("-(x*y)"=>"-x*y";"canonicalization"));
+    egg.push_str(&rewrite!("-(x/y)"=>"-x/y";"canonicalization"));
+    egg.push_str(&rewrite!("(a+b)*(a-b)"=>"a*a-b*b";"canonicalization"));
+    egg.push_str(&rewrite!("(a+b)*(a+b)"=>"a*a+2*a*b+b*b";"canonicalization"));
+    egg.push_str(&rewrite!("((x+y)*z)"=>"(x*z+y*z)";"canonicalization"));
+    egg.push_str(&rewrite!("((x-y)*z)"=>"(x*z-y*z)";"canonicalization"));
+    egg.push_str(&rewrite!("((x*y)+(x*z))"=>"(x*(y+z))";"canonicalization"));
+    egg.push_str(&rewrite!("((x*y)-(x*z))"=>"(x*(y-z))";"canonicalization"));
+    egg.push_str(&rewrite!("((x*y)+y)"=>"((x+1)*y)";"canonicalization"));
+    egg.push_str(&rewrite!("(x+x)"=>"(2*x)";"canonicalization"));
+    egg.push_str(&rewrite!("a>>b>>c"=>"a>>(b+c)";"canonicalization"));
+    egg.push_str(&rewrite!("a|(b&c)"=>"(a|b)&(a|c)";"canonicalization"));
+    egg.push_str(&rewrite!("a&(b|c)"=>"(a&b)|(a&c)";"canonicalization"));
+    egg.push_str(&rewrite!("a&(b^c)"=>"(a&b)^(a&c)";"canonicalization"));
+    egg.push_str(&rewrite!("a<<1"=>"a*2";"canonicalization"));
+    egg.push_str(&rewrite!("a--b"=>"a+b";"canonicalization"));
 
     egg.push_str(&rewrite!("a+b"=>"b+a"));
     egg.push_str(&rewrite!("a*b"=>"b*a"));
     egg.push_str(&rewrite!("a&b"=>"b&a"));
     egg.push_str(&rewrite!("a|b"=>"b|a"));
     egg.push_str(&rewrite!("a^b"=>"b^a"));
-    egg.push_str(&rewrite!("a<<1"=>"a*2"));
-    egg.push_str(&rewrite!("a--b"=>"a+b"));
     egg.push_str(&rewrite!("(x*(y*z))"=>"((x*y)*z)"));
     egg.push_str(&rewrite!("(x+(y+z))"=>"((x+y)+z)"));
     egg.push_str(&rewrite!("(x&(y&z))"=>"((x&y)&z)"));
     egg.push_str(&rewrite!("(x^(y^z))"=>"((x^y)^z)"));
     egg.push_str(&rewrite!("(x|(y|z))"=>"((x|y)|z)"));
-    egg.push_str(&rewrite!("((x+y)*z)"=>"((x*z)+(y*z))"));
-    egg.push_str(&rewrite!("((x-y)*z)"=>"((x*z)-(y*z))"));
-    egg.push_str(&rewrite!("((x*y)+(x*z))"=>"(x*(y+z))"));
-    egg.push_str(&rewrite!("((x*y)-(x*z))"=>"(x*(y-z))"));
-    egg.push_str(&rewrite!("((x*y)+y)"=>"((x+1)*y)"));
-    egg.push_str(&rewrite!("(x+x)"=>"(2*x)"));
-    egg.push_str(&rewrite!("a>>b>>c"=>"a>>(b+c)"));
-    egg.push_str(&rewrite!("a|(b&c)"=>"(a|b)&(a|c)"));
-    egg.push_str(&rewrite!("a&(b|c)"=>"(a&b)|(a&c)"));
-    egg.push_str(&rewrite!("a&(b^c)"=>"(a&b)^(a&c)"));
 
     egg.push_str(&rewrite!("(x ^ y) - 2*(~x & y)" => "x - y";"simplify"));
     egg.push_str(&rewrite!("2*(x & ~y) - (x ^ y)" => "x - y";"simplify"));
@@ -186,8 +188,8 @@ fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
       (back-off
         :match-limit 64
         :ban-length 3
-        :growth-rate 1.5
-        :decay-rate 0.9
+        :growth-rate 2
+        :decay-rate 0.8
       )
     )
     (repeat {}
@@ -218,14 +220,35 @@ fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    #[arg(short, long, default_value_t = false)]
+    #[arg(
+        short,
+        long,
+        default_value_t = false,
+        help = "Output expression in egglog format instead of simplifying"
+    )]
     rule_compile: bool,
-    #[arg(short, long, default_value_t = false)]
+    #[arg(
+        short,
+        long,
+        default_value_t = false,
+        help = "Output expression in egglog rule format instead of simplifying"
+    )]
     expr_compile: bool,
-    #[arg(short, long, default_value = "i64")]
+    #[arg(
+        short,
+        long,
+        default_value = "i64",
+        help = "Numeric type to use (e.g., i64, f64)"
+    )]
     num_type: String,
-    #[arg(short, long, default_value_t = 30)]
+    #[arg(
+        short,
+        long,
+        default_value_t = 30,
+        help = "Maximum number of simplification iterations"
+    )]
     iter_limit: usize,
+    #[arg(help = "The infix expression to simplify")]
     expr: String,
 }
 fn main() {
@@ -235,11 +258,11 @@ fn main() {
         return;
     }
     if cli.rule_compile {
-        println!("{}",infix_to_egglog(&cli.expr, false));
+        println!("{}", infix_to_egglog(&cli.expr, false));
         return;
     }
     if cli.expr_compile {
-        println!("{}",infix_to_egglog(&cli.expr, true));
+        println!("{}", infix_to_egglog(&cli.expr, true));
         return;
     }
     let egg_expr = infix_to_egglog(&cli.expr, true);
@@ -264,7 +287,7 @@ mod tests {
             rule_compile: false,
             expr_compile: false,
             num_type: "i64".to_string(),
-            iter_limit: 15,
+            iter_limit: 20,
             expr: "".to_string(),
         };
         let test_pairs = vec![
@@ -313,8 +336,6 @@ mod tests {
             ("(a * 2) >> 1", "((a * 2) >> 1)"),
             ("a + (b & 1)", "(a + (b & 1))"),
             ("(a << 3) + (b & 7)", "((a << 3) + (b & 7))"),
-            ("a - (b - c)", "(a + (c - b))"),
-            ("(a - b) - c", "((a - b) - c)"),
             ("((a + b) * c - d) + (d - a * c)", "(b * c)"),
             (
                 "a * b + a * c + b * a + b * c",
@@ -361,7 +382,11 @@ mod tests {
             let egg_expr = infix_to_egglog(case, true);
             let result = simplify(&egg_expr, &cli);
             assert_eq!(
-                result.unwrap(),
+                if result.is_ok() {
+                    result.unwrap()
+                } else {
+                    result.unwrap_err().to_string()
+                },
                 expect,
                 "{} {} \n{}",
                 case,

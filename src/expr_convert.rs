@@ -329,7 +329,11 @@ fn ast_to_egglog(ast: &Ast, is_expr: bool) -> String {
             let operand_str = ast_to_egglog(operand, is_expr);
             match op.as_str() {
                 "-" => {
-                    format!("(Neg {})", operand_str)
+                    if let Ast::Num(v) = operand.as_ref() {
+                        format!("(Num -{})", v)
+                    } else {
+                        format!("(Neg {})", operand_str)
+                    }
                 }
                 "~" => {
                     format!("(Not {})", operand_str)
