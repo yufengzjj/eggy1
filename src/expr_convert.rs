@@ -298,7 +298,14 @@ fn parse_prefix_expr(tokens: &[Token], _min_prec: u8) -> (Ast, &[Token]) {
 
 fn ast_to_infix(ast: &Ast) -> String {
     match ast {
-        Ast::Num(s) => s.clone(),
+        Ast::Num(s) => {
+            let n = i64::from_str_radix(s, 10).unwrap();
+            if n > 9 || n < -9 {
+                format!("{:#x}", n)
+            } else {
+                n.to_string()
+            }
+        }
         Ast::Operand(s) => s.clone(),
         Ast::UnaryOp(op, operand) => {
             let operand_str = ast_to_infix(operand);

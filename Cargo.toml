@@ -5,4 +5,4 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.5.57", features = ["derive"] }
-egglog-experimental = { git = "https://github.com/egraphs-good/egglog-experimental.git" }
+egglog = { git = "https://github.com/egraphs-good/egglog-experimental.git",package = "egglog-experimental" }
