@@ -24,13 +24,6 @@ cd eggy1
 # Build and install
 cargo install --path .
 ```
-
-### Using Cargo
-
-```bash
-cargo install eggy1
-```
-
 ## Usage
 
 ### Basic Simplification
@@ -46,21 +39,18 @@ eggy1 "(a + b) * 0"
 ### Command-line Options
 
 ```
-USAGE:
-    eggy1 [OPTIONS] <EXPR>
+Usage: eggy1.exe [OPTIONS] <EXPR>
 
-ARGS:
-    <EXPR>    The infix expression to simplify
+Arguments:
+  <EXPR>  The infix expression to simplify
 
-OPTIONS:
-    -e, --expr-compile      Output expression in egglog format instead of simplifying
-    -h, --help              Print help
-    -i, --iter-limit <ITER_LIMIT>
-                            Maximum number of simplification iterations [default: 30]
-    -n, --num-type <NUM_TYPE>
-                            Numeric type to use (e.g., i64, f64) [default: "i64"]
-    -r, --rule-compile      Output expression in egglog rule format instead of simplifying
-    -V, --version           Print version
+Options:
+  -r, --rule-compile             Output expression in egglog format instead of simplifying
+  -e, --expr-compile             Output expression in egglog rule format instead of simplifying
+  -n, --num-type <NUM_TYPE>      Numeric type to use [default: i64] [possible values: i64, u64, i32, u32, i16, u16, i8, u8]
+  -i, --iter-limit <ITER_LIMIT>  Maximum number of simplification iterations [default: 30]
+  -h, --help                     Print help
+  -V, --version                  Print version
 ```
 
 ### Examples
@@ -78,7 +68,7 @@ eggy1 "x * 0 + y * 1"
 
 # Bitwise operations
 eggy1 "0x1 << 4"
-# Output: 16
+# Output: 0x10
 
 # Complex expression
 eggy1 "((a + b) * (a - b)) - (a * a - b * b)"

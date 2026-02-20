@@ -23,12 +23,6 @@ cd eggy1
 cargo install --path .
 ```
 
-### 使用 Cargo
-
-```bash
-cargo install eggy1
-```
-
 ## 使用方法
 
 ### 基本简化
@@ -44,21 +38,18 @@ eggy1 "(a + b) * 0"
 ### 命令行选项
 
 ```
-USAGE:
-    eggy1 [OPTIONS] <EXPR>
+Usage: eggy1.exe [OPTIONS] <EXPR>
 
-ARGS:
-    <EXPR>    要简化的中缀表达式
+Arguments:
+  <EXPR>  要简化的中缀表达式
 
-OPTIONS:
-    -e, --expr-compile      输出表达式的 egglog 格式而不是简化
-    -h, --help              打印帮助信息
-    -i, --iter-limit <ITER_LIMIT>
-                            最大简化迭代次数 [默认值: 30]
-    -n, --num-type <NUM_TYPE>
-                            使用的数字类型（例如：i64, f64）[默认值: "i64"]
-    -r, --rule-compile      输出表达式的 egglog 规则格式而不是简化
-    -V, --version           打印版本信息
+Options:
+  -r, --rule-compile             输出表达式的 egglog 规则格式而不是简化
+  -e, --expr-compile             输出表达式的 egglog 格式而不是简化
+  -n, --num-type <NUM_TYPE>      使用的数字类型 [默认值: i64] [可能的取值: i64, u64, i32, u32, i16, u16, i8, u8]
+  -i, --iter-limit <ITER_LIMIT>  最大简化迭代次数 [默认值: 30]
+  -h, --help                     打印帮助信息
+  -V, --version                  打印版本信息
 ```
 
 ### 示例
@@ -76,7 +67,7 @@ eggy1 "x * 0 + y * 1"
 
 # 位运算
 eggy1 "0x1 << 4"
-# 输出: 16
+# 输出: 0x10
 
 # 复杂表达式
 eggy1 "((a + b) * (a - b)) - (a * a - b * b)"
