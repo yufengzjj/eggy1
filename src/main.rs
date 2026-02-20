@@ -83,7 +83,6 @@ fn make_egg(num_type: &str) -> String {
     (Xor Expr Expr)
     (Shr Expr Expr)
     (Shl Expr Expr)
-    (Pow Expr Expr)
     (Not Expr)
     (Neg Expr)
     (Var String)
@@ -152,11 +151,16 @@ fn make_egg(num_type: &str) -> String {
     egg.push_str(&rewrite!("~(x&y)"<=>"(~x|~y)";"canonicalization"));
     egg.push_str(&rewrite!("~(x^y)"<=>"(x^~y)";"canonicalization"));
     egg.push_str(&rewrite!("~(x|y)"<=>"(~x&~y)";"canonicalization"));
-    egg.push_str(&rewrite!("(x|y)"<=>"(x^y)+(x&y)";"canonicalization"));
+    egg.push_str(&rewrite!("x|y"<=>"(x&~y)+y";"canonicalization"));
+    egg.push_str(&rewrite!("x|y"<=>"(x+y)-(x&y)";"canonicalization"));
+    egg.push_str(&rewrite!("x|y"<=>"(x^y)+(x&y)";"canonicalization"));
     egg.push_str(&rewrite!("-(x+y)"<=>"-x-y";"canonicalization"));
     egg.push_str(&rewrite!("-(x-y)"<=>"y-x";"canonicalization"));
     egg.push_str(&rewrite!("-(x*y)"<=>"-x*y";"canonicalization"));
     egg.push_str(&rewrite!("(Num x)*-y"<=>"(- (Num x))*y";"canonicalization"));
+    egg.push_str(&rewrite!("(Num a)*x+(Num a)"<=>"(Num a)*(x+1)";"canonicalization"));
+    egg.push_str(&rewrite!("(Num a)*x-(Num a)"<=>"(Num a)*(x-1)";"canonicalization"));
+    egg.push_str(&rewrite!("((Num a)*x)&(Num a)"<=>"(Num a)*(x&1)";format!("canonicalization :when ((is-2-pow-n-{} a))",num_type)));
     egg.push_str(&rewrite!("-(x/y)"<=>"-x/y";"canonicalization"));
     egg.push_str(&rewrite!("(a+b)*(a-b)"<=>"a*a-b*b";"canonicalization"));
     egg.push_str(&rewrite!("(a+b)*(a+b)"<=>"a*a+2*a*b+b*b";"canonicalization"));
@@ -187,33 +191,50 @@ fn make_egg(num_type: &str) -> String {
     egg.push_str(&rewrite!("(x^(y^z))"=>"((x^y)^z)"));
     egg.push_str(&rewrite!("(x|(y|z))"=>"((x|y)|z)"));
 
-    egg.push_str(&rewrite!("(x ^ y) - 2*(~x & y)" => "x - y";"simplify"));
-    egg.push_str(&rewrite!("2*(x & ~y) - (x ^ y)" => "x - y";"simplify"));
-    egg.push_str(&rewrite!("(x & ~y) - (~x & y)" => "x - y";"simplify"));
-    egg.push_str(&rewrite!("(a & b) ^ (a & ~b)" => "a";"simplify"));
-    egg.push_str(&rewrite!("2*(x | y) + (x ^ ~y)" => "(x + y) - 1";"simplify"));
-    egg.push_str(&rewrite!("(x | ~y) + y" => "(x & y) - 1";"simplify"));
-    egg.push_str(&rewrite!("(x + y) + ~(x & y)" => "(x | y) - 1";"simplify"));
-    egg.push_str(&rewrite!("(x ^ y) + 2*(x & y)" => "x + y";"simplify"));
-    egg.push_str(&rewrite!("((x & 0xff) ^ (Num c1)) + 2*(x & (Num c2))" => "(x & 0xff) + (Num c1)";"simplify :when ((= (& c1 255) c2))"));
+    egg.push_str(&rewrite!("(x^y)-2*(~x&y)"=>"x-y";"simplify"));
+    egg.push_str(&rewrite!("2*(x&~y)-(x^y)"=>"x-y";"simplify"));
+    egg.push_str(&rewrite!("(x&~y)-(~x&y)"=>"x-y";"simplify"));
+    egg.push_str(&rewrite!("(a&b)^(a&~b)"=>"a";"simplify"));
+    egg.push_str(&rewrite!("2*(x|y)+(x^~y)"=>"(x+y)-1";"simplify"));
+    egg.push_str(&rewrite!("(x|~y)+y"=>"(x&y)-1";"simplify"));
+    egg.push_str(&rewrite!("(x+y)+~(x&y)"=>"(x|y)-1";"simplify"));
+    egg.push_str(&rewrite!("(x^y)+2*(x&y)"=>"x+y";"simplify"));
+    egg.push_str(&rewrite!("((x& 0xff) ^ (Num c1)) + 2*(x & (Num c2))" => "(x & 0xff) + (Num c1)";"simplify :when ((= (& c1 255) c2))"));
     egg.push_str(&rewrite!("(x ^ (Num c1)) + 2*(x | (Num c2))" => "x + (Num c2) - 1";format!("simplify :when ((is-bit-not-eq-{} c1 c2))",num_type)));
-    egg.push_str(&rewrite!("(x - y) - 2*(x | ~y)" => "(x ^ y) + 2";"simplify"));
-    egg.push_str(&rewrite!("(x | y)*(x & y) + (x & ~y)*(y & ~x)" => "x * y";"simplify"));
-    egg.push_str(&rewrite!("(x + y) - (x | y)" => "x & y";"simplify"));
-    egg.push_str(&rewrite!("(y & ~x) - y" => "-(y & x)";"simplify"));
-    egg.push_str(&rewrite!("x - (y & x)" => "x & ~y";"simplify"));
-    egg.push_str(&rewrite!("x + (y&~x)" => "x | y";"simplify"));
-    egg.push_str(&rewrite!("(x | y) - y "=>" x & ~y";"simplify"));
-    egg.push_str(&rewrite!("x ^ (x & y) "=>" x & ~y";"simplify"));
-    egg.push_str(&rewrite!("(x | y) ^ y "=>" x & ~y";"simplify"));
-    egg.push_str(&rewrite!("(x * x) & 3 "=>" x & 1";"simplify"));
-    egg.push_str(&rewrite!("~x ^ ~y "=>" x ^ y";"simplify"));
-    egg.push_str(&rewrite!("(x | y) ^ (~x | ~y)"=>"~(x ^ y)";"simplify"));
-    egg.push_str(&rewrite!("((x | y) - (x & y)) "=>"x^y";"simplify"));
-    egg.push_str(&rewrite!("(x & ~y) - (x & y) "=>"(x ^ y) - y";"simplify"));
-    egg.push_str(&rewrite!("(x | y) + (x & ~y)"=>"(x ^ y) + x";"simplify"));
-    egg.push_str(&rewrite!("(x & y) + (x & ~y)"=>"x";"simplify"));
-    egg.push_str(&rewrite!("(x & y) ^ (x | y)"=>"x ^ y";"simplify"));
+    egg.push_str(&rewrite!("(x-y)-2*(x|~y)"=>"(x^y) + 2";"simplify"));
+    egg.push_str(&rewrite!("(x|y)*(x&y)+(x&~y)*(y&~x)"=>"x*y";"simplify"));
+    egg.push_str(&rewrite!("(x+y)-(x|y)"=>"x&y";"simplify"));
+    egg.push_str(&rewrite!("(y&~x)-y"=>"-(y&x)";"simplify"));
+    egg.push_str(&rewrite!("x-(y&x)"=>"x&~y";"simplify"));
+    egg.push_str(&rewrite!("(x|y)-y"=>"x&~y";"simplify"));
+    egg.push_str(&rewrite!("x^(x&y)"=>"x&~y";"simplify"));
+    egg.push_str(&rewrite!("(x|y)^y"=>"x&~y";"simplify"));
+    egg.push_str(&rewrite!("(x*x)&3"=>"x&1";"simplify"));
+    egg.push_str(&rewrite!("~x^~y"=>"x^y";"simplify"));
+    egg.push_str(&rewrite!("(x|y)^(~x|~y)"=>"~(x^y)";"simplify"));
+    egg.push_str(&rewrite!("((x|y)-(x&y))"=>"x^y";"simplify"));
+    egg.push_str(&rewrite!("(x&~y)-(x&y)"=>"(x^y)-y";"simplify"));
+    egg.push_str(&rewrite!("(x|y)+(x&~y)"=>"(x^y)+x";"simplify"));
+    egg.push_str(&rewrite!("(x&y)+(x&~y)"=>"x";"simplify"));
+    egg.push_str(&rewrite!("(x&y)^(x&~y)"=>"x";"simplify"));
+    egg.push_str(&rewrite!("(x&y)^(x|y)"=>"x^y";"simplify"));
+    egg.push_str(&rewrite!("(x&y)|(x^y)"=>"x|y";"simplify"));
+    egg.push_str(&rewrite!("(x&y)^(x^y)"=>"x|y";"simplify"));
+    egg.push_str(&rewrite!("(x^y)|y"=>"x|y";"simplify"));
+    egg.push_str(&rewrite!("~(x-1)"=>"-x";"simplify"));
+    egg.push_str(&rewrite!("~x+1"=>"-x";"simplify"));
+    egg.push_str(&rewrite!("(x+y)-2*(x&y)"=>"x^y";"simplify"));
+    egg.push_str(&rewrite!("2*(x|y)-(x+y)"=>"x^y";"simplify"));
+    egg.push_str(&rewrite!("(x|y)-(x^y)"=>"x&y";"simplify"));
+    egg.push_str(&rewrite!("(~x|y)-~x"=>"x&y";"simplify"));
+    egg.push_str(&rewrite!("(x|y)+(x&y)"=>"x+y";"simplify"));
+    egg.push_str(&rewrite!("2*(x|y)-(x^y)"=>"x+y";"simplify"));
+    egg.push_str(&rewrite!("(x&y)-(x+y)"=>"-(x|y)";"simplify"));
+    egg.push_str(&rewrite!("(x&y)-(x|y)"=>"-(x^y)";"simplify"));
+    egg.push_str(&rewrite!("(x^y)-2*(x|y)"=>"-(x+y)";"simplify"));
+    egg.push_str(&rewrite!("(x+y)-2*(x|y)"=>"-(x^y)";"simplify"));
+    egg.push_str(&rewrite!("x-(x&y)"=>"x&~y";"simplify"));
+    egg.push_str(&rewrite!("x&(x^y)"=>"x&~y";"simplify"));
 
     egg
 }
@@ -254,15 +275,6 @@ fn init_egg_function(eg: &mut EGraph) {
     add_primitive!(eg, "wrapping-div-u16" = |a: i64, b: i64| -> i64 { (a as u16).wrapping_div(b as u16) as i64 } );
     add_primitive!(eg, "wrapping-div-i8" = |a: i64, b: i64| -> i64 { (a as i8).wrapping_div(b as i8) as i64 } );
     add_primitive!(eg, "wrapping-div-u8" = |a: i64, b: i64| -> i64 { (a as u8).wrapping_div(b as u8) as i64 } );
-
-    add_primitive!(eg, "wrapping-pow-i64" = |a: i64, b: i64| -> i64 { a.wrapping_pow(b as u32) } );
-    add_primitive!(eg, "wrapping-pow-u64" = |a: i64, b: i64| -> i64 { (a as u64).wrapping_pow(b as u32) as i64 } );
-    add_primitive!(eg, "wrapping-pow-i32" = |a: i64, b: i64| -> i64 { (a as i32).wrapping_pow(b as u32) as i64 } );
-    add_primitive!(eg, "wrapping-pow-u32" = |a: i64, b: i64| -> i64 { (a as u32).wrapping_pow(b as u32) as i64 } );
-    add_primitive!(eg, "wrapping-pow-i16" = |a: i64, b: i64| -> i64 { (a as i16).wrapping_pow(b as u32) as i64 } );
-    add_primitive!(eg, "wrapping-pow-u16" = |a: i64, b: i64| -> i64 { (a as u16).wrapping_pow(b as u32) as i64 } );
-    add_primitive!(eg, "wrapping-pow-i8" = |a: i64, b: i64| -> i64 { (a as i8).wrapping_pow(b as u32) as i64 } );
-    add_primitive!(eg, "wrapping-pow-u8" = |a: i64, b: i64| -> i64 { (a as u8).wrapping_pow(b as u32) as i64 } );
 
     add_primitive!(eg, "wrapping-and-i64" = |a: i64, b: i64| -> i64 { a & b } );
     add_primitive!(eg, "wrapping-and-u64" = |a: i64, b: i64| -> i64 { ((a as u64) & (b as u64)) as i64 } );
@@ -344,6 +356,15 @@ fn init_egg_function(eg: &mut EGraph) {
     add_primitive!( eg, "is-bit-not-eq-u16" = |a: i64, b: i64| -?> () { ((a as u64 ).wrapping_add(b as u64) == 0xffff).then_some(()) });
     add_primitive!( eg, "is-bit-not-eq-i8" = |a: i64, b: i64| -?> () { ((a as u64 ).wrapping_add(b as u64) == 0xff).then_some(()) });
     add_primitive!( eg, "is-bit-not-eq-u8" = |a: i64, b: i64| -?> () { ((a as u64 ).wrapping_add(b as u64) == 0xff).then_some(()) });
+
+    add_primitive!( eg, "is-2-pow-n-i64" = |a: i64| -?> () { {let a= a as u64;(a>1&&a&(a-1)==0).then_some(())} });
+    add_primitive!( eg, "is-2-pow-n-u64" = |a: i64| -?> () { {let a= a as u64;(a>1&&a&(a-1)==0).then_some(())} });
+    add_primitive!( eg, "is-2-pow-n-i32" = |a: i64| -?> () { {let a= a as u32;(a>1&&a&(a-1)==0).then_some(())} });
+    add_primitive!( eg, "is-2-pow-n-u32" = |a: i64| -?> () { {let a= a as u32;(a>1&&a&(a-1)==0).then_some(())} });
+    add_primitive!( eg, "is-2-pow-n-i16" = |a: i64| -?> () { {let a= a as u16;(a>1&&a&(a-1)==0).then_some(())} });
+    add_primitive!( eg, "is-2-pow-n-u16" = |a: i64| -?> () { {let a= a as u16;(a>1&&a&(a-1)==0).then_some(())} });
+    add_primitive!( eg, "is-2-pow-n-i8" = |a: i64| -?> () { {let a= a as u8;(a>1&&a&(a-1)==0).then_some(())} });
+    add_primitive!( eg, "is-2-pow-n-u8" = |a: i64| -?> () { {let a= a as u8;(a>1&&a&(a-1)==0).then_some(())} });
 }
 fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
     let egg = make_egg(&cli.num_type);
@@ -366,8 +387,8 @@ fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
     )
     (repeat {}
         (seq
-            (run-with babibo canonicalization)
             (run-with babibo default-ruleset)
+            (run-with babibo canonicalization)
             (saturate (run constant-folding))
             (saturate (run identity-zero-element))
             (run-with babibo simplify)
@@ -456,7 +477,7 @@ mod tests {
     use super::*;
     #[test]
     fn test_formal_simplify() {
-        let cli = Cli {
+        let mut cli = Cli {
             rule_compile: false,
             expr_compile: false,
             num_type: "i64".to_string(),
@@ -464,262 +485,89 @@ mod tests {
             expr: "".to_string(),
         };
         let test_pairs = vec![
-            ("a + 0", "a"),
-            ("0 + a", "a"),
-            ("a + 0 + b", "(a + b)"),
-            ("a - a", "0"),
-            ("a - a + b", "b"),
-            ("a + b - a", "b"),
-            ("a + b - b - a", "0"),
-            ("a * 1", "a"),
-            ("1 * a", "a"),
-            ("a * 0", "0"),
-            ("0 * a", "0"),
-            ("a + a", "(a + a)"),
-            ("a + a + a", "(3 * a)"),
-            ("2 * a + 3 * a", "(5 * a)"),
-            ("5 + 3", "8"),
-            ("17 - 8", "9"),
-            ("4 * 6", "24"),
-            ("a + 5 - 5", "a"),
-            ("a * 8 / 8", "a"),
-            ("3 * a + 5 * a + 2 * a", "(10 * a)"),
-            ("12 + a + 8 + b - 20", "(a + b)"),
-            ("a & a", "a"),
-            ("a | a", "a"),
-            ("a ^ a", "0"),
-            ("a & 0", "0"),
-            ("a | 0", "a"),
-            ("a ^ 0", "a"),
-            ("a & -1", "a"),
-            ("a | -1", "-1"),
-            ("a ^ -1", "~a"),
-            ("~(~a)", "a"),
-            ("a & (a | b)", "a"),
-            ("a | (a & b)", "a"),
-            ("a ^ b ^ a", "b"),
-            ("a ^ a ^ b ^ b", "0"),
-            ("a ^ a ^ a", "a"),
-            ("x & 255", "(x & 255)"),
-            ("x & 0xff", "(x & 255)"),
-            ("(x & 0xffff) << 8", "((x & 65535) << 8)"),
-            ("x >> 3 << 3", "((x >> 3) << 3)"),
-            ("(a + 1) & ~1", "((a + 1) & -2)"),
-            ("(a * 2) >> 1", "((a * 2) >> 1)"),
-            ("a + (b & 1)", "(a + (b & 1))"),
-            ("(a << 3) + (b & 7)", "((a << 3) + (b & 7))"),
-            ("((a + b) * c - d) + (d - a * c)", "(b * c)"),
+            ("a + 0", vec!["a"], 10),
+            ("0 + a", vec!["a"], 10),
+            ("a + 0 + b", vec!["(a + b)"], 10),
+            ("a - a", vec!["0"], 10),
+            ("a - a + b", vec!["b"], 10),
+            ("a + b - a", vec!["b"], 10),
+            ("a + b - b - a", vec!["0"], 10),
+            ("a * 1", vec!["a"], 10),
+            ("1 * a", vec!["a"], 10),
+            ("a * 0", vec!["0"], 10),
+            ("0 * a", vec!["0"], 10),
+            ("a + a", vec!["(a + a)","(2 * a)"], 10),
+            ("a + a + a", vec!["(3 * a)"], 10),
+            ("2 * a + 3 * a", vec!["(5 * a)"], 10),
+            ("5 + 3", vec!["8"], 10),
+            ("17 - 8", vec!["9"], 10),
+            ("4 * 6", vec!["0x18"], 10),
+            ("a + 5 - 5", vec!["a"], 10),
+            ("a * 8 / 8", vec!["a"], 10),
+            ("3 * a + 5 * a + 2 * a", vec!["(0xa * a)"], 10),
+            ("12 + a + 8 + b - 20", vec!["(a + b)"], 10),
+            ("a & a", vec!["a"], 10),
+            ("a | a", vec!["a"], 10),
+            ("a ^ a", vec!["0"], 10),
+            ("a & 0", vec!["0"], 10),
+            ("a | 0", vec!["a"], 10),
+            ("a ^ 0", vec!["a"], 10),
+            ("a & -1", vec!["a"], 10),
+            ("a | -1", vec!["-1"], 10),
+            ("a ^ -1", vec!["~a"], 10),
+            ("~(~a)", vec!["a"], 10),
+            ("a & (a | b)", vec!["a"], 10),
+            ("a | (a & b)", vec!["a"], 10),
+            ("a ^ b ^ a", vec!["b"], 10),
+            ("a ^ a ^ b ^ b", vec!["0"], 10),
+            ("a ^ a ^ a", vec!["a"], 10),
+            ("(x & 0xffff) << 8", vec!["((x & 0xffff) << 8)"], 10),
+            ("x >> 3 << 3", vec!["((x >> 3) << 3)"], 10),
+            ("(a + 1) & ~1", vec!["((a + 1) & -2)"], 10),
+            ("(a * 2) >> 1", vec!["((a * 2) >> 1)"], 10),
+            ("a + (b & 1)", vec!["(a + (b & 1))"], 10),
+            ("(a << 3) + (b & 7)", vec!["((a << 3) + (b & 7))"], 10),
+            ("((a + b) * c - d) + (d - a * c)", vec!["(b * c)"], 10),
             (
                 "a * b + a * c + b * a + b * c",
-                "((((b + c) + b) * a) + (b * c))",
+                vec!["((((b + c) + b) * a) + (b * c))","(((b + a) * c) + (2 * (a * b)))"],
+                10,
             ),
             (
                 "(a + b + c) * (a + b + c)",
-                "(((a + b) + c) * ((a + b) + c))",
+                vec!["(((a + b) + c) * ((a + b) + c))"],
+                10,
             ),
-            ("a - b + c - a + b - c", "0"),
-            (
-                "((x >> 4) & 0xf) | ((x & 0xf) << 4)",
-                "(((x >> 4) & 15) | ((x & 15) << 4))",
-            ),
-            ("a + (~a + 1)", "0"),
-            ("(a & b) ^ (a & ~b)", "a"),
-            ("a + 1 + 3", "(4 + a)"),
-            ("a + b + 0 + c + 0", "((a + b) + c)"),
-            ("0 * (a + b + c)", "0"),
-            ("1 * (a + b + c)", "((a + b) + c)"),
-            ("(a + b) - (a + b)", "0"),
-            ("a * (b - b)", "0"),
-            ("a & ~a", "0"),
-            ("a | ~a", "-1"),
-            ("(a ^ b) ^ b", "a"),
-            ("a ^ (b ^ a)", "b"),
-            ("~0", "-1"),
-            ("~-1", "0"),
-            ("(x & 0xff00) >> 8", "((x & 65280) >> 8)"),
-            ("x & (x | y)", "x"),
-            ("(x | y) & x", "x"),
-            ("a + b * 0", "a"),
-            ("a * (1 + 0)", "a"),
-            ("(2 * a) + (3 * a) + a", "(6 * a)"),
-            ("a - 0", "a"),
-            ("0 - a", "-a"),
-            ("-(a - b)", "(b - a)"),
-            ("a * -1", "-a"),
-            ("-1 * a", "-a"),
-            ("a + -a", "0"),
-            ("a ^ (a ^ b ^ c) ^ b ^ c", "0"),
-        ];
-        for (case, expect) in test_pairs {
-            let egg_expr = infix_to_egglog(case, true);
-            let result = simplify(&egg_expr, &cli);
-            assert_eq!(
-                if result.is_ok() {
-                    result.unwrap()
-                } else {
-                    result.unwrap_err().to_string()
-                },
-                expect,
-                "{} {} \n{}",
-                case,
-                egg_expr,
-                make_egg(&cli.num_type)
-            );
-        }
-    }
-    #[test]
-    fn test_complex_simplify() {
-        let cli = Cli {
-            rule_compile: false,
-            expr_compile: false,
-            num_type: "i8".to_string(),
-            iter_limit: 40,
-            expr: "".to_string(),
-        };
-        let test_pairs = vec![
-            ("x + (~y + 1)", vec!["(x - y)"]),
-            ("(x ^ y) - 2*(~x & y)", vec!["(x - y)"]),
-            ("(x & ~y) - (~x & y)", vec!["(x - y)"]),
-            ("2*(x & ~y) - (x ^ y)", vec!["(x - y)"]),
-            ("(-x - 1) - (-2 * x)", vec!["(-1 + x)", "~-x"]),
-            ("2*x + ~x", vec!["~-x","(-1 + x)"]),
-            (
-                "2*(x | y) + (x ^ ~y)",
-                vec!["(~-y + x)", "(~-x + y)", "((x + y) + -1)", "~(-y - x)","~(-x - y)"],
-            ),
-            ("(x | ~y) + y", vec!["((x & y) + -1)", "~-(x & y)"]),
-            (
-                "(x + y) + ~(x & y)",
-                vec!["((x | y) + -1)", "((y | x) + -1)", "~-(x | y)", "~-(y | x)"],
-            ),
-            (
-                "(~x | 1) + x",
-                vec!["((1 & x) + -1)", "-(~x & 1)", "-(1 & ~x)", "~-(1 & x)"],
-            ),
-            ("x - (~y + 1)", vec!["(x + y)"]),
-            ("(x ^ y) + 2*(x & y)", vec!["(x + y)"]),
-            ("(x | y) + (x & y)", vec!["(x + y)"]),
-            ("2*(x | y) - (x ^ y)", vec!["(x + y)"]),
-            ("2*(x | y | z) - (x ^ (y | z))", vec!["((y | z) + x)"]),
-            ("(x ^ y) + 2*(x & y)", vec!["(x + y)"]),
-            ("(a ^ 5) + 2*(a & 5)", vec!["(a + 5)"]),
-            (
-                "((a & 0xff) ^ 0x12) + 2*(a & 0x12)",
-                vec!["((a & 0xff) + 0x12)"],
-            ),
-            ("(a ^ 0xfe) + 2*(a | 0x01)", vec!["a"]),
-            (
-                "~(x ^ y) + 2*(x | y)",
-                vec!["((y + x) - 1)", "((x + y) - 1)", "~-(x + y)","~(-y - x)","~(-x - y)","((x + y) + -1)"],
-            ),
-            (
-                "~(x ^ y) - (-2 * (x | y))",
-                vec!["((y + x) - 1)", "((x + y) - 1)", "~-(x + y)","~(-x - y)","~(-y - x)","((-1 + x) + y)"],
-            ),
-            ("(x - y) - 2*(x | ~y)", vec!["((x ^ y) + 2)"]),
-            ("(x - y) - 2*(~(~x & y))", vec!["((x ^ y) + 2)"]),
-            ("(x | y)*(x & y) + (x & ~y)*(y & ~x)", vec!["(x * y)"]),
-            ("(x | y)*(x & y) + ~(x | ~y)*(x & ~y)", vec!["(x * y)"]),
-            (
-                "2 + 2*(y + (x | ~y))",
-                vec!["(2 * (x & y))", "((x & y) * 2)"],
-            ),
-            ("-(x & y) - (x & y)", vec!["(-2 * (x & y))"]),
-            ("(~x | y) - ~x", vec!["(x & y)"]),
-            ("(x + y) - (x | y)", vec!["(x & y)"]),
-            ("(x | y) - (x ^ y)", vec!["(x & y)"]),
-            ("(x | y) & ~(x ^ y)", vec!["(x & y)"]),
-            ("(x & y) & ~(x ^ y)", vec!["(x & y)"]),
-            ("x & ~(x ^ y)", vec!["(x & y)"]),
-            ("(x | y) - y", vec!["(x & ~y)"]),
-            ("x - (x & y)", vec!["(x & ~y)"]),
-            ("x ^ (x & y)", vec!["(x & ~y)"]),
-            ("x & (x ^ y)", vec!["(x & ~y)"]),
-            ("(x | y) ^ y", vec!["(x & ~y)"]),
-            (
-                "(x & z) | (y & z)",
-                vec!["((x | y) & z)", "(z & (y | x))", "(z & (x | y))"],
-            ),
-            ("(x & z) ^ (y & z)", vec!["((x ^ y) & z)", "(z & (y ^ x))","(z & (x ^ y))"]),
-            ("(~x | y) + (x + 1)", vec!["(x & y)"]),
-            ("(x | y) & (x ^ ~y)", vec!["(x & y)"]),
-            (" (x ^ ~y) & y", vec!["(x & y)"]),
-            ("(x * x) & 3", vec!["(x & 1)"]),
-            ("-x - 1", vec!["~x"]),
-            ("~(x | y) | ~y", vec!["~y"]),
-            ("(x - 1) - 2*x", vec!["~x"]),
-            ("~(x ^ y) ^ y", vec!["~x"]),
-            ("~x ^ ~y", vec!["(x ^ y)"]),
-            ("(x ^ y) | ~(x | y)", vec!["~(x & y)"]),
-            ("~x | ~y", vec!["~(x & y)"]),
-            ("~x & ~y", vec!["~(x | y)"]),
-            ("(x & y) | ~(x | y)", vec!["~(x ^ y)","(x ^ ~y)","(~y ^ x)","(~x ^ y)","(y ^ ~x)"]),
-            ("(x & y) ^ (x | ~y)", vec!["~y"]),
-            ("(x & y) | (~x & ~y)", vec!["~(x ^ y)","(x ^ ~y)","(~y ^ x)","(~x ^ y)","(y ^ ~x)"]),
-            ("(x | y) ^ (~x | ~y)", vec!["~(x ^ y)","(x ^ ~y)","(~y ^ x)","(~x ^ y)","(y ^ ~x)"]),
-            ("(x | ~y) & (~x | y)", vec!["~(x ^ y)","(x ^ ~y)","(~y ^ x)","(~x ^ y)","(y ^ ~x)"]),
-            ("(~x | ~y) | (x ^ y)", vec!["~(x & y)"]),
-            ("~x | (x ^ y)", vec!["~(x & y)","~(y & x)"]),
-            ("(x ^ ~y) - 2*(x & y)", vec!["~(x + y)","(~x - y)","(~y - x)"]),
-            ("(x & ~y) | ~(x | y)", vec!["~y"]),
-            ("~x & (~x ^ c)", vec!["(x & ~c) ^ ~c","~(x | c)"]),
-            ("((x ^ 0x12) & 1) | ((x ^ 8) & 0xfe)", vec!["(x ^ 8)"]),
-            ("(x - 7) + 11*(x - 8)", vec!["(-0x5f + (0xc * x))","((x * 0xc) + -0x5f)","((0xc * x) + -0x5f)"]),
-            ("(x >> z) & (y >> z)", vec!["((x & y) >> z)"]),
-            ("2*x - (x & ~y)", vec!["(x + (x & y))","((x & y) + x)"]),
-            ("(x & ~y) - 2*x", vec!["-(x + (x & y))","(-(x & y) - x)"]),
-            ("(x & ~y) - (x & y)", vec!["((x ^ y) - y)"]),
-            ("(~x | (~y & z)) + (x + (y & z)) - z", vec!["(x | (y | ~z))","((y | ~z) | x)","((~z | y) | x)"]),
-            ("(x | y) + (x & ~y)", vec!["((x ^ y) + x)"]),
-            ("(x & y) + (x & ~y)", vec!["x"]),
-            ("(x & y) ^ (x & ~y)", vec!["x"]),
-            ("x & (x | y)", vec!["x"]),
-            ("~(x - 1)", vec!["-x"]),
-            ("(x ^ y) - 2*(x | y)", vec!["-(x + y)"]),
-            ("(-2 * (x | y)) + (x ^ y)", vec!["-(x + y)"]),
-            ("(x ^ (y | z)) - 2*((x | y) | z)", vec!["-(x + (y | z))"]),
-            ("(x & y) - (x + y)", vec!["-(x | y)"]),
-            ("(x & y) - (x | y)", vec!["-(x ^ y)"]),
-            ("(x + y) - 2*(x | y)", vec!["-(x ^ y)"]),
-            ("(x + y) - (x & y)", vec!["(x | y)","(y | x)"]),
-            ("(x - y) - (x & -y)", vec!["(x | -y)"]),
-            ("(x & y) + (x ^ y)", vec!["(x | y)","(y | x)"]),
-            ("(x ^ y) + (x & y)", vec!["(x | y)","(y | x)"]),
-            ("((x + y) + 1) + ~(x & y)", vec!["(x | y)","(y | x)"]),
-            ("(x + (x ^ y)) - (x & ~y)", vec!["(x | y)","(y | x)"]),
-            ("(x & y) | (x ^ y)", vec!["(x | y)","(y | x)"]),
-            ("(x & (y ^ z)) | ((x ^ y) ^ z)", vec!["(x | (y ^ z))"]),
-            ("(x ^ y) | y", vec!["(x | y)","(y | x)"]),
-            ("(x & y) ^ (x ^ y)", vec!["(x | y)","(y | x)"]),
-            ("~x ^ (x & y)", vec!["(~x | y)"]),
-            ("x ^ (~x & y)", vec!["(x | y)","(y | x)"]),
-            ("(x & ~y) + y", vec!["(x | y)","(y | x)","(y | x)"]),
-            ("(x | y) | (~x ^ ~y)", vec!["(x | y)","(y | x)"]),
-            ("(x & y) | ~(~x ^ y)", vec!["(x | y)","(y | x)"]),
-            ("(~x & y) | x", vec!["(x | y)","(y | x)"]),
-            ("~(~x | ~y) | (x ^ y)", vec!["(x | y)","(y | x)"]),
-            ("(x - y) + (~x | y)", vec!["(x | ~y)"]),
-            ("(~x | y) ^ (x ^ y)", vec!["(x | ~y)"]),
-            ("(x | y) - (x & y)", vec!["(x ^ y)"]),
-            ("2*(x | y) - (x + y)", vec!["(x ^ y)"]),
-            ("(x + y) - 2*(x & y)", vec!["(x ^ y)"]),
-            ("((x - y) - 2*(x | ~y)) - 2", vec!["(x ^ y)"]),
-            ("x - (2*(x & y) - y)", vec!["(x ^ y)"]),
-            ("x - (2*(y & ~(x ^ y)) - y)", vec!["(x ^ y)"]),
-            ("x - (2*(x & y) - y)", vec!["(x ^ y)"]),
-            ("x - 2*(x & y)", vec!["((x ^ y) - y)"]),
-            ("(x & ~y) | (~x & y)", vec!["(x ^ y)"]),
-            ("(~x & y) ^ (x & ~y)", vec!["(x ^ y)"]),
-            ("(x & y) ^ (x | y)", vec!["(x ^ y)"]),
-            ("(x - y) + 2*(~x & y)", vec!["(x ^ y)"]),
-            ("~x + (2*x | 2)", vec!["(x ^ 1)"]),
-            ("(x & y) | ~(x | y)", vec!["(x ^ ~y)"]),
-            ("((x ^ z) & (y ^ ~z)) | ((x ^ ~z) & (y ^ z))", vec!["(x ^ y)"]),
-            ("((x ^ z) & (y ^ z)) | ((x ^ ~z) & (y ^ ~z))", vec!["(~x ^ y)"]),
-            ("(x + y) - 2*(x | (y - 1))", vec!["((x ^ -y) + 2)"]),
+            ("a - b + c - a + b - c", vec!["0"], 10),
+            ("a + (~a + 1)", vec!["0"], 10),
+            ("(a & b) ^ (a & ~b)", vec!["a"], 10),
+            ("a + 1 + 3", vec!["(4 + a)"], 10),
+            ("a + b + 0 + c + 0", vec!["((a + b) + c)"], 10),
+            ("0 * (a + b + c)", vec!["0"], 10),
+            ("1 * (a + b + c)", vec!["((a + b) + c)"], 10),
+            ("(a + b) - (a + b)", vec!["0"], 10),
+            ("a * (b - b)", vec!["0"], 10),
+            ("a & ~a", vec!["0"], 10),
+            ("a | ~a", vec!["-1"], 10),
+            ("(a ^ b) ^ b", vec!["a"], 10),
+            ("a ^ (b ^ a)", vec!["b"], 10),
+            ("~0", vec!["-1"], 10),
+            ("~-1", vec!["0"], 10),
+            ("x & (x | y)", vec!["x"], 10),
+            ("(x | y) & x", vec!["x"], 10),
+            ("a + b * 0", vec!["a"], 10),
+            ("a * (1 + 0)", vec!["a"], 10),
+            ("(2 * a) + (3 * a) + a", vec!["(6 * a)"], 10),
+            ("a - 0", vec!["a"], 10),
+            ("0 - a", vec!["-a"], 10),
+            ("-(a - b)", vec!["(b - a)"], 10),
+            ("a * -1", vec!["-a"], 10),
+            ("-1 * a", vec!["-a"], 10),
+            ("a + -a", vec!["0"], 10),
+            ("a ^ (a ^ b ^ c) ^ b ^ c", vec!["0"], 10),
         ];
         let mut c = 0;
-        for (case, expect) in test_pairs {
+        for (case, expect, iter) in test_pairs {
             if case.is_empty() {
                 continue;
             }
@@ -727,6 +575,325 @@ mod tests {
             if c < 0 {
                 continue;
             }
+            cli.iter_limit = iter;
+            let egg_expr = infix_to_egglog(case, true);
+            let result = simplify(&egg_expr, &cli);
+            let r = if result.is_ok() {
+                result.unwrap()
+            } else {
+                result.unwrap_err().to_string()
+            };
+            println!("#{} {}", c, case);
+            assert!(
+                expect.contains(&r.as_str()),
+                "{} {}\n{} != {:?} \n{}",
+                case,
+                egg_expr,
+                r,
+                expect,
+                make_egg(&cli.num_type)
+            );
+        }
+    }
+    #[test]
+    fn test_complex_simplify() {
+        let mut cli = Cli {
+            rule_compile: false,
+            expr_compile: false,
+            num_type: "i8".to_string(),
+            iter_limit: 10,
+            expr: "".to_string(),
+        };
+        let test_pairs = vec![
+            ("x + (~y + 1)", vec!["(x - y)"], 10),
+            ("(x ^ y) - 2*(~x & y)", vec!["(x - y)"], 10),
+            ("(x & ~y) - (~x & y)", vec!["(x - y)"], 10),
+            ("2*(x & ~y) - (x ^ y)", vec!["(x - y)"], 10),
+            (
+                "(-x - 1) - (-2 * x)",
+                vec!["(-1 + x)", "~-x", "(x + -1)"],
+                10,
+            ),
+            ("2*x + ~x", vec!["~-x", "(-1 + x)"], 10),
+            (
+                "2*(x | y) + (x ^ ~y)",
+                vec![
+                    "(~-y + x)",
+                    "(~-x + y)",
+                    "((x + y) + -1)",
+                    "~(-y - x)",
+                    "~(-x - y)",
+                ],
+                10,
+            ),
+            ("(x | ~y) + y", vec!["((x & y) + -1)", "~-(x & y)"], 10),
+            (
+                "(x + y) + ~(x & y)",
+                vec!["((x | y) + -1)", "((y | x) + -1)", "~-(x | y)", "~-(y | x)"],
+                10,
+            ),
+            (
+                "(~x | 1) + x",
+                vec![
+                    "((1 & x) + -1)",
+                    "-(~x & 1)",
+                    "-(1 & ~x)",
+                    "~-(1 & x)",
+                    "((-2 | x) + 1)",
+                ],
+                10,
+            ),
+            ("x - (~y + 1)", vec!["(x + y)"], 10),
+            ("(x ^ y) + 2*(x & y)", vec!["(x + y)"], 10),
+            ("(x | y) + (x & y)", vec!["(x + y)"], 10),
+            ("2*(x | y) - (x ^ y)", vec!["(x + y)"], 10),
+            ("2*(x | y | z) - (x ^ (y | z))", vec!["((y | z) + x)"], 10),
+            ("(x ^ y) + 2*(x & y)", vec!["(x + y)"], 10),
+            ("(a ^ 5) + 2*(a & 5)", vec!["(a + 5)"], 10),
+            (
+                "((a & 0xff) ^ 0x12) + 2*(a & 0x12)",
+                vec!["((a & 0xff) + 0x12)"],
+                10,
+            ),
+            ("(a ^ 0xfe) + 2*(a | 0x01)", vec!["a"], 10),
+            (
+                "~(x ^ y) + 2*(x | y)",
+                vec![
+                    "((y + x) - 1)",
+                    "((x + y) - 1)",
+                    "~-(x + y)",
+                    "~(-y - x)",
+                    "~(-x - y)",
+                    "((x + y) + -1)",
+                    "((y + x) + -1)",
+                ],
+                10,
+            ),
+            (
+                "~(x ^ y) - (-2 * (x | y))",
+                vec![
+                    "((y + x) - 1)",
+                    "((x + y) - 1)",
+                    "~-(x + y)",
+                    "~(-x - y)",
+                    "~(-y - x)",
+                    "((-1 + x) + y)",
+                    "((x + y) + -1)",
+                    "((y + x) + -1)",
+                ],
+                10,
+            ),
+            ("(x - y) - 2*(x | ~y)", vec!["((x ^ y) + 2)"], 10),
+            ("(x - y) - 2*(~(~x & y))", vec!["((x ^ y) + 2)"], 10),
+            ("(x | y)*(x & y) + (x & ~y)*(y & ~x)", vec!["(x * y)"], 10),
+            ("(x | y)*(x & y) + ~(x | ~y)*(x & ~y)", vec!["(x * y)"], 10),
+            (
+                "2 + 2*(y + (x | ~y))",
+                vec!["(2 * (x & y))", "((x & y) * 2)", "((y & x) * 2)"],
+                10,
+            ),
+            ("-(x & y) - (x & y)", vec!["(-2 * (x & y))"], 10),
+            ("(~x | y) - ~x", vec!["(x & y)"], 10),
+            ("(x + y) - (x | y)", vec!["(x & y)"], 10),
+            ("(x | y) - (x ^ y)", vec!["(x & y)"], 10),
+            ("(x | y) & ~(x ^ y)", vec!["(x & y)"], 10),
+            ("(x & y) & ~(x ^ y)", vec!["(x & y)"], 10),
+            ("x & ~(x ^ y)", vec!["(x & y)"], 10),
+            ("(x | y) - y", vec!["(x & ~y)"], 10),
+            ("x - (x & y)", vec!["(x & ~y)"], 10),
+            ("x ^ (x & y)", vec!["(x & ~y)"], 10),
+            ("x & (x ^ y)", vec!["(x & ~y)"], 10),
+            ("(x | y) ^ y", vec!["(x & ~y)"], 10),
+            (
+                "(x & z) | (y & z)",
+                vec!["((x | y) & z)", "(z & (y | x))", "(z & (x | y))"],
+                10,
+            ),
+            (
+                "(x & z) ^ (y & z)",
+                vec!["((x ^ y) & z)", "(z & (y ^ x))", "(z & (x ^ y))"],
+                10,
+            ),
+            ("(~x | y) + (x + 1)", vec!["(x & y)"], 10),
+            ("(x | y) & (x ^ ~y)", vec!["(x & y)"], 10),
+            (" (x ^ ~y) & y", vec!["(x & y)", "(y & x)"], 10),
+            ("(x * x) & 3", vec!["(x & 1)"], 10),
+            ("-x - 1", vec!["~x"], 10),
+            ("~(x | y) | ~y", vec!["~y"], 10),
+            ("(x - 1) - 2*x", vec!["~x"], 10),
+            ("~(x ^ y) ^ y", vec!["~x"], 10),
+            ("~x ^ ~y", vec!["(x ^ y)"], 10),
+            ("(x ^ y) | ~(x | y)", vec!["~(x & y)", "~(y & x)"], 10),
+            ("~x | ~y", vec!["~(x & y)"], 10),
+            ("~x & ~y", vec!["~(x | y)"], 10),
+            (
+                "(x & y) | ~(x | y)",
+                vec!["~(x ^ y)", "(x ^ ~y)", "(~y ^ x)", "(~x ^ y)", "(y ^ ~x)"],
+                10,
+            ),
+            ("(x & y) ^ (x | ~y)", vec!["~y"], 10),
+            (
+                "(x & y) | (~x & ~y)",
+                vec!["~(x ^ y)", "(x ^ ~y)", "(~y ^ x)", "(~x ^ y)", "(y ^ ~x)"],
+                10,
+            ),
+            (
+                "(x | y) ^ (~x | ~y)",
+                vec!["~(x ^ y)", "(x ^ ~y)", "(~y ^ x)", "(~x ^ y)", "(y ^ ~x)"],
+                10,
+            ),
+            (
+                "(x | ~y) & (~x | y)",
+                vec!["~(x ^ y)", "(x ^ ~y)", "(~y ^ x)", "(~x ^ y)", "(y ^ ~x)"],
+                10,
+            ),
+            ("(~x | ~y) | (x ^ y)", vec!["~(x & y)"], 10),
+            ("~x | (x ^ y)", vec!["~(x & y)", "~(y & x)"], 10),
+            (
+                "(x ^ ~y) - 2*(x & y)",
+                vec!["~(x + y)", "(~x - y)", "(~y - x)"],
+                10,
+            ),
+            ("(x & ~y) | ~(x | y)", vec!["~y"], 10),
+            ("~x & (~x ^ c)", vec!["(x & ~c) ^ ~c", "~(x | c)"], 10),
+            (
+                "((x ^ 0x12) & 1) | ((x ^ 8) & 0xfe)",
+                vec!["((x ^ 8) | (1 & x))", "(x ^ 8)"],
+                15,
+            ),
+            ("((x ^ 8) | (1 & x))", vec!["(x ^ 8)"], 15),
+            (
+                "(x - 7) + 11*(x - 8)",
+                vec![
+                    "(-0x5f + (0xc * x))",
+                    "((x * 0xc) + -0x5f)",
+                    "((0xc * x) + -0x5f)",
+                ],
+                10,
+            ),
+            (
+                "(x >> z) & (y >> z)",
+                vec!["((x & y) >> z)", "((y & x) >> z)"],
+                10,
+            ),
+            ("2*x - (x & ~y)", vec!["(x + (x & y))", "((x & y) + x)"], 10),
+            (
+                "(x & ~y) - 2*x",
+                vec!["-(x + (x & y))", "(-(x & y) - x)", "-((x & y) + x)"],
+                10,
+            ),
+            (
+                "(x & ~y) - (x & y)",
+                vec!["((x ^ y) - y)", "((x ^ y) + -y)"],
+                20,
+            ),
+            (
+                "(~x | (~y & z)) + (x + (y & z)) - z",
+                vec![
+                    "(x | (y | ~z))",
+                    "((y | ~z) | x)",
+                    "((~z | y) | x)",
+                    "((((~y & z) & x) + -1) + -(~y & z))",
+                    "(-(~y & z) + (((~y & z) & x) + -1))",
+                    "((((~y & z) & x) + -1) - (~y & z))",
+                ],
+                10,
+            ),
+            (
+                "((((~y & z) & x) + -1) + -(~y & z))",
+                vec![
+                    "(x | (y | ~z))",
+                    "((y | ~z) | x)",
+                    "((~z | y) | x)",
+                    "((x | y) | ~z)",
+                    "(x | (~z | y))",
+                ],
+                10,
+            ),
+            (
+                "(x | y) + (x & ~y)",
+                vec!["((x ^ y) + x)", "((y ^ x) + x)"],
+                10,
+            ),
+            ("(x & y) + (x & ~y)", vec!["x"], 10),
+            ("(x & y) ^ (x & ~y)", vec!["x"], 10),
+            ("x & (x | y)", vec!["x"], 10),
+            ("~(x - 1)", vec!["-x"], 10),
+            ("(x ^ y) - 2*(x | y)", vec!["-(x + y)"], 10),
+            ("(-2 * (x | y)) + (x ^ y)", vec!["-(x + y)", "(-y - x)","(-x - y)"], 10),
+            (
+                "(x ^ (y | z)) - 2*((x | y) | z)",
+                vec![
+                    "-(x + (y | z))",
+                    "-((y | z) + x)",
+                    "(-(y | z) - x)",
+                    "(-x - (y | z))",
+                ],
+                10,
+            ),
+            ("(x & y) - (x + y)", vec!["-(x | y)"], 10),
+            ("(x & y) - (x | y)", vec!["-(x ^ y)", "-(y ^ x)"], 10),
+            ("(x + y) - 2*(x | y)", vec!["-(x ^ y)"], 10),
+            ("(x + y) - (x & y)", vec!["(x | y)", "(y | x)"], 10),
+            ("(x - y) - (x & -y)", vec!["(x | -y)"], 10),
+            ("(x & y) + (x ^ y)", vec!["(x | y)", "(y | x)"], 10),
+            ("(x ^ y) + (x & y)", vec!["(x | y)", "(y | x)"], 10),
+            ("((x + y) + 1) + ~(x & y)", vec!["(x | y)", "(y | x)"], 10),
+            ("(x + (x ^ y)) - (x & ~y)", vec!["(x | y)", "(y | x)"], 10),
+            ("(x & y) | (x ^ y)", vec!["(x | y)", "(y | x)"], 10),
+            (
+                "(x & (y ^ z)) | ((x ^ y) ^ z)",
+                vec!["(x | (y ^ z))", "((y ^ z) | x)"],
+                10,
+            ),
+            ("(x ^ y) | y", vec!["(x | y)", "(y | x)"], 10),
+            ("(x & y) ^ (x ^ y)", vec!["(x | y)", "(y | x)"], 10),
+            ("~x ^ (x & y)", vec!["(~x | y)"], 10),
+            ("x ^ (~x & y)", vec!["(x | y)", "(y | x)"], 10),
+            ("(x & ~y) + y", vec!["(x | y)", "(y | x)", "(y | x)"], 10),
+            ("(x | y) | (~x ^ ~y)", vec!["(x | y)", "(y | x)"], 10),
+            ("(x & y) | ~(~x ^ y)", vec!["(x | y)", "(y | x)"], 10),
+            ("(~x & y) | x", vec!["(x | y)", "(y | x)"], 10),
+            ("~(~x | ~y) | (x ^ y)", vec!["(x | y)", "(y | x)"], 10),
+            ("(x - y) + (~x | y)", vec!["(x | ~y)", "(~y | x)"], 10),
+            ("(~x | y) ^ (x ^ y)", vec!["(x | ~y)", "(~y | x)"], 10),
+            ("(x | y) - (x & y)", vec!["(x ^ y)"], 10),
+            ("2*(x | y) - (x + y)", vec!["(x ^ y)"], 10),
+            ("(x + y) - 2*(x & y)", vec!["(x ^ y)"], 10),
+            ("((x - y) - 2*(x | ~y)) - 2", vec!["(x ^ y)"], 10),
+            ("x - (2*(x & y) - y)", vec!["(x ^ y)"], 10),
+            ("x - (2*(y & ~(x ^ y)) - y)", vec!["(x ^ y)"], 10),
+            ("x - (2*(x & y) - y)", vec!["(x ^ y)"], 10),
+            ("x - 2*(x & y)", vec!["((x ^ y) - y)", "((x ^ y) + -y)"], 10),
+            ("(x & ~y) | (~x & y)", vec!["(x ^ y)"], 10),
+            ("(~x & y) ^ (x & ~y)", vec!["(x ^ y)"], 10),
+            ("(x & y) ^ (x | y)", vec!["(x ^ y)"], 10),
+            ("(x - y) + 2*(~x & y)", vec!["(x ^ y)"], 10),
+            ("~x + (2*x | 2)", vec!["(x ^ 1)", "(1 ^ x)"], 20),
+            (
+                "((x ^ z) & (y ^ ~z)) | ((x ^ ~z) & (y ^ z))",
+                vec!["(x ^ y)", "((y ^ z) ^ (x ^ z))"],
+                10,
+            ),
+            ("((y ^ z) ^ (x ^ z))", vec!["(x ^ y)", "(y ^ x)"], 10),
+            (
+                "((x ^ z) & (y ^ z)) | ((x ^ ~z) & (y ^ ~z))",
+                vec!["(~x ^ y)", "((y ^ z) ^ (x ^ ~z))"],
+                10,
+            ),
+            ("((y ^ z) ^ (x ^ ~z))", vec!["(~x ^ y)", "~(y ^ x)"], 10),
+            ("(x + y) - 2*(x | (y - 1))", vec!["((x ^ -y) + 2)"], 10),
+        ];
+        let mut c = 0;
+        for (case, expect, iter) in test_pairs {
+            if case.is_empty() {
+                continue;
+            }
+            c += 1;
+            if c < 0 {
+                continue;
+            }
+            cli.iter_limit = iter;
             let egg_expr = infix_to_egglog(case, true);
             let result = simplify(&egg_expr, &cli);
             let r = if result.is_ok() {
