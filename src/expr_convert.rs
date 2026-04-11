@@ -6,7 +6,7 @@ use crate::expr_convert::Token::RParen;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
-    Num(String),
+    Num(u64),
     Operand(String),
     Operator(String),
     LParen,
@@ -29,7 +29,7 @@ fn tokenize(expr: &str) -> Vec<Token> {
                 chars.next();
             }
             ')' => {
-                tokens.push(Token::RParen);
+                tokens.push(RParen);
                 chars.next();
             }
             '+' | '-' | '*' | '/' | '%' | '&' | '|' | '^' | '~' => {
@@ -93,11 +93,12 @@ fn tokenize(expr: &str) -> Vec<Token> {
                 if num.starts_with("0x") {
                     tokens.push(Token::Num(
                         u64::from_str_radix(&num[2..], 16)
-                            .expect(&format!("fail to parse num:{}", num))
-                            .to_string(),
+                            .expect(&format!("fail to parse num:{}", num)),
                     ));
                 } else {
-                    tokens.push(Token::Num(num));
+                    tokens.push(Token::Num(
+                        u64::from_str_radix(&num, 10).expect(&format!("fail to parse num:{}", num)),
+                    ));
                 }
             }
             _ => {
@@ -110,7 +111,7 @@ fn tokenize(expr: &str) -> Vec<Token> {
 
 #[derive(Debug)]
 enum Ast {
-    Num(String),
+    Num(u64),
     Operand(String),
     BinaryOp(String, Box<Ast>, Box<Ast>),
     UnaryOp(String, Box<Ast>),
@@ -163,7 +164,7 @@ fn is_unary_op(op: &str) -> bool {
 
 fn parse_atom(tokens: &[Token]) -> (Ast, &[Token]) {
     match tokens.first() {
-        Some(Token::Num(num)) => (Ast::Operand(num.clone()), &tokens[1..]),
+        Some(Token::Num(num)) => (Ast::Num(*num), &tokens[1..]),
         Some(Token::Operand(s)) => (Ast::Operand(s.clone()), &tokens[1..]),
         Some(Token::LParen) => {
             let (expr, rest) = parse_infix_expr(&tokens[1..], 0);
@@ -215,7 +216,7 @@ pub fn egglog_to_infix(expr: &str) -> String {
 
 fn ast_to_prefix(ast: &Ast) -> String {
     match ast {
-        Ast::Num(s) => s.clone(),
+        Ast::Num(s) => s.to_string(),
         Ast::Operand(s) => s.clone(),
         Ast::UnaryOp(op, operand) => {
             format!("({} {})", op, ast_to_prefix(operand))
@@ -275,7 +276,7 @@ fn parse_prefix_op(tokens: &[Token]) -> (Ast, &[Token]) {
 
 fn parse_prefix_expr(tokens: &[Token], _min_prec: u8) -> (Ast, &[Token]) {
     match tokens.first() {
-        Some(Token::Num(num)) => (Ast::Num(num.clone()), &tokens[1..]),
+        Some(Token::Num(num)) => (Ast::Num(*num), &tokens[1..]),
         Some(Token::Operand(s)) => (Ast::Operand(s.clone()), &tokens[1..]),
         Some(Token::LParen) => {
             let (ast, rest) = parse_prefix_op(&tokens[1..]);
@@ -299,7 +300,7 @@ fn parse_prefix_expr(tokens: &[Token], _min_prec: u8) -> (Ast, &[Token]) {
 fn ast_to_infix(ast: &Ast) -> String {
     match ast {
         Ast::Num(s) => {
-            let n = i64::from_str_radix(s, 10).unwrap();
+            let n = *s as i64;
             if n > 9 || n < -9 {
                 format!("{:#x}", n)
             } else {
@@ -323,7 +324,7 @@ fn ast_to_infix(ast: &Ast) -> String {
 fn ast_to_egglog(ast: &Ast, is_expr: bool) -> String {
     match ast {
         Ast::Num(s) => {
-            format!("(Num {})", s)
+            format!("(Num {})", *s as i64)
         }
         Ast::Operand(s) => {
             if is_expr {
@@ -337,7 +338,7 @@ fn ast_to_egglog(ast: &Ast, is_expr: bool) -> String {
             match op.as_str() {
                 "-" => {
                     if let Ast::Num(v) = operand.as_ref() {
-                        format!("(Num -{})", v)
+                        format!("(Num -{})", *v)
                     } else {
                         format!("(Neg {})", operand_str)
                     }

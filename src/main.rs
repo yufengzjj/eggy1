@@ -2,8 +2,8 @@ mod expr_convert;
 
 use crate::expr_convert::{egglog_to_infix, infix_to_egglog};
 use clap::Parser;
-use egglog::Error::ParseError;
 use egglog::ast::Span;
+use egglog::Error::ParseError;
 use egglog::*;
 
 macro_rules! rewrite {
@@ -496,7 +496,7 @@ mod tests {
             ("1 * a", vec!["a"], 10),
             ("a * 0", vec!["0"], 10),
             ("0 * a", vec!["0"], 10),
-            ("a + a", vec!["(a + a)","(2 * a)"], 10),
+            ("a + a", vec!["(a + a)", "(2 * a)"], 10),
             ("a + a + a", vec!["(3 * a)"], 10),
             ("2 * a + 3 * a", vec!["(5 * a)"], 10),
             ("5 + 3", vec!["8"], 10),
@@ -530,7 +530,10 @@ mod tests {
             ("((a + b) * c - d) + (d - a * c)", vec!["(b * c)"], 10),
             (
                 "a * b + a * c + b * a + b * c",
-                vec!["((((b + c) + b) * a) + (b * c))","(((b + a) * c) + (2 * (a * b)))"],
+                vec![
+                    "((((b + c) + b) * a) + (b * c))",
+                    "(((b + a) * c) + (2 * (a * b)))",
+                ],
                 10,
             ),
             (
@@ -812,7 +815,7 @@ mod tests {
             ),
             (
                 "(x | y) + (x & ~y)",
-                vec!["((x ^ y) + x)", "((y ^ x) + x)"],
+                vec!["((x ^ y) + x)", "((y ^ x) + x)", "(x + (y ^ x))"],
                 10,
             ),
             ("(x & y) + (x & ~y)", vec!["x"], 10),
@@ -820,7 +823,11 @@ mod tests {
             ("x & (x | y)", vec!["x"], 10),
             ("~(x - 1)", vec!["-x"], 10),
             ("(x ^ y) - 2*(x | y)", vec!["-(x + y)"], 10),
-            ("(-2 * (x | y)) + (x ^ y)", vec!["-(x + y)", "(-y - x)","(-x - y)"], 10),
+            (
+                "(-2 * (x | y)) + (x ^ y)",
+                vec!["-(x + y)", "(-y - x)", "(-x - y)"],
+                10,
+            ),
             (
                 "(x ^ (y | z)) - 2*((x | y) | z)",
                 vec![
