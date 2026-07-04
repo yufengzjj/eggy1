@@ -95,13 +95,13 @@ fn make_egg(num_type: &str) -> String {
 (rewrite (Add (Num a) (Num b))   (Num (wrapping-add-{0} a b)) :ruleset constant-folding)
 (rewrite (Sub (Num a) (Num b))   (Num (wrapping-sub-{0} a b)) :ruleset constant-folding)
 (rewrite (Mul (Num a) (Num b))   (Num (wrapping-mul-{0} a b)) :ruleset constant-folding)
-(rewrite (Div (Num a) (Num b))   (Num (wrapping-div-{0} a b)) :when ((!= (Num b) (Num 0))) :ruleset constant-folding)
+(rewrite (Div (Num a) (Num b))   (Num (wrapping-div-{0} a b)) :when ((!= b 0)) :ruleset constant-folding)
 (rewrite (And (Num a) (Num b))   (Num (wrapping-and-{0} a b)) :ruleset constant-folding)
 (rewrite (Or (Num a) (Num b))   (Num (wrapping-or-{0} a b)) :ruleset constant-folding)
 (rewrite (Xor (Num a) (Num b))   (Num (wrapping-xor-{0} a b)) :ruleset constant-folding)
 (rewrite (Shl (Num a) (Num b))   (Num (wrapping-shl-{0} a b)) :ruleset constant-folding)
 (rewrite (Shr (Num a) (Num b))   (Num (wrapping-shr-{0} a b)) :ruleset constant-folding)
-(rewrite (Mod (Num a) (Num b))   (Num (wrapping-mod-{0} a b)) :when ((!= (Num b) (Num 0))) :ruleset constant-folding)
+(rewrite (Mod (Num a) (Num b))   (Num (wrapping-mod-{0} a b)) :when ((!= b 0)) :ruleset constant-folding)
 (rewrite (Not (Num a))   (Num (wrapping-not-{0} a)) :ruleset constant-folding)
 (rewrite (Neg (Num a))   (Num (wrapping-neg-{0} a)) :ruleset constant-folding)
 "#,
@@ -119,7 +119,9 @@ fn make_egg(num_type: &str) -> String {
     egg.push_str(&rewrite!("a*1"=>"a";"identity-zero-element"));
     egg.push_str(&rewrite!("0/a"=>"0";"identity-zero-element"));
     egg.push_str(&rewrite!("a/1"=>"a";"identity-zero-element"));
-    egg.push_str(&rewrite!("a*(1/a)"=>"1";"identity-zero-element"));
+    // NOTE: no `a*(1/a)=>1` / `a/b<=>a*(1/b)` here: integer division truncates,
+    // so 1/b folds to 0 for |b|>1 and would merge a/b with 0 in the e-graph.
+    egg.push_str(&rewrite!("a*b/b"=>"a";"identity-zero-element"));
     egg.push_str(&rewrite!("a/-1"=>"-a";"identity-zero-element"));
     egg.push_str(&rewrite!("a/a"=>"1";"identity-zero-element"));
     egg.push_str(&rewrite!("a|0"=>"a";"identity-zero-element"));
@@ -141,13 +143,11 @@ fn make_egg(num_type: &str) -> String {
     egg.push_str(&rewrite!("a|(a&b)"=>"a";"identity-zero-element"));
 
     egg.push_str(&rewrite!("a-b"<=>"a+-b";"canonicalization"));
-    egg.push_str(&rewrite!("a/b"<=>"a*(1/b)";"canonicalization"));
     egg.push_str(&rewrite!("~a"<=>"-a-1";"canonicalization"));
     egg.push_str(&rewrite!("-a"<=>"a*-1";"canonicalization"));
     egg.push_str(&rewrite!("~(x*y)"<=>"((~x*y)+(y-1))";"canonicalization"));
     egg.push_str(&rewrite!("~(x+y)"<=>"((~y+1)+~x)";"canonicalization"));
     egg.push_str(&rewrite!("~(x-y)"<=>"(~x-(~y+1))";"canonicalization"));
-    egg.push_str(&rewrite!("~(x&y)"<=>"-(x&y)-1";"canonicalization"));
     egg.push_str(&rewrite!("~(x&y)"<=>"(~x|~y)";"canonicalization"));
     egg.push_str(&rewrite!("~(x^y)"<=>"(x^~y)";"canonicalization"));
     egg.push_str(&rewrite!("~(x|y)"<=>"(~x&~y)";"canonicalization"));
@@ -194,7 +194,6 @@ fn make_egg(num_type: &str) -> String {
     egg.push_str(&rewrite!("(x^y)-2*(~x&y)"=>"x-y";"simplify"));
     egg.push_str(&rewrite!("2*(x&~y)-(x^y)"=>"x-y";"simplify"));
     egg.push_str(&rewrite!("(x&~y)-(~x&y)"=>"x-y";"simplify"));
-    egg.push_str(&rewrite!("(a&b)^(a&~b)"=>"a";"simplify"));
     egg.push_str(&rewrite!("2*(x|y)+(x^~y)"=>"(x+y)-1";"simplify"));
     egg.push_str(&rewrite!("(x|~y)+y"=>"(x&y)-1";"simplify"));
     egg.push_str(&rewrite!("(x+y)+~(x&y)"=>"(x|y)-1";"simplify"));
@@ -205,7 +204,6 @@ fn make_egg(num_type: &str) -> String {
     egg.push_str(&rewrite!("(x|y)*(x&y)+(x&~y)*(y&~x)"=>"x*y";"simplify"));
     egg.push_str(&rewrite!("(x+y)-(x|y)"=>"x&y";"simplify"));
     egg.push_str(&rewrite!("(y&~x)-y"=>"-(y&x)";"simplify"));
-    egg.push_str(&rewrite!("x-(y&x)"=>"x&~y";"simplify"));
     egg.push_str(&rewrite!("(x|y)-y"=>"x&~y";"simplify"));
     egg.push_str(&rewrite!("x^(x&y)"=>"x&~y";"simplify"));
     egg.push_str(&rewrite!("(x|y)^y"=>"x&~y";"simplify"));
@@ -312,22 +310,22 @@ fn init_egg_function(eg: &mut EGraph) {
     add_primitive!(eg, "wrapping-shl-i8" = |a: i64, b: i64| -> i64 { if b as u8 > 7 { 0 } else{((a as i8) << (b as u8)) as i64} } );
     add_primitive!(eg, "wrapping-shl-u8" = |a: i64, b: i64| -> i64 { if b as u8 > 7 { 0 } else{((a as u8) << (b as u8)) as i64} } );
 
-    add_primitive!(eg, "wrapping-shr-i64" = |a: i64, b: i64| -> i64 { if b as u64 > 63 { 0 } else { a >> (b as u64) } } );
+    add_primitive!(eg, "wrapping-shr-i64" = |a: i64, b: i64| -> i64 { if b as u64 > 63 { a >> 63 } else { a >> (b as u64) } } );
     add_primitive!(eg, "wrapping-shr-u64" = |a: i64, b: i64| -> i64 { if b as u64 > 63 { 0 } else{((a as u64) >> (b as u64)) as i64} } );
-    add_primitive!(eg, "wrapping-shr-i32" = |a: i64, b: i64| -> i64 { if b as u32 > 31 { 0 } else{((a as i32) >> (b as u32)) as i64} } );
+    add_primitive!(eg, "wrapping-shr-i32" = |a: i64, b: i64| -> i64 { if b as u32 > 31 { ((a as i32) >> 31) as i64 } else{((a as i32) >> (b as u32)) as i64} } );
     add_primitive!(eg, "wrapping-shr-u32" = |a: i64, b: i64| -> i64 { if b as u32 > 31 { 0 } else{((a as u32) >> (b as u32)) as i64} } );
-    add_primitive!(eg, "wrapping-shr-i16" = |a: i64, b: i64| -> i64 { if b as u16 > 15 { 0 } else{((a as i16) >> (b as u16)) as i64} } );
+    add_primitive!(eg, "wrapping-shr-i16" = |a: i64, b: i64| -> i64 { if b as u16 > 15 { ((a as i16) >> 15) as i64 } else{((a as i16) >> (b as u16)) as i64} } );
     add_primitive!(eg, "wrapping-shr-u16" = |a: i64, b: i64| -> i64 { if b as u16 > 15 { 0 } else{((a as u16) >> (b as u16)) as i64} } );
-    add_primitive!(eg, "wrapping-shr-i8" = |a: i64, b: i64| -> i64 { if b as u8 > 7 { 0 } else{((a as i8) >> (b as u8)) as i64} } );
+    add_primitive!(eg, "wrapping-shr-i8" = |a: i64, b: i64| -> i64 { if b as u8 > 7 { ((a as i8) >> 7) as i64 } else{((a as i8) >> (b as u8)) as i64} } );
     add_primitive!(eg, "wrapping-shr-u8" = |a: i64, b: i64| -> i64 { if b as u8 > 7 { 0 } else{((a as u8) >> (b as u8)) as i64} } );
 
-    add_primitive!(eg, "wrapping-mod-i64" = |a: i64, b: i64| -> i64 { a % b } );
+    add_primitive!(eg, "wrapping-mod-i64" = |a: i64, b: i64| -> i64 { a.wrapping_rem(b) } );
     add_primitive!(eg, "wrapping-mod-u64" = |a: i64, b: i64| -> i64 { ((a as u64) % (b as u64)) as i64 } );
-    add_primitive!(eg, "wrapping-mod-i32" = |a: i64, b: i64| -> i64 { ((a as i32) % (b as i32)) as i64 } );
+    add_primitive!(eg, "wrapping-mod-i32" = |a: i64, b: i64| -> i64 { ((a as i32).wrapping_rem(b as i32)) as i64 } );
     add_primitive!(eg, "wrapping-mod-u32" = |a: i64, b: i64| -> i64 { ((a as u32) % (b as u32)) as i64 } );
-    add_primitive!(eg, "wrapping-mod-i16" = |a: i64, b: i64| -> i64 { ((a as i16) % (b as i16)) as i64 } );
+    add_primitive!(eg, "wrapping-mod-i16" = |a: i64, b: i64| -> i64 { ((a as i16).wrapping_rem(b as i16)) as i64 } );
     add_primitive!(eg, "wrapping-mod-u16" = |a: i64, b: i64| -> i64 { ((a as u16) % (b as u16)) as i64 } );
-    add_primitive!(eg, "wrapping-mod-i8" = |a: i64, b: i64| -> i64 { ((a as i8) % (b as i8)) as i64 } );
+    add_primitive!(eg, "wrapping-mod-i8" = |a: i64, b: i64| -> i64 { ((a as i8).wrapping_rem(b as i8)) as i64 } );
     add_primitive!(eg, "wrapping-mod-u8" = |a: i64, b: i64| -> i64 { ((a as u8) % (b as u8)) as i64 } );
 
     add_primitive!(eg, "wrapping-not-i64" = |a: i64| -> i64 { !a } );
@@ -504,6 +502,9 @@ mod tests {
             ("4 * 6", vec!["0x18"], 10),
             ("a + 5 - 5", vec!["a"], 10),
             ("a * 8 / 8", vec!["a"], 10),
+            ("6 / 2", vec!["3"], 10),
+            ("10 % 3", vec!["1"], 10),
+            ("a / 2 + (b - b)", vec!["(a / 2)"], 10),
             ("3 * a + 5 * a + 2 * a", vec!["(0xa * a)"], 10),
             ("12 + a + 8 + b - 20", vec!["(a + b)"], 10),
             ("a & a", vec!["a"], 10),
@@ -822,7 +823,7 @@ mod tests {
             ("(x & y) ^ (x & ~y)", vec!["x"], 10),
             ("x & (x | y)", vec!["x"], 10),
             ("~(x - 1)", vec!["-x"], 10),
-            ("(x ^ y) - 2*(x | y)", vec!["-(x + y)"], 10),
+            ("(x ^ y) - 2*(x | y)", vec!["-(x + y)", "-(y + x)"], 10),
             (
                 "(-2 * (x | y)) + (x ^ y)",
                 vec!["-(x + y)", "(-y - x)", "(-x - y)"],

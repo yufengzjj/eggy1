@@ -2,7 +2,7 @@
 
 [中文文档](README_CN.md)
 
-A Rust command-line tool for simplifying infix arithmetic expressions using egglog-based rewriting.
+simplifying infix arithmetic expressions using egglog-based rewriting.
 
 ## Features
 
