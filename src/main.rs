@@ -104,6 +104,14 @@ fn make_egg(num_type: &str) -> String {
 (rewrite (Mod (Num a) (Num b))   (Num (wrapping-mod-{0} a b)) :when ((!= b 0)) :ruleset constant-folding)
 (rewrite (Not (Num a))   (Num (wrapping-not-{0} a)) :ruleset constant-folding)
 (rewrite (Neg (Num a))   (Num (wrapping-neg-{0} a)) :ruleset constant-folding)
+(relation non-zero (Expr))
+(ruleset analysis)
+(rule ((= e (Num c)) (is-nonzero-{0} c)) ((non-zero e)) :ruleset analysis)
+(rule ((= e (Or a b)) (non-zero a)) ((non-zero e)) :ruleset analysis)
+(rule ((= e (Or a b)) (non-zero b)) ((non-zero e)) :ruleset analysis)
+(rule ((= e (Neg a)) (non-zero a)) ((non-zero e)) :ruleset analysis)
+(rule ((= e (Mul a (Num c))) (non-zero a) (is-odd c)) ((non-zero e)) :ruleset analysis)
+(rule ((= e (Mul (Num c) a)) (non-zero a) (is-odd c)) ((non-zero e)) :ruleset analysis)
 "#,
         num_type
     );
@@ -121,9 +129,13 @@ fn make_egg(num_type: &str) -> String {
     egg.push_str(&rewrite!("a/1"=>"a";"identity-zero-element"));
     // NOTE: no `a*(1/a)=>1` / `a/b<=>a*(1/b)` here: integer division truncates,
     // so 1/b folds to 0 for |b|>1 and would merge a/b with 0 in the e-graph.
-    egg.push_str(&rewrite!("a*b/b"=>"a";"identity-zero-element"));
+    // Division/mod rules with a non-constant divisor must prove the divisor
+    // non-zero (via the `non-zero` analysis), or two rules could assign different
+    // values to a 0/0 node and merge distinct constants (0==1).
+    egg.push_str(&rewrite!("a*b/b"=>"a";"identity-zero-element :when ((non-zero b))"));
+    egg.push_str(&rewrite!("a/a"=>"1";"identity-zero-element :when ((non-zero a))"));
+    egg.push_str(&rewrite!("a%a"=>"0";"identity-zero-element :when ((non-zero a))"));
     egg.push_str(&rewrite!("a/-1"=>"-a";"identity-zero-element"));
-    egg.push_str(&rewrite!("a/a"=>"1";"identity-zero-element"));
     egg.push_str(&rewrite!("a|0"=>"a";"identity-zero-element"));
     egg.push_str(&rewrite!("a|-1"=>"-1";"identity-zero-element"));
     egg.push_str(&rewrite!("a|~a"=>"-1";"identity-zero-element"));
@@ -146,8 +158,8 @@ fn make_egg(num_type: &str) -> String {
     egg.push_str(&rewrite!("~a"<=>"-a-1";"canonicalization"));
     egg.push_str(&rewrite!("-a"<=>"a*-1";"canonicalization"));
     egg.push_str(&rewrite!("~(x*y)"<=>"((~x*y)+(y-1))";"canonicalization"));
-    egg.push_str(&rewrite!("~(x+y)"<=>"((~y+1)+~x)";"canonicalization"));
-    egg.push_str(&rewrite!("~(x-y)"<=>"(~x-(~y+1))";"canonicalization"));
+    egg.push_str(&rewrite!("((~y+1)+~x)"=>"~(x+y)";"canonicalization"));
+    egg.push_str(&rewrite!("(~x-(~y+1))"=>"~(x-y)";"canonicalization"));
     egg.push_str(&rewrite!("~(x&y)"<=>"(~x|~y)";"canonicalization"));
     egg.push_str(&rewrite!("~(x^y)"<=>"(x^~y)";"canonicalization"));
     egg.push_str(&rewrite!("~(x|y)"<=>"(~x&~y)";"canonicalization"));
@@ -158,22 +170,22 @@ fn make_egg(num_type: &str) -> String {
     egg.push_str(&rewrite!("-(x-y)"<=>"y-x";"canonicalization"));
     egg.push_str(&rewrite!("-(x*y)"<=>"-x*y";"canonicalization"));
     egg.push_str(&rewrite!("(Num x)*-y"<=>"(- (Num x))*y";"canonicalization"));
-    egg.push_str(&rewrite!("(Num a)*x+(Num a)"<=>"(Num a)*(x+1)";"canonicalization"));
-    egg.push_str(&rewrite!("(Num a)*x-(Num a)"<=>"(Num a)*(x-1)";"canonicalization"));
+    egg.push_str(&rewrite!("(Num a)*x+(Num a)"=>"(Num a)*(x+1)";"canonicalization"));
+    egg.push_str(&rewrite!("(Num a)*x-(Num a)"=>"(Num a)*(x-1)";"canonicalization"));
     egg.push_str(&rewrite!("((Num a)*x)&(Num a)"<=>"(Num a)*(x&1)";format!("canonicalization :when ((is-2-pow-n-{} a))",num_type)));
     egg.push_str(&rewrite!("-(x/y)"<=>"-x/y";"canonicalization"));
-    egg.push_str(&rewrite!("(a+b)*(a-b)"<=>"a*a-b*b";"canonicalization"));
-    egg.push_str(&rewrite!("(a+b)*(a+b)"<=>"a*a+2*a*b+b*b";"canonicalization"));
+    egg.push_str(&rewrite!("(a+b)*(a-b)"=>"a*a-b*b";"canonicalization"));
+    egg.push_str(&rewrite!("(a+b)*(a+b)"=>"a*a+2*a*b+b*b";"canonicalization"));
     egg.push_str(&rewrite!("((x+y)*z)"<=>"(x*z+y*z)";"canonicalization"));
     egg.push_str(&rewrite!("((x-y)*z)"<=>"(x*z-y*z)";"canonicalization"));
-    egg.push_str(&rewrite!("((x*y)+y)"<=>"((x+1)*y)";"canonicalization"));
-    egg.push_str(&rewrite!("((x*y)-y)"<=>"((x-1)*y)";"canonicalization"));
+    egg.push_str(&rewrite!("((x*y)+y)"=>"((x+1)*y)";"canonicalization"));
+    egg.push_str(&rewrite!("((x*y)-y)"=>"((x-1)*y)";"canonicalization"));
     egg.push_str(&rewrite!("a>>b>>c"=>"a>>(b+c)";"canonicalization"));
     egg.push_str(&rewrite!("a<<b<<c"=>"a<<(b+c)";"canonicalization"));
-    egg.push_str(&rewrite!("a|(b&c)"<=>"(a|b)&(a|c)";"canonicalization"));
+    egg.push_str(&rewrite!("(a|b)&(a|c)"=>"a|(b&c)";"canonicalization"));
     egg.push_str(&rewrite!("a&(b|c)"<=>"(a&b)|(a&c)";"canonicalization"));
     egg.push_str(&rewrite!("a&(b^c)"<=>"(a&b)^(a&c)";"canonicalization"));
-    egg.push_str(&rewrite!("(x&y)>>z"<=>"(x>>z)&(y>>z)";"canonicalization"));
+    egg.push_str(&rewrite!("(x>>z)&(y>>z)"=>"(x&y)>>z";"canonicalization"));
     egg.push_str(&rewrite!("2*x"<=>"x+x";"canonicalization"));
     if ["u64", "u32", "u16", "u8"].contains(&num_type) {
         egg.push_str(&rewrite!("a<<1"<=>"a*2";"canonicalization"));
@@ -355,6 +367,17 @@ fn init_egg_function(eg: &mut EGraph) {
     add_primitive!( eg, "is-bit-not-eq-i8" = |a: i64, b: i64| -?> () { ((a as u64 ).wrapping_add(b as u64) == 0xff).then_some(()) });
     add_primitive!( eg, "is-bit-not-eq-u8" = |a: i64, b: i64| -?> () { ((a as u64 ).wrapping_add(b as u64) == 0xff).then_some(()) });
 
+    add_primitive!( eg, "is-odd" = |a: i64| -?> () { ((a & 1) == 1).then_some(()) });
+
+    add_primitive!( eg, "is-nonzero-i64" = |a: i64| -?> () { (a != 0).then_some(()) });
+    add_primitive!( eg, "is-nonzero-u64" = |a: i64| -?> () { ((a as u64) != 0).then_some(()) });
+    add_primitive!( eg, "is-nonzero-i32" = |a: i64| -?> () { ((a as i32) != 0).then_some(()) });
+    add_primitive!( eg, "is-nonzero-u32" = |a: i64| -?> () { ((a as u32) != 0).then_some(()) });
+    add_primitive!( eg, "is-nonzero-i16" = |a: i64| -?> () { ((a as i16) != 0).then_some(()) });
+    add_primitive!( eg, "is-nonzero-u16" = |a: i64| -?> () { ((a as u16) != 0).then_some(()) });
+    add_primitive!( eg, "is-nonzero-i8" = |a: i64| -?> () { ((a as i8) != 0).then_some(()) });
+    add_primitive!( eg, "is-nonzero-u8" = |a: i64| -?> () { ((a as u8) != 0).then_some(()) });
+
     add_primitive!( eg, "is-2-pow-n-i64" = |a: i64| -?> () { {let a= a as u64;(a>1&&a&(a-1)==0).then_some(())} });
     add_primitive!( eg, "is-2-pow-n-u64" = |a: i64| -?> () { {let a= a as u64;(a>1&&a&(a-1)==0).then_some(())} });
     add_primitive!( eg, "is-2-pow-n-i32" = |a: i64| -?> () { {let a= a as u32;(a>1&&a&(a-1)==0).then_some(())} });
@@ -388,6 +411,7 @@ fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
             (run-with babibo default-ruleset)
             (run-with babibo canonicalization)
             (saturate (run constant-folding))
+            (saturate (run analysis))
             (saturate (run identity-zero-element))
             (run-with babibo simplify)
         )
@@ -505,6 +529,12 @@ mod tests {
             ("6 / 2", vec!["3"], 10),
             ("10 % 3", vec!["1"], 10),
             ("a / 2 + (b - b)", vec!["(a / 2)"], 10),
+            ("a / a", vec!["(a / a)"], 10),
+            ("1 + (b - b) / (b - b)", vec!["1"], 10),
+            ("(a | 4) / (a | 4)", vec!["1"], 10),
+            ("b * (a | 1) / (a | 1)", vec!["b"], 10),
+            ("(3 * (b | 1)) / (3 * (b | 1))", vec!["1"], 10),
+            ("(x | 2) % (x | 2)", vec!["0"], 10),
             ("3 * a + 5 * a + 2 * a", vec!["(0xa * a)"], 10),
             ("12 + a + 8 + b - 20", vec!["(a + b)"], 10),
             ("a & a", vec!["a"], 10),
@@ -618,7 +648,7 @@ mod tests {
                 vec!["(-1 + x)", "~-x", "(x + -1)"],
                 10,
             ),
-            ("2*x + ~x", vec!["~-x", "(-1 + x)"], 10),
+            ("2*x + ~x", vec!["~-x", "(-1 + x)", "(x + -1)"], 10),
             (
                 "2*(x | y) + (x ^ ~y)",
                 vec![
@@ -693,7 +723,12 @@ mod tests {
             ("(x | y)*(x & y) + ~(x | ~y)*(x & ~y)", vec!["(x * y)"], 10),
             (
                 "2 + 2*(y + (x | ~y))",
-                vec!["(2 * (x & y))", "((x & y) * 2)", "((y & x) * 2)"],
+                vec![
+                    "(2 * (x & y))",
+                    "(2 * (y & x))",
+                    "((x & y) * 2)",
+                    "((y & x) * 2)",
+                ],
                 10,
             ),
             ("-(x & y) - (x & y)", vec!["(-2 * (x & y))"], 10),
@@ -729,7 +764,7 @@ mod tests {
             ("~x ^ ~y", vec!["(x ^ y)"], 10),
             ("(x ^ y) | ~(x | y)", vec!["~(x & y)", "~(y & x)"], 10),
             ("~x | ~y", vec!["~(x & y)"], 10),
-            ("~x & ~y", vec!["~(x | y)"], 10),
+            ("~x & ~y", vec!["~(x | y)", "~(y | x)"], 10),
             (
                 "(x & y) | ~(x | y)",
                 vec!["~(x ^ y)", "(x ^ ~y)", "(~y ^ x)", "(~x ^ y)", "(y ^ ~x)"],
@@ -795,8 +830,17 @@ mod tests {
                 "(~x | (~y & z)) + (x + (y & z)) - z",
                 vec![
                     "(x | (y | ~z))",
+                    "(x | (~z | y))",
+                    "(y | (x | ~z))",
+                    "(y | (~z | x))",
+                    "(~z | (x | y))",
+                    "(~z | (y | x))",
                     "((y | ~z) | x)",
                     "((~z | y) | x)",
+                    "((x | ~z) | y)",
+                    "((~z | x) | y)",
+                    "((x | y) | ~z)",
+                    "((y | x) | ~z)",
                     "((((~y & z) & x) + -1) + -(~y & z))",
                     "(-(~y & z) + (((~y & z) & x) + -1))",
                     "((((~y & z) & x) + -1) - (~y & z))",
@@ -874,7 +918,7 @@ mod tests {
             ("x - (2*(x & y) - y)", vec!["(x ^ y)"], 10),
             ("x - 2*(x & y)", vec!["((x ^ y) - y)", "((x ^ y) + -y)"], 10),
             ("(x & ~y) | (~x & y)", vec!["(x ^ y)"], 10),
-            ("(~x & y) ^ (x & ~y)", vec!["(x ^ y)"], 10),
+            ("(~x & y) ^ (x & ~y)", vec!["(x ^ y)"], 15),
             ("(x & y) ^ (x | y)", vec!["(x ^ y)"], 10),
             ("(x - y) + 2*(~x & y)", vec!["(x ^ y)"], 10),
             ("~x + (2*x | 2)", vec!["(x ^ 1)", "(1 ^ x)"], 20),
@@ -886,7 +930,11 @@ mod tests {
             ("((y ^ z) ^ (x ^ z))", vec!["(x ^ y)", "(y ^ x)"], 10),
             (
                 "((x ^ z) & (y ^ z)) | ((x ^ ~z) & (y ^ ~z))",
-                vec!["(~x ^ y)", "((y ^ z) ^ (x ^ ~z))"],
+                vec![
+                    "(~x ^ y)",
+                    "((y ^ z) ^ (x ^ ~z))",
+                    "((y ^ ~z) ^ (x ^ z))",
+                ],
                 10,
             ),
             ("((y ^ z) ^ (x ^ ~z))", vec!["(~x ^ y)", "~(y ^ x)"], 10),
