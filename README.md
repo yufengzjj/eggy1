@@ -2,28 +2,32 @@
 
 [中文文档](README_CN.md)
 
-simplifying infix arithmetic expressions using egglog-based rewriting.
+Simplifying infix arithmetic and bitwise expressions — including MBA-style
+(mixed boolean-arithmetic) obfuscated expressions — via equality saturation
+with [egglog-experimental](https://github.com/egraphs-good/egglog-experimental).
 
 ## Features
 
-- **Expression Simplification**: Simplifies arithmetic expressions using algebraic rules
-- **Multiple Number Types**: Supports different numeric types (default: i64)
-- **Comprehensive Operator Support**: Handles arithmetic (`+`, `-`, `*`, `/`, `%`), bitwise (`&`, `|`, `^`, `~`, `<<`, `>>`), and parentheses
-- **Flexible Output Formats**: Can output simplified expressions, egglog rule format, or compiled expression format
-- **Customizable Iteration Limits**: Control the simplification depth with configurable iteration limits
+- **Expression Simplification**: Simplifies arithmetic/bitwise expressions using a large set of algebraic and MBA identities
+- **MBA Deobfuscation**: Collapses mixed boolean-arithmetic identities such as `(x ^ y) + 2*(x & y) → x + y` and `(a & ~b) | (~a & b) → a ^ b`
+- **Multiple Number Types**: Works over `i8/u8/i16/u16/i32/u32/i64/u64`, with all rules sound under **wrapping (modular)** arithmetic for the chosen width
+- **Comprehensive Operator Support**: Arithmetic (`+`, `-`, `*`, `/`, `%`), bitwise (`&`, `|`, `^`, `~`, `<<`, `>>`), unary `-`/`~`, and the `mulhi(a, b)` high-multiply intrinsic
+- **Flexible Output Formats**: Simplified expression, egglog rule/pattern form, or egglog expression form
+- **Extract-and-Restart Driver**: Re-seeds a fresh e-graph with each round's best result, converging further than a single saturation pass while keeping the graph small
 
 ## Installation
 
 ### From Source
 
 ```bash
-# Clone the repository
 git clone <repository-url>
 cd eggy1
 
-# Build and install
+# egglog-experimental is a git dependency, so the first build fetches and
+# compiles it (this can take a while).
 cargo install --path .
 ```
+
 ## Usage
 
 ### Basic Simplification
@@ -39,23 +43,24 @@ eggy1 "(a + b) * 0"
 ### Command-line Options
 
 ```
-Usage: eggy1.exe [OPTIONS] <EXPR>
+Usage: eggy1 [OPTIONS] <EXPR>
 
 Arguments:
   <EXPR>  The infix expression to simplify
 
 Options:
-  -r, --rule-compile             Output expression in egglog format instead of simplifying
-  -e, --expr-compile             Output expression in egglog rule format instead of simplifying
-  -n, --num-type <NUM_TYPE>      Numeric type to use [default: i64] [possible values: i64, u64, i32, u32, i16, u16, i8, u8]
-  -i, --iter-limit <ITER_LIMIT>  Maximum number of simplification iterations [default: 30]
-  -h, --help                     Print help
-  -V, --version                  Print version
+  -r, --rule-compile                 Output expression in egglog format instead of simplifying
+  -e, --expr-compile                 Output expression in egglog rule format instead of simplifying
+  -n, --num-type <NUM_TYPE>          Numeric type to use [default: i64] [possible values: i64, u64, i32, u32, i16, u16, i8, u8]
+  -i, --iter-limit <ITER_LIMIT>      Maximum number of simplification iterations [default: 10]
+  -m, --max-restarts <MAX_RESTARTS>  Maximum number of extract-and-restart rounds [default: 2]
+  -h, --help                         Print help
+  -V, --version                      Print version
 ```
 
 ### Examples
 
-#### Simplification Examples
+#### Simplification
 
 ```bash
 # Basic arithmetic
@@ -70,52 +75,84 @@ eggy1 "x * 0 + y * 1"
 eggy1 "0x1 << 4"
 # Output: 0x10
 
-# Complex expression
+# Algebraic cancellation
 eggy1 "((a + b) * (a - b)) - (a * a - b * b)"
 # Output: 0
 ```
 
-#### Rule Compilation Mode
+#### MBA Deobfuscation
 
-Generate egglog rules for an expression:
+The numeric type determines the bit width the rules are proven sound for. MBA
+identities are most useful on a fixed width:
+
+```bash
+# XOR reconstruction
+eggy1 -n i32 "(a & ~b) | (~a & b)"
+# Output: (a ^ b)
+
+# Boolean-arithmetic carry identity
+eggy1 -n i32 "(x ^ y) + 2*(x & y)"
+# Output: (x + y)
+```
+
+#### Rule / Pattern Form
+
+Output the egglog rule (pattern) form, with bare pattern variables:
 
 ```bash
 eggy1 -r "x * (y + z)"
 # Output: (Mul x (Add y z))
 ```
 
-#### Expression Compilation Mode
+#### Expression Form
 
-Output the expression in compiled format:
+Output the egglog expression form, with variables wrapped as `(Var "…")`:
 
 ```bash
 eggy1 -e "a + b * c"
 # Output: (Add (Var "a") (Mul (Var "b") (Var "c")))
 ```
 
-#### Adjust Iteration Limit
+#### Tuning the Search
 
-Control simplification depth:
+`-i` controls how many rule-application iterations run per round; `-m` controls
+how many extract-and-restart rounds run. Raise them for stubborn expressions:
 
 ```bash
-eggy1 -i 100 "very_complex_expression"
+eggy1 -i 30 -m 4 "very_complex_expression"
 ```
 
 ## How It Works
 
-The tool uses [egglog-experimental](https://github.com/egraphs-good/egglog-experimental) for equality saturation and term rewriting. The simplification process involves:
+The tool uses [egglog-experimental](https://github.com/egraphs-good/egglog-experimental)
+for equality saturation and term rewriting:
 
-1. **Parsing**: Convert infix expressions to abstract syntax trees
-2. **Rule Application**: Apply algebraic simplification rules using egglog
-3. **Extraction**: Extract the simplest equivalent expression from the e-graph
+1. **Parsing**: A tokenizer + Pratt parser converts the infix expression to an
+   egglog expression.
+2. **Saturation**: A back-off scheduler runs the rule sets in phases
+   (canonicalization → constant folding → analysis → identity/zero → directed
+   MBA simplification).
+3. **Extract-and-Restart**: The best term is extracted and used to re-seed a
+   fresh e-graph; this repeats (up to `--max-restarts`) until a fixpoint, which
+   lets later rounds resume from a smaller term with the full match budget.
+4. **Extraction**: The minimal-size equivalent expression is extracted; constants
+   with `|value| > 9` are printed in hex.
 
 ### Supported Simplification Rules
 
-- Constant folding (e.g., `1 + 2 → 3`)
-- Identity and zero element elimination (e.g., `x + 0 → x`, `x * 1 → x`)
-- Algebraic canonicalization
-- Bitwise operation simplification
-- Arithmetic simplification
+All rules are sound under wrapping (modular) arithmetic for every supported
+width, or are gated on the numeric type / a guard predicate.
+
+- Constant folding (e.g. `1 + 2 → 3`)
+- Identity / zero / absorption (e.g. `x + 0 → x`, `x * 1 → x`, `x & ~x → 0`)
+- Neg/Not canonicalization and De Morgan laws
+- Distributivity and term collection (e.g. `2*a + 3*a → 5*a`)
+- MBA identities (Hacker's Delight): XOR/OR/AND reconstruction, carry
+  identities, the three-input full adder, annihilation / opaque-predicate
+  collapse, etc.
+- Shift algebra: shift combining and distribution over bitwise ops / `+` / `-`
+- Magic-number division recognition (rewrites compiler-emitted
+  multiply-high sequences back to `n / d`)
 
 ## Development
 
@@ -123,71 +160,60 @@ The tool uses [egglog-experimental](https://github.com/egraphs-good/egglog-exper
 
 ```
 src/
-├── main.rs          # CLI interface and main simplification logic
-├── expr_convert.rs  # Expression parsing and conversion utilities
-Cargo.toml          # Project configuration and dependencies
+├── lib.rs           # Rule definitions (make_egg), egglog primitives, simplify driver
+├── main.rs          # Thin CLI binary over the library
+└── expr_convert.rs  # Expression parsing and format conversion
+tests/
+├── expr_convert_tests.rs  # Parser / converter unit tests
+└── simplify_tests.rs      # Simplification & magic-number tests (grouped for parallelism)
+Cargo.toml           # Project configuration and dependencies
 ```
 
 ### Building from Source
 
 ```bash
-# Build the project
-cargo build --release
-
-# Run tests
-cargo test
-
-# Run with debug output
-cargo run -- "1 + 2"
+cargo build --release   # optimized build
+cargo test              # run all tests (integration tests run in parallel)
+cargo run -- "1 + 2"    # run against an expression
 ```
 
 ### Adding New Rules
 
-The simplification rules are defined in `main.rs` in the `make_egg` function. To add new rules:
+Simplification rules are defined in `src/lib.rs` in the `make_egg` function.
+To add a new rule:
 
-1. Add the rule to the appropriate rule set in `make_egg`
-2. Ensure the rule preserves equivalence
-3. Test with various expressions to verify correctness
+1. Add it with the `rewrite!` macro to the appropriate rule set. Prefer
+   directed `=>` rules in `simplify`; use `<=>` (birewrite) only for genuine
+   normalization identities, since birewrites grow the e-graph fast.
+2. Ensure it is sound under wrapping arithmetic for **all** supported widths, or
+   gate it on `num_type` / a guard primitive (e.g. `is-2-pow-n-*`).
+3. Add cases to `tests/simplify_tests.rs`. Because extraction may pick any of
+   several equivalent minimal forms, the expected value is a set of acceptable
+   outputs; constants ≥ 10 appear in hex.
+
+**Adding a new numeric type** additionally requires a primitive for every op in
+`init_egg_function`, plus adding the type to the `value_parser` list in `Cli`.
 
 ## Testing
-
-The project includes comprehensive tests for expression simplification:
 
 ```bash
 # Run all tests
 cargo test
 
-# Run specific test modules
-cargo test expr_convert
-cargo test simplify
+# Run a single integration binary
+cargo test --test expr_convert_tests
+cargo test --test simplify_tests
 ```
 
-Test cases cover:
-- Basic arithmetic operations
-- Bitwise operations
-- Variable handling
-- Edge cases and error conditions
-
-## Performance Considerations
-
-- The default iteration limit (30) balances thoroughness and performance
-- Complex expressions with many variables may require higher iteration limits
-- The tool uses egglog's efficient e-graph data structures for rule application
+Test cases cover arithmetic and bitwise simplification, MBA identities,
+magic-number division recognition, wrapping-arithmetic soundness regressions,
+and the parser/converter.
 
 ## Limitations
 
-- Currently supports integer arithmetic only (no floating-point)
-- Expression size is limited by available memory
-- Very complex expressions may not converge within iteration limits
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit pull requests for:
-- New simplification rules
-- Performance improvements
-- Additional expression types
-- Bug fixes
-- Documentation improvements
+- Integer arithmetic only (no floating-point).
+- Expression size is limited by available memory.
+- Very complex expressions may not converge within the iteration / restart limits.
 
 ## License
 
@@ -197,15 +223,10 @@ This project is licensed under the terms of the MIT license.
 
 - Built with [egglog-experimental](https://github.com/egraphs-good/egglog-experimental)
 - Uses [clap](https://github.com/clap-rs/clap) for command-line argument parsing
-- Inspired by algebraic simplification and term rewriting research
-
-## Support
-
-For issues, questions, or feature requests, please:
-1. Check the existing test cases for similar functionality
-2. Review the command-line help (`eggy1 --help`)
-3. Open an issue on the project repository
+- MBA identities drawn from *Hacker's Delight* and equality-saturation MBA research
 
 ---
 
-**Note**: This tool is primarily designed for educational and demonstration purposes, showing how egglog can be used for algebraic simplification in practice.
+**Note**: This tool is primarily designed for educational and research purposes,
+demonstrating how equality saturation can be applied to algebraic simplification
+and MBA deobfuscation.
