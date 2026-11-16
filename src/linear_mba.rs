@@ -311,12 +311,66 @@ pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
     let g: Vec<u64> = vals.iter().map(|v| v.wrapping_sub(vals[0].wrapping_mul(2)) & m).collect();
     let k = g[0];
     let gp: Vec<u64> = g.iter().map(|v| v.wrapping_sub(k) & m).collect();
-    let konst = k.wrapping_neg() & m;
+    // e(x) = konst + Σ_j 2^j gp(bit j of x), and gp(0) = 0.
+    let mut konst = k.wrapping_neg() & m;
+    let mut terms = Vec::new();
+    for group in independent_groups(&gp, n, w) {
+        let sub: Vec<u64> = (0..1usize << group.len())
+            .map(|q| gp[group.iter().enumerate().filter(|(j, _)| q >> j & 1 == 1).fold(0, |p, (_, &i)| p | 1 << i)])
+            .collect();
+        let sub_lv: Vec<T> = group.iter().map(|&i| lv[i].clone()).collect();
+        let (ts, k) = rebuild_table(&sub, &sub_lv, konst, w);
+        terms.extend(ts);
+        konst = k;
+    }
+    Some(build_sum(&terms, konst, w)).filter(|b| size(b) < size(t))
+}
+
+/// Split the variables into groups with no interaction in `gp`, so that
+/// `gp(p) = Σ_group gp(p ∩ group)`: a mixed difference
+/// `gp(p+i+j) - gp(p+i) - gp(p+j) + gp(p)` that is never zero joins `i` and `j`.
+fn independent_groups(gp: &[u64], n: usize, w: &Width) -> Vec<Vec<usize>> {
+    let mut root: Vec<usize> = (0..n).collect();
+    fn find(root: &mut [usize], i: usize) -> usize {
+        if root[i] != i {
+            root[i] = find(root, root[i]);
+        }
+        root[i]
+    }
+    for i in 0..n {
+        for j in i + 1..n {
+            let (bi, bj) = (1usize << i, 1usize << j);
+            let joined = (0..1usize << n).filter(|p| p & (bi | bj) == 0).any(|p| {
+                gp[p | bi | bj].wrapping_sub(gp[p | bi]).wrapping_sub(gp[p | bj]).wrapping_add(gp[p]) & w.mask != 0
+            });
+            if joined {
+                let (ri, rj) = (find(&mut root, i), find(&mut root, j));
+                root[ri] = rj;
+            }
+        }
+    }
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for i in 0..n {
+        let r = find(&mut root, i);
+        match groups.iter_mut().find(|g| find(&mut root, g[0]) == r) {
+            Some(g) => g.push(i),
+            None => groups.push(vec![i]),
+        }
+    }
+    groups
+}
+
+/// Shortest `(terms, konst')` with `konst + Σ_j 2^j gp(bit j of x) = Σ terms + konst'`.
+fn rebuild_table(gp: &[u64], lv: &[T], konst: u64, w: &Width) -> (Vec<(u64, T)>, u64) {
+    let n = lv.len();
+    let pts = 1usize << n;
+    let m = w.mask;
     let all_vars: Vec<usize> = (0..n).collect();
-    let mut best: Option<T> = None;
+    let mut cands: Vec<(Vec<(u64, T)>, u64)> = Vec::new();
+    // Leaves with their own coefficient, then one term per remaining value.
     for subset in 0..(1usize << n) {
         let mut terms = Vec::new();
-        let mut r = gp.clone();
+        let mut r = gp.to_vec();
         for i in (0..n).filter(|i| subset >> i & 1 == 1) {
             let c = gp[1 << i];
             if c == 0 {
@@ -337,14 +391,122 @@ pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
             let BE::E(_, b) = bool_expr(tt, &all_vars) else {
                 unreachable!("r[0] == 0, so the table is neither empty nor full")
             };
-            terms.push((u, b_to_t(&b, &lv)));
+            terms.push((u, b_to_t(&b, lv)));
         }
-        let cand = build_sum(&terms, konst, w);
-        if best.as_ref().is_none_or(|b| size(&cand) < size(b)) {
-            best = Some(cand);
+        cands.push((terms, konst));
+    }
+    cands.extend(overlapping_terms(gp, lv, konst, w));
+    cands
+        .into_iter()
+        .min_by_key(|(ts, k)| size(&build_sum(ts, *k, w)))
+        .unwrap()
+}
+
+/// Most distinct non-zero values for which `overlapping_terms` searches.
+const OVERLAP_MAX_VALUES: usize = 4;
+
+/// Up to 3 bitwise terms whose supports may overlap (`11*(x^y) - x`), possibly
+/// non-zero at 0 (`-23*~(x|y)`). Shifting the table by `d` gives
+/// `h = gp + d = Σ c_j·b_j` per bit, and then `e = Σ c_j·b_j(x) + konst + d`,
+/// since a per-bit constant `d` is the word `-d`. `d` is tried as 0 or `-v`
+/// for a value `v` of `gp`, i.e. `h` is zero where `gp` is `v`.
+fn overlapping_terms(gp: &[u64], lv: &[T], konst: u64, w: &Width) -> Vec<(Vec<(u64, T)>, u64)> {
+    let m = w.mask;
+    let all_vars: Vec<usize> = (0..lv.len()).collect();
+    let distinct = |t: &[u64]| {
+        let mut v: Vec<u64> = t.iter().copied().filter(|&u| u != 0).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let vals = distinct(gp);
+    if vals.len() > OVERLAP_MAX_VALUES {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let offsets = std::iter::once(0).chain(vals.iter().map(|&v| v.wrapping_neg() & m));
+    for d in offsets {
+        let h: Vec<u64> = gp.iter().map(|v| v.wrapping_add(d) & m).collect();
+        let hv = distinct(&h);
+        if hv.len() > OVERLAP_MAX_VALUES {
+            continue;
+        }
+        let mut pool = hv.clone();
+        for &a in &hv {
+            for &b in &hv {
+                pool.push(a.wrapping_sub(b) & m);
+            }
+        }
+        pool.retain(|&c| c != 0);
+        pool.sort_unstable();
+        pool.dedup();
+        for k in (1..=3usize).filter(|k| hv.len() < 1 << k) {
+            for coefs in combinations(&pool, k) {
+                if let Some(c) = split_by_sums(&h, &hv, &coefs, &all_vars, lv, konst.wrapping_add(d) & m, m) {
+                    out.push(c);
+                }
+            }
         }
     }
-    best.filter(|b| size(b) < size(t))
+    out
+}
+
+fn combinations(pool: &[u64], k: usize) -> Vec<Vec<u64>> {
+    if k == 0 {
+        return vec![Vec::new()];
+    }
+    (0..pool.len())
+        .flat_map(|i| {
+            combinations(&pool[i + 1..], k - 1).into_iter().map(move |mut rest| {
+                rest.insert(0, pool[i]);
+                rest
+            })
+        })
+        .collect()
+}
+
+/// Write `h` as `Σ coefs[j]·b_j`, each value being the sum of a unique subset
+/// of `coefs`; `None` when some value has no such subset or more than one.
+fn split_by_sums(
+    h: &[u64],
+    h_vals: &[u64],
+    coefs: &[u64],
+    vars: &[usize],
+    lv: &[T],
+    konst: u64,
+    m: u64,
+) -> Option<(Vec<(u64, T)>, u64)> {
+    let k = coefs.len();
+    let sums: Vec<u64> = (0..1usize << k)
+        .map(|s| (0..k).filter(|j| s >> j & 1 == 1).fold(0u64, |acc, j| acc.wrapping_add(coefs[j])) & m)
+        .collect();
+    if !h_vals.iter().all(|v| sums.contains(v)) {
+        return None;
+    }
+    let mut tts = vec![0u64; k];
+    for (p, &v) in h.iter().enumerate() {
+        let mut found = sums.iter().enumerate().filter(|&(_, &s)| s == v).map(|(s, _)| s);
+        let s = found.next()?;
+        if found.next().is_some() {
+            return None;
+        }
+        for (j, tt) in tts.iter_mut().enumerate() {
+            if s >> j & 1 == 1 {
+                *tt |= 1 << p;
+            }
+        }
+    }
+    let mut terms = Vec::new();
+    let mut konst = konst;
+    for (j, &tt) in tts.iter().enumerate() {
+        match bool_expr(tt, vars) {
+            BE::Zero => return None,
+            // All ones in every bit is the word -1.
+            BE::Ones => konst = konst.wrapping_sub(coefs[j]) & m,
+            BE::E(_, b) => terms.push((coefs[j], b_to_t(&b, lv))),
+        }
+    }
+    Some((terms, konst))
 }
 
 thread_local! {

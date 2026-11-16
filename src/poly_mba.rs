@@ -22,6 +22,7 @@ const FACTOR_TRIES: usize = 3;
 struct Ctx<'a> {
     w: &'a Width,
     leaves: Vec<T>,
+    built: std::cell::RefCell<std::collections::HashMap<(Poly, usize), T>>,
 }
 
 impl Ctx<'_> {
@@ -177,6 +178,16 @@ impl Ctx<'_> {
     /// Short term for `p`: pull out a common conjunction `f` (`p = f·q + r`)
     /// so that `q` gets rebuilt as a linear MBA, recursively.
     fn build(&self, p: &Poly, tries: usize) -> T {
+        let key = (p.clone(), tries);
+        if let Some(t) = self.built.borrow().get(&key) {
+            return t.clone();
+        }
+        let t = self.build_uncached(p, tries);
+        self.built.borrow_mut().insert(key, t.clone());
+        t
+    }
+
+    fn build_uncached(&self, p: &Poly, tries: usize) -> T {
         if p.keys().all(|m| m.len() <= 1) {
             return self.build_linear(p);
         }
@@ -239,7 +250,7 @@ pub(crate) fn simplify_poly(t: &T, w: &Width) -> Option<T> {
     if !has_product(t, w) {
         return None;
     }
-    let mut ctx = Ctx { w, leaves: Vec::new() };
+    let mut ctx = Ctx { w, leaves: Vec::new(), built: Default::default() };
     let p = ctx.poly(t)?;
     let r = ctx.build(&p, FACTOR_TRIES);
     (size(&r) < size(t)).then_some(r)

@@ -512,6 +512,24 @@ fn linear_mba() {
                 &["w"],
                 10,
             ),
+            // Overlapping terms (MBA-Obfuscator linear samples).
+            (
+                "7*(x|y)-5*~(x&~y)+5*(x|~y)+1*~y+1*y-3*~(x^y)+1*~x+1*~(x|y)+7*~(x|~y)-3*(x&~y)-6*(x&y)",
+                &["((0xb * (x ^ y)) - x)"],
+                10,
+            ),
+            // A term that is non-zero at 0.
+            (
+                "-7*~(x&y)+1*~(x&~x)-2*~x+1*y-1*~(x^y)-7*~(x&~y)-2*x-7*~y-1*(x|y)+20*~(x|~y)+21*(x&~y)+9*(x&y)",
+                &["((5 * (x ^ y)) + (-0x17 * ~(x | y)))", "((5 * (x ^ y)) - (0x17 * ~(x | y)))"],
+                10,
+            ),
+            // Variables {x, y, z} and {a, t} do not interact, so they are rebuilt separately (NeuReduce).
+            (
+                "2*(~y|z)-(~x&y|~z)-3*(x&y^~z)-(x&~y&~z)+3*(y|~z)-2*(x&y|z)-(~x)-(x&y^z)-(a&~t)+a",
+                &["((((y ^ z) & x) + (-2 * (y ^ z))) + (a & t))"],
+                10,
+            ),
         ],
     );
     check(
@@ -531,7 +549,7 @@ fn poly_mba() {
     let cases: &[(&str, &[&str], usize)] = &[
         (
             "-8*~y*(x&y)-8*~y*(x&~y)+10*~y*x+3*~y*~(x|y)+8*(x^y)*(x&y)+8*(x^y)*(x&~y)-10*(x^y)*x-3*(x^y)*~(x|y)-3*~y*(x|~y)-1*~y*~x+3*(x^y)*(x|~y)+1*(x^y)*~x",
-            &["((x ^ ~y) - y)", "(~y - (x ^ y))"],
+            &["((x ^ ~y) - y)", "(~y - (x ^ y))", "(x + ~((x | y) * 2))"],
             10,
         ),
         (
