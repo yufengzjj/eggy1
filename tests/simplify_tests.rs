@@ -317,6 +317,10 @@ fn magic_numbers() {
     // A non-magic pair must not resolve to any divisor.
     assert_eq!(magic_div_s(0x12345678, 1, 32, false), None);
     assert_eq!(magic_div_u(0x12345678, 3, 32, true), None);
+    // Shift amounts past the width must be rejected without overflowing `1u128 << p`.
+    assert_eq!(magic_div_s(5, 100, 64, false), None);
+    assert_eq!(magic_div_u(5, 64, 64, false), None);
+    assert_eq!(magic_div_u(5, i64::MAX, 64, true), None);
     // Signed pow-of-2 division guard.
     assert_eq!(pow2_div(7, 3, 32), Some(8));
     assert_eq!(pow2_div(6, 3, 32), None); // mask != 2^k-1
@@ -399,6 +403,8 @@ fn unsigned_soundness_regressions() {
             ("(a >> 255) >> 1", &["((a >> 0xff) >> 1)", "0"], 10),    // NOT a
             ("(a << 255) << 1", &["((a << 0xff) * 2)", "0"], 10),     // NOT a
             ("(a >> 2) >> 3", &["(a >> 5)"], 10),                     // in-range combine still works
+            ("5 / 256", &["(5 / 0)"], 10),                            // 256 is 0 in u8: no fold, no panic
+            ("5 % 256", &["(5 % 0)"], 10),
         ],
     );
 }

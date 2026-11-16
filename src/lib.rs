@@ -96,13 +96,13 @@ pub fn make_egg(num_type: &str) -> String {
 (rewrite (Add (Num a) (Num b))   (Num (wrapping-add-{0} a b)) :ruleset constant-folding)
 (rewrite (Sub (Num a) (Num b))   (Num (wrapping-sub-{0} a b)) :ruleset constant-folding)
 (rewrite (Mul (Num a) (Num b))   (Num (wrapping-mul-{0} a b)) :ruleset constant-folding)
-(rewrite (Div (Num a) (Num b))   (Num (wrapping-div-{0} a b)) :when ((!= b 0)) :ruleset constant-folding)
+(rewrite (Div (Num a) (Num b))   (Num (wrapping-div-{0} a b)) :when ((is-nonzero-{0} b)) :ruleset constant-folding)
 (rewrite (And (Num a) (Num b))   (Num (wrapping-and-{0} a b)) :ruleset constant-folding)
 (rewrite (Or (Num a) (Num b))   (Num (wrapping-or-{0} a b)) :ruleset constant-folding)
 (rewrite (Xor (Num a) (Num b))   (Num (wrapping-xor-{0} a b)) :ruleset constant-folding)
 (rewrite (Shl (Num a) (Num b))   (Num (wrapping-shl-{0} a b)) :ruleset constant-folding)
 (rewrite (Shr (Num a) (Num b))   (Num (wrapping-shr-{0} a b)) :ruleset constant-folding)
-(rewrite (Mod (Num a) (Num b))   (Num (wrapping-mod-{0} a b)) :when ((!= b 0)) :ruleset constant-folding)
+(rewrite (Mod (Num a) (Num b))   (Num (wrapping-mod-{0} a b)) :when ((is-nonzero-{0} b)) :ruleset constant-folding)
 (rewrite (Not (Num a))   (Num (wrapping-not-{0} a)) :ruleset constant-folding)
 (rewrite (Neg (Num a))   (Num (wrapping-neg-{0} a)) :ruleset constant-folding)
 (rewrite (Num a)   (Num (sext-{0} a)) :ruleset constant-folding)
@@ -518,7 +518,7 @@ pub fn magic_u(d: i64, w: u32) -> Option<(u128, u32, bool)> {
 /// Recover the signed divisor from a bound (M, s), verifying it is the exact
 /// magic pair with the given add-flag. Returns the divisor, or None.
 pub fn magic_div_s(m_bits: i64, s: i64, w: u32, want_add: bool) -> Option<i64> {
-    if s < 0 {
+    if s < 0 || s > w as i64 {
         return None;
     }
     let mask: u128 = (1u128 << w) - 1;
@@ -527,7 +527,7 @@ pub fn magic_div_s(m_bits: i64, s: i64, w: u32, want_add: bool) -> Option<i64> {
         return None;
     }
     let p = s as u32 + w;
-    let d0 = (1u128 << p) / m;
+    let d0 = 1u128.checked_shl(p).map_or(u128::MAX / m, |x| x / m);
     for cand in [d0.saturating_sub(2), d0.saturating_sub(1), d0, d0 + 1, d0 + 2] {
         if cand < 2 || cand >= (1u128 << (w - 1)) {
             continue;
@@ -542,7 +542,7 @@ pub fn magic_div_s(m_bits: i64, s: i64, w: u32, want_add: bool) -> Option<i64> {
 /// Recover the unsigned divisor from a bound (M, s); returns it sign-extended
 /// to i64 (matching how constants are stored), or None.
 pub fn magic_div_u(m_bits: i64, s: i64, w: u32, want_add: bool) -> Option<i64> {
-    if s < 0 {
+    if s < 0 || s > w as i64 {
         return None;
     }
     let mask: u128 = (1u128 << w) - 1;
@@ -552,7 +552,7 @@ pub fn magic_div_u(m_bits: i64, s: i64, w: u32, want_add: bool) -> Option<i64> {
         return None;
     }
     let p = s as u32 + w;
-    let d0 = (1u128 << p) / m_full;
+    let d0 = 1u128.checked_shl(p).map_or(u128::MAX / m_full, |x| x / m_full);
     for cand in [d0.saturating_sub(2), d0.saturating_sub(1), d0, d0 + 1, d0 + 2] {
         if cand < 2 || cand > mask {
             continue;
@@ -673,14 +673,14 @@ fn init_egg_function(eg: &mut EGraph) {
     add_primitive!(eg, "wrapping-neg-i8" = |a: i64| -> i64 { ((a as i8).wrapping_neg()) as i64 } );
     add_primitive!(eg, "wrapping-neg-u8" = |a: i64| -> i64 { ((a as u8).wrapping_neg()) as i64 } );
 
-    add_primitive!( eg, "is-bit-not-eq-i64" = |a: i64, b: i64| -?> () { ((a as u64 ).wrapping_add(b as u64) == 0xffffffffffffffff).then_some(()) });
-    add_primitive!( eg, "is-bit-not-eq-u64" = |a: i64, b: i64| -?> () { ((a as u64 ).wrapping_add(b as u64) == 0xffffffffffffffff).then_some(()) });
-    add_primitive!( eg, "is-bit-not-eq-i32" = |a: i64, b: i64| -?> () { ((a as u64 ).wrapping_add(b as u64) == 0xffffffff).then_some(()) });
-    add_primitive!( eg, "is-bit-not-eq-u32" = |a: i64, b: i64| -?> () { ((a as u64 ).wrapping_add(b as u64) == 0xffffffff).then_some(()) });
-    add_primitive!( eg, "is-bit-not-eq-i16" = |a: i64, b: i64| -?> () { ((a as u64 ).wrapping_add(b as u64) == 0xffff).then_some(()) });
-    add_primitive!( eg, "is-bit-not-eq-u16" = |a: i64, b: i64| -?> () { ((a as u64 ).wrapping_add(b as u64) == 0xffff).then_some(()) });
-    add_primitive!( eg, "is-bit-not-eq-i8" = |a: i64, b: i64| -?> () { ((a as u64 ).wrapping_add(b as u64) == 0xff).then_some(()) });
-    add_primitive!( eg, "is-bit-not-eq-u8" = |a: i64, b: i64| -?> () { ((a as u64 ).wrapping_add(b as u64) == 0xff).then_some(()) });
+    add_primitive!( eg, "is-bit-not-eq-i64" = |a: i64, b: i64| -?> () { ((a as u64) ^ (b as u64) == u64::MAX).then_some(()) });
+    add_primitive!( eg, "is-bit-not-eq-u64" = |a: i64, b: i64| -?> () { ((a as u64) ^ (b as u64) == u64::MAX).then_some(()) });
+    add_primitive!( eg, "is-bit-not-eq-i32" = |a: i64, b: i64| -?> () { ((a as u32) ^ (b as u32) == u32::MAX).then_some(()) });
+    add_primitive!( eg, "is-bit-not-eq-u32" = |a: i64, b: i64| -?> () { ((a as u32) ^ (b as u32) == u32::MAX).then_some(()) });
+    add_primitive!( eg, "is-bit-not-eq-i16" = |a: i64, b: i64| -?> () { ((a as u16) ^ (b as u16) == u16::MAX).then_some(()) });
+    add_primitive!( eg, "is-bit-not-eq-u16" = |a: i64, b: i64| -?> () { ((a as u16) ^ (b as u16) == u16::MAX).then_some(()) });
+    add_primitive!( eg, "is-bit-not-eq-i8" = |a: i64, b: i64| -?> () { ((a as u8) ^ (b as u8) == u8::MAX).then_some(()) });
+    add_primitive!( eg, "is-bit-not-eq-u8" = |a: i64, b: i64| -?> () { ((a as u8) ^ (b as u8) == u8::MAX).then_some(()) });
 
     add_primitive!(eg, "sext-i64" = |a: i64| -> i64 { a } );
     add_primitive!(eg, "sext-u64" = |a: i64| -> i64 { a } );
@@ -720,10 +720,10 @@ fn init_egg_function(eg: &mut EGraph) {
     add_primitive!(eg, "magicu-div-u16" = |m: i64, s: i64| -?> i64 { magic_div_u(m, s, 16, false) });
     add_primitive!(eg, "magicu-div-u8" = |m: i64, s: i64| -?> i64 { magic_div_u(m, s, 8, false) });
     // The add-variant's outer shift is (real magic shift - 1); recover s = outer + 1.
-    add_primitive!(eg, "magicu-div-add-u64" = |m: i64, s: i64| -?> i64 { magic_div_u(m, s + 1, 64, true) });
-    add_primitive!(eg, "magicu-div-add-u32" = |m: i64, s: i64| -?> i64 { magic_div_u(m, s + 1, 32, true) });
-    add_primitive!(eg, "magicu-div-add-u16" = |m: i64, s: i64| -?> i64 { magic_div_u(m, s + 1, 16, true) });
-    add_primitive!(eg, "magicu-div-add-u8" = |m: i64, s: i64| -?> i64 { magic_div_u(m, s + 1, 8, true) });
+    add_primitive!(eg, "magicu-div-add-u64" = |m: i64, s: i64| -?> i64 { magic_div_u(m, s.saturating_add(1), 64, true) });
+    add_primitive!(eg, "magicu-div-add-u32" = |m: i64, s: i64| -?> i64 { magic_div_u(m, s.saturating_add(1), 32, true) });
+    add_primitive!(eg, "magicu-div-add-u16" = |m: i64, s: i64| -?> i64 { magic_div_u(m, s.saturating_add(1), 16, true) });
+    add_primitive!(eg, "magicu-div-add-u8" = |m: i64, s: i64| -?> i64 { magic_div_u(m, s.saturating_add(1), 8, true) });
 
     add_primitive!(eg, "ilog2" = |a: i64| -> i64 { (a as u64).trailing_zeros() as i64 } );
     add_primitive!(eg, "pow2" = |a: i64| -> i64 { 1i64.wrapping_shl(a as u32) } );
