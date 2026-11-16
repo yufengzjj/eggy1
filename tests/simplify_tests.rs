@@ -570,6 +570,28 @@ fn poly_mba() {
     check("u8", cases);
 }
 
+/// Semi-linear MBA: bitwise operations with constant operands, rebuilt per bit
+/// position (src/linear_mba.rs, `semi_linear`). The last two are from
+/// scripts/gen-semi-linear.py.
+#[test]
+fn semi_linear_mba() {
+    let cases: &[(&str, &[&str], usize)] = &[
+        ("3*(x | 0x5c) - 2*(x & 0x5c) - (x ^ 0x5c) - 2*(x & ~0x5c)", &["(0xb8 - (x & 0x5c))"], 10),
+        (
+            "3*(x | y) - 2*(((z ^ 0xf0) + 0xf) - ((z ^ 0xf0) | 0xf)) - 3*(((y | 0x5e) | ~(x)) - ((y | 0x5e) & ~(x))) + 3*((y | 0x5e) ^ ~(x)) + 2*((z ^ 0xf0) & 0xf)",
+            &["(3 * (x | y))"],
+            10,
+        ),
+        (
+            "-((z & 0xff00) | 0x71) - 3*~((y ^ x)) + 2*((x + y) - (x & y)) + ((((z + 0xff00) - (z | 0xff00)) + 0x71) - ((z & 0xff00) & 0x71)) + 3*(-((y ^ x)) - 0x1)",
+            &["(2 * (x | y))"],
+            10,
+        ),
+    ];
+    check("i64", cases);
+    check("u8", cases);
+}
+
 #[test]
 fn square_parity() {
     check(

@@ -1,8 +1,10 @@
 //! Linear MBA simplification (SiMBA-style). A linear MBA, i.e. a sum of
 //! constant multiples of bitwise functions, is fully determined by its values
 //! on {0,1}^n, so it can be rebuilt from those values in a minimal form.
-//! Subterms that are not linear (`x*y`, `x & 0xff`, `x >> 3`, ...) are treated
-//! as opaque variables; the identity holds for any value they take.
+//! Subterms that are not linear (`x*y`, `x >> 3`, ...) are treated as opaque
+//! variables; the identity holds for any value they take. Bitwise operations
+//! with constant operands (`x & 0xff`) make the region semi-linear: each bit
+//! position then has its own bitwise function, see `semi_linear`.
 
 use crate::eval::{Term as T, parse, show, size};
 use std::sync::OnceLock;
@@ -11,6 +13,8 @@ use std::sync::OnceLock;
 pub(crate) enum Kind {
     /// Bitwise function of the leaves.
     Bit,
+    /// Bitwise function of the leaves and constants other than 0 and -1.
+    ConstBit,
     /// Linear combination of bitwise functions.
     Lin,
     /// Not linear: an opaque leaf for the enclosing region.
@@ -51,10 +55,14 @@ pub(crate) fn kind(t: &T, w: &Width) -> Kind {
             "Not" => bit(kind(&a[0], w)),
             "Neg" | "Add" | "Sub" => Kind::Lin,
             "And" | "Or" | "Xor" => {
-                if bit(kind(&a[0], w)) == Kind::Bit && bit(kind(&a[1], w)) == Kind::Bit {
-                    Kind::Bit
-                } else {
-                    Kind::Atom
+                let operand = |x: &T| match (x, kind(x, w)) {
+                    (T::Num(_), Kind::Lin) => Kind::ConstBit,
+                    (_, k) => bit(k),
+                };
+                match (operand(&a[0]), operand(&a[1])) {
+                    (Kind::Bit, Kind::Bit) => Kind::Bit,
+                    (Kind::Bit | Kind::ConstBit, Kind::Bit | Kind::ConstBit) => Kind::ConstBit,
+                    _ => Kind::Atom,
                 }
             }
             "Mul" if matches!(a[0], T::Num(_)) || matches!(a[1], T::Num(_)) => Kind::Lin,
@@ -299,22 +307,41 @@ pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
     if n == 0 || n > MAX_LEAVES {
         return None;
     }
-    let pts = 1usize << n;
-    let m = w.mask;
-    let vals: Vec<u64> = (0..pts)
-        .map(|p| {
-            let env: Vec<(T, u64)> = lv.iter().enumerate().map(|(i, l)| (l.clone(), (p >> i & 1) as u64)).collect();
-            eval(t, w, &env)
-        })
-        .collect();
-    // e(x) = Σ_j 2^j g(bit j of x), with g(p) = e(p) - 2e(0); k = g(0).
-    let g: Vec<u64> = vals.iter().map(|v| v.wrapping_sub(vals[0].wrapping_mul(2)) & m).collect();
-    let k = g[0];
-    let gp: Vec<u64> = g.iter().map(|v| v.wrapping_sub(k) & m).collect();
-    // e(x) = konst + Σ_j 2^j gp(bit j of x), and gp(0) = 0.
-    let mut konst = k.wrapping_neg() & m;
+    let rebuilt = if has_const_bitwise(t, w) {
+        semi_linear(t, &lv, w)?
+    } else {
+        let pts = 1usize << n;
+        let m = w.mask;
+        let vals: Vec<u64> = (0..pts)
+            .map(|p| {
+                let env: Vec<(T, u64)> = lv.iter().enumerate().map(|(i, l)| (l.clone(), (p >> i & 1) as u64)).collect();
+                eval(t, w, &env)
+            })
+            .collect();
+        // e(x) = Σ_j 2^j g(bit j of x), with g(p) = e(p) - 2e(0); k = g(0).
+        let g: Vec<u64> = vals.iter().map(|v| v.wrapping_sub(vals[0].wrapping_mul(2)) & m).collect();
+        let k = g[0];
+        let gp: Vec<u64> = g.iter().map(|v| v.wrapping_sub(k) & m).collect();
+        let (terms, konst) = rebuild_gp(&gp, &lv, k.wrapping_neg() & m, w);
+        build_sum(&terms, konst, w)
+    };
+    Some(rebuilt).filter(|b| size(b) < size(t))
+}
+
+/// Whether the linear region `t` has a bitwise operation with a constant operand.
+fn has_const_bitwise(t: &T, w: &Width) -> bool {
+    match (t, kind(t, w)) {
+        (_, Kind::ConstBit) => true,
+        (T::Op(_, a), Kind::Lin) => a.iter().any(|x| has_const_bitwise(x, w)),
+        _ => false,
+    }
+}
+
+/// Shortest `(terms, konst')` with `konst + Σ_j 2^j gp(bit j of x) = Σ terms + konst'`,
+/// where `gp(0) = 0` and table point `p` sets leaf `i` to bit `i` of `p`.
+fn rebuild_gp(gp: &[u64], lv: &[T], mut konst: u64, w: &Width) -> (Vec<(u64, T)>, u64) {
     let mut terms = Vec::new();
-    for group in independent_groups(&gp, n, w) {
+    for group in independent_groups(gp, lv.len(), w) {
         let sub: Vec<u64> = (0..1usize << group.len())
             .map(|q| gp[group.iter().enumerate().filter(|(j, _)| q >> j & 1 == 1).fold(0, |p, (_, &i)| p | 1 << i)])
             .collect();
@@ -323,12 +350,143 @@ pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
         terms.extend(ts);
         konst = k;
     }
-    Some(build_sum(&terms, konst, w)).filter(|b| size(b) < size(t))
+    (terms, konst)
+}
+
+/// Semi-linear region: `e(x) = e(0) + Σ_j D_j(bit j of x)` with
+/// `D_j(q) = e(q << j) - e(0)`, a multiple of `2^j`. `g_j = D_j >> j` only
+/// matters modulo `2^(w-j)`, so bit `j` joins a group (found from the low bits
+/// up) whose table agrees with `g_j` in its low `w-j` bits. Each group has mask `M`;
+/// each group is rebuilt as a linear MBA `L` of the leaves and contributes
+/// `L(x & M)`, i.e. `c·(b(x) & M)` per term `c·b`, plus `c·~M` when `b(0) = -1`.
+fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
+    let n = lv.len();
+    let m = w.mask;
+    let at = |j: u32, q: usize| {
+        let env: Vec<(T, u64)> = lv.iter().enumerate().map(|(i, l)| (l.clone(), ((q >> i & 1) as u64) << j)).collect();
+        eval(t, w, &env)
+    };
+    let e0 = at(0, 0);
+    let mut groups: Vec<(Vec<u64>, u64)> = Vec::new();
+    for j in 0..w.w {
+        let rest = w.w - j;
+        let rest_mask = if rest == 64 { u64::MAX } else { (1u64 << rest) - 1 };
+        let mut g = Vec::with_capacity(1 << n);
+        for q in 0..1usize << n {
+            let d = at(j, q).wrapping_sub(e0) & m;
+            if d & ((1u64 << j) - 1) != 0 {
+                return None;
+            }
+            let v = (d >> j) & rest_mask;
+            let sign_fill = if v >> (rest - 1) & 1 == 1 { !rest_mask } else { 0 };
+            g.push((v | sign_fill) & m);
+        }
+        let same = |rep: &[u64]| rep.iter().zip(&g).all(|(a, b)| (a ^ b) & rest_mask == 0);
+        // High bits match several groups; prefer bit j-1's, which keeps the
+        // masks of small constants short.
+        let below = groups.iter().position(|(_, mask)| j > 0 && mask >> (j - 1) & 1 == 1);
+        match below.filter(|&i| same(&groups[i].0)).or_else(|| groups.iter().position(|(rep, _)| same(rep))) {
+            Some(i) => groups[i].1 |= 1 << j,
+            None => groups.push((g, 1 << j)),
+        }
+    }
+    let mut cands = vec![masked_groups(&groups, lv, e0, w)];
+    cands.extend(const_leaf_groups(&groups, lv, e0, w));
+    cands.into_iter().min_by_key(|c| size(c))
+}
+
+/// `e0 + Σ_group L_group(x & M)`, with `L_group` the linear MBA of the group's table.
+fn masked_groups(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width) -> T {
+    let m = w.mask;
+    let mut terms = Vec::new();
+    let mut konst = e0;
+    let zero_env: Vec<(T, u64)> = lv.iter().map(|l| (l.clone(), 0)).collect();
+    for (g, mask) in groups.iter().filter(|(g, _)| g.iter().any(|&v| v != 0)) {
+        let (ts, k) = rebuild_gp(g, lv, 0, w);
+        konst = konst.wrapping_add(k) & m;
+        for (c, b) in ts {
+            if *mask == m {
+                terms.push((c, b));
+                continue;
+            }
+            if eval(&b, w, &zero_env) != 0 {
+                konst = konst.wrapping_add(c.wrapping_mul(!mask)) & m;
+            }
+            terms.push((c, T::Op("And".into(), vec![b, T::Num(w.signed(*mask))])));
+        }
+    }
+    build_sum(&terms, konst, w)
+}
+
+/// Give each group a binary code and add one constant leaf `k_b` per code bit,
+/// holding the bits of the groups whose code has bit `b`. Then bit `j` of the
+/// region is `table(bits_j(x), code of j's group)`, a linear MBA of `x` and the
+/// constant leaves, so `(y & ~K) - (y & K) + K` can come back as `y ^ K`.
+/// Tried for every code assignment of at most 4 groups.
+fn const_leaf_groups(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width) -> Vec<T> {
+    let (n, r) = (lv.len(), groups.len());
+    let p = (usize::BITS - (r - 1).leading_zeros()) as usize;
+    if r < 2 || r > 4 || n + p > MAX_LEAVES {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for codes in permutations(r) {
+        let mut leaves = lv.to_vec();
+        for b in 0..p {
+            let mask = (0..r).filter(|&i| codes[i] >> b & 1 == 1).fold(0u64, |acc, i| acc | groups[i].1);
+            leaves.push(T::Num(w.signed(mask)));
+        }
+        let mut table = vec![0u64; 1 << (n + p)];
+        for (i, (g, _)) in groups.iter().enumerate() {
+            for (q, &v) in g.iter().enumerate() {
+                table[q | codes[i] << n] = v;
+            }
+        }
+        let (terms, mut konst) = rebuild_gp(&table, &leaves, e0, w);
+        let mut kept = Vec::new();
+        for (c, t) in terms {
+            match fold_consts(&t, w) {
+                T::Num(v) => konst = konst.wrapping_add(c.wrapping_mul(v as u64)) & w.mask,
+                t => kept.push((c, t)),
+            }
+        }
+        out.push(build_sum(&kept, konst, w));
+    }
+    out
+}
+
+fn permutations(r: usize) -> Vec<Vec<usize>> {
+    if r == 0 {
+        return vec![Vec::new()];
+    }
+    let mut out = Vec::new();
+    for rest in permutations(r - 1) {
+        for pos in 0..=rest.len() {
+            let mut p = rest.clone();
+            p.insert(pos, r - 1);
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// Evaluate bitwise and additive operations whose operands are all constants.
+fn fold_consts(t: &T, w: &Width) -> T {
+    let T::Op(op, a) = t else { return t.clone() };
+    if !matches!(op.as_str(), "And" | "Or" | "Xor" | "Not" | "Add" | "Sub" | "Neg") {
+        return t.clone();
+    }
+    let a: Vec<T> = a.iter().map(|x| fold_consts(x, w)).collect();
+    let t = T::Op(op.clone(), a);
+    match &t {
+        T::Op(_, a) if a.iter().all(|x| matches!(x, T::Num(_))) => T::Num(w.signed(eval(&t, w, &[]))),
+        _ => t,
+    }
 }
 
 /// Split the variables into groups with no interaction in `gp`, so that
 /// `gp(p) = Σ_group gp(p ∩ group)`: a mixed difference
-/// `gp(p+i+j) - gp(p+i) - gp(p+j) + gp(p)` that is never zero joins `i` and `j`.
+/// `gp(p+i+j) - gp(p+i) - gp(p+j) + gp(p)` that is non-zero anywhere joins `i` and `j`.
 fn independent_groups(gp: &[u64], n: usize, w: &Width) -> Vec<Vec<usize>> {
     let mut root: Vec<usize> = (0..n).collect();
     fn find(root: &mut [usize], i: usize) -> usize {
@@ -442,7 +600,7 @@ fn overlapping_terms(gp: &[u64], lv: &[T], konst: u64, w: &Width) -> Vec<(Vec<(u
         pool.dedup();
         for k in (1..=3usize).filter(|k| hv.len() < 1 << k) {
             for coefs in combinations(&pool, k) {
-                if let Some(c) = split_by_sums(&h, &hv, &coefs, &all_vars, lv, konst.wrapping_add(d) & m, m) {
+                if let Some(c) = split_by_sums(&h, &hv, &coefs, &all_vars, lv, konst.wrapping_add(d) & m, w) {
                     out.push(c);
                 }
             }
@@ -465,17 +623,16 @@ fn combinations(pool: &[u64], k: usize) -> Vec<Vec<u64>> {
         .collect()
 }
 
-/// Write `h` as `Σ coefs[j]·b_j`, each value being the sum of a unique subset
-/// of `coefs`; `None` when some value has no such subset or more than one.
-fn split_by_sums(
-    h: &[u64],
-    h_vals: &[u64],
-    coefs: &[u64],
-    vars: &[usize],
-    lv: &[T],
-    konst: u64,
-    m: u64,
-) -> Option<(Vec<(u64, T)>, u64)> {
+/// Most ways tried to resolve points whose value is the sum of several subsets of `coefs`.
+const MAX_SUBSET_CHOICES: usize = 16;
+
+/// Write `h` as `Σ coefs[j]·b_j`, where each point's value is the sum of the
+/// coefficients of the `b_j` that are 1 there. With two terms a point can only
+/// be ambiguous when `c1 + c2 = 0` (as in `(y ^ k) - k`); such points are
+/// resolved in up to `MAX_SUBSET_CHOICES` ways and the shortest result wins.
+/// With three terms ambiguity is common and too costly to resolve, so it fails.
+fn split_by_sums(h: &[u64], h_vals: &[u64], coefs: &[u64], vars: &[usize], lv: &[T], konst: u64, w: &Width) -> Option<(Vec<(u64, T)>, u64)> {
+    let m = w.mask;
     let k = coefs.len();
     let sums: Vec<u64> = (0..1usize << k)
         .map(|s| (0..k).filter(|j| s >> j & 1 == 1).fold(0u64, |acc, j| acc.wrapping_add(coefs[j])) & m)
@@ -483,30 +640,45 @@ fn split_by_sums(
     if !h_vals.iter().all(|v| sums.contains(v)) {
         return None;
     }
-    let mut tts = vec![0u64; k];
-    for (p, &v) in h.iter().enumerate() {
-        let mut found = sums.iter().enumerate().filter(|&(_, &s)| s == v).map(|(s, _)| s);
-        let s = found.next()?;
-        if found.next().is_some() {
-            return None;
+    let options: Vec<Vec<usize>> = h.iter().map(|&v| (0..sums.len()).filter(|&s| sums[s] == v).collect()).collect();
+    if options.iter().any(|o| o.is_empty()) {
+        return None;
+    }
+    let ambiguous: Vec<usize> = (0..h.len()).filter(|&p| options[p].len() > 1).collect();
+    if k > 2 && !ambiguous.is_empty() {
+        return None;
+    }
+    let ways = ambiguous.iter().try_fold(1usize, |acc, &p| acc.checked_mul(options[p].len())).unwrap_or(usize::MAX);
+    let mut best: Option<(Vec<(u64, T)>, u64)> = None;
+    'ways: for mut way in 0..ways.min(MAX_SUBSET_CHOICES) {
+        let mut choice: Vec<usize> = options.iter().map(|o| o[0]).collect();
+        for &p in &ambiguous {
+            choice[p] = options[p][way % options[p].len()];
+            way /= options[p].len();
         }
-        for (j, tt) in tts.iter_mut().enumerate() {
-            if s >> j & 1 == 1 {
-                *tt |= 1 << p;
+        let mut tts = vec![0u64; k];
+        for (p, &s) in choice.iter().enumerate() {
+            for (j, tt) in tts.iter_mut().enumerate() {
+                if s >> j & 1 == 1 {
+                    *tt |= 1 << p;
+                }
             }
         }
-    }
-    let mut terms = Vec::new();
-    let mut konst = konst;
-    for (j, &tt) in tts.iter().enumerate() {
-        match bool_expr(tt, vars) {
-            BE::Zero => return None,
-            // All ones in every bit is the word -1.
-            BE::Ones => konst = konst.wrapping_sub(coefs[j]) & m,
-            BE::E(_, b) => terms.push((coefs[j], b_to_t(&b, lv))),
+        let mut terms = Vec::new();
+        let mut kk = konst;
+        for (j, &tt) in tts.iter().enumerate() {
+            match bool_expr(tt, vars) {
+                BE::Zero => continue 'ways,
+                // All ones in every bit is the word -1.
+                BE::Ones => kk = kk.wrapping_sub(coefs[j]) & m,
+                BE::E(_, b) => terms.push((coefs[j], b_to_t(&b, lv))),
+            }
+        }
+        if best.as_ref().is_none_or(|(bt, bk)| size(&build_sum(&terms, kk, w)) < size(&build_sum(bt, *bk, w))) {
+            best = Some((terms, kk));
         }
     }
-    Some((terms, konst))
+    best
 }
 
 thread_local! {
