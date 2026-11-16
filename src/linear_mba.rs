@@ -4,7 +4,6 @@
 //! Subterms that are not linear (`x*y`, `x & 0xff`, `x >> 3`, ...) are treated
 //! as opaque variables; the identity holds for any value they take.
 
-use std::collections::HashMap;
 use std::sync::OnceLock;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -238,6 +237,77 @@ fn bool_table(n: usize) -> &'static [Option<(usize, B)>] {
     })
 }
 
+enum BE {
+    Zero,
+    Ones,
+    E(usize, B),
+}
+
+fn remap(b: &B, vars: &[usize]) -> B {
+    match b {
+        B::V(i) => B::V(vars[*i]),
+        B::Not(x) => B::Not(Box::new(remap(x, vars))),
+        B::Bin(op, x, y) => B::Bin(op, Box::new(remap(x, vars)), Box::new(remap(y, vars))),
+    }
+}
+
+/// Short bitwise expression for truth table `tt` over `vars` (table bit `p`
+/// is the value where bit `j` of `p` is `vars[j]`). Exact table lookup up to 3
+/// variables; above that, Shannon expansion on the best variable.
+fn bool_expr(tt: usize, vars: &[usize]) -> BE {
+    let n = vars.len();
+    let pts = 1usize << n;
+    let full = if pts >= usize::BITS as usize { usize::MAX } else { (1usize << pts) - 1 };
+    if tt == 0 {
+        return BE::Zero;
+    }
+    if tt == full {
+        return BE::Ones;
+    }
+    if n <= 3 {
+        let (c, b) = bool_table(n)[tt].as_ref().expect("non-constant table");
+        return BE::E(*c, remap(b, vars));
+    }
+    let not = |b: B| B::Not(Box::new(b));
+    let bin = |op, x: B, y: B| B::Bin(op, Box::new(x), Box::new(y));
+    let mut best: Option<(usize, B)> = None;
+    for i in 0..n {
+        let rest: Vec<usize> = vars.iter().enumerate().filter(|&(j, _)| j != i).map(|(_, &v)| v).collect();
+        let (mut f0, mut f1) = (0usize, 0usize);
+        for p in 0..pts {
+            if tt >> p & 1 == 1 {
+                let q = (p & ((1 << i) - 1)) | (p >> (i + 1) << i);
+                if p >> i & 1 == 0 { f0 |= 1 << q } else { f1 |= 1 << q }
+            }
+        }
+        let x = B::V(vars[i]);
+        let sub_full = (1usize << (pts / 2)) - 1;
+        let cand = match (bool_expr(f0, &rest), bool_expr(f1, &rest)) {
+            (BE::Zero, BE::Ones) => (1, x),
+            (BE::Ones, BE::Zero) => (2, not(x)),
+            (BE::Zero, BE::E(c, e)) => (c + 2, bin("And", x, e)),
+            (BE::E(c, e), BE::Zero) => (c + 3, bin("And", not(x), e)),
+            (BE::Ones, BE::E(c, e)) => (c + 3, bin("Or", not(x), e)),
+            (BE::E(c, e), BE::Ones) => (c + 2, bin("Or", x, e)),
+            (BE::E(c, e), _) if f0 == f1 => (c, e),
+            (BE::E(c, e), _) if f1 == !f0 & sub_full => (c + 2, bin("Xor", x, e)),
+            (BE::E(c0, e0), BE::E(c1, e1)) => {
+                let mux = (c0 + c1 + 6, bin("Or", bin("And", x.clone(), e1), bin("And", not(x.clone()), e0.clone())));
+                match bool_expr(f0 ^ f1, &rest) {
+                    BE::E(cd, d) if c0 + cd + 3 < mux.0 => (c0 + cd + 3, bin("Xor", e0, bin("And", x, d))),
+                    _ => mux,
+                }
+            }
+            (BE::Zero, BE::Zero) | (BE::Ones, BE::Ones) => unreachable!("tt is not constant"),
+        };
+        if best.as_ref().is_none_or(|(c, _)| cand.0 < *c) {
+            best = Some(cand);
+        }
+    }
+    let (c, b) = best.unwrap();
+    BE::E(c, b)
+}
+
 fn b_to_t(b: &B, leaves: &[T]) -> T {
     match b {
         B::V(i) => leaves[*i].clone(),
@@ -268,12 +338,12 @@ fn build_sum(terms: &[(u64, T)], konst: u64, w: &Width) -> T {
     }
 }
 
-/// Smallest rebuilt form of the linear region `t`, if it has 1..=3 leaves.
+/// Smallest rebuilt form of the linear region `t`, if it has 1..=4 leaves.
 fn simba(t: &T, w: &Width) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
     let n = lv.len();
-    if n == 0 || n > 3 {
+    if n == 0 || n > 4 {
         return None;
     }
     let pts = 1usize << n;
@@ -289,7 +359,7 @@ fn simba(t: &T, w: &Width) -> Option<T> {
     let k = g[0];
     let gp: Vec<u64> = g.iter().map(|v| v.wrapping_sub(k) & m).collect();
     let konst = k.wrapping_neg() & m;
-    let table = bool_table(n);
+    let all_vars: Vec<usize> = (0..n).collect();
     let mut best: Option<T> = None;
     for subset in 0..(1usize << n) {
         let mut terms = Vec::new();
@@ -311,8 +381,10 @@ fn simba(t: &T, w: &Width) -> Option<T> {
         distinct.dedup();
         for u in distinct {
             let tt = (0..pts).filter(|&p| r[p] == u).fold(0usize, |acc, p| acc | 1 << p);
-            let (_, b) = table[tt].as_ref().expect("every non-constant truth table has an expression");
-            terms.push((u, b_to_t(b, &lv)));
+            let BE::E(_, b) = bool_expr(tt, &all_vars) else {
+                unreachable!("r[0] == 0, so the table is neither empty nor full")
+            };
+            terms.push((u, b_to_t(&b, &lv)));
         }
         let cand = build_sum(&terms, konst, w);
         if best.as_ref().is_none_or(|b| size(&cand) < size(b)) {
@@ -349,7 +421,7 @@ fn substitute_atoms(t: &T, w: &Width) -> T {
 }
 
 /// Rewrite the egglog term `egg` (W-bit wrapping semantics) with every linear
-/// MBA region of at most 3 leaves rebuilt in a smaller form. Returns `egg`
+/// MBA region of at most 4 leaves rebuilt in a smaller form. Returns `egg`
 /// unchanged when nothing gets smaller.
 pub fn simplify_linear(egg: &str, w: u32) -> String {
     let w = Width::new(w);
@@ -361,6 +433,7 @@ pub fn simplify_linear(egg: &str, w: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn full_eval(t: &T, w: &Width, env: &HashMap<String, u64>) -> u64 {
         let m = w.mask;
@@ -456,12 +529,40 @@ mod tests {
         assert!(changed > 1000, "only {changed} rewrites fired");
     }
 
+    fn b_eval(b: &B, p: usize) -> bool {
+        match b {
+            B::V(i) => p >> i & 1 == 1,
+            B::Not(x) => !b_eval(x, p),
+            B::Bin(op, x, y) => {
+                let (x, y) = (b_eval(x, p), b_eval(y, p));
+                match *op {
+                    "And" => x & y,
+                    "Or" => x | y,
+                    _ => x ^ y,
+                }
+            }
+        }
+    }
+
+    fn b_size(b: &B) -> usize {
+        match b {
+            B::V(_) => 1,
+            B::Not(x) => 1 + b_size(x),
+            B::Bin(_, x, y) => 1 + b_size(x) + b_size(y),
+        }
+    }
+
     #[test]
-    fn bool_table_is_complete() {
-        for n in 1..=3 {
-            let full = (1usize << (1 << n)) - 1;
-            for tt in 1..full {
-                assert!(bool_table(n)[tt].is_some(), "n={n} table {tt:#x}");
+    fn bool_expr_matches_table() {
+        for n in 1..=4usize {
+            let pts = 1usize << n;
+            let vars: Vec<usize> = (0..n).collect();
+            for tt in 1..(1usize << pts) - 1 {
+                let BE::E(cost, b) = bool_expr(tt, &vars) else { panic!("n={n} table {tt:#x} not found") };
+                assert_eq!(cost, b_size(&b), "n={n} table {tt:#x}: wrong cost");
+                for p in 0..pts {
+                    assert_eq!(b_eval(&b, p), tt >> p & 1 == 1, "n={n} table {tt:#x} point {p}");
+                }
             }
         }
     }
