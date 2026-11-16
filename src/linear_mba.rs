@@ -4,14 +4,8 @@
 //! Subterms that are not linear (`x*y`, `x & 0xff`, `x >> 3`, ...) are treated
 //! as opaque variables; the identity holds for any value they take.
 
+use crate::eval::{Term as T, parse, show, size};
 use std::sync::OnceLock;
-
-#[derive(Clone, Debug, PartialEq)]
-enum T {
-    Num(i64),
-    Var(String),
-    Op(String, Vec<T>),
-}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
@@ -21,73 +15,6 @@ enum Kind {
     Lin,
     /// Not linear: an opaque leaf for the enclosing region.
     Atom,
-}
-
-fn parse(s: &str) -> T {
-    let mut toks = Vec::new();
-    let mut cur = String::new();
-    for ch in s.chars() {
-        if ch == '(' || ch == ')' || ch.is_whitespace() {
-            if !cur.is_empty() {
-                toks.push(std::mem::take(&mut cur));
-            }
-            if ch != ' ' && !ch.is_whitespace() {
-                toks.push(ch.to_string());
-            }
-        } else {
-            cur.push(ch);
-        }
-    }
-    if !cur.is_empty() {
-        toks.push(cur);
-    }
-    let mut i = 0;
-    parse_at(&toks, &mut i)
-}
-
-fn parse_at(t: &[String], i: &mut usize) -> T {
-    assert_eq!(t[*i], "(", "expected '(' in egglog term");
-    let head = t[*i + 1].clone();
-    *i += 2;
-    let node = match head.as_str() {
-        "Num" => {
-            let v = t[*i].parse().expect("bad Num literal");
-            *i += 1;
-            T::Num(v)
-        }
-        "Var" => {
-            let v = t[*i].trim_matches('"').to_string();
-            *i += 1;
-            T::Var(v)
-        }
-        _ => {
-            let mut args = Vec::new();
-            while t[*i] != ")" {
-                args.push(parse_at(t, i));
-            }
-            T::Op(head, args)
-        }
-    };
-    *i += 1;
-    node
-}
-
-fn show(t: &T) -> String {
-    match t {
-        T::Num(v) => format!("(Num {v})"),
-        T::Var(v) => format!("(Var \"{v}\")"),
-        T::Op(op, args) => {
-            let parts: Vec<String> = args.iter().map(show).collect();
-            format!("({op} {})", parts.join(" "))
-        }
-    }
-}
-
-fn size(t: &T) -> usize {
-    match t {
-        T::Op(_, args) => 1 + args.iter().map(size).sum::<usize>(),
-        _ => 1,
-    }
 }
 
 struct Width {
@@ -459,37 +386,12 @@ pub fn simplify_linear(egg: &str, w: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eval::{NumType, eval};
     use std::collections::HashMap;
 
     fn full_eval(t: &T, w: &Width, env: &HashMap<String, u64>) -> u64 {
-        let m = w.mask;
-        let e = |x: &T| full_eval(x, w, env);
-        let r = match t {
-            T::Num(c) => *c as u64,
-            T::Var(v) => env[v],
-            T::Op(op, a) => match op.as_str() {
-                "Not" => !e(&a[0]),
-                "Neg" => e(&a[0]).wrapping_neg(),
-                "Add" => e(&a[0]).wrapping_add(e(&a[1])),
-                "Sub" => e(&a[0]).wrapping_sub(e(&a[1])),
-                "Mul" => e(&a[0]).wrapping_mul(e(&a[1])),
-                "And" => e(&a[0]) & e(&a[1]),
-                "Or" => e(&a[0]) | e(&a[1]),
-                "Xor" => e(&a[0]) ^ e(&a[1]),
-                "Shl" | "Shr" => {
-                    let k = e(&a[1]);
-                    if k >= w.w as u64 {
-                        0
-                    } else if op == "Shl" {
-                        e(&a[0]) << k
-                    } else {
-                        (e(&a[0]) & m) >> k
-                    }
-                }
-                _ => unreachable!(),
-            },
-        };
-        r & m
+        let ty = NumType { bits: w.w, signed: false };
+        eval(t, ty, &|v: &str| env[v]).expect("no division in generated terms")
     }
 
     struct Rng(u64);

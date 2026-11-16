@@ -1,3 +1,4 @@
+pub mod eval;
 pub mod expr_convert;
 pub mod linear_mba;
 
