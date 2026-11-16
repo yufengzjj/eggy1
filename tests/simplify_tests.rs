@@ -501,6 +501,17 @@ fn linear_mba() {
                 &["(y + (z & u))"],
                 10,
             ),
+            // The hidden zero spans 5 and 6 leaves, so no smaller sub-region removes it.
+            (
+                "u + v + ((x ^ y) & (z | u | v)) + ((x ^ y) & ~(z | u | v)) - (x ^ y)",
+                &["(u + v)"],
+                10,
+            ),
+            (
+                "w + ((x ^ y) & (z | u | v)) + ((x ^ y) & ~(z | u | v)) - (x & ~y) - (~x & y)",
+                &["w"],
+                10,
+            ),
         ],
     );
     check(
