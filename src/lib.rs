@@ -1,4 +1,5 @@
 pub mod expr_convert;
+pub mod linear_mba;
 
 use crate::expr_convert::{egglog_to_infix, infix_to_egglog};
 use clap::Parser;
@@ -876,17 +877,21 @@ fn init_egg_function(eg: &mut EGraph) {
     add_primitive!(eg, "kz-mul" = |a: i64, b: i64, w: i64| -> i64 { kz_mul(a, b, w) });
     add_primitive!(eg, "all-ones" = |z: i64, w: i64| -?> () { {let m = lowmask(w as u32); (z & m == m).then_some(())} });
 }
-/// One equality-saturation round on a fresh e-graph: insert `s`, run the
-/// schedule, extract the best term (in egglog syntax).
+/// One equality-saturation round on a fresh e-graph: insert `s` (unioned with
+/// its linear-MBA rebuild), run the schedule, extract the best term (in egglog
+/// syntax).
 pub fn simplify_round(egg: &str, s: &str, cli: &Cli) -> Result<String, Error> {
     let mut egraph = new_experimental_egraph();
     init_egg_function(&mut egraph);
     egraph.parse_and_run_program(None, egg)?;
+    let alt = linear_mba::simplify_linear(s, width_of(&cli.num_type));
+    let union = if alt != s { format!("(union expr {alt})") } else { String::new() };
     let result = egraph.parse_and_run_program(
         None,
         &format!(
             r#"
 (let expr {})
+{union}
 (run-schedule
     (let-scheduler babibo
       (back-off

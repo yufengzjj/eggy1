@@ -487,6 +487,27 @@ fn known_bits() {
     check("i8", &[("(x << 4) & 15", &["0"], 10)]);
 }
 
+/// Linear MBA rebuilt from its values on {0,1}^n (src/linear_mba.rs); none of
+/// these match a hand-written rule.
+#[test]
+fn linear_mba() {
+    check(
+        "i64",
+        &[
+            ("(x ^ y) + 3*(x & y) + (~x & y)", &["(x + (2 * y))"], 10),
+            ("7*(x & y) - 5*(x | y) + 3*(x ^ y) + 2*(~x | y) - 2*~x + 2*x", &["((-2 * y) + (8 * (x & y)))", "((8 * (x & y)) - (2 * y))"], 10),
+        ],
+    );
+    check(
+        "i32",
+        &[
+            ("5*(x | y) - 3*(x ^ y) - 2*(x & ~y) + 7", &["(((2 * y) + (3 * (x & y))) + 7)"], 10),
+            // `a*b` is not linear: it is treated as one opaque variable.
+            ("((a*b) ^ c) + 3*((a*b) & c) + (~(a*b) & c)", &["((a * b) + (2 * c))"], 10),
+        ],
+    );
+}
+
 #[test]
 fn square_parity() {
     check(
@@ -845,7 +866,7 @@ fn complex_to_neg() {
     check(
         "i8",
         &[
-            ("(x ^ y) - 2*(x | y)", &["-(x + y)", "-(y + x)"], 10),
+            ("(x ^ y) - 2*(x | y)", &["-(x + y)", "-(y + x)", "(-x - y)"], 10),
             (
                 "(-2 * (x | y)) + (x ^ y)",
                 &["-(x + y)", "(-y - x)", "(-x - y)"],
@@ -1077,7 +1098,7 @@ fn complex_misc() {
             ("2*x - (x & ~y)", &["(x + (x & y))", "((x & y) + x)"], 10),
             (
                 "(x & ~y) - 2*x",
-                &["-(x + (x & y))", "(-(x & y) - x)", "-((x & y) + x)"],
+                &["-(x + (x & y))", "(-(x & y) - x)", "-((x & y) + x)", "(-x - (x & y))"],
                 10,
             ),
             ("~x & (~x ^ c)", &["(x & ~c) ^ ~c", "~(x | c)"], 10),
