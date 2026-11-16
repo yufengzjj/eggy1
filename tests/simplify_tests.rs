@@ -1,5 +1,8 @@
 use eggy1::expr_convert::{ac_canon_infix, infix_to_egglog};
-use eggy1::{Cli, magic_div_s, magic_div_u, magic_s, magic_u, make_egg, pow2_div, simplify, simplify_round};
+use eggy1::{
+    Cli, kz_add, kz_low, kz_mul, kz_shl, kz_shr, magic_div_s, magic_div_u, magic_s, magic_u, make_egg, pow2_div,
+    simplify, simplify_round,
+};
 
 /// Accept `r` if it matches any expected form exactly, or is
 /// associativity/commutativity-equivalent to one of them.
@@ -407,6 +410,81 @@ fn unsigned_soundness_regressions() {
             ("5 % 256", &["(5 % 0)"], 10),
         ],
     );
+}
+
+/// Every bit a kz-* result marks as zero must be zero in the real result, for
+/// any input masks that are themselves correct (exact `!a`, or a subset of it).
+#[test]
+fn known_zero_transfer_functions() {
+    fn check_width(w: i64, values: &[(i64, i64)], subsets: &[i64]) {
+        let m = if w == 64 { -1 } else { (1i64 << w) - 1 };
+        let sext = |v: i64| (v << (64 - w)) >> (64 - w);
+        let ok = |z: i64, v: i64, what: &str| assert_eq!(z & v & m, 0, "w={w} {what}: kz={z:#x} value={v:#x}");
+        for &(a, b) in values {
+            let (a, b) = (sext(a), sext(b));
+            for &sa in subsets {
+                for &sb in subsets {
+                    let (za, zb) = (!a & sa, !b & sb);
+                    ok(kz_add(za, zb, w), a.wrapping_add(b), "add");
+                    ok(kz_add(za, zb, w), a.wrapping_sub(b), "sub");
+                    ok(kz_mul(za, zb, w), a.wrapping_mul(b), "mul");
+                }
+                let za = !a & sa;
+                ok(kz_low(za, w), a.wrapping_neg(), "neg");
+                ok(kz_low(za, w), a.wrapping_mul(b), "mul one side");
+                for k in 0..w {
+                    ok(kz_shl(za, k, w).unwrap(), a << k, "shl");
+                    ok(kz_shr(za, k, w, true).unwrap(), a >> k, "ashr");
+                    ok(kz_shr(za, k, w, false).unwrap(), ((a as u64 & m as u64) >> k) as i64, "lshr");
+                }
+            }
+        }
+        assert_eq!(kz_shl(0, w, w), None);
+        assert_eq!(kz_shr(0, -1, w, false), None);
+    }
+    let subsets = [-1, 0, 0x0f, 0xf0, 0x55, -2, 0x7f, -0x80, 0x3c];
+    let all8: Vec<(i64, i64)> = (0..256).flat_map(|a| (0..256).map(move |b| (a, b))).collect();
+    check_width(8, &all8, &subsets);
+    let mut r = 0x9e3779b97f4a7c15u64;
+    let mut next = || {
+        r ^= r << 13;
+        r ^= r >> 7;
+        r ^= r << 17;
+        let x = r as i64;
+        match r % 4 {
+            0 => x & !(1i64 << (r >> 58)).wrapping_sub(1),
+            1 => x & 0xff,
+            _ => x,
+        }
+    };
+    let pairs: Vec<(i64, i64)> = (0..4000).map(|_| (next(), next())).collect();
+    for w in [16, 32, 64] {
+        check_width(w, &pairs, &subsets);
+    }
+}
+
+#[test]
+fn known_bits() {
+    check(
+        "u32",
+        &[
+            ("((x << 8) + (y & 0xff)) ^ ((x << 8) | (y & 0xff))", &["0"], 10),
+            ("((x << 8) + (y & 0xff)) - ((x << 8) ^ (y & 0xff))", &["0"], 10),
+            ("((x & 0xff) << 8) & 0xff00", &["((x & 0xff) << 8)", "((x & 0xff) * 0x100)"], 10),
+            ("(x & 0xff) >> 8", &["0"], 10),
+            ("((x & 0xf0) * 16) & 0xf", &["0"], 10),
+            ("(x * 4 + y * 8) & 3", &["0"], 10),
+        ],
+    );
+    check(
+        "i32",
+        &[
+            ("(x & 0xff) >> 8", &["0"], 10),
+            // Sign bit not known zero: arithmetic `>>` keeps it, must NOT fold.
+            ("(x & -0x100) >> 8", &["((x & -0x100) >> 8)"], 10),
+        ],
+    );
+    check("i8", &[("(x << 4) & 15", &["0"], 10)]);
 }
 
 #[test]

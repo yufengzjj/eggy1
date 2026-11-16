@@ -403,7 +403,75 @@ pub fn make_egg(num_type: &str) -> String {
         ));
     }
 
+    egg.push_str(&known_bits(width_of(num_type), is_signed(num_type)));
     egg
+}
+
+/// Known-zero-bits analysis: `(kz e)` is a mask of bits known to be 0 in `e`.
+/// Only the low `w` bits are meaningful; the kz-* primitives and `all-ones`
+/// ignore the rest.
+fn known_bits(w: u32, signed: bool) -> String {
+    let s = signed as i64;
+    format!(
+        r#"
+(function kz (Expr) i64 :merge (| old new))
+(rule ((= e (Num c))) ((set (kz e) (not-i64 c))) :ruleset analysis)
+(rule ((= e (And a b)) (= z (kz a))) ((set (kz e) z)) :ruleset analysis)
+(rule ((= e (And a b)) (= z (kz b))) ((set (kz e) z)) :ruleset analysis)
+(rule ((= e (Or a b)) (= za (kz a)) (= zb (kz b))) ((set (kz e) (& za zb))) :ruleset analysis)
+(rule ((= e (Xor a b)) (= za (kz a)) (= zb (kz b))) ((set (kz e) (& za zb))) :ruleset analysis)
+(rule ((= e (Shl a (Num k))) (= v (kz-shl 0 k {w}))) ((set (kz e) v)) :ruleset analysis)
+(rule ((= e (Shl a (Num k))) (= z (kz a)) (= v (kz-shl z k {w}))) ((set (kz e) v)) :ruleset analysis)
+(rule ((= e (Shr a (Num k))) (= v (kz-shr 0 k {w} {s}))) ((set (kz e) v)) :ruleset analysis)
+(rule ((= e (Shr a (Num k))) (= z (kz a)) (= v (kz-shr z k {w} {s}))) ((set (kz e) v)) :ruleset analysis)
+(rule ((= e (Mul a b)) (= z (kz a))) ((set (kz e) (kz-low z {w}))) :ruleset analysis)
+(rule ((= e (Mul a b)) (= z (kz b))) ((set (kz e) (kz-low z {w}))) :ruleset analysis)
+(rule ((= e (Mul a b)) (= za (kz a)) (= zb (kz b))) ((set (kz e) (kz-mul za zb {w}))) :ruleset analysis)
+(rule ((= e (Add a b)) (= za (kz a)) (= zb (kz b))) ((set (kz e) (kz-add za zb {w}))) :ruleset analysis)
+(rule ((= e (Sub a b)) (= za (kz a)) (= zb (kz b))) ((set (kz e) (kz-add za zb {w}))) :ruleset analysis)
+(rule ((= e (Neg a)) (= z (kz a))) ((set (kz e) (kz-low z {w}))) :ruleset analysis)
+
+(rule ((= z (kz e)) (all-ones z {w})) ((union e (Num 0))) :ruleset simplify)
+(rule ((= e (And a (Num c))) (= z (kz a)) (all-ones (| z c) {w})) ((union e a)) :ruleset simplify)
+"#
+    )
+}
+
+fn lowmask(k: u32) -> i64 {
+    if k >= 64 { -1 } else { ((1u64 << k) - 1) as i64 }
+}
+
+/// Known-zero mask of `a << k` given known-zero mask `z` of `a`; None unless 0 <= k < w.
+pub fn kz_shl(z: i64, k: i64, w: i64) -> Option<i64> {
+    (0..w).contains(&k).then(|| (z << k) | lowmask(k as u32))
+}
+
+/// Known-zero mask of `a >> k` (arithmetic if `signed`); None unless 0 <= k < w.
+pub fn kz_shr(z: i64, k: i64, w: i64, signed: bool) -> Option<i64> {
+    (0..w).contains(&k).then(|| {
+        if signed {
+            let sh = 64 - w;
+            ((z << sh) >> sh) >> k
+        } else {
+            let m = lowmask(w as u32) as u64;
+            (((z as u64 & m) >> k) | !(m >> k)) as i64
+        }
+    })
+}
+
+/// Trailing known zeros of `z`, as a mask (kept by `-a` and by `a * b`).
+pub fn kz_low(z: i64, w: i64) -> i64 {
+    lowmask(z.trailing_ones().min(w as u32))
+}
+
+/// Known-zero mask of `a + b` or `a - b`: the shorter run of trailing known zeros.
+pub fn kz_add(za: i64, zb: i64, w: i64) -> i64 {
+    lowmask(za.trailing_ones().min(zb.trailing_ones()).min(w as u32))
+}
+
+/// Known-zero mask of `a * b`: trailing known zeros add up.
+pub fn kz_mul(za: i64, zb: i64, w: i64) -> i64 {
+    lowmask((za.trailing_ones() + zb.trailing_ones()).min(w as u32))
 }
 
 fn width_of(t: &str) -> u32 {
@@ -800,6 +868,13 @@ fn init_egg_function(eg: &mut EGraph) {
     add_primitive!( eg, "is-disjoint-u16" = |a: i64, b: i64| -?> () { (((a as u16)&(b as u16))==0).then_some(()) });
     add_primitive!( eg, "is-disjoint-i8" = |a: i64, b: i64| -?> () { (((a as u8)&(b as u8))==0).then_some(()) });
     add_primitive!( eg, "is-disjoint-u8" = |a: i64, b: i64| -?> () { (((a as u8)&(b as u8))==0).then_some(()) });
+
+    add_primitive!(eg, "kz-shl" = |z: i64, k: i64, w: i64| -?> i64 { kz_shl(z, k, w) });
+    add_primitive!(eg, "kz-shr" = |z: i64, k: i64, w: i64, s: i64| -?> i64 { kz_shr(z, k, w, s != 0) });
+    add_primitive!(eg, "kz-low" = |z: i64, w: i64| -> i64 { kz_low(z, w) });
+    add_primitive!(eg, "kz-add" = |a: i64, b: i64, w: i64| -> i64 { kz_add(a, b, w) });
+    add_primitive!(eg, "kz-mul" = |a: i64, b: i64, w: i64| -> i64 { kz_mul(a, b, w) });
+    add_primitive!(eg, "all-ones" = |z: i64, w: i64| -?> () { {let m = lowmask(w as u32); (z & m == m).then_some(())} });
 }
 /// One equality-saturation round on a fresh e-graph: insert `s`, run the
 /// schedule, extract the best term (in egglog syntax).
