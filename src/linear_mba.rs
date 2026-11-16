@@ -8,7 +8,7 @@ use crate::eval::{Term as T, parse, show, size};
 use std::sync::OnceLock;
 
 #[derive(Clone, Copy, PartialEq)]
-enum Kind {
+pub(crate) enum Kind {
     /// Bitwise function of the leaves.
     Bit,
     /// Linear combination of bitwise functions.
@@ -17,13 +17,13 @@ enum Kind {
     Atom,
 }
 
-struct Width {
-    w: u32,
-    mask: u64,
+pub(crate) struct Width {
+    pub(crate) w: u32,
+    pub(crate) mask: u64,
 }
 
 impl Width {
-    fn new(w: u32) -> Width {
+    pub(crate) fn new(w: u32) -> Width {
         Width { w, mask: if w == 64 { u64::MAX } else { (1u64 << w) - 1 } }
     }
     fn signed(&self, v: u64) -> i64 {
@@ -32,14 +32,14 @@ impl Width {
     }
 }
 
-fn const_shift(t: &T, w: &Width) -> Option<u32> {
+pub(crate) fn const_shift(t: &T, w: &Width) -> Option<u32> {
     match t {
         T::Num(k) if (0..w.w as i64).contains(k) => Some(*k as u32),
         _ => None,
     }
 }
 
-fn kind(t: &T, w: &Width) -> Kind {
+pub(crate) fn kind(t: &T, w: &Width) -> Kind {
     let bit = |k: Kind| if k == Kind::Atom { Kind::Bit } else { k };
     match t {
         T::Var(_) => Kind::Bit,
@@ -65,7 +65,7 @@ fn kind(t: &T, w: &Width) -> Kind {
 }
 
 /// Leaves of the linear region rooted at `t`: variables and atom subterms.
-fn leaves(t: &T, w: &Width, out: &mut Vec<T>) {
+pub(crate) fn leaves(t: &T, w: &Width, out: &mut Vec<T>) {
     match t {
         T::Num(_) => {}
         T::Var(_) => {
@@ -85,7 +85,7 @@ fn leaves(t: &T, w: &Width, out: &mut Vec<T>) {
     }
 }
 
-fn eval(t: &T, w: &Width, leaf_vals: &[(T, u64)]) -> u64 {
+pub(crate) fn eval(t: &T, w: &Width, leaf_vals: &[(T, u64)]) -> u64 {
     if let Some((_, v)) = leaf_vals.iter().find(|(l, _)| l == t) {
         return *v;
     }
@@ -172,7 +172,7 @@ enum BE {
 }
 
 /// Largest region (in leaves) that gets rebuilt; truth tables are `u64`.
-const MAX_LEAVES: usize = 6;
+pub(crate) const MAX_LEAVES: usize = 6;
 
 fn remap(b: &B, vars: &[usize]) -> B {
     match b {
@@ -270,7 +270,7 @@ fn b_to_t(b: &B, leaves: &[T]) -> T {
 }
 
 /// `Σ coef·term + konst`, using Sub/Neg for negative coefficients.
-fn build_sum(terms: &[(u64, T)], konst: u64, w: &Width) -> T {
+pub(crate) fn build_sum(terms: &[(u64, T)], konst: u64, w: &Width) -> T {
     let num = |v: u64| T::Num(w.signed(v));
     let scaled = |c: u64, t: &T| if c == 1 { t.clone() } else { T::Op("Mul".into(), vec![num(c), t.clone()]) };
     let mut acc: Option<T> = None;
@@ -292,7 +292,7 @@ fn build_sum(terms: &[(u64, T)], konst: u64, w: &Width) -> T {
 }
 
 /// Smallest rebuilt form of the linear region `t`, if it has 1..=MAX_LEAVES leaves.
-fn simba(t: &T, w: &Width) -> Option<T> {
+pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
     let n = lv.len();
@@ -347,9 +347,30 @@ fn simba(t: &T, w: &Width) -> Option<T> {
     best.filter(|b| size(b) < size(t))
 }
 
-/// Replace every linear region (and, recursively, regions inside atoms) by its
-/// rebuilt form when that is smaller.
-fn rewrite(t: &T, w: &Width) -> T {
+thread_local! {
+    static REWRITTEN: std::cell::RefCell<std::collections::HashMap<(u32, T), T>> = Default::default();
+}
+
+/// Replace every linear or polynomial region (and, recursively, regions inside
+/// atoms) by its rebuilt form when that is smaller. Memoized per thread.
+pub(crate) fn rewrite(t: &T, w: &Width) -> T {
+    if !matches!(t, T::Op(..)) {
+        return t.clone();
+    }
+    let key = (w.w, t.clone());
+    if let Some(r) = REWRITTEN.with(|c| c.borrow().get(&key).cloned()) {
+        return r;
+    }
+    let lin = rewrite_linear(t, w);
+    let r = match crate::poly_mba::simplify_poly(t, w) {
+        Some(p) if size(&p) < size(&lin) => p,
+        _ => lin,
+    };
+    REWRITTEN.with(|c| c.borrow_mut().insert(key, r.clone()));
+    r
+}
+
+fn rewrite_linear(t: &T, w: &Width) -> T {
     let T::Op(op, args) = t else { return t.clone() };
     if kind(t, w) != Kind::Atom {
         if let Some(best) = simba(t, w) {
@@ -374,12 +395,13 @@ fn substitute_atoms(t: &T, w: &Width) -> T {
 }
 
 /// Rewrite the egglog term `egg` (W-bit wrapping semantics) with every linear
-/// MBA region of at most `MAX_LEAVES` leaves rebuilt in a smaller form. Returns `egg`
-/// unchanged when nothing gets smaller.
+/// MBA region of at most `MAX_LEAVES` leaves, and every polynomial MBA region,
+/// rebuilt in a smaller form. Returns `egg` unchanged when nothing gets smaller.
 pub fn simplify_linear(egg: &str, w: u32) -> String {
     let w = Width::new(w);
     let t = parse(egg);
     let r = rewrite(&t, &w);
+    REWRITTEN.with(|c| c.borrow_mut().clear());
     if r == t { egg.to_string() } else { show(&r) }
 }
 

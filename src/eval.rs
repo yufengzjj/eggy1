@@ -1,7 +1,7 @@
 //! Egglog `Expr` terms as a tree, with concrete evaluation that matches the
 //! `wrapping-<op>-<type>` primitives in `lib.rs`.
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Term {
     Num(i64),
     Var(String),

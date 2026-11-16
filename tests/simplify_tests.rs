@@ -524,6 +524,34 @@ fn linear_mba() {
     );
 }
 
+/// Polynomial MBA expanded in the conjunction basis and rebuilt
+/// (src/poly_mba.rs). The first two are from the MBA-Obfuscator poly samples.
+#[test]
+fn poly_mba() {
+    let cases: &[(&str, &[&str], usize)] = &[
+        (
+            "-8*~y*(x&y)-8*~y*(x&~y)+10*~y*x+3*~y*~(x|y)+8*(x^y)*(x&y)+8*(x^y)*(x&~y)-10*(x^y)*x-3*(x^y)*~(x|y)-3*~y*(x|~y)-1*~y*~x+3*(x^y)*(x|~y)+1*(x^y)*~x",
+            &["((x ^ ~y) - y)", "(~y - (x ^ y))"],
+            10,
+        ),
+        (
+            "-6*(x^y)*(x&y)-7*(x^y)*(x&~y)+5*(x^y)*(x|~y)-2*(x^y)*~(x|~y)+12*(x&~y)*(x&y)+14*(x&~y)*(x&~y)-10*(x&~y)*(x|~y)+4*(x&~y)*~(x|~y)+1*(x^y)*~(x&y)-7*(x^y)*~(x|y)-2*(x&~y)*~(x&y)+14*(x&~y)*~(x|y)",
+            &["(y - x)"],
+            10,
+        ),
+        // Common factor pulled out, then the linear cofactor rebuilt.
+        (
+            "(x|y)*(x^y) + (x&y)*(x^y) - y*(x^y) + 2*(x|y)*(x&y) + 2*(x&y)*(x&y) - 2*y*(x&y)",
+            &["(x * (x + y))"],
+            10,
+        ),
+        ("((x ^ y) + 2*(x & y)) * ((x | z) + (x & z)) - x*z", &["((x * (x + y)) + (y * z))"], 10),
+        ("(x&y)*(x|y) + (x&~y)*(~x&y) - x*y + (x ^ z) + 2*(x & z)", &["(x + z)"], 10),
+    ];
+    check("i64", cases);
+    check("u8", cases);
+}
+
 #[test]
 fn square_parity() {
     check(

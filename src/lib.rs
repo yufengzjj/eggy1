@@ -1,6 +1,7 @@
 pub mod eval;
 pub mod expr_convert;
 pub mod linear_mba;
+mod poly_mba;
 
 use crate::expr_convert::{egglog_to_infix, infix_to_egglog};
 use clap::Parser;
