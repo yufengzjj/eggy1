@@ -215,7 +215,7 @@ fn formal_shift() {
                 &["((x & 0xffff) << 8)", "((x & 0xffff) * 0x100)"],
                 10,
             ),
-            ("x >> 3 << 3", &["((x >> 3) << 3)", "((x >> 3) * 8)"], 10),
+            ("x >> 3 << 3", &["(x & -8)"], 10),
             ("(a + 1) & ~1", &["((a + 1) & -2)"], 10),
             ("(a * 2) >> 1", &["((a * 2) >> 1)"], 10),
             ("a + (b & 1)", &["(a + (b & 1))"], 10),
@@ -405,6 +405,40 @@ fn unsigned_soundness_regressions() {
             ("(a >> 2) >> 3", &["(a >> 5)"], 10),                     // in-range combine still works
             ("5 / 256", &["(5 / 0)"], 10),                            // 256 is 0 in u8: no fold, no panic
             ("5 % 256", &["(5 % 0)"], 10),
+        ],
+    );
+}
+
+#[test]
+fn square_parity() {
+    check(
+        "i8",
+        &[
+            ("(x*x) & 1", &["(x & 1)"], 10),
+            ("(x*x) & 2", &["0"], 10),
+            ("(x*(x+1)) & 1", &["0"], 10),
+            ("(x*~x) & 1", &["0"], 10),
+        ],
+    );
+}
+
+#[test]
+fn shift_then_mask() {
+    check("i32", &[
+        ("(x >> 4) << 4", &["(x & -0x10)"], 10),
+        // Signed `>>` sign-extends, so this must NOT become a mask.
+        ("(x << 4) >> 4", &["((x * 0x10) >> 4)", "((x << 4) >> 4)"], 10),
+    ]);
+    check("u32", &[("(x << 4) >> 4", &["(x & 0xfffffff)"], 10)]);
+}
+
+#[test]
+fn disjoint_masks_two_vars() {
+    check(
+        "u32",
+        &[
+            ("((hi & 0xff00) + (lo & 0xff)) ^ ((hi & 0xff00) | (lo & 0xff))", &["0"], 10),
+            ("((hi & 0xff00) ^ (lo & 0xff)) - ((hi & 0xff00) | (lo & 0xff))", &["0"], 10),
         ],
     );
 }

@@ -355,6 +355,19 @@ pub fn make_egg(num_type: &str) -> String {
     egg.push_str(&rewrite!("((x&(Num m))+(y&(Num m)))&(Num m)"=>"(x+y)&(Num m)";format!("simplify :when ((is-mersenne-{0} m))",num_type)));
     egg.push_str(&rewrite!("((x&(Num m))-(y&(Num m)))&(Num m)"=>"(x-y)&(Num m)";format!("simplify :when ((is-mersenne-{0} m))",num_type)));
     egg.push_str(&rewrite!("((x&(Num m))*(y&(Num m)))&(Num m)"=>"(x*y)&(Num m)";format!("simplify :when ((is-mersenne-{0} m))",num_type)));
+    egg.push_str(&rewrite!("(a&(Num c1))+(b&(Num c2))"=>"(a&(Num c1))|(b&(Num c2))";format!("simplify :when ((is-disjoint-{0} c1 c2))",num_type)));
+    egg.push_str(&rewrite!("(a&(Num c1))^(b&(Num c2))"=>"(a&(Num c1))|(b&(Num c2))";format!("simplify :when ((is-disjoint-{0} c1 c2))",num_type)));
+
+    egg.push_str(&rewrite!("(x*x)&1"=>"x&1";"simplify"));
+    egg.push_str(&rewrite!("(x*x)&2"=>"0";"simplify"));
+    egg.push_str(&rewrite!("(x*(x+1))&1"=>"0";"simplify"));
+    egg.push_str(&rewrite!("(x*~x)&1"=>"0";"simplify"));
+
+    egg.push_str(&rewrite!("(a>>(Num c))<<(Num c)"=>"a&(-1<<(Num c))";format!("simplify :when ((is-shl-in-{0} c))",num_type)));
+    // Unsigned only: a signed `>>` would copy the sign bit back into the cleared high bits.
+    if !is_signed(num_type) {
+        egg.push_str(&rewrite!("(a<<(Num c))>>(Num c)"=>"a&(-1>>(Num c))";format!("simplify :when ((is-shl-in-{0} c))",num_type)));
+    }
 
     // HD ch. 10: recognize magic-number division and rewrite back to `n / d`.
     // The divisor d is recovered from (M, s) by the magic-div-* primitive, which
