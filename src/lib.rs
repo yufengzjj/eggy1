@@ -271,6 +271,8 @@ pub fn make_egg(num_type: &str) -> String {
     egg.push_str(&rewrite!("x^(x&y)"=>"x&~y";"simplify"));
     egg.push_str(&rewrite!("(x|y)^y"=>"x&~y";"simplify"));
     egg.push_str(&rewrite!("(x*x)&3"=>"x&1";"simplify"));
+    // x & -x is x's lowest set bit L; -L sets every bit from L up, and x has none below L.
+    egg.push_str(&rewrite!("x&-(x&-x)"=>"x";"simplify"));
     egg.push_str(&rewrite!("~x^~y"=>"x^y";"simplify"));
     egg.push_str(&rewrite!("(x|y)^(~x|~y)"=>"~(x^y)";"simplify"));
     egg.push_str(&rewrite!("(x&y)|~(x|y)"=>"~(x^y)";"simplify"));

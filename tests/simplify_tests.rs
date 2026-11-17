@@ -592,6 +592,39 @@ fn semi_linear_mba() {
     check("u8", cases);
 }
 
+/// Non-polynomial MBA: a linear MBA identity over A, B with arithmetic
+/// expressions substituted for A and B (MBA-Obfuscator nonpoly samples). The
+/// arithmetic operands of bitwise operations are leaves of the outer region.
+#[test]
+fn nonpoly_mba() {
+    check(
+        "i64",
+        &[
+            (
+                "9*((-1*(x^y))&(-1*(x|y)))+19*((-1*(x^y))&~(-1*(x|y)))-11*((-1*(x^y))^(-1*(x|y)))-7*((-1*(x^y))|~(-1*(x|y)))+7*~((-1*(x^y))|(-1*(x|y)))+12*~((-1*(x^y))|~(-1*(x|y)))-3*(x&~y)-4*(x&y)",
+                &["((-3 * x) + (-2 * (x | y)))", "((-3 * x) - (2 * (x | y)))"],
+                10,
+            ),
+            (
+                "-9*((5*y)&(1*~(x&~y)))-10*((5*y)&~(1*~(x&~y)))+11*~((5*y)&(1*~(x&~y)))+11*~((5*y)^(1*~(x&~y)))-22*~((5*y)|(1*~(x&~y)))-10*~((5*y)|~(1*~(x&~y)))-1*~(x|y)-17*~(x|~y)-17*(x&y)",
+                &["(-0xb * y)"],
+                10,
+            ),
+            (
+                "-3*((3*(x|y))&(1*x))+5*~((3*(x|y))&~(1*x))-6*~((3*(x|y))|(1*x))-4*~((3*(x|y))|~(1*x))+1*~(1*x)-1*~(x&y)-4*(x&~y)-5*(x&y)",
+                &["((3 * (y & ~x)) + 1)"],
+                10,
+            ),
+        ],
+    );
+}
+
+#[test]
+fn lowest_set_bit_mask() {
+    check("i8", &[("y + (x & -(x & -x))", &["(x + y)"], 10)]);
+    check("u64", &[("(x & -(x & -x)) ^ x", &["0"], 10)]);
+}
+
 #[test]
 fn square_parity() {
     check(

@@ -54,17 +54,10 @@ pub(crate) fn kind(t: &T, w: &Width) -> Kind {
         T::Op(op, a) => match op.as_str() {
             "Not" => bit(kind(&a[0], w)),
             "Neg" | "Add" | "Sub" => Kind::Lin,
-            "And" | "Or" | "Xor" => {
-                let operand = |x: &T| match (x, kind(x, w)) {
-                    (T::Num(_), Kind::Lin) => Kind::ConstBit,
-                    (_, k) => bit(k),
-                };
-                match (operand(&a[0]), operand(&a[1])) {
-                    (Kind::Bit, Kind::Bit) => Kind::Bit,
-                    (Kind::Bit | Kind::ConstBit, Kind::Bit | Kind::ConstBit) => Kind::ConstBit,
-                    _ => Kind::Atom,
-                }
-            }
+            "And" | "Or" | "Xor" => match (bit_operand(&a[0], w), bit_operand(&a[1], w)) {
+                (Kind::Bit, Kind::Bit) => Kind::Bit,
+                _ => Kind::ConstBit,
+            },
             "Mul" if matches!(a[0], T::Num(_)) || matches!(a[1], T::Num(_)) => Kind::Lin,
             "Shl" if const_shift(&a[1], w).is_some() => Kind::Lin,
             _ => Kind::Atom,
@@ -72,8 +65,25 @@ pub(crate) fn kind(t: &T, w: &Width) -> Kind {
     }
 }
 
-/// Leaves of the linear region rooted at `t`: variables and atom subterms.
+/// Kind of `t` as an operand of a bitwise operation (`Bit` or `ConstBit`).
+/// Arithmetic operands (`x + y`, `-(x | y)`) are opaque leaves there, but `~`
+/// stays visible so that `~a` and `a` share the leaf `a`; see `leaves`.
+fn bit_operand(t: &T, w: &Width) -> Kind {
+    match t {
+        T::Num(_) if kind(t, w) == Kind::Lin => Kind::ConstBit,
+        T::Op(op, a) if op == "Not" => bit_operand(&a[0], w),
+        _ if kind(t, w) == Kind::ConstBit => Kind::ConstBit,
+        _ => Kind::Bit,
+    }
+}
+
+/// Leaves of the linear region rooted at `t`: variables, atom subterms, and
+/// arithmetic operands of bitwise operations.
 pub(crate) fn leaves(t: &T, w: &Width, out: &mut Vec<T>) {
+    leaves_in(t, w, out, false);
+}
+
+fn leaves_in(t: &T, w: &Width, out: &mut Vec<T>, in_bitwise: bool) {
     match t {
         T::Num(_) => {}
         T::Var(_) => {
@@ -81,13 +91,15 @@ pub(crate) fn leaves(t: &T, w: &Width, out: &mut Vec<T>) {
                 out.push(t.clone());
             }
         }
-        T::Op(_, a) => {
-            if kind(t, w) == Kind::Atom {
+        T::Op(op, a) => {
+            let k = kind(t, w);
+            if k == Kind::Atom || (in_bitwise && k == Kind::Lin && op != "Not") {
                 if !out.contains(t) {
                     out.push(t.clone());
                 }
             } else {
-                a.iter().for_each(|x| leaves(x, w, out));
+                let inner = in_bitwise || matches!(op.as_str(), "And" | "Or" | "Xor");
+                a.iter().for_each(|x| leaves_in(x, w, out, inner));
             }
         }
     }
@@ -696,10 +708,21 @@ pub(crate) fn rewrite(t: &T, w: &Width) -> T {
         return r;
     }
     let lin = rewrite_linear(t, w);
-    let r = match crate::poly_mba::simplify_poly(t, w) {
+    let mut r = match crate::poly_mba::simplify_poly(t, w) {
         Some(p) if size(&p) < size(&lin) => p,
         _ => lin,
     };
+    // A rebuilt region can expose more: once `9*(A & B) + ...` becomes `2*A - B`
+    // with `A = -(x ^ y)`, A's own linear form joins the enclosing region. Only
+    // arithmetic leaves of bitwise operations can do this.
+    let mut lv = Vec::new();
+    leaves(t, w, &mut lv);
+    if r != *t && lv.iter().any(|l| kind(l, w) == Kind::Lin) {
+        let again = rewrite(&r, w);
+        if size(&again) < size(&r) {
+            r = again;
+        }
+    }
     REWRITTEN.with(|c| c.borrow_mut().insert(key, r.clone()));
     r
 }
