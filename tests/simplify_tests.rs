@@ -592,6 +592,21 @@ fn semi_linear_mba() {
     check("u8", cases);
 }
 
+/// Semi-linear rebuilds whose constant term is absorbed into a bitwise term.
+#[test]
+fn semi_linear_constant_absorbed() {
+    check(
+        "i64",
+        &[
+            ("-2*(x & ~0xe5) - 0x1ca", &["(-2 * (x | 0xe5))"], 10),
+            ("-3*(x & 0xa3) + 0x1e9", &["(3 * (~x & 0xa3))"], 10),
+            ("x + 2*(x & 0x95) - 0x95", &["((2 * x) - (x ^ 0x95))"], 10),
+            ("((y & ~0x36) ^ 0x627e) - 0x34", &["((y & -0x37) ^ 0x624a)"], 10),
+            ("3*z + (y & ~0xff3a) - (0xff00 & y) + 0xff3a", &["((0xff00 ^ (y | 0x3a)) + (3 * z))"], 10),
+        ],
+    );
+}
+
 /// Non-polynomial MBA: a linear MBA identity over A, B with arithmetic
 /// expressions substituted for A and B (MBA-Obfuscator nonpoly samples). The
 /// arithmetic operands of bitwise operations are leaves of the outer region.

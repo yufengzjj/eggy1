@@ -402,8 +402,36 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
             None => groups.push((g, 1 << j)),
         }
     }
+    let r = groups.len();
     let mut cands = vec![masked_groups(&groups, lv, e0, w)];
-    cands.extend(const_leaf_groups(&groups, lv, e0, w));
+    let mut shifts = vec![vec![0; r]];
+    for i in 0..r {
+        if let Some(h) = solve_mul(groups[i].1, e0, w) {
+            let mut hs = vec![0; r];
+            hs[i] = h;
+            shifts.push(hs);
+        }
+    }
+    cands.extend(const_leaf_groups(&groups, &shifts, lv, e0, w));
+    // Bits with the same table can still differ in their share of the constant,
+    // as in `(y | 0x36) ^ 0x627c`. For `e0 = s·E`, split the groups by the bits
+    // of `E` and give the groups inside `E` the shift `s`.
+    let mut scales: Vec<u64> = vec![1, m];
+    for (g, _) in &groups {
+        scales.extend(g.iter().filter(|&&v| v != 0).flat_map(|&v| [v, v.wrapping_neg() & m]));
+    }
+    scales.sort_unstable();
+    scales.dedup();
+    for s in scales {
+        let Some(e) = solve_mul(s, e0, w) else { continue };
+        let refined: Vec<(Vec<u64>, u64)> = groups
+            .iter()
+            .flat_map(|(g, mask)| [(g.clone(), mask & e), (g.clone(), mask & !e)])
+            .filter(|(_, mask)| *mask != 0)
+            .collect();
+        let hs: Vec<u64> = refined.iter().map(|(_, mask)| if mask & e != 0 { s } else { 0 }).collect();
+        cands.extend(const_leaf_groups(&refined, &[hs], lv, e0, w));
+    }
     cands.into_iter().min_by_key(|c| size(c))
 }
 
@@ -434,13 +462,17 @@ fn masked_groups(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width) -> T 
 /// holding the bits of the groups whose code has bit `b`. Then bit `j` of the
 /// region is `table(bits_j(x), code of j's group)`, a linear MBA of `x` and the
 /// constant leaves, so `(y & ~K) - (y & K) + K` can come back as `y ^ K`.
-/// Tried for every code assignment of at most 4 groups.
-fn const_leaf_groups(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width) -> Vec<T> {
+/// Tried for every code assignment of at most 4 groups. Part of the constant
+/// `e0` can also move into the table: adding `shifts[i]` to group `i`'s table
+/// adds `shifts[i]·M_i` to the region, so `-2*(x & ~K) - 2*K` can come back as
+/// `-2*(x | K)`.
+fn const_leaf_groups(groups: &[(Vec<u64>, u64)], shifts: &[Vec<u64>], lv: &[T], e0: u64, w: &Width) -> Vec<T> {
     let (n, r) = (lv.len(), groups.len());
     let p = (usize::BITS - (r - 1).leading_zeros()) as usize;
     if r < 2 || r > 4 || n + p > MAX_LEAVES {
         return Vec::new();
     }
+    let m = w.mask;
     let mut out = Vec::new();
     for codes in permutations(r) {
         let mut leaves = lv.to_vec();
@@ -448,23 +480,48 @@ fn const_leaf_groups(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width) -
             let mask = (0..r).filter(|&i| codes[i] >> b & 1 == 1).fold(0u64, |acc, i| acc | groups[i].1);
             leaves.push(T::Num(w.signed(mask)));
         }
-        let mut table = vec![0u64; 1 << (n + p)];
-        for (i, (g, _)) in groups.iter().enumerate() {
-            for (q, &v) in g.iter().enumerate() {
-                table[q | codes[i] << n] = v;
+        // The group with code 0 sits at table point 0, which must stay 0.
+        for hs in shifts.iter().filter(|hs| (0..r).all(|i| codes[i] != 0 || hs[i] == 0)) {
+            let mut table = vec![0u64; 1 << (n + p)];
+            let mut k0 = e0;
+            for (i, (g, mask)) in groups.iter().enumerate() {
+                for (q, &v) in g.iter().enumerate() {
+                    table[q | codes[i] << n] = v.wrapping_add(hs[i]) & m;
+                }
+                k0 = k0.wrapping_sub(hs[i].wrapping_mul(*mask)) & m;
             }
-        }
-        let (terms, mut konst) = rebuild_gp(&table, &leaves, e0, w);
-        let mut kept = Vec::new();
-        for (c, t) in terms {
-            match fold_consts(&t, w) {
-                T::Num(v) => konst = konst.wrapping_add(c.wrapping_mul(v as u64)) & w.mask,
-                t => kept.push((c, t)),
+            let (terms, mut konst) = rebuild_gp(&table, &leaves, k0, w);
+            let mut kept = Vec::new();
+            for (c, t) in terms {
+                match fold_consts(&t, w) {
+                    T::Num(v) => konst = konst.wrapping_add(c.wrapping_mul(v as u64)) & m,
+                    t => kept.push((c, t)),
+                }
             }
+            out.push(build_sum(&kept, konst, w));
         }
-        out.push(build_sum(&kept, konst, w));
     }
     out
+}
+
+/// The `h` of smallest magnitude with `h·mask = e0` in the word, if any.
+fn solve_mul(mask: u64, e0: u64, w: &Width) -> Option<u64> {
+    let tz = mask.trailing_zeros();
+    if e0 == 0 || tz >= w.w || e0 & ((1u64 << tz) - 1) != 0 {
+        return None;
+    }
+    let odd = mask >> tz;
+    // Inverse of an odd number modulo 2^64 by Newton's iteration.
+    let mut inv = odd;
+    for _ in 0..6 {
+        inv = inv.wrapping_mul(2u64.wrapping_sub(odd.wrapping_mul(inv)));
+    }
+    let rest = w.w - tz;
+    let low = if rest == 64 { u64::MAX } else { (1u64 << rest) - 1 };
+    let h = (e0 >> tz).wrapping_mul(inv) & low;
+    // h + i·2^rest are all solutions; take the one closest to 0.
+    let h = if rest < 64 && h >> (rest - 1) & 1 == 1 { h | !low } else { h };
+    Some(h & w.mask)
 }
 
 fn permutations(r: usize) -> Vec<Vec<usize>> {
