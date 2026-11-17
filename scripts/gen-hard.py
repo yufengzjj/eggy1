@@ -5,7 +5,9 @@ Sections:
 - variables inside bitwise operations replaced by (v + Z), Z a zero MBA;
 - products, with x*y written as (x&y)*(x|y) + (x&~y)*(~x&y);
 - one obfuscated subterm repeated, also inside bitwise operations;
-- two levels of (v + Z) substitution.
+- two levels of (v + Z) substitution;
+- 8 variables in overlapping pairs, deeper bitwise terms, noisy product
+  operands, sums of products, and arithmetic leaves over 4 variables.
 
 Zero MBAs are sums c*(f - g), with g the bitwise expression f rewritten by
 identities such as a&b = a+b-(a|b). Every case is checked on random inputs.
@@ -170,6 +172,65 @@ def two_level(r):
     return emit(r, sum_tree(obf), sum_tree(gt), vs)
 
 
+def chained_vars(r):
+    """Terms over overlapping variable pairs, so all 8 leaves form one group."""
+    vs = r.sample(VARS8, 8)
+    gt = [(r.choice([1, 2, 3, -1, -2]), bitwise(r, [vs[i], vs[i + 1]], 1)) for i in range(0, 7, 2)]
+    gt += [(r.choice([1, -1, 2]), bitwise(r, [vs[i], vs[i + 1]], 1)) for i in (1, 3, 5)]
+    obf = [(c, expand(e, r, 0.8)) for c, e in gt] + zero_terms(r, VARS8, 4)
+    r.shuffle(obf)
+    return emit(r, sum_tree(obf), sum_tree(gt), VARS8)
+
+
+def deep_bitwise(r):
+    """Depth-3 bitwise terms over 4 variables, fully expanded, plus noise."""
+    vs = ["x", "y", "z", "w"]
+    gt = [(r.choice([1, 2, -1, 3]), bitwise(r, vs, 3)) for _ in range(2)]
+    obf = [(c, expand(e, r, 0.9)) for c, e in gt] + zero_terms(r, vs, 3)
+    r.shuffle(obf)
+    return emit(r, sum_tree(obf), sum_tree(gt), vs)
+
+
+def noisy_product(r):
+    """x*y written with the product identity, with noisy operands."""
+    vs = ["x", "y", "z"]
+    x, y = r.sample(vs, 2)
+    a, b = ("var", x), ("var", y)
+    pieces = [
+        (("and", a, b), ("or", a, b)),
+        (("and", a, ("not", b)), ("and", ("not", a), b)),
+    ]
+    noise = lambda v: noisy(r, v, vs, 1)
+    prod = sum_tree([(1, ("mul", subst(expand(p, r, 0.8), noise), subst(expand(q, r, 0.8), noise))) for p, q in pieces])
+    c = r.choice([1, 2, 3, -1])
+    w = r.choice(vs)
+    gt = sum_tree([(1, ("mul", a, b)), (c, ("var", w))])
+    obf = sum_tree([(1, prod), (c, ("var", w))] + zero_terms(r, vs, 1))
+    return emit(r, obf, gt, vs)
+
+
+def poly_degree2(r):
+    """Sum of two products of bitwise terms, each factor written as a linear MBA."""
+    vs = ["x", "y", "z"]
+    gt = [(r.choice([1, 2, -1]), ("mul", bitwise(r, vs, 1), bitwise(r, vs, 1))) for _ in range(2)]
+
+    def lin(e):
+        return sum_tree([(1, expand(e, r, 0.9))] + zero_terms(r, vs, 1))
+
+    obf = [(c, ("mul", lin(e[1]), lin(e[2]))) for c, e in gt] + zero_terms(r, vs, 1)
+    r.shuffle(obf)
+    return emit(r, sum_tree(obf), sum_tree(gt), vs)
+
+
+def wide_arith_leaves(r):
+    """Arithmetic leaves over 4 variables inside bitwise terms of depth 2."""
+    vs = ["x", "y", "z", "w"]
+    gt = [(r.choice([1, 2, -1]), bitwise(r, vs, 2)), (r.choice([1, 3, -1]), ("var", r.choice(vs)))]
+    obf = [(c, subst(expand(e, r, 0.7), lambda v: noisy(r, v, vs, 2))) for c, e in gt] + zero_terms(r, vs, 2)
+    r.shuffle(obf)
+    return emit(r, sum_tree(obf), sum_tree(gt), vs)
+
+
 def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 100
     r = random.Random(1)
@@ -179,6 +240,11 @@ def main():
         ("product identity x*y,groundtruth", product),
         ("repeated obfuscated subterm,groundtruth", repeated),
         ("two-level zero MBA substitution,groundtruth", two_level),
+        ("8 variables in one chained group,groundtruth", chained_vars),
+        ("depth-3 bitwise over 4 variables,groundtruth", deep_bitwise),
+        ("product with noisy operands,groundtruth", noisy_product),
+        ("sum of products of linear MBA,groundtruth", poly_degree2),
+        ("4-variable arithmetic leaves,groundtruth", wide_arith_leaves),
     ]
     for name, f in sections:
         print(f"#{name}")
