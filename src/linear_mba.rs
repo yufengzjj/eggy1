@@ -291,13 +291,26 @@ fn b_to_t(b: &B, leaves: &[T]) -> T {
 
 /// `Σ coef·term + konst`, using Sub/Neg for negative coefficients.
 pub(crate) fn build_sum(terms: &[(u64, T)], konst: u64, w: &Width) -> T {
+    // c·t + c = -c·~t saves the constant term (no gain when c = 1).
+    if konst != 0 && konst != 1 {
+        if let Some(i) = terms.iter().position(|(c, _)| *c == konst) {
+            let mut terms = terms.to_vec();
+            let (c, t) = terms[i].clone();
+            let not_t = match t {
+                T::Op(op, mut a) if op == "Not" => a.remove(0),
+                t => T::Op("Not".into(), vec![t]),
+            };
+            terms[i] = (c.wrapping_neg() & w.mask, not_t);
+            return build_sum(&terms, 0, w);
+        }
+    }
     let num = |v: u64| T::Num(w.signed(v));
     let scaled = |c: u64, t: &T| if c == 1 { t.clone() } else { T::Op("Mul".into(), vec![num(c), t.clone()]) };
     let mut acc: Option<T> = None;
     for (c, t) in terms {
         let neg = w.signed(*c) < 0 && *c != 1u64 << (w.w - 1);
         acc = Some(match acc {
-            None if neg => T::Op("Neg".into(), vec![scaled(c.wrapping_neg() & w.mask, t)]),
+            None if *c == w.mask => T::Op("Neg".into(), vec![t.clone()]),
             None => scaled(*c, t),
             Some(a) if neg => T::Op("Sub".into(), vec![a, scaled(c.wrapping_neg() & w.mask, t)]),
             Some(a) => T::Op("Add".into(), vec![a, scaled(*c, t)]),

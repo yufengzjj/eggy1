@@ -521,7 +521,11 @@ fn linear_mba() {
             // A term that is non-zero at 0.
             (
                 "-7*~(x&y)+1*~(x&~x)-2*~x+1*y-1*~(x^y)-7*~(x&~y)-2*x-7*~y-1*(x|y)+20*~(x|~y)+21*(x&~y)+9*(x&y)",
-                &["((5 * (x ^ y)) + (-0x17 * ~(x | y)))", "((5 * (x ^ y)) - (0x17 * ~(x | y)))"],
+                &[
+                    "((5 * (x ^ y)) + (-0x17 * ~(x | y)))",
+                    "((5 * (x ^ y)) - (0x17 * ~(x | y)))",
+                    "((-0x17 * ~(x & y)) + (0x1c * (x ^ y)))",
+                ],
                 10,
             ),
             // Variables {x, y, z} and {a, t} do not interact, so they are rebuilt separately (NeuReduce).
@@ -603,6 +607,18 @@ fn semi_linear_constant_absorbed() {
             ("x + 2*(x & 0x95) - 0x95", &["((2 * x) - (x ^ 0x95))"], 10),
             ("((y & ~0x36) ^ 0x627e) - 0x34", &["((y & -0x37) ^ 0x624a)"], 10),
             ("3*z + (y & ~0xff3a) - (0xff00 & y) + 0xff3a", &["((0xff00 ^ (y | 0x3a)) + (3 * z))"], 10),
+        ],
+    );
+}
+
+/// `c·b + c = -c·~b` drops the constant term.
+#[test]
+fn constant_into_not() {
+    check(
+        "i64",
+        &[
+            ("4*((x^z) & (y^z)) + 4", &["(-4 * ~((x ^ z) & (y ^ z)))"], 10),
+            ("2 + x*2", &["(-2 * ~x)"], 10),
         ],
     );
 }
