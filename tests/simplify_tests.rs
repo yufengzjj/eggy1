@@ -612,7 +612,17 @@ fn semi_linear_constant_absorbed() {
             ("-3*(x & 0xa3) + 0x1e9", &["(3 * (~x & 0xa3))"], 10),
             ("x + 2*(x & 0x95) - 0x95", &["((2 * x) - (x ^ 0x95))"], 10),
             ("((y & ~0x36) ^ 0x627e) - 0x34", &["((y & -0x37) ^ 0x624a)"], 10),
-            ("3*z + (y & ~0xff3a) - (0xff00 & y) + 0xff3a", &["((0xff00 ^ (y | 0x3a)) + (3 * z))"], 10),
+            ("3*z + (y & ~0xff3a) - (0xff00 & y) + 0xff3a", &["((0xff00 ^ (y | 0x3a)) + (3 * z))", "(((y & -0x3b) ^ 0xff3a) + (3 * z))"], 10),
+        ],
+    );
+    // A multiple of a leaf added to one bitwise term splits its bits into
+    // several tables; subtracting it first leaves one term.
+    check(
+        "i64",
+        &[
+            ("(0x7fffffffffff004f & x) + 0xffb0 + (x & 0x7fffffffffffc6ff)", &["((0x3900 ^ (x | 0xc6b0)) + x)"], 10),
+            ("x + (-0x7ffffffffffffff8 & z) - ((0x7fffffffffffff47 & z) + 0xb8)", &["(x - ((z | 0xb0) ^ 8))"], 10),
+            ("(~x | 0x5c00) - (0xa300 & x) + 0xfb72", &["((0x5871 - x) + ((x ^ 0xa378) & 0xff00))", "((0x5871 - x) + ((x & 0xff00) ^ 0xa300))"], 10),
         ],
     );
     // The top bits only matter modulo 2 or 4, so they fit more than one group.

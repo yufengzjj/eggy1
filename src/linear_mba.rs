@@ -384,7 +384,44 @@ fn rebuild_gp(gp: &[u64], lv: &[T], mut konst: u64, w: &Width) -> (Vec<(u64, T)>
 /// up) whose table agrees with `g_j` in its low `w-j` bits. Each group has mask `M`;
 /// each group is rebuilt as a linear MBA `L` of the leaves and contributes
 /// `L(x & M)`, i.e. `c·(b(x) & M)` per term `c·b`, plus `c·~M` when `b(0) = -1`.
+/// Also tries `t - a·v`, added back as a term, for the leaf `v` and small `a`
+/// that leave no more groups and the smallest table values: in
+/// `((x ^ K) | C) + x` the bits of the bitwise term have tables 0, ±1, but the
+/// `+ x` makes them 0, 1, 2.
 fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
+    let m = w.mask;
+    let (e0, groups) = bit_groups(t, lv, w)?;
+    let mut cands = Vec::new();
+    semi_linear_candidates(&groups, lv, e0, w, &mut cands);
+    let mut best: Option<((u64, u64), usize, i64, u64, Vec<(Vec<u64>, u64)>)> = None;
+    for (i, l) in lv.iter().enumerate() {
+        for a in [1i64, -1, 2, -2, 3, -3] {
+            let peeled = T::Op("Sub".into(), vec![t.clone(), T::Op("Mul".into(), vec![T::Num(a), l.clone()])]);
+            let Some((e0, gs)) = bit_groups(&peeled, lv, w) else { continue };
+            let s = spread(&gs, w);
+            if gs.len() <= groups.len() && s < best.as_ref().map_or(spread(&groups, w), |b| b.0) {
+                best = Some((s, i, a, e0, gs));
+            }
+        }
+    }
+    if let Some((_, i, a, e0, gs)) = best {
+        let mut sub = Vec::new();
+        semi_linear_candidates(&gs, lv, e0, w, &mut sub);
+        cands.extend(sub.into_iter().map(|c| build_sum(&[(1, c), (a as u64 & m, lv[i].clone())], 0, w)));
+    }
+    // Masks that differ only in bits that cannot matter tie on size; keep the short one.
+    cands.into_iter().min_by_key(|c| (size(c), const_bits(c)))
+}
+
+/// Largest table value in magnitude, then the sum of each group's largest.
+fn spread(groups: &[(Vec<u64>, u64)], w: &Width) -> (u64, u64) {
+    let per_group = groups.iter().map(|(g, _)| g.iter().map(|&v| w.signed(v).unsigned_abs()).max().unwrap_or(0));
+    (per_group.clone().max().unwrap_or(0), per_group.fold(0, u64::saturating_add))
+}
+
+/// `e(0)` and the bits of the semi-linear region `t` grouped by table, as
+/// `(table, mask)`; `None` if `t` is not semi-linear.
+fn bit_groups(t: &T, lv: &[T], w: &Width) -> Option<(u64, Vec<(Vec<u64>, u64)>)> {
     let n = lv.len();
     let m = w.mask;
     let at = |j: u32, q: usize| {
@@ -414,19 +451,20 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
             _ => groups.push((g, 1 << j)),
         }
     }
-    let mut cands = Vec::new();
+    Some((e0, groups))
+}
+
+fn semi_linear_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, cands: &mut Vec<T>) {
     let mut seen = std::collections::HashSet::new();
-    for groups in half_flips(&groups, w) {
+    for groups in half_flips(groups, w) {
         for gs in high_merges(&groups, w) {
             let mut key: Vec<(Vec<u64>, u64)> = gs.clone();
             key.sort_unstable();
             if seen.insert(key) {
-                grouped_candidates(&gs, lv, e0, w, &mut cands);
+                grouped_candidates(&gs, lv, e0, w, cands);
             }
         }
     }
-    // Masks that differ only in bits that cannot matter tie on size; keep the short one.
-    cands.into_iter().min_by_key(|c| (size(c), const_bits(c)))
 }
 
 fn const_bits(t: &T) -> u32 {
@@ -463,6 +501,7 @@ fn grouped_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, 
     let m = w.mask;
     let r = groups.len();
     cands.push(masked_groups(groups, lv, e0, w));
+    single_leaf(groups, lv, e0, w, cands);
     let mut shifts = vec![vec![0; r]];
     for i in 0..r {
         if let Some(h) = solve_mul(groups[i].1, e0, w) {
@@ -490,6 +529,44 @@ fn grouped_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, 
             .collect();
         let hs: Vec<u64> = refined.iter().map(|(_, mask)| if mask & e != 0 { s } else { 0 }).collect();
         cands.extend(const_leaf_groups(&refined, &[hs], lv, e0, w));
+    }
+}
+
+/// When every table depends on one leaf `y` only and takes the values 0 and ±c,
+/// the region is `e0 + c·(y & P) - c·(y & N)`, which is `c·((y & M) ^ K) + r`
+/// with `M = P | N`, `K = N | Z` for any `Z` outside `M`, and `r = e0 - c·K`.
+fn single_leaf(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, cands: &mut Vec<T>) {
+    let m = w.mask;
+    let Some(i) = (0..lv.len()).find(|&i| groups.iter().all(|(g, _)| g.iter().enumerate().all(|(q, &v)| v == g[q & 1 << i]))) else {
+        return;
+    };
+    let vals: Vec<(u64, u64)> = groups.iter().map(|(g, mask)| (g[1 << i], *mask)).filter(|&(v, _)| v != 0).collect();
+    let Some(&(c, _)) = vals.first() else { return };
+    let neg_c = c.wrapping_neg() & m;
+    if vals.iter().any(|&(v, _)| v != c && v != neg_c) {
+        return;
+    }
+    let mask_of = |c: u64| vals.iter().filter(|&&(v, _)| v == c).fold(0u64, |acc, &(_, k)| acc | k);
+    let (p, n) = (mask_of(c), mask_of(neg_c));
+    let free = m & !(p | n);
+    let y = &lv[i];
+    for (c, p, n) in [(c, p, n), (neg_c, n, p)] {
+        let mask = p | n;
+        let mut zs = vec![0, free];
+        if let Some(h) = solve_mul(c, e0.wrapping_sub(c.wrapping_mul(n)) & m, w) {
+            zs.extend([h, h & free]);
+        }
+        zs.sort_unstable();
+        zs.dedup();
+        for z in zs.into_iter().filter(|z| z & !free == 0) {
+            let k = n | z;
+            let mut inner = if mask == m { y.clone() } else { T::Op("And".into(), vec![y.clone(), T::Num(w.signed(mask))]) };
+            if k != 0 {
+                inner = T::Op("Xor".into(), vec![inner, T::Num(w.signed(k))]);
+            }
+            let rest = e0.wrapping_sub(c.wrapping_mul(k)) & m;
+            cands.push(build_sum(&[(c, inner)], rest, w));
+        }
     }
 }
 
