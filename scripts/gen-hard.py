@@ -7,7 +7,9 @@ Sections:
 - one obfuscated subterm repeated, also inside bitwise operations;
 - two levels of (v + Z) substitution;
 - 8 variables in overlapping pairs, deeper bitwise terms, noisy product
-  operands, sums of products, and arithmetic leaves over 4 variables.
+  operands, sums of products, and arithmetic leaves over 4 variables;
+- semi-linear MBA (bitwise operations with constants): 4 variables, 64-bit
+  constants, depth 3, a constant offset, and semi-linear arithmetic leaves.
 
 Zero MBAs are sums c*(f - g), with g the bitwise expression f rewritten by
 identities such as a&b = a+b-(a|b). Every case is checked on random inputs.
@@ -231,6 +233,73 @@ def wide_arith_leaves(r):
     return emit(r, sum_tree(obf), sum_tree(gt), vs)
 
 
+def const(r, wide):
+    if wide:
+        return r.getrandbits(64)
+    return r.choice([r.randrange(1, 256), r.randrange(1, 1 << 16), r.choice([0xF0, 0x0F, 0x5C, 0x33, 0xCC, 0xFF00])])
+
+
+def cbitwise(r, vars, depth, wide=False):
+    """Bitwise expression where an operand is a constant half of the time."""
+    if depth == 0:
+        return ("var", r.choice(vars))
+    op = r.choice(["and", "or", "xor", "not", "and", "or", "xor"])
+    if op == "not":
+        return ("not", cbitwise(r, vars, depth - 1, wide))
+    other = ("num", const(r, wide)) if r.random() < 0.5 else cbitwise(r, vars, depth - 1, wide)
+    return (op, cbitwise(r, vars, depth - 1, wide), other)
+
+
+def czero_terms(r, vars, k, depth=2, wide=False):
+    out = []
+    for _ in range(k):
+        c = r.choice([1, 2, 3, 5, -1, -2, -3, -7])
+        f = cbitwise(r, vars, depth, wide)
+        out += [(c, f), (-c, expand(f, r, 0.9))]
+    return out
+
+
+def semi_case(r, vs, depth, k, wide=False, konst=False):
+    gt = [(r.choice([1, 1, 2, 3, -1, -2]), cbitwise(r, vs, depth, wide))]
+    if r.random() < 0.5:
+        gt.append((r.choice([1, 2, -1, 3]), ("var", r.choice(vs))))
+    if konst:
+        gt.append((1, ("num", const(r, wide))))
+    obf = [(c, expand(e, r, 0.7)) for c, e in gt] + czero_terms(r, vs, k, 2, wide)
+    r.shuffle(obf)
+    return emit(r, sum_tree(obf), sum_tree(gt), vs)
+
+
+def semi_4vars(r):
+    return semi_case(r, ["x", "y", "z", "w"], 2, 3)
+
+
+def semi_wide_consts(r):
+    return semi_case(r, ["x", "y"], 2, 3, wide=True)
+
+
+def semi_deep(r):
+    return semi_case(r, ["x", "y", "z"], 3, 3)
+
+
+def semi_offset(r):
+    return semi_case(r, ["x", "y"], 2, 3, konst=True)
+
+
+def semi_arith_leaves(r):
+    """Semi-linear ground truth with variables replaced by v + Z, Z a semi-linear zero."""
+    vs = ["x", "y", "z"]
+    gt = [(r.choice([1, 2, -1]), cbitwise(r, vs, 2)), (r.choice([1, 3, -1]), ("var", r.choice(vs)))]
+
+    def noise(v):
+        z = czero_terms(r, vs, 1, 1)
+        return ("add", ("var", v), sum_tree(z))
+
+    obf = [(c, subst(expand(e, r, 0.7), noise)) for c, e in gt] + czero_terms(r, vs, 2)
+    r.shuffle(obf)
+    return emit(r, sum_tree(obf), sum_tree(gt), vs)
+
+
 def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 100
     r = random.Random(1)
@@ -245,6 +314,11 @@ def main():
         ("product with noisy operands,groundtruth", noisy_product),
         ("sum of products of linear MBA,groundtruth", poly_degree2),
         ("4-variable arithmetic leaves,groundtruth", wide_arith_leaves),
+        ("semi-linear over 4 variables,groundtruth", semi_4vars),
+        ("semi-linear with 64-bit constants,groundtruth", semi_wide_consts),
+        ("depth-3 semi-linear over 3 variables,groundtruth", semi_deep),
+        ("semi-linear with a constant offset,groundtruth", semi_offset),
+        ("semi-linear arithmetic leaves,groundtruth", semi_arith_leaves),
     ]
     for name, f in sections:
         print(f"#{name}")
