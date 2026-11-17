@@ -534,6 +534,12 @@ fn linear_mba() {
                 &["((((y ^ z) & x) + (-2 * (y ^ z))) + (a & t))"],
                 10,
             ),
+            // 8 leaves: rebuilt per group of leaves that share a conjunction.
+            (
+                "(((((g & e) * 3) + ((((5 * ~(b | a)) + (-3 * ~a)) + (((((c | ~e) + (((b | a) * 5) + (-3 * a))) + (-2 * (f ^ ~d))) + (-3 * (g & e))) - c)) - h)) - (c | ~e)) - (b | e))",
+                &["(((2 * (f ^ d)) - c) - ((b | e) + h))"],
+                10,
+            ),
         ],
     );
     check(

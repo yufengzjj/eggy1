@@ -168,11 +168,31 @@ impl Ctx<'_> {
             .unwrap()
     }
 
+    /// Rebuilds each part of the linear `p` whose conjunctions share leaves on
+    /// its own, so that `simba` sees few leaves even when `p` has many.
     fn build_linear(&self, p: &Poly) -> T {
-        let terms: Vec<(u64, T)> = p.iter().filter(|(m, _)| m.len() == 1).map(|(m, c)| (*c, self.conj_term(m[0]))).collect();
-        let konst = p.get(&vec![]).copied().unwrap_or(0);
-        let t = build_sum(&terms, konst, self.w);
-        simba(&t, self.w).unwrap_or(t)
+        let mut parts: Vec<(Conj, Vec<(u64, Conj)>)> = Vec::new();
+        for (m, &c) in p.iter().filter(|(m, _)| m.len() == 1) {
+            let mut part = (m[0], vec![(c, m[0])]);
+            parts.retain(|q| {
+                let joined = q.0 & part.0 != 0;
+                if joined {
+                    part.0 |= q.0;
+                    part.1.extend(&q.1);
+                }
+                !joined
+            });
+            parts.push(part);
+        }
+        let mut konst = p.get(&vec![]).copied().unwrap_or(0);
+        let mut built = Vec::new();
+        for (_, ms) in &parts {
+            let terms: Vec<(u64, T)> = ms.iter().map(|&(c, m)| (c, self.conj_term(m))).collect();
+            let t = build_sum(&terms, konst, self.w);
+            konst = 0;
+            built.push(simba(&t, self.w).unwrap_or(t));
+        }
+        built.into_iter().reduce(|a, b| T::Op("Add".into(), vec![a, b])).unwrap_or_else(|| build_sum(&[], konst, self.w))
     }
 
     /// Short term for `p`: pull out a common conjunction `f` (`p = f·q + r`)
@@ -245,9 +265,16 @@ fn has_product(t: &T, w: &Width) -> bool {
 }
 
 /// Rebuilt form of the polynomial region rooted at `t`, if it has a product of
-/// non-constant terms and the rebuilt form is smaller.
+/// non-constant terms or is a linear region with more than `MAX_LEAVES` leaves,
+/// and the rebuilt form is smaller.
 pub(crate) fn simplify_poly(t: &T, w: &Width) -> Option<T> {
-    if !has_product(t, w) {
+    // A bitwise root would be its own leaf, and `leaf` rewrites leaves.
+    let wide = kind(t, w) == Kind::Lin && {
+        let mut lv = Vec::new();
+        leaves(t, w, &mut lv);
+        lv.len() > MAX_LEAVES
+    };
+    if !wide && !has_product(t, w) {
         return None;
     }
     let mut ctx = Ctx { w, leaves: Vec::new(), built: Default::default() };

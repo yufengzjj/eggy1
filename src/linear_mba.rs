@@ -939,7 +939,7 @@ fn substitute_atoms(t: &T, w: &Width) -> T {
 }
 
 /// Rewrite the egglog term `egg` (W-bit wrapping semantics) with every linear
-/// MBA region of at most `MAX_LEAVES` leaves, and every polynomial MBA region,
+/// MBA region, and every polynomial MBA region,
 /// rebuilt in a smaller form. Returns `egg` unchanged when nothing gets smaller.
 pub fn simplify_linear(egg: &str, w: u32) -> String {
     let w = Width::new(w);
