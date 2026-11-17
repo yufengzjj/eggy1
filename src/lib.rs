@@ -274,6 +274,18 @@ pub fn make_egg(num_type: &str) -> String {
     egg.push_str(&rewrite!("(x*x)&3"=>"x&1";"simplify"));
     // x & -x is x's lowest set bit L; -L sets every bit from L up, and x has none below L.
     egg.push_str(&rewrite!("x&-(x&-x)"=>"x";"simplify"));
+    // x & 2x keeps the bits i with x_i = x_(i-1) = 1, all above L, where -x is ~x
+    // and x - 1 is x; 2x has no bit L.
+    egg.push_str(&rewrite!("(x&(2*x))&-x"=>"0";"simplify"));
+    egg.push_str(&rewrite!("-x&~(x&(2*x))"=>"-x";"simplify"));
+    egg.push_str(&rewrite!("x&~(-x&(-2*x))"=>"x";"simplify"));
+    egg.push_str(&rewrite!("x&~(-x&(2*x))"=>"x";"simplify"));
+    egg.push_str(&rewrite!("(2*x)&(x&-x)"=>"0";"simplify"));
+    egg.push_str(&rewrite!("(x+-1)|(x&(2*x))"=>"x+-1";"simplify"));
+    // -2x has no bits up to L, where x - 1 differs from x.
+    egg.push_str(&rewrite!("((-2*x)&(x+-1))|x"=>"x";"simplify"));
+    // -(y | -a) | y = a for y ⊆ a.
+    egg.push_str(&rewrite!("-(y|-(x|y))|y"=>"x|y";"simplify"));
     egg.push_str(&rewrite!("~x^~y"=>"x^y";"simplify"));
     egg.push_str(&rewrite!("(x|y)^(~x|~y)"=>"~(x^y)";"simplify"));
     egg.push_str(&rewrite!("(x&y)|~(x|y)"=>"~(x^y)";"simplify"));
