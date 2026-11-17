@@ -407,16 +407,62 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
             g.push((v | sign_fill) & m);
         }
         let same = |rep: &[u64]| rep.iter().zip(&g).all(|(a, b)| (a ^ b) & rest_mask == 0);
-        // High bits match several groups; prefer bit j-1's, which keeps the
-        // masks of small constants short.
-        let below = groups.iter().position(|(_, mask)| j > 0 && mask >> (j - 1) & 1 == 1);
-        match below.filter(|&i| same(&groups[i].0)).or_else(|| groups.iter().position(|(rep, _)| same(rep))) {
-            Some(i) => groups[i].1 |= 1 << j,
-            None => groups.push((g, 1 << j)),
+        // A bit matching several groups starts its own; high_merges places it.
+        let matching: Vec<usize> = (0..groups.len()).filter(|&i| same(&groups[i].0)).collect();
+        match matching[..] {
+            [i] => groups[i].1 |= 1 << j,
+            _ => groups.push((g, 1 << j)),
         }
     }
+    let mut cands = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for groups in half_flips(&groups, w) {
+        for gs in high_merges(&groups, w) {
+            let mut key: Vec<(Vec<u64>, u64)> = gs.clone();
+            key.sort_unstable();
+            if seen.insert(key) {
+                grouped_candidates(&gs, lv, e0, w, &mut cands);
+            }
+        }
+    }
+    // Masks that differ only in bits that cannot matter tie on size; keep the short one.
+    cands.into_iter().min_by_key(|c| (size(c), const_bits(c)))
+}
+
+fn const_bits(t: &T) -> u32 {
+    match t {
+        T::Num(v) => 64 - v.unsigned_abs().leading_zeros(),
+        T::Op(_, args) => args.iter().map(const_bits).sum(),
+        _ => 0,
+    }
+}
+
+/// The groups, plus variants with `-2^(r-1)` entries read as `+2^(r-1)`, for the
+/// first two groups that have such entries (`r = w - j` for the group's lowest bit
+/// `j`; both are the same value modulo `2^r`).
+fn half_flips(groups: &[(Vec<u64>, u64)], w: &Width) -> Vec<Vec<(Vec<u64>, u64)>> {
+    let mut out = vec![groups.to_vec()];
+    let flippable = groups.iter().enumerate().filter_map(|(i, (g, mask))| {
+        let rest = w.w - mask.trailing_zeros();
+        let half = (1u64 << (rest - 1)).wrapping_neg() & w.mask;
+        (rest > 1 && rest < w.w && g.contains(&half)).then_some((i, half))
+    });
+    for (i, half) in flippable.take(2) {
+        for v in out.clone() {
+            let mut v = v;
+            for x in v[i].0.iter_mut().filter(|x| **x == half) {
+                *x = x.wrapping_neg() & w.mask;
+            }
+            out.push(v);
+        }
+    }
+    out
+}
+
+fn grouped_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, cands: &mut Vec<T>) {
+    let m = w.mask;
     let r = groups.len();
-    let mut cands = vec![masked_groups(&groups, lv, e0, w)];
+    cands.push(masked_groups(groups, lv, e0, w));
     let mut shifts = vec![vec![0; r]];
     for i in 0..r {
         if let Some(h) = solve_mul(groups[i].1, e0, w) {
@@ -425,12 +471,12 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
             shifts.push(hs);
         }
     }
-    cands.extend(const_leaf_groups(&groups, &shifts, lv, e0, w));
+    cands.extend(const_leaf_groups(groups, &shifts, lv, e0, w));
     // Bits with the same table can still differ in their share of the constant,
     // as in `(y | 0x36) ^ 0x627c`. For `e0 = s·E`, split the groups by the bits
     // of `E` and give the groups inside `E` the shift `s`.
     let mut scales: Vec<u64> = vec![1, m];
-    for (g, _) in &groups {
+    for (g, _) in groups {
         scales.extend(g.iter().filter(|&&v| v != 0).flat_map(|&v| [v, v.wrapping_neg() & m]));
     }
     scales.sort_unstable();
@@ -445,7 +491,78 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
         let hs: Vec<u64> = refined.iter().map(|(_, mask)| if mask & e != 0 { s } else { 0 }).collect();
         cands.extend(const_leaf_groups(&refined, &[hs], lv, e0, w));
     }
-    cands.into_iter().min_by_key(|c| size(c))
+}
+
+/// The ways to merge each group that agrees with several lower-starting groups into
+/// one of them. A group whose lowest bit is `j` only matters modulo `2^(w-j)`, so
+/// it can take the table of any such group; which one lets the constant fold in
+/// depends on the constant, as for bit 7 of `3*(y ^ 0x61)` in u8.
+fn high_merges(groups: &[(Vec<u64>, u64)], w: &Width) -> Vec<Vec<(Vec<u64>, u64)>> {
+    let r = groups.len();
+    let low = |i: usize| groups[i].1.trailing_zeros();
+    let options: Vec<Vec<usize>> = (0..r)
+        .map(|i| {
+            let rest = w.w - low(i);
+            let rest_mask = if rest == 64 { u64::MAX } else { (1u64 << rest) - 1 };
+            (0..r)
+                .filter(|&k| low(k) < low(i))
+                .filter(|&k| groups[k].0.iter().zip(&groups[i].0).all(|(a, b)| (a ^ b) & rest_mask == 0))
+                .collect()
+        })
+        .collect();
+    let mut ambiguous: Vec<usize> = (0..r).filter(|&i| !options[i].is_empty()).collect();
+    ambiguous.sort_by_key(|&i| low(i));
+    // Enumerate at most 16 variants; the other groups join the group holding the
+    // bit just below them.
+    let mut count = 1;
+    let take = ambiguous
+        .iter()
+        .take_while(|&&i| {
+            count *= options[i].len();
+            count <= 16
+        })
+        .count();
+    let fixed = ambiguous.split_off(take);
+    let mut base: Vec<usize> = (0..r).collect();
+    for &i in &fixed {
+        let below = options[i].iter().copied().find(|&k| groups[k].1 >> (low(i) - 1) & 1 == 1);
+        base[i] = below.unwrap_or(options[i][0]);
+    }
+    let mut out = Vec::new();
+    let mut choice = vec![0usize; ambiguous.len()];
+    loop {
+        let mut target = base.clone();
+        for (a, &i) in ambiguous.iter().enumerate() {
+            target[i] = options[i][choice[a]];
+        }
+        // Targets start strictly lower, so following them ends.
+        let root = |mut i: usize| {
+            while target[i] != i {
+                i = target[i];
+            }
+            i
+        };
+        let gs = (0..r)
+            .filter(|&i| target[i] == i)
+            .map(|i| {
+                let mask = (0..r).filter(|&k| root(k) == i).fold(0u64, |acc, k| acc | groups[k].1);
+                (groups[i].0.clone(), mask)
+            })
+            .collect();
+        out.push(gs);
+        let mut a = 0;
+        while a < choice.len() {
+            choice[a] += 1;
+            if choice[a] < options[ambiguous[a]].len() {
+                break;
+            }
+            choice[a] = 0;
+            a += 1;
+        }
+        if a == choice.len() {
+            return out;
+        }
+    }
 }
 
 /// `e0 + Σ_group L_group(x & M)`, with `L_group` the linear MBA of the group's table.
