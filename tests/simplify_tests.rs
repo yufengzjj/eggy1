@@ -356,6 +356,11 @@ fn magic_division_signed() {
             "mulhi(0x12345678, n) + ((n >> 31) & 1)",
             "(mulhi(0x12345678, n) + ((n >> 0x1f) & 1))",
         ),
+        // Compiler form: constant second, sign mask subtracted.
+        ("i32", "(mulhi(n, 0x66666667) >> 2) - (n >> 31)", "(n / 0xa)"),
+        ("i32", "n - ((mulhi(n, 0x66666667) >> 2) - (n >> 31)) * 10", "(n % 0xa)"),
+        // Remainder after the linear pass distributes the product.
+        ("i32", "(n + (-10 * (mulhi(0x66666667, n) >> 2))) + ((n >> 31) * 10)", "(n % 0xa)"),
     ]);
 }
 
@@ -374,6 +379,22 @@ fn magic_division_unsigned() {
             "(((n - mulhi(0x2493, n)) >> 1) + mulhi(0x2493, n)) >> 2",
             "(n / 7)",
         ),
+        ("u64", "mulhi(n, 0xcccccccccccccccd) >> 3", "(n / 0xa)"),
+        ("u64", "n - (mulhi(n, 0xcccccccccccccccd) >> 3) * 10", "(n % 0xa)"),
+    ]);
+}
+
+#[test]
+fn shifts_in_multiply_form() {
+    check_exact(&[
+        ("u64", "(x >> 1) * 2", "(x & -2)"),
+        ("i8", "(x >> 3) * 8", "(x & -8)"),
+        ("u8", "(2 * x) >> 1", "(x & 0x7f)"),
+        // Arithmetic `>>` copies bit 62 into the sign bit: no mask form.
+        ("i64", "(2 * x) >> 1", "((2 * x) >> 1)"),
+        ("u64", "(x & 0xffffffffffffffe0) >> 5", "(x >> 5)"),
+        ("u8", "(x & 0x3f) * 4", "(4 * x)"),
+        ("u8", "(x & 0x1f) * 4", "((x & 0x1f) * 4)"),
     ]);
 }
 
@@ -401,7 +422,7 @@ fn unsigned_soundness_regressions() {
     check(
         "u8",
         &[
-            ("(a * 4) / 4", &["((a * 4) / 4)", "((a << 2) / 4)"], 10), // NOT a
+            ("(a * 4) / 4", &["(a & 0x3f)"], 10), // NOT a
             ("x / 255", &["(x / 0xff)"], 10),                         // NOT -x (0xff != -1)
             ("(a >> 255) >> 1", &["((a >> 0xff) >> 1)", "0"], 10),    // NOT a
             ("(a << 255) << 1", &["((a << 0xff) * 2)", "0"], 10),     // NOT a
@@ -480,8 +501,8 @@ fn known_bits() {
         "i32",
         &[
             ("(x & 0xff) >> 8", &["0"], 10),
-            // Sign bit not known zero: arithmetic `>>` keeps it, must NOT fold.
-            ("(x & -0x100) >> 8", &["((x & -0x100) >> 8)"], 10),
+            // Sign bit not known zero: arithmetic `>>` keeps it, must NOT fold to 0.
+            ("(x & -0x100) >> 8", &["(x >> 8)"], 10),
         ],
     );
     check("i8", &[("(x << 4) & 15", &["0"], 10)]);
@@ -531,7 +552,7 @@ fn linear_mba() {
             // Variables {x, y, z} and {a, t} do not interact, so they are rebuilt separately (NeuReduce).
             (
                 "2*(~y|z)-(~x&y|~z)-3*(x&y^~z)-(x&~y&~z)+3*(y|~z)-2*(x&y|z)-(~x)-(x&y^z)-(a&~t)+a",
-                &["((((y ^ z) & x) + (-2 * (y ^ z))) + (a & t))"],
+                &["((a & t) - ((y ^ z) + ((y ^ z) & ~x)))"],
                 10,
             ),
             // 8 leaves: rebuilt per group of leaves that share a conjunction.

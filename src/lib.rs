@@ -198,6 +198,8 @@ pub fn make_egg(num_type: &str) -> String {
     egg.push_str(&rewrite!("-(x-y)"<=>"y-x";"canonicalization"));
     egg.push_str(&rewrite!("-(x*y)"<=>"-x*y";"canonicalization"));
     egg.push_str(&rewrite!("(Num x)*-y"<=>"(- (Num x))*y";"canonicalization"));
+    // Folded negative factors never match the rule above; this lets `a + -c*b` become `a - c*b`.
+    egg.push_str(&format!("(rewrite (Mul (Num c) a) (Neg (Mul (Num (wrapping-neg-{num_type} c)) a)) :when ((is-neg-in c {})) :ruleset canonicalization)\n", width_of(num_type)));
     egg.push_str(&rewrite!("(Num a)*x+(Num a)"=>"(Num a)*(x+1)";"canonicalization"));
     egg.push_str(&rewrite!("(Num a)*x-(Num a)"=>"(Num a)*(x-1)";"canonicalization"));
     egg.push_str(&rewrite!("((Num a)*x)&(Num a)"<=>"(Num a)*(x&1)";format!("canonicalization :when ((is-2-pow-n-{} a))",num_type)));
@@ -386,6 +388,14 @@ pub fn make_egg(num_type: &str) -> String {
     if !is_signed(num_type) {
         egg.push_str(&rewrite!("(a<<(Num c))>>(Num c)"=>"a&(-1>>(Num c))";format!("simplify :when ((is-shl-in-{0} c))",num_type)));
     }
+    // `a << c` is canonicalized to `a * 2^c`, so the shift rules also need the multiply form.
+    let w = width_of(num_type);
+    egg.push_str(&format!("(rewrite (Mul (Shr a (Num c)) (Num p)) (And a (Shl (Num -1) (Num c))) :when ((is-pow2-of p c {w})) :ruleset simplify)\n"));
+    if !is_signed(num_type) {
+        egg.push_str(&format!("(rewrite (Shr (Mul a (Num p)) (Num c)) (And a (Shr (Num -1) (Num c))) :when ((is-pow2-of p c {w})) :ruleset simplify)\n"));
+    }
+    egg.push_str(&format!("(rewrite (Shr (And a (Num m)) (Num c)) (Shr a (Num c)) :when ((covers-high m c {w})) :ruleset simplify)\n"));
+    egg.push_str(&format!("(rewrite (Mul (And a (Num m)) (Num p)) (Mul a (Num p)) :when ((covers-low m p {w})) :ruleset simplify)\n"));
 
     // HD ch. 10: recognize magic-number division and rewrite back to `n / d`.
     // The divisor d is recovered from (M, s) by the magic-div-* primitive, which
@@ -393,7 +403,14 @@ pub fn make_egg(num_type: &str) -> String {
     // width/signedness (else the rule does not fire). `Mulhi` is the high half of
     // the 2W-bit product (mulhs for signed types, mulhu for unsigned).
     let w1 = width_of(num_type) - 1;
+    egg.push_str("(rewrite (Mulhi n (Num m)) (Mulhi (Num m) n) :ruleset canonicalization)\n");
+    egg.push_str(&format!(
+"(rewrite (Sub n (Mul (Div n (Num d)) (Num d))) (Mod n (Num d)) :ruleset simplify)
+(rule ((= e (Add n (Mul (Div n (Num d)) (Num nd)))) (= nd (wrapping-neg-{num_type} d))) ((union e (Mod n (Num d)))) :ruleset simplify)
+"));
     if is_signed(num_type) {
+        // Compilers subtract the sign mask (0 or -1) instead of adding the sign bit.
+        egg.push_str(&format!("(rewrite (Sub a (Shr n (Num {w1}))) (Add a (And (Shr n (Num {w1})) (Num 1))) :ruleset canonicalization)\n"));
         // Signed division by 2^k (HD 10-1): add (2^k-1) if n<0, then shift.
         egg.push_str(&format!(
 "(rule ((= e (Shr (Add n (And (Shr n (Num {w1})) (Num mask))) (Num k))) (= dd (pow2div-{t} mask k))) ((union e (Div n (Num dd)))) :ruleset simplify)\n",
@@ -490,6 +507,17 @@ pub fn kz_add(za: i64, zb: i64, w: i64) -> i64 {
 /// Known-zero mask of `a * b`: trailing known zeros add up.
 pub fn kz_mul(za: i64, zb: i64, w: i64) -> i64 {
     lowmask((za.trailing_ones() + zb.trailing_ones()).min(w as u32))
+}
+
+fn width_mask(w: i64) -> u64 {
+    if w >= 64 { u64::MAX } else { (1u64 << w) - 1 }
+}
+
+/// `m` keeps every bit of `a` that survives `a * p` for the power of two `p`.
+fn covers_low(m: i64, p: i64, w: i64) -> bool {
+    let p = p as u64 & width_mask(w);
+    let low = width_mask(w) >> p.trailing_zeros().min(63);
+    p.is_power_of_two() && (m as u64) & low == low
 }
 
 fn width_of(t: &str) -> u32 {
@@ -826,6 +854,10 @@ fn init_egg_function(eg: &mut EGraph) {
 
     add_primitive!(eg, "ilog2" = |a: i64| -> i64 { (a as u64).trailing_zeros() as i64 } );
     add_primitive!(eg, "pow2" = |a: i64| -> i64 { 1i64.wrapping_shl(a as u32) } );
+    add_primitive!(eg, "is-neg-in" = |c: i64, w: i64| -?> () { (((c as u64) & width_mask(w)) > (width_mask(w) >> 1) + 1).then_some(()) });
+    add_primitive!(eg, "is-pow2-of" = |p: i64, c: i64, w: i64| -?> () { (c >= 1 && c < w && (p as u64) & width_mask(w) == 1u64 << c).then_some(()) });
+    add_primitive!(eg, "covers-high" = |m: i64, c: i64, w: i64| -?> () { (c >= 1 && c < w && ((m as u64) | ((1u64 << c) - 1)) & width_mask(w) == width_mask(w)).then_some(()) });
+    add_primitive!(eg, "covers-low" = |m: i64, p: i64, w: i64| -?> () { covers_low(m, p, w).then_some(()) });
     add_primitive!( eg, "is-shl-in-i64" = |a: i64| -?> () { (a >= 1 && a <= 63).then_some(()) });
     add_primitive!( eg, "is-shl-in-u64" = |a: i64| -?> () { (a >= 1 && a <= 63).then_some(()) });
     add_primitive!( eg, "is-shl-in-i32" = |a: i64| -?> () { (a >= 1 && a <= 31).then_some(()) });
