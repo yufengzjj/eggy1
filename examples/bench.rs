@@ -85,7 +85,11 @@ fn load(args: &Args) -> Vec<Case> {
                 sections.push((header.clone(), Vec::new()));
                 in_data = true;
             }
-            let mut cols = line.split(',');
+            let mut depth = 0i32;
+            let mut cols = line.split(|ch| {
+                depth += (ch == '(') as i32 - (ch == ')') as i32;
+                ch == ',' && depth == 0
+            });
             let (Some(input), Some(truth)) = (cols.next(), cols.next()) else {
                 eprintln!("{file}: skipped line without ground truth: {line}");
                 continue;
