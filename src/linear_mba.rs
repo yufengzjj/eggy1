@@ -393,21 +393,36 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
     let (e0, groups) = bit_groups(t, lv, w)?;
     let mut cands = Vec::new();
     semi_linear_candidates(&groups, lv, e0, w, &mut cands);
-    let mut best: Option<((u64, u64), usize, i64, u64, Vec<(Vec<u64>, u64)>)> = None;
+    let mut peels = Vec::new();
+    let mut best: Option<((u64, u64), usize)> = None;
     for (i, l) in lv.iter().enumerate() {
         for a in [1i64, -1, 2, -2, 3, -3] {
             let peeled = T::Op("Sub".into(), vec![t.clone(), T::Op("Mul".into(), vec![T::Num(a), l.clone()])]);
             let Some((e0, gs)) = bit_groups(&peeled, lv, w) else { continue };
             let s = spread(&gs, w);
-            if gs.len() <= groups.len() && s < best.as_ref().map_or(spread(&groups, w), |b| b.0) {
-                best = Some((s, i, a, e0, gs));
+            if gs.len() <= groups.len() && s < best.map_or(spread(&groups, w), |b| b.0) {
+                best = Some((s, peels.len()));
             }
+            peels.push((i, a, e0, gs));
         }
     }
-    if let Some((_, i, a, e0, gs)) = best {
+    let add = |c: T, i: usize, a: i64| build_sum(&[(1, c), (a as u64 & m, lv[i].clone())], 0, w);
+    if let Some((_, k)) = best {
+        let (i, a, e0, gs) = &peels[k];
         let mut sub = Vec::new();
-        semi_linear_candidates(&gs, lv, e0, w, &mut sub);
-        cands.extend(sub.into_iter().map(|c| build_sum(&[(1, c), (a as u64 & m, lv[i].clone())], 0, w)));
+        semi_linear_candidates(gs, lv, *e0, w, &mut sub);
+        cands.extend(sub.into_iter().map(|c| add(c, *i, *a)));
+    }
+    let mut limit = cands.iter().map(size).min().unwrap_or(usize::MAX).min(size(t));
+    shape_candidates(&groups, lv, e0, w, limit, &mut cands);
+    for (i, a, e0, gs) in &peels {
+        limit = cands.iter().map(size).min().unwrap_or(limit);
+        let extra = size(&add(T::Num(1), *i, *a)) - 1;
+        if limit > extra {
+            let mut sub = Vec::new();
+            shape_candidates(gs, lv, *e0, w, limit - extra, &mut sub);
+            cands.extend(sub.into_iter().map(|c| add(c, *i, *a)));
+        }
     }
     // Masks that differ only in bits that cannot matter tie on size; keep the short one.
     cands.into_iter().min_by_key(|c| (size(c), const_bits(c)))
@@ -417,6 +432,275 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
 fn spread(groups: &[(Vec<u64>, u64)], w: &Width) -> (u64, u64) {
     let per_group = groups.iter().map(|(g, _)| g.iter().map(|&v| w.signed(v).unsigned_abs()).max().unwrap_or(0));
     (per_group.clone().max().unwrap_or(0), per_group.fold(0, u64::saturating_add))
+}
+
+/// Largest bitwise expression size `shape_candidates` searches.
+const MAX_SHAPE: usize = 14;
+
+#[derive(Clone, Copy)]
+enum Shape {
+    Leaf(usize),
+    Const,
+    Not(usize),
+    Bin(&'static str, usize, usize),
+}
+
+/// Bitwise expressions of `n` leaves and constants, one per set of truth tables
+/// they can give at one bit position when every constant bit is free. Tables are
+/// indexed by point `q` (leaf `i` = bit `i` of `q`); a set is a 256-bit mask.
+struct Shapes {
+    n: usize,
+    sets: Vec<[u64; 4]>,
+    elems: Vec<Vec<u8>>,
+    how: Vec<Shape>,
+    /// `levels[s]`: the entries of size `s`.
+    levels: Vec<std::ops::Range<usize>>,
+    seen: std::collections::HashSet<[u64; 4]>,
+}
+
+fn one(f: u8) -> [u64; 4] {
+    let mut s = [0; 4];
+    s[(f >> 6) as usize] |= 1 << (f & 63);
+    s
+}
+
+impl Shapes {
+    fn new(n: usize) -> Shapes {
+        let mut sh = Shapes { n, sets: Vec::new(), elems: Vec::new(), how: Vec::new(), levels: vec![0..0], seen: Default::default() };
+        let full = sh.full();
+        let mut level = Vec::new();
+        for i in 0..n {
+            let f = (0..1usize << n).filter(|q| q >> i & 1 == 1).fold(0u8, |acc, q| acc | 1 << q);
+            level.push((one(f), Shape::Leaf(i)));
+        }
+        let mut c = one(0);
+        c.iter_mut().zip(one(full)).for_each(|(a, b)| *a |= b);
+        level.push((c, Shape::Const));
+        sh.push_level(level);
+        sh
+    }
+
+    fn full(&self) -> u8 {
+        ((1u32 << (1 << self.n)) - 1) as u8
+    }
+
+    fn push_level(&mut self, level: Vec<([u64; 4], Shape)>) {
+        let start = self.sets.len();
+        for (s, how) in level {
+            if self.seen.insert(s) {
+                self.elems.push((0..=255u8).filter(|&f| s[(f >> 6) as usize] >> (f & 63) & 1 == 1).collect());
+                self.sets.push(s);
+                self.how.push(how);
+            }
+        }
+        self.levels.push(start..self.sets.len());
+    }
+
+    fn grow(&mut self, size: usize) {
+        let full = self.full();
+        while self.levels.len() <= size {
+            let s = self.levels.len();
+            let mut level = Vec::new();
+            for i in self.levels[s - 1].clone() {
+                let mut set = [0; 4];
+                for &f in &self.elems[i] {
+                    let g = !f & full;
+                    set[(g >> 6) as usize] |= 1 << (g & 63);
+                }
+                level.push((set, Shape::Not(i)));
+            }
+            for a in 1..=(s - 1) / 2 {
+                for i in self.levels[a].clone() {
+                    let js = self.levels[s - 1 - a].clone();
+                    let js = if 2 * a == s - 1 { i..js.end } else { js };
+                    for k in js {
+                        let mut sets = [[0u64; 4]; 3];
+                        for &x in &self.elems[i] {
+                            for &y in &self.elems[k] {
+                                for (set, r) in sets.iter_mut().zip([x & y, x | y, x ^ y]) {
+                                    set[(r >> 6) as usize] |= 1 << (r & 63);
+                                }
+                            }
+                        }
+                        for (set, op) in sets.into_iter().zip(["And", "Or", "Xor"]) {
+                            level.push((set, Shape::Bin(op, i, k)));
+                        }
+                    }
+                }
+            }
+            self.push_level(level);
+        }
+    }
+
+    /// Set the bits `j` of the constants (numbered in visiting order) so that
+    /// entry `i` gives table `f` there.
+    fn solve(&self, i: usize, f: u8, j: u32, consts: &mut Vec<u64>, slot: &mut usize) {
+        match self.how[i] {
+            Shape::Leaf(_) => {}
+            Shape::Const => {
+                if consts.len() <= *slot {
+                    consts.resize(*slot + 1, 0);
+                }
+                if f != 0 {
+                    consts[*slot] |= 1 << j;
+                }
+                *slot += 1;
+            }
+            Shape::Not(a) => self.solve(a, !f & self.full(), j, consts, slot),
+            Shape::Bin(op, a, b) => {
+                let apply = |x: u8, y: u8| match op {
+                    "And" => x & y,
+                    "Or" => x | y,
+                    _ => x ^ y,
+                };
+                let (x, y) = self.elems[a]
+                    .iter()
+                    .find_map(|&x| self.elems[b].iter().find(|&&y| apply(x, y) == f).map(|&y| (x, y)))
+                    .expect("table in the entry's set");
+                self.solve(a, x, j, consts, slot);
+                self.solve(b, y, j, consts, slot);
+            }
+        }
+    }
+
+    fn build(&self, i: usize, lv: &[T], consts: &[u64], slot: &mut usize, w: &Width) -> T {
+        match self.how[i] {
+            Shape::Leaf(k) => lv[k].clone(),
+            Shape::Const => {
+                *slot += 1;
+                T::Num(w.signed(consts.get(*slot - 1).copied().unwrap_or(0) & w.mask))
+            }
+            Shape::Not(a) => T::Op("Not".into(), vec![self.build(a, lv, consts, slot, w)]),
+            Shape::Bin(op, a, b) => {
+                let x = self.build(a, lv, consts, slot, w);
+                T::Op(op.into(), vec![x, self.build(b, lv, consts, slot, w)])
+            }
+        }
+    }
+}
+
+fn shapes(n: usize) -> &'static std::sync::Mutex<Shapes> {
+    static SHAPES: [OnceLock<std::sync::Mutex<Shapes>>; 2] = [OnceLock::new(), OnceLock::new()];
+    SHAPES[n - 2].get_or_init(|| std::sync::Mutex::new(Shapes::new(n)))
+}
+
+/// Candidates `c·B + r` smaller than `limit`, with `B` a bitwise expression of
+/// 2 or 3 leaves and constants. Bit `j` of `B` has a table `f_j`, and the region
+/// needs `c·(f_j(q) - f_j(0)) = g_j(q)` modulo `2^(w-j)`; the smallest `B` whose
+/// table set meets each bit's acceptable tables is found in `Shapes`.
+fn shape_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, mut limit: usize, cands: &mut Vec<T>) {
+    let n = lv.len();
+    if !(2..=3).contains(&n) {
+        return;
+    }
+    let m = w.mask;
+    let pts = 1usize << n;
+    let mut bits: Vec<(&Vec<u64>, u64)> = vec![(&groups[0].0, 0); w.w as usize];
+    for (g, mask) in groups {
+        for j in 0..w.w {
+            if mask >> j & 1 == 1 {
+                let rest = w.w - j;
+                bits[j as usize] = (g, if rest == 64 { u64::MAX } else { (1u64 << rest) - 1 });
+            }
+        }
+    }
+    let mut scales: Vec<u64> = groups.iter().flat_map(|(g, _)| g.iter().filter(|&&v| v != 0).flat_map(|&v| [v, v.wrapping_neg() & m])).collect();
+    scales.sort_unstable();
+    scales.dedup();
+    let zero_env: Vec<(T, u64)> = lv.iter().map(|l| (l.clone(), 0)).collect();
+    let nf = 1usize << pts;
+    for c in scales {
+        let overhead = if c == 1 { 0 } else if c == m { 1 } else { 2 };
+        // Table `f` fits when `c·(f(q) - f(0)) = g(q)` at every point: with `f(0) = 0`
+        // the points where `g = c` and not 0 need 1, those where `g = 0` and not `c`
+        // need 0; with `f(0) = 1` the same with `-c` and the complement.
+        let mut memo = std::collections::HashMap::new();
+        let mut accept = |&(g, rest_mask): &(&Vec<u64>, u64)| {
+            let is = |q: usize, v: u64| (v ^ g[q]) & rest_mask == 0;
+            let key: Vec<(usize, usize)> = [c, c.wrapping_neg()]
+                .iter()
+                .map(|&v| {
+                    let (mut ones, mut zeros) = (0usize, 0usize);
+                    for q in 0..pts {
+                        match (is(q, v), is(q, 0)) {
+                            (true, false) => ones |= 1 << q,
+                            (false, true) => zeros |= 1 << q,
+                            (false, false) => ones |= usize::MAX,
+                            _ => {}
+                        }
+                    }
+                    (ones, zeros)
+                })
+                .collect();
+            *memo.entry(key.clone()).or_insert_with(|| {
+                let mut set = [0u64; 4];
+                let (z, o) = (key[0], key[1]);
+                for f in 0..nf {
+                    let fits = if f & 1 == 0 { f & z.0 == z.0 && f & z.1 == 0 } else { !f & o.0 & (nf - 1) == o.0 && !f & o.1 == 0 };
+                    if fits {
+                        set[f >> 6] |= 1 << (f & 63);
+                    }
+                }
+                set
+            })
+        };
+        let acc: Vec<[u64; 4]> = bits.iter().map(&mut accept).collect();
+        if acc.iter().any(|a| a == &[0; 4]) {
+            continue;
+        }
+        // First ask for `B(0) = h` with `c·h = e0`, so that `r = 0`; only the low
+        // `w - tz(c)` bits of `h` matter.
+        let fixed = (if e0 == 0 { Some(0) } else { solve_mul(c, e0, w) }).map(|h| {
+            let low = w.w - c.trailing_zeros();
+            let mut acc = acc.clone();
+            for (j, a) in acc.iter_mut().enumerate().filter(|&(j, _)| (j as u32) < low) {
+                let at0 = if h >> j & 1 == 1 { !0x5555_5555_5555_5555u64 } else { 0x5555_5555_5555_5555 };
+                a.iter_mut().for_each(|x| *x &= at0);
+            }
+            acc
+        });
+        for (acc, r_size) in fixed.into_iter().map(|a| (a, 0)).chain([(acc, 2)]) {
+            if acc.iter().any(|a| a == &[0; 4]) {
+                continue;
+            }
+            let Some(b) = smallest_shape(&acc, n, MAX_SHAPE.min(limit.saturating_sub(overhead + r_size + 1)), lv, w) else {
+                continue;
+            };
+            let r = e0.wrapping_sub(c.wrapping_mul(eval(&b, w, &zero_env))) & m;
+            let cand = build_sum(&[(c, b)], r, w);
+            limit = limit.min(size(&cand));
+            cands.push(cand);
+        }
+    }
+}
+
+/// The smallest expression in `Shapes` of size at most `top` whose table set meets
+/// `acc[j]` for every bit `j`, with its constants solved bit by bit.
+fn smallest_shape(acc: &[[u64; 4]], n: usize, top: usize, lv: &[T], w: &Width) -> Option<T> {
+    let mut distinct = acc.to_vec();
+    distinct.sort_unstable();
+    distinct.dedup();
+    let mut sh = shapes(n).lock().unwrap();
+    let fits = |set: &[u64; 4]| distinct.iter().all(|a| a.iter().zip(set).any(|(x, y)| x & y != 0));
+    for s in 1..=top {
+        sh.grow(s);
+        let Some(i) = sh.levels[s].clone().find(|&i| fits(&sh.sets[i])) else { continue };
+        let mut consts = Vec::new();
+        let mut prev = None;
+        for (j, a) in acc.iter().enumerate() {
+            let meet: Vec<u8> = (0..4)
+                .flat_map(|k| {
+                    let b = a[k] & sh.sets[i][k];
+                    (0..64).filter(move |t| b >> t & 1 == 1).map(move |t| (k * 64 + t) as u8)
+                })
+                .collect();
+            let f = prev.filter(|p| meet.contains(p)).unwrap_or(meet[0]);
+            prev = Some(f);
+            sh.solve(i, f, j as u32, &mut consts, &mut 0);
+        }
+        return Some(sh.build(i, lv, &consts, &mut 0, w));
+    }
+    None
 }
 
 /// `e(0)` and the bits of the semi-linear region `t` grouped by table, as

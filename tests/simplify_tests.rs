@@ -623,6 +623,26 @@ fn semi_linear_mba() {
     check("u8", cases);
 }
 
+/// Semi-linear regions whose shortest form is one bitwise term with several constants.
+#[test]
+fn semi_linear_bitwise_shape() {
+    check(
+        "i64",
+        &[
+            (
+                "((((((((x | y) & (z ^ z)) + (((x ^ 0x4d) | 0xf) | ((y & 0xf592) & 0x1253))) + (0x2 * (((y ^ z) | (x & 0xe65d)) - ((y ^ z) & (x & 0xe65d))))) - (0x3 * ((((x + 0xe1) - (x & 0xe1)) + ((y | y) - (y & y))) - ((x | 0xe1) & (y ^ y))))) - (0x2 * ((y ^ z) ^ (x & 0xe65d)))) - (((x | y) + (z ^ z)) - ((x | y) | (z ^ z)))) + (0x3 * ((x | 0xe1) | (y ^ y))))",
+                &["(0x40 ^ (x | ((y & 0x1010) + 0xf)))"],
+                10,
+            ),
+            (
+                "((((((-((0x2 * ~((z ^ z)))) + (0x2 * ((((z | 0xf0) ^ (y & x)) + (-((z ^ x)) - 0x1)) - (((z | 0xf0) ^ (y & x)) | ~((z ^ x)))))) - ((((y + 0x2156) - (y | 0x2156)) + 0x5c) - ((y & 0x2156) & 0x5c))) - (0x5 * ((((x + 0xbf) - (x & 0xbf)) + 0xff00) - ((x | 0xbf) & 0xff00)))) + ((y & 0x2156) | 0x5c)) + (0x5 * ((x | 0xbf) | 0xff00))) + (0x2 * (-(((z | z) - (z & z))) - 0x1)))",
+                &["(2 * ((z ^ ~x) & ((z & (y ^ -0xf1)) ^ 0xf0)))"],
+                10,
+            ),
+        ],
+    );
+}
+
 /// Semi-linear rebuilds whose constant term is absorbed into a bitwise term.
 #[test]
 fn semi_linear_constant_absorbed() {
