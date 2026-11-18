@@ -335,22 +335,98 @@ pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
     let rebuilt = if has_const_bitwise(t, w) {
         semi_linear(t, &lv, w)?
     } else {
-        let pts = 1usize << n;
-        let m = w.mask;
-        let vals: Vec<u64> = (0..pts)
-            .map(|p| {
-                let env: Vec<(T, u64)> = lv.iter().enumerate().map(|(i, l)| (l.clone(), (p >> i & 1) as u64)).collect();
-                eval(t, w, &env)
-            })
-            .collect();
-        // e(x) = Σ_j 2^j g(bit j of x), with g(p) = e(p) - 2e(0); k = g(0).
-        let g: Vec<u64> = vals.iter().map(|v| v.wrapping_sub(vals[0].wrapping_mul(2)) & m).collect();
-        let k = g[0];
-        let gp: Vec<u64> = g.iter().map(|v| v.wrapping_sub(k) & m).collect();
-        let (terms, konst) = rebuild_gp(&gp, &lv, k.wrapping_neg() & m, w);
-        build_sum(&terms, konst, w)
+        let vals: Vec<u64> = (0..1usize << n).map(|p| eval(t, w, &point_env(&lv, p))).collect();
+        let rebuilt = rebuild_values(&vals, &lv, w);
+        match related_leaves(t, &lv, w) {
+            Some(r) if size(&r) < size(&rebuilt) => r,
+            _ => rebuilt,
+        }
     };
     Some(rebuilt).filter(|b| size(b) < size(t))
+}
+
+fn point_env(lv: &[T], p: usize) -> Vec<(T, u64)> {
+    lv.iter().enumerate().map(|(i, l)| (l.clone(), (p >> i & 1) as u64)).collect()
+}
+
+/// The linear MBA over `lv` with values `vals` on {0,1}^n.
+fn rebuild_values(vals: &[u64], lv: &[T], w: &Width) -> T {
+    let m = w.mask;
+    // e(x) = Σ_j 2^j g(bit j of x), with g(p) = e(p) - 2e(0); k = g(0).
+    let g: Vec<u64> = vals.iter().map(|v| v.wrapping_sub(vals[0].wrapping_mul(2)) & m).collect();
+    let k = g[0];
+    let gp: Vec<u64> = g.iter().map(|v| v.wrapping_sub(k) & m).collect();
+    let (terms, konst) = rebuild_gp(&gp, lv, k.wrapping_neg() & m, w);
+    build_sum(&terms, konst, w)
+}
+
+/// An arithmetic leaf `L` that is itself a linear MBA `ℓ` of other leaves (`a - d`,
+/// `(b ^ d) - b`) is treated as independent, but `L - ℓ = 0`, so the region can
+/// add `μ·(L - ℓ)` for any `μ`: in `(P & ~b) - (Q & (b | P)) + (b ^ d)` with
+/// `Q = (b ^ d) - b`, `μ = 1` removes `d` and leaves `b | P | Q`. Tries up to two
+/// such leaves with small `μ`.
+fn related_leaves(t: &T, lv: &[T], w: &Width) -> Option<T> {
+    let own = |l: &T| {
+        let mut sub = Vec::new();
+        leaves(l, w, &mut sub);
+        sub
+    };
+    let arith: Vec<&T> = lv
+        .iter()
+        .filter(|l| kind(l, w) == Kind::Lin && !has_const_bitwise(l, w) && own(l).iter().any(|s| lv.contains(s)))
+        .take(4)
+        .collect();
+    if arith.is_empty() {
+        return None;
+    }
+    let mut ext = lv.to_vec();
+    for l in &arith {
+        for s in own(l) {
+            if !ext.contains(&s) {
+                ext.push(s);
+            }
+        }
+    }
+    if ext.len() > MAX_LEAVES {
+        return None;
+    }
+    let pts = 1usize << ext.len();
+    let base: Vec<u64> = (0..pts).map(|p| eval(t, w, &point_env(&ext, p))).collect();
+    // `L - ℓ` at each point, with `ℓ` evaluated from `L`'s own leaves.
+    let diffs: Vec<Vec<u64>> = arith
+        .iter()
+        .map(|l| {
+            let i = ext.iter().position(|e| e == *l).unwrap();
+            (0..pts)
+                .map(|p| {
+                    let mut env = point_env(&ext, p);
+                    env.remove(i);
+                    ((p >> i & 1) as u64).wrapping_sub(eval(l, w, &env))
+                })
+                .collect()
+        })
+        .collect();
+    let mus = [1u64, 2, w.mask, w.mask - 1];
+    let mut combos: Vec<Vec<(usize, u64)>> = Vec::new();
+    for i in 0..arith.len() {
+        for &a in &mus {
+            combos.push(vec![(i, a)]);
+            for k in i + 1..arith.len() {
+                if a == 1 || a == w.mask {
+                    combos.extend([1, w.mask].map(|b| vec![(i, a), (k, b)]));
+                }
+            }
+        }
+    }
+    combos
+        .into_iter()
+        .map(|combo| {
+            let vals: Vec<u64> = (0..pts)
+                .map(|p| combo.iter().fold(base[p], |v, &(i, mu)| v.wrapping_add(mu.wrapping_mul(diffs[i][p])) & w.mask))
+                .collect();
+            rebuild_values(&vals, &ext, w)
+        })
+        .min_by_key(size)
 }
 
 /// Whether the linear region `t` has a bitwise operation with a constant operand.

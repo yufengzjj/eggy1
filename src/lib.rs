@@ -984,12 +984,19 @@ pub fn simplify_round(egg: &str, s: &str, cli: &Cli) -> Result<String, Error> {
 pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
     let egg = make_egg(&cli.num_type);
     let mut seed = s.to_string();
-    for _ in 0..cli.max_restarts.max(1) {
+    let (mut rounds, mut extra) = (cli.max_restarts.max(1), 2);
+    while rounds > 0 {
+        rounds -= 1;
         let extracted = simplify_round(&egg, &seed, cli)?;
         if extracted == seed {
             break;
         }
         seed = extracted;
+        // The last extraction can still hold a linear region the pre-pass rebuilds.
+        if rounds == 0 && extra > 0 && linear_mba::simplify_linear(&seed, width_of(&cli.num_type)) != seed {
+            rounds = 1;
+            extra -= 1;
+        }
     }
     Ok(egglog_to_infix(&seed, &|n| norm_const(n, &cli.num_type)))
 }

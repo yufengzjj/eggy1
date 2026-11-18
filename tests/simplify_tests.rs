@@ -558,7 +558,7 @@ fn linear_mba() {
             // 8 leaves: rebuilt per group of leaves that share a conjunction.
             (
                 "(((((g & e) * 3) + ((((5 * ~(b | a)) + (-3 * ~a)) + (((((c | ~e) + (((b | a) * 5) + (-3 * a))) + (-2 * (f ^ ~d))) + (-3 * (g & e))) - c)) - h)) - (c | ~e)) - (b | e))",
-                &["(((2 * (f ^ d)) - c) - ((b | e) + h))"],
+                &["(((2 * (f ^ d)) - c) - ((b | e) + h))", "((((2 * (f ^ d)) - c) - h) - (b | e))"],
                 10,
             ),
         ],
@@ -641,6 +641,24 @@ fn semi_linear_bitwise_shape() {
             ),
         ],
     );
+}
+
+/// Arithmetic leaves that are linear in the other leaves (`a - d`, `(b ^ d) - b`).
+#[test]
+fn related_arithmetic_leaves() {
+    check(
+        "i64",
+        &[
+            ("((b*b) & ~b) - ((((b ^ d) - b) & (b | (b * b))) - (b ^ d))", &["((b * b) | (b | ((b ^ d) - b)))"], 10),
+            ("(3*a - (d | a) - ((a - d) & (a + (d & a))))", &["((a - d) | (a + (d & a)))"], 10),
+        ],
+    );
+}
+
+/// The last extraction still holds a region the linear pre-pass rebuilds.
+#[test]
+fn extra_round_after_last_extraction() {
+    check("i64", &[("(x & (- ((x | y) & (~ (~ (((x | y) & (- y)) | (- y)))))))", &["(x & y)"], 10)]);
 }
 
 /// Semi-linear rebuilds whose constant term is absorbed into a bitwise term.
