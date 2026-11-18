@@ -6,7 +6,7 @@
 //! reverse.
 
 use crate::eval::{Term as T, size};
-use crate::linear_mba::{Kind, MAX_LEAVES, Width, build_sum, const_shift, eval, kind, leaves, rewrite, simba};
+use crate::linear_mba::{Kind, MAX_LEAVES, Width, build_sum, Prog, const_shift, kind, leaves, rewrite, simba};
 use std::collections::BTreeMap;
 
 /// Conjunction of leaves, as a set of leaf indices.
@@ -115,8 +115,12 @@ impl Ctx<'_> {
                 let x = self.poly(&a[0])?;
                 self.sum(self.scale(x, neg1), self.constant(neg1))
             }
+            // Semi-linear factors expand into many independent leaves (`x | K`, ...);
+            // rebuilt first, `(x + K) - (x | K)` is the single leaf `x & K`. Other factors
+            // stay as they are: rebuilt, `~(y - 1)` becomes `-y`, a leaf unrelated to `y - 1`.
             "Mul" => {
-                let (x, y) = (self.poly(&a[0])?, self.poly(&a[1])?);
+                let f = |t: &T| if has_const_bit(t, self.w) { rewrite(t, self.w) } else { t.clone() };
+                let (x, y) = (self.poly(&f(&a[0]))?, self.poly(&f(&a[1]))?);
                 self.product(&x, &y)?
             }
             "Shl" if const_shift(&a[1], self.w).is_some() => {
@@ -137,12 +141,8 @@ impl Ctx<'_> {
         if n > MAX_LEAVES {
             return self.leaf_poly(t);
         }
-        let mut a: Vec<u64> = (0..1usize << n)
-            .map(|p| {
-                let env: Vec<(T, u64)> = lv.iter().enumerate().map(|(i, l)| (l.clone(), (p >> i & 1) as u64)).collect();
-                eval(t, self.w, &env) & 1
-            })
-            .collect();
+        let prog = Prog::new(t, &lv, self.w);
+        let mut a: Vec<u64> = (0..1usize << n).map(|p| prog.at(p, self.w) & 1).collect();
         // Möbius transform: a[S] = Σ_{R ⊆ S} (-1)^{|S|-|R|} f(R).
         for i in 0..n {
             for p in 0..1usize << n {
@@ -249,6 +249,13 @@ impl Ctx<'_> {
             }
         }
         best.unwrap()
+    }
+}
+
+fn has_const_bit(t: &T, w: &Width) -> bool {
+    match t {
+        T::Op(_, a) => kind(t, w) == Kind::ConstBit || a.iter().any(|x| has_const_bit(x, w)),
+        _ => false,
     }
 }
 

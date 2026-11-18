@@ -132,6 +132,76 @@ pub(crate) fn eval(t: &T, w: &Width, leaf_vals: &[(T, u64)]) -> u64 {
     }
 }
 
+/// A linear region compiled once for evaluation at many points; `run` reads leaf
+/// `i` of the `lv` given to `new` from `leaf(i)`.
+pub(crate) struct Prog(Vec<Ins>);
+
+enum Ins {
+    Leaf(usize),
+    Num(u64),
+    Not(usize),
+    Neg(usize),
+    Shl(usize, u32),
+    Bin(fn(u64, u64) -> u64, usize, usize),
+}
+
+impl Prog {
+    pub(crate) fn new(t: &T, lv: &[T], w: &Width) -> Prog {
+        let mut p = Prog(Vec::new());
+        p.push(t, lv, w);
+        p
+    }
+
+    fn push(&mut self, t: &T, lv: &[T], w: &Width) -> usize {
+        let ins = match (lv.iter().position(|l| l == t), t) {
+            (Some(i), _) => Ins::Leaf(i),
+            (_, T::Num(c)) => Ins::Num(*c as u64),
+            (_, T::Var(_)) => unreachable!("variable missing from leaves"),
+            (_, T::Op(op, a)) => match op.as_str() {
+                "Not" => Ins::Not(self.push(&a[0], lv, w)),
+                "Neg" => Ins::Neg(self.push(&a[0], lv, w)),
+                "Shl" => Ins::Shl(self.push(&a[0], lv, w), const_shift(&a[1], w).unwrap()),
+                op => {
+                    let f: fn(u64, u64) -> u64 = match op {
+                        "Add" => u64::wrapping_add,
+                        "Sub" => u64::wrapping_sub,
+                        "Mul" => u64::wrapping_mul,
+                        "And" => |x, y| x & y,
+                        "Or" => |x, y| x | y,
+                        "Xor" => |x, y| x ^ y,
+                        _ => unreachable!("non-linear op {op} inside a linear region"),
+                    };
+                    let x = self.push(&a[0], lv, w);
+                    Ins::Bin(f, x, self.push(&a[1], lv, w))
+                }
+            },
+        };
+        self.0.push(ins);
+        self.0.len() - 1
+    }
+
+    pub(crate) fn run(&self, leaf: impl Fn(usize) -> u64, w: &Width) -> u64 {
+        let mut v: Vec<u64> = Vec::with_capacity(self.0.len());
+        for ins in &self.0 {
+            let r = match *ins {
+                Ins::Leaf(i) => leaf(i),
+                Ins::Num(c) => c,
+                Ins::Not(x) => !v[x],
+                Ins::Neg(x) => u64::wrapping_neg(v[x]),
+                Ins::Shl(x, k) => v[x] << k,
+                Ins::Bin(f, x, y) => f(v[x], v[y]),
+            };
+            v.push(r & w.mask);
+        }
+        v[v.len() - 1]
+    }
+
+    /// Value with leaf `i` set to bit `i` of `p`.
+    pub(crate) fn at(&self, p: usize, w: &Width) -> u64 {
+        self.run(|i| (p >> i & 1) as u64, w)
+    }
+}
+
 #[derive(Clone)]
 enum B {
     V(usize),
@@ -336,7 +406,8 @@ pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
     let rebuilt = if has_const_bitwise(t, w) {
         semi_linear(t, &lv, w)?
     } else {
-        let vals: Vec<u64> = (0..1usize << n).map(|p| eval(t, w, &point_env(&lv, p))).collect();
+        let prog = Prog::new(t, &lv, w);
+        let vals: Vec<u64> = (0..1usize << n).map(|p| prog.at(p, w)).collect();
         let rebuilt = rebuild_values(&vals, &lv, w);
         match related_leaves(t, &lv, w) {
             Some(r) if size(&r) < size(&rebuilt) => r,
@@ -346,9 +417,6 @@ pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
     Some(rebuilt).filter(|b| size(b) < size(t))
 }
 
-fn point_env(lv: &[T], p: usize) -> Vec<(T, u64)> {
-    lv.iter().enumerate().map(|(i, l)| (l.clone(), (p >> i & 1) as u64)).collect()
-}
 
 /// The linear MBA over `lv` with values `vals` on {0,1}^n.
 fn rebuild_values(vals: &[u64], lv: &[T], w: &Width) -> T {
@@ -361,86 +429,149 @@ fn rebuild_values(vals: &[u64], lv: &[T], w: &Width) -> T {
     build_sum(&terms, konst, w)
 }
 
-/// Most leaves `pairwise` handles; the region is evaluated at all `2^n` points.
-const MAX_PAIR_LEAVES: usize = 10;
+/// Most leaves `small_blocks` handles.
+const MAX_BLOCK_LEAVES: usize = 12;
 
-/// Rebuild a linear region whose conjunction-basis expansion has no terms of degree
-/// above 2: `k + Σ s_i·x_i + Σ c_ij·(x_i & x_j)`. Each `c·(x & y)` can also be written
-/// as `c·x + c·y - c·(x | y)`, `(c/2)·(x + y) - (c/2)·(x ^ y)` (even `c`),
-/// `c·x - c·(x & ~y)` or `c·y - c·(~x & y)`, moving weight into the single terms;
-/// the choice per pair that gives the smallest sum wins. Not limited to `MAX_LEAVES`.
-fn pairwise(t: &T, w: &Width) -> Option<T> {
+/// Upper bound on the degree of `t`'s conjunction-basis expansion: the most leaves
+/// any bitwise subterm of the linear region has.
+fn bit_degree(t: &T, w: &Width) -> usize {
+    match t {
+        T::Num(_) => 0,
+        T::Op(_, a) if kind(t, w) == Kind::Lin => {
+            a.iter().map(|x| bit_degree(x, w)).max().unwrap_or(0)
+        }
+        _ => {
+            let mut lv = Vec::new();
+            leaves(t, w, &mut lv);
+            lv.len()
+        }
+    }
+}
+
+/// Rebuild a linear region from its conjunction-basis expansion when every maximal
+/// set of leaves with a non-zero coefficient (a block) has at most 3 leaves: one
+/// term `c·f` per block, with `f` any bitwise function of the block's leaves and `c`
+/// set by the block's top coefficient, plus the lower-degree monomials still left
+/// over. The choice per block that gives the smallest sum wins, so `c·(x & y)` may
+/// come back as `x + y - (x | y)` or `-(x ^ y)` when the single terms absorb the rest.
+/// Not limited to `MAX_LEAVES`.
+fn small_blocks(t: &T, w: &Width) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
     let n = lv.len();
-    if !(2..=MAX_PAIR_LEAVES).contains(&n) || has_const_bitwise(t, w) {
+    if !(2..=MAX_BLOCK_LEAVES).contains(&n) || has_const_bitwise(t, w) {
         return None;
     }
     let m = w.mask;
-    let vals: Vec<u64> = (0..1usize << n).map(|p| eval(t, w, &point_env(&lv, p))).collect();
-    let g: Vec<u64> = vals.iter().map(|v| v.wrapping_sub(vals[0].wrapping_mul(2)) & m).collect();
-    let k = g[0];
-    let mut coef: Vec<u64> = g.iter().map(|v| v.wrapping_sub(k) & m).collect();
+    // Blocks of at most 3 leaves mean degree <= 3, so the coefficients come from the
+    // points with at most 3 ones; the other points must then match the interpolation.
+    let pts: Vec<usize> = (0..1usize << n).filter(|p| p.count_ones() <= 3).collect();
+    let prog = Prog::new(t, &lv, w);
+    let mut coef = vec![0u64; 1 << n];
+    for &p in &pts {
+        coef[p] = prog.at(p, w);
+    }
     for i in 0..n {
-        for p in 0..1usize << n {
+        for &p in &pts {
             if p >> i & 1 == 1 {
                 coef[p] = coef[p].wrapping_sub(coef[p ^ 1 << i]) & m;
             }
         }
     }
-    if (0..1usize << n).any(|p| p.count_ones() > 2 && coef[p] != 0) {
-        return None;
-    }
-    let single: Vec<u64> = (0..n).map(|i| coef[1 << i]).collect();
-    let edges: Vec<(usize, usize, u64)> = (0..n)
-        .flat_map(|i| (i + 1..n).map(move |j| (i, j)))
-        .filter_map(|(i, j)| Some((i, j, coef[1 << i | 1 << j])).filter(|e| e.2 != 0))
-        .collect();
-    if edges.is_empty() {
-        return None;
-    }
-    let (v, not) = (|i: usize| lv[i].clone(), |x: T| T::Op("Not".into(), vec![x]));
-    let bin = |op: &str, x: T, y: T| T::Op(op.into(), vec![x, y]);
-    // Options for one pair: (coefficient, term, weight added to x_i, to x_j).
-    let options = |&(i, j, c): &(usize, usize, u64)| {
-        let neg = c.wrapping_neg() & m;
-        let mut o = vec![
-            (c, bin("And", v(i), v(j)), 0, 0),
-            (neg, bin("Or", v(i), v(j)), c, c),
-            (neg, bin("And", v(i), not(v(j))), c, 0),
-            (neg, bin("And", not(v(i)), v(j)), 0, c),
-        ];
-        if c & 1 == 0 {
-            let h = (w.signed(c) / 2) as u64 & m;
-            o.push((h.wrapping_neg() & m, bin("Xor", v(i), v(j)), h, h));
+    let low: Vec<usize> = pts.iter().copied().filter(|&p| coef[p] != 0).collect();
+    if bit_degree(t, w) > 3 {
+        let fits = |p: usize| prog.at(p, w) == low.iter().filter(|&&q| q & p == q).fold(0u64, |a, &q| a.wrapping_add(coef[q])) & m;
+        // Most regions fail; a few spread-out points reject them before the full check.
+        let mut h = 0x9e37_79b9_7f4a_7c15u64;
+        let spread = (0..8).map(|_| {
+            h ^= h << 13;
+            h ^= h >> 7;
+            h ^= h << 17;
+            h as usize & ((1 << n) - 1)
+        });
+        if !spread.chain(0..1 << n).filter(|p| p.count_ones() > 3).all(fits) {
+            return None;
         }
-        o
+    }
+    let support: Vec<usize> = low.into_iter().filter(|&p| p != 0).collect();
+    let blocks: Vec<usize> = support.iter().copied().filter(|&p| p.count_ones() >= 2 && !support.iter().any(|&q| q != p && q & p == p)).collect();
+    if blocks.is_empty() || blocks.iter().any(|b| b.count_ones() > 3) {
+        return None;
+    }
+    // Leaves can be large subterms, so sums are built over placeholder variables
+    // and measured with each placeholder counting as its leaf's size.
+    let ph: Vec<T> = (0..n).map(|i| T::Var(format!("\u{1}{i}"))).collect();
+    let leaf_size: Vec<usize> = lv.iter().map(size).collect();
+    let wsize = |t: &T| -> usize {
+        fn go(t: &T, ph: &[T], ls: &[usize]) -> usize {
+            match t {
+                T::Var(_) => ph.iter().position(|p| p == t).map_or(1, |i| ls[i]),
+                T::Num(_) => 1,
+                T::Op(_, a) => 1 + a.iter().map(|x| go(x, ph, ls)).sum::<usize>(),
+            }
+        }
+        go(t, &ph, &leaf_size)
     };
-    let opts: Vec<Vec<(u64, T, u64, u64)>> = edges.iter().map(options).collect();
+    // Per block: (c, c·f, monomials f adds besides the block's own, c·f(0)).
+    let candidates = |s: usize| {
+        let vars: Vec<usize> = (0..n).filter(|i| s >> i & 1 == 1).collect();
+        let (bits, full) = (vars.len(), (1usize << vars.len()) - 1);
+        let global = |q: usize| (0..bits).filter(|j| q >> j & 1 == 1).fold(0, |acc, j| acc | 1 << vars[j]);
+        let mut out = Vec::new();
+        for tt in 1..(1u64 << (1 << bits)) - 1 {
+            let mut a: Vec<u64> = (0..=full).map(|q| tt >> q & 1).collect();
+            for j in 0..bits {
+                for q in 0..=full {
+                    if q >> j & 1 == 1 {
+                        a[q] = a[q].wrapping_sub(a[q ^ 1 << j]);
+                    }
+                }
+            }
+            let Some(c) = solve_mul(a[full] & m, coef[s], w) else { continue };
+            let BE::E(_, b) = bool_expr(tt, &vars) else { continue };
+            let adds: Vec<(usize, u64)> = (1..full).map(|q| (global(q), c.wrapping_mul(a[q]) & m)).filter(|&(_, v)| v != 0).collect();
+            out.push((c, b_to_t(&b, &ph), adds, c.wrapping_mul(a[0]) & m));
+        }
+        out.sort_by_key(|o| wsize(&o.1));
+        out
+    };
+    let opts: Vec<_> = blocks.iter().map(|&s| candidates(s)).collect();
+    if opts.iter().any(|o| o.is_empty()) {
+        return None;
+    }
     let build = |choice: &[usize]| {
-        let mut s = single.clone();
+        let mut rest: std::collections::BTreeMap<usize, u64> = support.iter().filter(|p| !blocks.contains(p)).map(|&p| (p, coef[p])).collect();
         let mut terms = Vec::new();
-        for (e, &ci) in edges.iter().zip(choice) {
-            let (c, term, di, dj) = &opts[terms.len()][ci];
-            s[e.0] = s[e.0].wrapping_add(*di) & m;
-            s[e.1] = s[e.1].wrapping_add(*dj) & m;
+        let mut konst = coef[0];
+        for (o, &ci) in opts.iter().zip(choice) {
+            let (c, term, adds, k0) = &o[ci];
+            for &(q, v) in adds {
+                let e = rest.entry(q).or_insert(0);
+                *e = e.wrapping_sub(v) & m;
+            }
+            konst = konst.wrapping_add(*k0) & m;
             terms.push((*c, term.clone()));
         }
-        terms.extend((0..n).filter(|&i| s[i] != 0).map(|i| (s[i], v(i))));
-        build_sum(&terms, k.wrapping_neg() & m, w)
+        for (q, c) in rest.into_iter().filter(|&(_, c)| c != 0) {
+            let conj = (0..n).filter(|i| q >> i & 1 == 1).map(|i| ph[i].clone()).reduce(|a, b| T::Op("And".into(), vec![a, b])).unwrap();
+            terms.push((c, conj));
+        }
+        build_sum(&terms, konst, w)
     };
-    let mut choice = vec![0usize; edges.len()];
+    let mut choice = vec![0usize; blocks.len()];
     let mut best = build(&choice);
-    // Coordinate descent: the single terms only couple pairs that share a leaf.
+    let mut best_size = wsize(&best);
+    // Coordinate descent: the remaining terms only couple blocks that share leaves.
     for _ in 0..4 {
         let mut improved = false;
-        for e in 0..edges.len() {
+        for e in 0..blocks.len() {
             for ci in 0..opts[e].len() {
                 let mut c = choice.clone();
                 c[e] = ci;
                 let cand = build(&c);
-                if size(&cand) < size(&best) {
-                    (best, choice, improved) = (cand, c, true);
+                let cs = wsize(&cand);
+                if cs < best_size {
+                    (best, best_size, choice, improved) = (cand, cs, c, true);
                 }
             }
         }
@@ -448,7 +579,14 @@ fn pairwise(t: &T, w: &Width) -> Option<T> {
             break;
         }
     }
-    Some(best).filter(|b| size(b) < size(t))
+    fn fill(t: &T, ph: &[T], lv: &[T]) -> T {
+        match t {
+            T::Var(_) => ph.iter().position(|p| p == t).map_or_else(|| t.clone(), |i| lv[i].clone()),
+            T::Num(_) => t.clone(),
+            T::Op(op, a) => T::Op(op.clone(), a.iter().map(|x| fill(x, ph, lv)).collect()),
+        }
+    }
+    (best_size < size(t)).then(|| fill(&best, &ph, &lv))
 }
 
 /// An arithmetic leaf `L` that is itself a linear MBA `ℓ` of other leaves (`a - d`,
@@ -482,19 +620,17 @@ fn related_leaves(t: &T, lv: &[T], w: &Width) -> Option<T> {
         return None;
     }
     let pts = 1usize << ext.len();
-    let base: Vec<u64> = (0..pts).map(|p| eval(t, w, &point_env(&ext, p))).collect();
+    let prog = Prog::new(t, &ext, w);
+    let base: Vec<u64> = (0..pts).map(|p| prog.at(p, w)).collect();
     // `L - ℓ` at each point, with `ℓ` evaluated from `L`'s own leaves.
     let diffs: Vec<Vec<u64>> = arith
         .iter()
         .map(|l| {
             let i = ext.iter().position(|e| e == *l).unwrap();
-            (0..pts)
-                .map(|p| {
-                    let mut env = point_env(&ext, p);
-                    env.remove(i);
-                    ((p >> i & 1) as u64).wrapping_sub(eval(l, w, &env))
-                })
-                .collect()
+            let mut own = ext.clone();
+            own.remove(i);
+            let prog = Prog::new(l, &own, w);
+            (0..pts).map(|p| ((p >> i & 1) as u64).wrapping_sub(prog.run(|j| (p >> (j + (j >= i) as usize) & 1) as u64, w))).collect()
         })
         .collect();
     let mus = [1u64, 2, w.mask, w.mask - 1];
@@ -875,10 +1011,8 @@ fn smallest_shape(acc: &[[u64; 4]], n: usize, top: usize, lv: &[T], w: &Width) -
 fn bit_groups(t: &T, lv: &[T], w: &Width) -> Option<(u64, Vec<(Vec<u64>, u64)>)> {
     let n = lv.len();
     let m = w.mask;
-    let at = |j: u32, q: usize| {
-        let env: Vec<(T, u64)> = lv.iter().enumerate().map(|(i, l)| (l.clone(), ((q >> i & 1) as u64) << j)).collect();
-        eval(t, w, &env)
-    };
+    let prog = Prog::new(t, lv, w);
+    let at = |j: u32, q: usize| prog.run(|i| ((q >> i & 1) as u64) << j, w);
     let e0 = at(0, 0);
     let mut groups: Vec<(Vec<u64>, u64)> = Vec::new();
     for j in 0..w.w {
@@ -1445,7 +1579,7 @@ pub(crate) fn rewrite(t: &T, w: &Width) -> T {
 fn rewrite_linear(t: &T, w: &Width) -> T {
     let T::Op(op, args) = t else { return t.clone() };
     if kind(t, w) != Kind::Atom {
-        let best = match (simba(t, w), pairwise(t, w)) {
+        let best = match (simba(t, w), small_blocks(t, w)) {
             (Some(s), Some(p)) => Some(if size(&p) < size(&s) { p } else { s }),
             (s, p) => s.or(p),
         };
