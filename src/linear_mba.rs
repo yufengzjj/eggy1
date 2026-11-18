@@ -291,16 +291,17 @@ fn b_to_t(b: &B, leaves: &[T]) -> T {
 
 /// `Σ coef·term + konst`, using Sub/Neg for negative coefficients.
 pub(crate) fn build_sum(terms: &[(u64, T)], konst: u64, w: &Width) -> T {
-    // c·t + c = -c·~t saves the constant term (no gain when c = 1).
-    if konst != 0 && konst != 1 {
+    // c·t + c = -c·~t saves the constant term; for c = 1 only inside a longer sum,
+    // where `a - ~t` is shorter than `a + t + 1`.
+    if konst != 0 && (konst != 1 || terms.len() > 1) {
         if let Some(i) = terms.iter().position(|(c, _)| *c == konst) {
             let mut terms = terms.to_vec();
-            let (c, t) = terms[i].clone();
+            let (c, t) = terms.remove(i);
             let not_t = match t {
                 T::Op(op, mut a) if op == "Not" => a.remove(0),
                 t => T::Op("Not".into(), vec![t]),
             };
-            terms[i] = (c.wrapping_neg() & w.mask, not_t);
+            terms.push((c.wrapping_neg() & w.mask, not_t));
             return build_sum(&terms, 0, w);
         }
     }
@@ -358,6 +359,96 @@ fn rebuild_values(vals: &[u64], lv: &[T], w: &Width) -> T {
     let gp: Vec<u64> = g.iter().map(|v| v.wrapping_sub(k) & m).collect();
     let (terms, konst) = rebuild_gp(&gp, lv, k.wrapping_neg() & m, w);
     build_sum(&terms, konst, w)
+}
+
+/// Most leaves `pairwise` handles; the region is evaluated at all `2^n` points.
+const MAX_PAIR_LEAVES: usize = 10;
+
+/// Rebuild a linear region whose conjunction-basis expansion has no terms of degree
+/// above 2: `k + Σ s_i·x_i + Σ c_ij·(x_i & x_j)`. Each `c·(x & y)` can also be written
+/// as `c·x + c·y - c·(x | y)`, `(c/2)·(x + y) - (c/2)·(x ^ y)` (even `c`),
+/// `c·x - c·(x & ~y)` or `c·y - c·(~x & y)`, moving weight into the single terms;
+/// the choice per pair that gives the smallest sum wins. Not limited to `MAX_LEAVES`.
+fn pairwise(t: &T, w: &Width) -> Option<T> {
+    let mut lv = Vec::new();
+    leaves(t, w, &mut lv);
+    let n = lv.len();
+    if !(2..=MAX_PAIR_LEAVES).contains(&n) || has_const_bitwise(t, w) {
+        return None;
+    }
+    let m = w.mask;
+    let vals: Vec<u64> = (0..1usize << n).map(|p| eval(t, w, &point_env(&lv, p))).collect();
+    let g: Vec<u64> = vals.iter().map(|v| v.wrapping_sub(vals[0].wrapping_mul(2)) & m).collect();
+    let k = g[0];
+    let mut coef: Vec<u64> = g.iter().map(|v| v.wrapping_sub(k) & m).collect();
+    for i in 0..n {
+        for p in 0..1usize << n {
+            if p >> i & 1 == 1 {
+                coef[p] = coef[p].wrapping_sub(coef[p ^ 1 << i]) & m;
+            }
+        }
+    }
+    if (0..1usize << n).any(|p| p.count_ones() > 2 && coef[p] != 0) {
+        return None;
+    }
+    let single: Vec<u64> = (0..n).map(|i| coef[1 << i]).collect();
+    let edges: Vec<(usize, usize, u64)> = (0..n)
+        .flat_map(|i| (i + 1..n).map(move |j| (i, j)))
+        .filter_map(|(i, j)| Some((i, j, coef[1 << i | 1 << j])).filter(|e| e.2 != 0))
+        .collect();
+    if edges.is_empty() {
+        return None;
+    }
+    let (v, not) = (|i: usize| lv[i].clone(), |x: T| T::Op("Not".into(), vec![x]));
+    let bin = |op: &str, x: T, y: T| T::Op(op.into(), vec![x, y]);
+    // Options for one pair: (coefficient, term, weight added to x_i, to x_j).
+    let options = |&(i, j, c): &(usize, usize, u64)| {
+        let neg = c.wrapping_neg() & m;
+        let mut o = vec![
+            (c, bin("And", v(i), v(j)), 0, 0),
+            (neg, bin("Or", v(i), v(j)), c, c),
+            (neg, bin("And", v(i), not(v(j))), c, 0),
+            (neg, bin("And", not(v(i)), v(j)), 0, c),
+        ];
+        if c & 1 == 0 {
+            let h = (w.signed(c) / 2) as u64 & m;
+            o.push((h.wrapping_neg() & m, bin("Xor", v(i), v(j)), h, h));
+        }
+        o
+    };
+    let opts: Vec<Vec<(u64, T, u64, u64)>> = edges.iter().map(options).collect();
+    let build = |choice: &[usize]| {
+        let mut s = single.clone();
+        let mut terms = Vec::new();
+        for (e, &ci) in edges.iter().zip(choice) {
+            let (c, term, di, dj) = &opts[terms.len()][ci];
+            s[e.0] = s[e.0].wrapping_add(*di) & m;
+            s[e.1] = s[e.1].wrapping_add(*dj) & m;
+            terms.push((*c, term.clone()));
+        }
+        terms.extend((0..n).filter(|&i| s[i] != 0).map(|i| (s[i], v(i))));
+        build_sum(&terms, k.wrapping_neg() & m, w)
+    };
+    let mut choice = vec![0usize; edges.len()];
+    let mut best = build(&choice);
+    // Coordinate descent: the single terms only couple pairs that share a leaf.
+    for _ in 0..4 {
+        let mut improved = false;
+        for e in 0..edges.len() {
+            for ci in 0..opts[e].len() {
+                let mut c = choice.clone();
+                c[e] = ci;
+                let cand = build(&c);
+                if size(&cand) < size(&best) {
+                    (best, choice, improved) = (cand, c, true);
+                }
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+    Some(best).filter(|b| size(b) < size(t))
 }
 
 /// An arithmetic leaf `L` that is itself a linear MBA `ℓ` of other leaves (`a - d`,
@@ -1354,7 +1445,11 @@ pub(crate) fn rewrite(t: &T, w: &Width) -> T {
 fn rewrite_linear(t: &T, w: &Width) -> T {
     let T::Op(op, args) = t else { return t.clone() };
     if kind(t, w) != Kind::Atom {
-        if let Some(best) = simba(t, w) {
+        let best = match (simba(t, w), pairwise(t, w)) {
+            (Some(s), Some(p)) => Some(if size(&p) < size(&s) { p } else { s }),
+            (s, p) => s.or(p),
+        };
+        if let Some(best) = best {
             return substitute_atoms(&best, w);
         }
     }
