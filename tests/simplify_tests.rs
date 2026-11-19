@@ -643,8 +643,20 @@ fn semi_linear_bitwise_shape() {
     );
 }
 
+/// Linear MBA whose values share a factor `2^k` is rebuilt as `2^k·L`.
+#[test]
+fn linear_common_power_of_two() {
+    check(
+        "i64",
+        &[
+            ("2*x - 4*(x & y)", &["(2 * ((x ^ y) - y))"], 10),
+            ("(x - (x & y)) * 8 - 8 * (y & ~x)", &["(8 * (x - y))"], 10),
+        ],
+    );
+}
+
 /// Shapes of size 15, leaves that cancel out, 4-variable bitwise functions split
-/// as `g(A) & h(B)`, and blocks that must change together.
+/// as `g(A) & h(B)`, blocks that must change together, and leaf sets rebuilt apart.
 #[test]
 fn semi_linear_large_shapes_and_splits() {
     check(
@@ -670,11 +682,17 @@ fn semi_linear_large_shapes_and_splits() {
                 &["(((((e & (c | d)) - (a | c)) - (e & g)) * 2) + -4)"],
                 10,
             ),
+            (
+                "(((((((-((0x3 * (~(x) & 0xdcab))) + (0x3 * ((((y + 0xe45c) - (y | 0xe45c)) + 0x1c5f) - ((y & 0xe45c) | 0x1c5f)))) + (0x3 * (~(z) & 0x3b))) - (0x3 * (((-(z) - 0x1) + 0x3b) - (~(z) | 0x3b)))) - (0x3 * ((y & 0xe45c) & 0x1c5f))) + (0x3 * ((((v + 0xbb) - (v & 0xbb)) + ((v + v) - (v | v))) - ((v | 0xbb) & (v & v))))) - ((((z + 0xf0) - (z | 0xf0)) + ((w + 0xe734) - (w | 0xe734))) - ((z & 0xf0) & (w & 0xe734)))) + (0x3 * (((-(x) - 0x1) + 0xdcab) - (~(x) | 0xdcab))))",
+                &["(((0xbb | v) * 3) - ((w & 0xe734) | (z & 0xf0)))"],
+                10,
+            ),
         ],
     );
 }
 
-/// Carry and lowest-set-bit identities (`x & -(x & -(x & y)) = x & y`), proved bit by bit.
+/// Carry and lowest-set-bit identities (`x & -(x & -(x & y)) = x & y`), proved bit by bit,
+/// also with bitwise subterms as operands.
 #[test]
 fn t_function_identities() {
     check(
@@ -683,6 +701,11 @@ fn t_function_identities() {
             ("(x & (- (x & ((- (x + (- (((x | (x | y)) | (((x | ((~ (x & (- (~ y)))) & y)) + (x | y)) + (- (x | y)))) + (- y))))) ^ (~ (y | (y | (~ y))))))))", &["(x & y)"], 10),
             ("((((x & (- x)) | ((x & (- x)) & (~ ((~ (x | y)) | ((~ (- (~ (x | y)))) & ((~ (x | y)) + (~ (x | y)))))))) | (~ ((~ (x | y)) | ((~ (- (~ (x | y)))) & ((~ (x | y)) + (~ (x | y))))))) | (~ ((~ (x | y)) | ((~ (- (~ (x | y)))) & ((~ (x | y)) + (~ (x | y)))))))", &["(x | y)"], 10),
             ("(~ ((((~ x) + (- y)) + y) + (- ((((~ x) + (- y)) + y) + (- ((((~ x) + (- y)) + y) ^ (~ (~ (y | (- ((- y) | (y + y))))))))))))", &["(x ^ y)"], 10),
+            (
+                "(((((-((0x2 * ((z & z) | (z | y)))) + ((x ^ z) & -(((x ^ z) & -(((x ^ z) & (y ^ z))))))) + (0x2 * (-(((z + z) - (z & -((z & -((z & z))))))) - 0x1))) + (0x2 * ((((z + z) - (z | z)) + ((z + y) - (z & y))) - ((z & z) & (z | y))))) - (0x2 * (~(z) | (x | x)))) + (0x2 * (((-(z) - 0x1) + ((x + x) - (x & x))) - (~(z) & (x | x)))))",
+                &["((2 * ~z) + ((x ^ z) & (y ^ z)))"],
+                10,
+            ),
         ],
     );
 }

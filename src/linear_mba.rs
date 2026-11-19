@@ -519,8 +519,21 @@ pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
 }
 
 
-/// The linear MBA over `lv` with values `vals` on {0,1}^n.
+/// The linear MBA over `lv` with values `vals` on {0,1}^n. When every value is a
+/// multiple of `2^k`, `2^k·L` with `L` rebuilt from `vals / 2^k` is also tried, as in
+/// `2*x - 4*(x & y) = 2*((x ^ y) - y)`; `L` only matters modulo `2^(w-k)`.
 fn rebuild_values(vals: &[u64], lv: &[T], w: &Width) -> T {
+    let plain = rebuild_values_plain(vals, lv, w);
+    let k = vals.iter().map(|v| v.trailing_zeros()).min().unwrap_or(64);
+    if k == 0 || k >= w.w {
+        return plain;
+    }
+    let low: Vec<u64> = vals.iter().map(|&v| (w.signed(v) >> k) as u64 & w.mask).collect();
+    let scaled = T::Op("Mul".into(), vec![T::Num(w.signed(1 << k)), rebuild_values_plain(&low, lv, w)]);
+    if size(&scaled) < size(&plain) { scaled } else { plain }
+}
+
+fn rebuild_values_plain(vals: &[u64], lv: &[T], w: &Width) -> T {
     let m = w.mask;
     // e(x) = Σ_j 2^j g(bit j of x), with g(p) = e(p) - 2e(0); k = g(0).
     let g: Vec<u64> = vals.iter().map(|v| v.wrapping_sub(vals[0].wrapping_mul(2)) & m).collect();
@@ -866,8 +879,86 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
             cands.extend(sub.into_iter().map(|c| add(c, *i, *a)));
         }
     }
+    limit = cands.iter().map(size).min().unwrap_or(limit);
+    cands.extend(semi_split(&groups, lv, e0, w, limit));
     // Masks that differ only in bits that cannot matter tie on size; keep the short one.
     cands.into_iter().min_by_key(|c| (size(c), const_bits(c)))
+}
+
+/// Smallest of the grouped and shape candidates for a semi-linear table.
+fn semi_from_groups(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, limit: usize) -> Option<T> {
+    let mut cands = Vec::new();
+    semi_linear_candidates(groups, lv, e0, w, &mut cands);
+    let limit = cands.iter().map(size).min().unwrap_or(limit).min(limit);
+    shape_candidates(groups, lv, e0, w, limit, &mut cands);
+    cands.into_iter().min_by_key(|c| (size(c), const_bits(c)))
+}
+
+/// Leaves split into sets with no mixed difference in any bit's table, so each
+/// table is the sum of its restrictions to the sets and each set is rebuilt on
+/// its own: `(~w ^ 0x72) - 2*((v & 0x4bfa) | (x | 0xf))`. One set takes `e(0)`
+/// so its shape can absorb it; each is tried in that role.
+fn semi_split(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, limit: usize) -> Option<T> {
+    let n = lv.len();
+    let mut root: Vec<usize> = (0..n).collect();
+    fn find(root: &mut [usize], i: usize) -> usize {
+        if root[i] != i {
+            root[i] = find(root, root[i]);
+        }
+        root[i]
+    }
+    for (g, _) in groups {
+        for i in 0..n {
+            for j in i + 1..n {
+                let (bi, bj) = (1usize << i, 1usize << j);
+                let joined = (0..1usize << n).filter(|p| p & (bi | bj) == 0).any(|p| g[p | bi | bj].wrapping_sub(g[p | bi]).wrapping_sub(g[p | bj]).wrapping_add(g[p]) & w.mask != 0);
+                if joined {
+                    let (ri, rj) = (find(&mut root, i), find(&mut root, j));
+                    root[ri] = rj;
+                }
+            }
+        }
+    }
+    let mut sets: Vec<Vec<usize>> = Vec::new();
+    for i in 0..n {
+        let r = find(&mut root, i);
+        match sets.iter_mut().find(|s| find(&mut root, s[0]) == r) {
+            Some(s) => s.push(i),
+            None => sets.push(vec![i]),
+        }
+    }
+    if sets.len() < 2 {
+        return None;
+    }
+    let restrict = |set: &[usize]| -> Vec<(Vec<u64>, u64)> {
+        let at = |q: usize| set.iter().enumerate().fold(0, |p, (j, &i)| p | (q >> j & 1) << i);
+        let mut out: Vec<(Vec<u64>, u64)> = Vec::new();
+        for (g, mask) in groups {
+            let h: Vec<u64> = (0..1usize << set.len()).map(|q| g[at(q)]).collect();
+            match out.iter_mut().find(|(o, _)| *o == h) {
+                Some(o) => o.1 |= mask,
+                None => out.push((h, *mask)),
+            }
+        }
+        out.sort_by_key(|(_, mask)| mask.trailing_zeros());
+        out
+    };
+    let parts: Vec<(Vec<(Vec<u64>, u64)>, Vec<T>)> = sets.iter().map(|s| (restrict(s), s.iter().map(|&i| lv[i].clone()).collect())).collect();
+    let free: Vec<Option<T>> = parts.iter().map(|(gs, sl)| semi_from_groups(gs, sl, 0, w, limit)).collect();
+    let mut best: Option<T> = None;
+    for last in 0..parts.len() {
+        let mut terms = Vec::new();
+        for (_, f) in free.iter().enumerate().filter(|&(k, _)| k != last) {
+            terms.push((1, f.clone()?));
+        }
+        let (gs, sl) = &parts[last];
+        terms.push((1, semi_from_groups(gs, sl, e0, w, limit)?));
+        let cand = build_sum(&terms, 0, w);
+        if best.as_ref().is_none_or(|b| size(&cand) < size(b)) {
+            best = Some(cand);
+        }
+    }
+    best
 }
 
 /// Largest table value in magnitude, then the sum of each group's largest.

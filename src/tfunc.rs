@@ -291,6 +291,10 @@ pub(crate) fn replacement(t: &T, w: &Width) -> Option<T> {
     if !(2..=MAX_TRY).contains(&size(t)) {
         return None;
     }
+    direct(t, w).or_else(|| over_atoms(t, w))
+}
+
+fn direct(t: &T, w: &Width) -> Option<T> {
     let mut vars = Vec::new();
     var_names(t, &mut vars);
     if vars.is_empty() || vars.len() > MAX_VARS {
@@ -301,13 +305,92 @@ pub(crate) fn replacement(t: &T, w: &Width) -> Option<T> {
     (size(&cand) < size(t) && equal(t, &cand, &vars, w)?).then_some(cand)
 }
 
-/// `t` with each outermost replaceable subterm replaced.
+fn bitwise_only(t: &T) -> bool {
+    match t {
+        T::Var(_) | T::Num(_) => true,
+        T::Op(op, a) => matches!(op.as_str(), "And" | "Or" | "Xor" | "Not") && a.iter().all(bitwise_only),
+    }
+}
+
+/// Purely bitwise subterms as atoms, so `(x ^ z) & -((x ^ z) & -((x ^ z) & (y ^ z)))`
+/// becomes `p & -(p & -(p & q))`. An atom that is a bitwise operation of other
+/// atoms is split, or `p & q` would hide its relation to `p`.
+fn over_atoms(t: &T, w: &Width) -> Option<T> {
+    fn collect(t: &T, out: &mut Vec<T>) {
+        match t {
+            T::Op(op, a) if op == "Not" => collect(&a[0], out),
+            T::Op(..) if bitwise_only(t) => {
+                if !out.contains(t) {
+                    out.push(t.clone());
+                }
+            }
+            T::Op(_, a) => a.iter().for_each(|x| collect(x, out)),
+            T::Var(_) => {
+                if !out.contains(t) {
+                    out.push(t.clone());
+                }
+            }
+            T::Num(_) => {}
+        }
+    }
+    let mut atoms = Vec::new();
+    collect(t, &mut atoms);
+    loop {
+        let strip = |x: &T| match x {
+            T::Op(op, a) if op == "Not" => a[0].clone(),
+            _ => x.clone(),
+        };
+        let Some(i) = atoms.iter().position(|s| match s {
+            T::Op(op, a) if op != "Not" => a.iter().any(|x| atoms.contains(&strip(x))),
+            _ => false,
+        }) else {
+            break;
+        };
+        let T::Op(_, a) = atoms.remove(i) else { unreachable!() };
+        for x in a.iter().map(strip) {
+            if !matches!(x, T::Num(_)) && !atoms.contains(&x) {
+                atoms.push(x);
+            }
+        }
+    }
+    if atoms.len() > MAX_VARS || atoms.iter().all(|a| matches!(a, T::Var(_))) {
+        return None;
+    }
+    let names: Vec<T> = (0..atoms.len()).map(|i| T::Var(format!("\u{3}{i}"))).collect();
+    fn abstracted(t: &T, atoms: &[T], names: &[T]) -> T {
+        if let Some(i) = atoms.iter().position(|a| a == t) {
+            return names[i].clone();
+        }
+        match t {
+            T::Op(op, a) => T::Op(op.clone(), a.iter().map(|x| abstracted(x, atoms, names)).collect()),
+            _ => t.clone(),
+        }
+    }
+    fn fill(t: &T, atoms: &[T], names: &[T]) -> T {
+        if let Some(i) = names.iter().position(|n| n == t) {
+            return atoms[i].clone();
+        }
+        match t {
+            T::Op(op, a) => T::Op(op.clone(), a.iter().map(|x| fill(x, atoms, names)).collect()),
+            _ => t.clone(),
+        }
+    }
+    let r = fill(&direct(&abstracted(t, &atoms, &names), w)?, &atoms, &names);
+    (size(&r) < size(t)).then_some(r)
+}
+
+/// `t` with each outermost replaceable subterm replaced; a node whose operands
+/// changed is tried again, since nested identities only show from the inside out.
 pub(crate) fn simplify(t: &T, w: &Width) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     if let Some(r) = replacement(t, w) {
         return r;
     }
-    T::Op(op.clone(), a.iter().map(|x| simplify(x, w)).collect())
+    let inner = T::Op(op.clone(), a.iter().map(|x| simplify(x, w)).collect());
+    if inner == *t {
+        return inner;
+    }
+    replacement(&inner, w).unwrap_or(inner)
 }
 
 #[cfg(test)]

@@ -231,4 +231,5 @@ def main():
             print(f(r))
 
 
-main()
+if __name__ == "__main__":
+    main()
