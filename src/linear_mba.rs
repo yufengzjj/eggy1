@@ -395,6 +395,41 @@ pub(crate) fn build_sum(terms: &[(u64, T)], konst: u64, w: &Width) -> T {
     }
 }
 
+/// `size(&build_sum(terms, konst, w))` without building it.
+fn sum_size(terms: &[(u64, T)], konst: u64, w: &Width) -> usize {
+    if konst != 0 && (konst != 1 || terms.len() > 1) {
+        if let Some(i) = terms.iter().position(|(c, _)| *c == konst) {
+            let not_size = match &terms[i].1 {
+                T::Op(op, _) if op == "Not" => size(&terms[i].1) - 1,
+                t => size(t) + 1,
+            };
+            let neg = konst.wrapping_neg() & w.mask;
+            let rest = terms.iter().enumerate().filter(|&(j, _)| j != i).map(|(_, (c, t))| (*c, size(t)));
+            return sized_sum(rest.chain([(neg, not_size)]), 0, w);
+        }
+    }
+    sized_sum(terms.iter().map(|(c, t)| (*c, size(t))), konst, w)
+}
+
+fn sized_sum(terms: impl Iterator<Item = (u64, usize)>, konst: u64, w: &Width) -> usize {
+    let scaled = |c: u64, s: usize| if c == 1 { s } else { s + 2 };
+    let mut acc: Option<usize> = None;
+    for (c, s) in terms {
+        let neg = w.signed(c) < 0 && c != 1u64 << (w.w - 1);
+        acc = Some(match acc {
+            None if c == w.mask => 1 + s,
+            None => scaled(c, s),
+            Some(a) if neg => 1 + a + scaled(c.wrapping_neg() & w.mask, s),
+            Some(a) => 1 + a + scaled(c, s),
+        });
+    }
+    match acc {
+        None => 1,
+        Some(a) if konst == 0 => a,
+        Some(a) => a + 2,
+    }
+}
+
 /// Smallest rebuilt form of the linear region `t`, if it has 1..=MAX_LEAVES leaves.
 pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
     let mut lv = Vec::new();
@@ -1381,6 +1416,36 @@ fn independent_groups(gp: &[u64], n: usize, w: &Width) -> Vec<Vec<usize>> {
 
 /// Shortest `(terms, konst')` with `konst + Σ_j 2^j gp(bit j of x) = Σ terms + konst'`.
 fn rebuild_table(gp: &[u64], lv: &[T], konst: u64, w: &Width) -> (Vec<(u64, T)>, u64) {
+    // The result depends on a leaf only through its size and whether it is a `~`
+    // (`build_sum` strips one), so other leaves become placeholders of the same size.
+    let ph: Vec<T> = lv
+        .iter()
+        .enumerate()
+        .map(|(i, l)| match l {
+            T::Op(op, _) if op == "Not" => l.clone(),
+            _ => T::Op(format!("\u{2}{i}"), vec![T::Num(0); size(l) - 1]),
+        })
+        .collect();
+    let key = (gp.to_vec(), ph.clone(), konst, w.w);
+    let r = match REBUILT.with(|c| c.borrow().get(&key).cloned()) {
+        Some(r) => r,
+        None => {
+            let r = rebuild_table_uncached(gp, &ph, konst, w);
+            REBUILT.with(|c| c.borrow_mut().insert(key, r.clone()));
+            r
+        }
+    };
+    fn fill(t: &T, lv: &[T]) -> T {
+        match t {
+            T::Op(op, _) if op.starts_with('\u{2}') => lv[op[1..].parse::<usize>().unwrap()].clone(),
+            T::Op(op, a) => T::Op(op.clone(), a.iter().map(|x| fill(x, lv)).collect()),
+            _ => t.clone(),
+        }
+    }
+    (r.0.iter().map(|(c, t)| (*c, fill(t, lv))).collect(), r.1)
+}
+
+fn rebuild_table_uncached(gp: &[u64], lv: &[T], konst: u64, w: &Width) -> (Vec<(u64, T)>, u64) {
     let n = lv.len();
     let pts = 1usize << n;
     let m = w.mask;
@@ -1417,7 +1482,7 @@ fn rebuild_table(gp: &[u64], lv: &[T], konst: u64, w: &Width) -> (Vec<(u64, T)>,
     cands.extend(overlapping_terms(gp, lv, konst, w));
     cands
         .into_iter()
-        .min_by_key(|(ts, k)| size(&build_sum(ts, *k, w)))
+        .min_by_key(|(ts, k)| sum_size(ts, *k, w))
         .unwrap()
 }
 
@@ -1535,7 +1600,7 @@ fn split_by_sums(h: &[u64], h_vals: &[u64], coefs: &[u64], vars: &[usize], lv: &
                 BE::E(_, b) => terms.push((coefs[j], b_to_t(&b, lv))),
             }
         }
-        if best.as_ref().is_none_or(|(bt, bk)| size(&build_sum(&terms, kk, w)) < size(&build_sum(bt, *bk, w))) {
+        if best.as_ref().is_none_or(|(bt, bk)| sum_size(&terms, kk, w) < sum_size(bt, *bk, w)) {
             best = Some((terms, kk));
         }
     }
@@ -1544,6 +1609,8 @@ fn split_by_sums(h: &[u64], h_vals: &[u64], coefs: &[u64], vars: &[usize], lv: &
 
 thread_local! {
     static REWRITTEN: std::cell::RefCell<std::collections::HashMap<(u32, T), T>> = Default::default();
+    #[allow(clippy::type_complexity)]
+    static REBUILT: std::cell::RefCell<std::collections::HashMap<(Vec<u64>, Vec<T>, u64, u32), (Vec<(u64, T)>, u64)>> = Default::default();
 }
 
 /// Replace every linear or polynomial region (and, recursively, regions inside
@@ -1629,6 +1696,7 @@ fn simplify_linear_uncached(egg: &str, w: u32) -> String {
         None => crate::tfunc::simplify(&rewrite(&t, &w), &w),
     };
     REWRITTEN.with(|c| c.borrow_mut().clear());
+    REBUILT.with(|c| c.borrow_mut().clear());
     if r == t { egg.to_string() } else { show(&r) }
 }
 
@@ -1676,6 +1744,28 @@ mod tests {
             9 => T::Op("Mul".into(), vec![sub(r), sub(r)]),
             10 => T::Op("Shl".into(), vec![sub(r), T::Num((r.next() % 10) as i64)]),
             _ => T::Op("Shr".into(), vec![sub(r), T::Num((r.next() % 4) as i64)]),
+        }
+    }
+
+    #[test]
+    fn sum_size_matches_build_sum() {
+        let mut r = Rng(0x9e3779b97f4a7c15);
+        for w in [8u32, 64] {
+            let wd = Width::new(w);
+            let coef = |r: &mut Rng| [1, wd.mask, 2, wd.mask - 1, 1 << (w - 1), r.next() & wd.mask][(r.next() % 6) as usize];
+            for _ in 0..3000 {
+                let mut terms = Vec::new();
+                for _ in 0..r.next() % 4 {
+                    let (c, depth) = (coef(&mut r), (r.next() % 3) as u32);
+                    terms.push((c, random_term(&mut r, depth)));
+                }
+                let konst = match r.next() % 3 {
+                    0 => 0,
+                    1 => terms.first().map_or(1, |t| t.0),
+                    _ => coef(&mut r),
+                };
+                assert_eq!(sum_size(&terms, konst, &wd), size(&build_sum(&terms, konst, &wd)), "{terms:?} {konst}");
+            }
         }
     }
 
