@@ -1487,3 +1487,18 @@ fn semi_linear_scaled_pairs_and_tfunc() {
         ],
     );
 }
+
+#[test]
+fn null_polynomials() {
+    check(
+        "u8",
+        &[
+            ("3*x + 0x80*x*x + 0x80*x", &["(3 * x)"], 10),
+            ("y + 0x20*x*x*x*x + 0x40*x*x*x + 0x60*x*x + 0x40*x", &["y"], 10),
+        ],
+    );
+    check(
+        "i64",
+        &[("x*y + 0x8000000000000000*x*x*y - 0x8000000000000000*x*y", &["(x * y)"], 10)],
+    );
+}

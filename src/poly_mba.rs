@@ -160,6 +160,57 @@ impl Ctx<'_> {
         Some(r)
     }
 
+    /// `p` modulo the polynomials that vanish everywhere: in the falling-factorial
+    /// basis, `c·Π x_i^(k_i)` vanishes iff `2^w` divides `c·Π k_i!`, so each such
+    /// coefficient is reduced modulo `2^(w - Σ v2(k_i!))` (to its smallest signed value).
+    fn reduce_null(&self, p: &Poly) -> Poly {
+        let w = self.w.w;
+        let top = p.keys().flat_map(|m| m.chunk_by(|a, b| a == b).map(|r| r.len())).max().unwrap_or(0);
+        let (mut s1, mut s2) = (vec![vec![1u64]], vec![vec![1u64]]);
+        for k in 0..top {
+            let (a, b) = (&s1[k], &s2[k]);
+            let at = |v: &Vec<u64>, j: usize| v.get(j).copied().unwrap_or(0);
+            s1.push((0..=k + 1).map(|j| (if j > 0 { at(a, j - 1) } else { 0 }).wrapping_sub((k as u64).wrapping_mul(at(a, j)))).collect());
+            s2.push((0..=k + 1).map(|j| (if j > 0 { at(b, j - 1) } else { 0 }).wrapping_add((j as u64).wrapping_mul(at(b, j)))).collect());
+        }
+        let ff = self.change_basis(p, &s2);
+        let mut red = Poly::new();
+        for (m, c) in ff {
+            let e: u32 = m.chunk_by(|a, b| a == b).map(|r| r.len() as u32 - r.len().count_ones()).sum();
+            if e >= w {
+                continue;
+            }
+            let sh = 64 - (w - e);
+            self.add_to(&mut red, m, ((c << sh) as i64 >> sh) as u64);
+        }
+        self.change_basis(&red, &s1)
+    }
+
+    /// Replaces each power `x^k` (a run of `k` equal conjunctions) by `Σ_j table[k][j]·x^j`.
+    fn change_basis(&self, p: &Poly, table: &[Vec<u64>]) -> Poly {
+        let mut r = Poly::new();
+        for (m, &c) in p {
+            let mut terms: Vec<(Mono, u64)> = vec![(vec![], c)];
+            for run in m.chunk_by(|a, b| a == b) {
+                let row = &table[run.len()];
+                terms = terms
+                    .iter()
+                    .flat_map(|(t, tc)| {
+                        (1..row.len()).filter(|&j| row[j] != 0).map(move |j| {
+                            let mut t = t.clone();
+                            t.extend(std::iter::repeat_n(run[0], j));
+                            (t, tc.wrapping_mul(row[j]))
+                        })
+                    })
+                    .collect();
+            }
+            for (t, tc) in terms {
+                self.add_to(&mut r, t, tc);
+            }
+        }
+        r
+    }
+
     fn conj_term(&self, c: Conj) -> T {
         (0..Conj::BITS as usize)
             .filter(|i| c >> i & 1 == 1)
@@ -286,7 +337,8 @@ pub(crate) fn simplify_poly(t: &T, w: &Width) -> Option<T> {
     }
     let mut ctx = Ctx { w, leaves: Vec::new(), built: Default::default() };
     let p = ctx.poly(t)?;
-    let r = ctx.build(&p, FACTOR_TRIES);
+    let q = ctx.reduce_null(&p);
+    let r = ctx.build(if q.len() < p.len() { &q } else { &p }, FACTOR_TRIES);
     (size(&r) < size(t)).then_some(r)
 }
 
