@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 const MAX_VARS: usize = 3;
-const MAX_SIZE: usize = 5;
+const MAX_SIZE: usize = 7;
 const POINTS: usize = 24;
 /// Largest subterm tried; larger ones are rarely replaceable and costly to prove.
 const MAX_TRY: usize = 256;

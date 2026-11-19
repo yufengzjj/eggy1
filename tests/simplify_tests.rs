@@ -690,7 +690,7 @@ fn semi_linear_large_shapes_and_splits() {
             ),
             (
                 "((((((((((w ^ x) | 0x5c) - ((w ^ x) & 0x5c)) - ((w ^ x) ^ 0x5c)) - ((((z | 0xcc) - (z & 0xcc)) + 0x5e) - ((z ^ 0xcc) | 0x5e))) + ((~(v) | (v ^ 0x70)) - (~(v) & (v ^ 0x70)))) - (0x3 * ((((w + 0x85) - (w | 0x85)) + 0x72) - ((w & 0x85) & 0x72)))) - (~(v) ^ (v ^ 0x70))) + ((w ^ 0xa1) ^ 0x33)) + (0x3 * ((w & 0x85) | 0x72)))",
-                &["((0x92 ^ w) - ((z ^ 0xcc) & 0x5e))"],
+                &["((0x92 ^ w) - ((z ^ 0xcc) & 0x5e))", "((0x12 ^ (z | -0x5f)) - (w ^ -0x93))"],
                 10,
             ),
         ],
@@ -1470,4 +1470,20 @@ fn extract_restart() {
     let seed = infix_to_egglog(&result, true);
     let again = simplify_round(&make_egg(&cli.num_type), &seed, &cli, true).unwrap();
     assert_eq!(seed, again, "simplify result is not a fixpoint");
+}
+
+/// A scaled semi-linear region, split sets that each absorb part of the constant,
+/// two bitwise terms over shared leaves, and a T-function identity of size 7.
+#[test]
+fn semi_linear_scaled_pairs_and_tfunc() {
+    check(
+        "i64",
+        &[
+            ("(-((z | y) | (x & 0xff00)) - z) << 5", &["(-0x20 * (((z | y) | (x & 0xff00)) + z))"], 10),
+            ("((((((((0x2 * (-(((u + y) - (u | y))) - 0x1)) - (0x3 * ((((v + v) - (v | v)) + 0xff00) - ((v & v) & 0xff00)))) + (0x3 * ((v & v) | 0xff00))) + (~(u) & 0xa95e)) - (((-(u) - 0x1) + 0xa95e) - (~(u) | 0xa95e))) - (0x2 * (((u ^ 0x5b34) + 0xf0) - ((u ^ 0x5b34) & 0xf0)))) - (0x2 * ~((u & y)))) + (0x3 * ((x | 0x30) ^ 0x438a)))", &["((3 * ((x & -0x31) ^ 0x43ba)) + (-2 * ((u & -0xf1) ^ 0x5bf4)))"], 10),
+            ("(((((((-((0x7 * ((w | v) ^ 0x4114))) + (0x2 * ((w | 0x3c) | 0x16))) + ((z | y) & 0xb5)) + (0x7 * (((w | v) | 0x4114) - ((w | v) & 0x4114)))) + (((x & y) | 0x59) - ((x & y) & 0x59))) + (0x2 * (-(((x + 0x6) - (x | 0x6))) - 0x1))) - (0x2 * ((((w + 0x3c) - (w & 0x3c)) + 0x16) - ((w | 0x3c) & 0x16)))) - (0x2 * ~((x & 0x6))))", &["(((x & y) ^ 0x59) + ((z | y) & 0xb5))"], 10),
+            ("((((((((0x5 * (~(y) | 0xcc)) + (0x3 * ~((y & w)))) + (-((y ^ 0xf)) - 0x1)) + (0x5 * ((v & u) | 0xcc))) - (0x5 * ((((v + u) - (v | u)) + 0xcc) - ((v & u) & 0xcc)))) + (0x3 * (((v & u) | 0x1b) - ((v & u) & 0x1b)))) - (0x5 * (((-(y) - 0x1) + 0xcc) - (~(y) & 0xcc)))) - (0x3 * ((v & u) ^ 0x1b)))", &["((3 * ~(y & w)) + (y ^ -0x10))"], 10),
+            ("(((((-(((z ^ x) ^ (x & -((x & -((x & y))))))) - (((y | z) | (y & -((y & -((y & x)))))) - ((y | z) & -(((y | z) & -(((y | z) & (y & -((y & -((y & x)))))))))))) + ((y ^ y) | (y | y))) + (0x7 * ((((z + z) - (z | z)) + ((z | z) - (z & z))) - ((z & z) | (z ^ z))))) - ((((y | y) - (y & y)) + ((y + y) - (y & y))) - ((y ^ y) & (y | y)))) - (0x7 * ((z & z) & (z ^ z))))", &["(-(x ^ (z | y)) - z)"], 10),
+        ],
+    );
 }
