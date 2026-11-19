@@ -441,7 +441,7 @@ fn ast_to_egglog(ast: &Ast, is_expr: bool) -> String {
             match op.as_str() {
                 "-" => {
                     if let Ast::Num(v) = operand.as_ref() {
-                        format!("(Num -{})", *v)
+                        format!("(Num {})", (*v as i64).wrapping_neg())
                     } else {
                         format!("(Neg {})", operand_str)
                     }

@@ -51,6 +51,14 @@ fn test_numbers() {
 }
 
 #[test]
+fn test_negated_literals_wrap() {
+    assert_eq!(infix_to_egglog("-5", true), "(Num -5)");
+    assert_eq!(infix_to_egglog("-9223372036854775808", true), "(Num -9223372036854775808)");
+    assert_eq!(infix_to_egglog("-9223372036854775809", true), "(Num 9223372036854775807)");
+    assert_eq!(infix_to_egglog("-0xffffffffffffffff", true), "(Num 1)");
+}
+
+#[test]
 fn test_new_operators() {
     assert_eq!(infix_to_prefix("a & b"), "(& a b)");
     assert_eq!(infix_to_prefix("a | b"), "(| a b)");
