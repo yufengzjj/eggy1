@@ -2,6 +2,7 @@ pub mod eval;
 pub mod expr_convert;
 pub mod linear_mba;
 mod poly_mba;
+mod tfunc;
 
 use crate::expr_convert::{egglog_to_infix, infix_to_egglog};
 use clap::Parser;
@@ -929,12 +930,18 @@ fn init_egg_function(eg: &mut EGraph) {
 /// One equality-saturation round on a fresh e-graph: insert `s` (unioned with
 /// its linear-MBA rebuild), run the schedule, extract the best term (in egglog
 /// syntax).
-pub fn simplify_round(egg: &str, s: &str, cli: &Cli) -> Result<String, Error> {
+/// One saturate-and-extract round on `s` together with its linear-MBA rebuild, or
+/// on the rebuild alone if `keep_input` is false and the pre-pass changed `s`.
+pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result<String, Error> {
     let mut egraph = new_experimental_egraph();
     init_egg_function(&mut egraph);
     egraph.parse_and_run_program(None, egg)?;
     let alt = linear_mba::simplify_linear(s, width_of(&cli.num_type));
-    let union = if alt != s { format!("(union expr {alt})") } else { String::new() };
+    let (s, union) = match alt != s {
+        true if !keep_input => (alt.as_str(), String::new()),
+        true => (s, format!("(union expr {alt})")),
+        false => (s, String::new()),
+    };
     let result = egraph.parse_and_run_program(
         None,
         &format!(
@@ -984,10 +991,22 @@ pub fn simplify_round(egg: &str, s: &str, cli: &Cli) -> Result<String, Error> {
 pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
     let egg = make_egg(&cli.num_type);
     let mut seed = s.to_string();
-    let (mut rounds, mut extra) = (cli.max_restarts.max(1), 2);
+    let (mut rounds, mut extra, mut first) = (cli.max_restarts.max(1), 2, true);
     while rounds > 0 {
         rounds -= 1;
-        let extracted = simplify_round(&egg, &seed, cli)?;
+        // Saturating a large input is most of the run time and rarely beats its
+        // rebuild; it is kept only where rules do better from the input: results
+        // that still mix arithmetic or constants into bitwise operations, and
+        // inputs with shifts, division or mulhi.
+        let opaque = ["(Shl ", "(Shr ", "(Div ", "(Mod ", "(Mulhi "].iter().any(|o| seed.contains(o));
+        let mut extracted = simplify_round(&egg, &seed, cli, first && opaque)?;
+        if first && !opaque && mixed(&eval::parse(&extracted)) {
+            let full = simplify_round(&egg, &seed, cli, true)?;
+            if eval::size(&eval::parse(&full)) <= eval::size(&eval::parse(&extracted)) {
+                extracted = full;
+            }
+        }
+        first = false;
         if extracted == seed {
             break;
         }
@@ -999,6 +1018,18 @@ pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
         }
     }
     Ok(egglog_to_infix(&seed, &|n| norm_const(n, &cli.num_type)))
+}
+
+/// Whether `t` has an arithmetic operation or a constant directly under a bitwise one.
+fn mixed(t: &eval::Term) -> bool {
+    let eval::Term::Op(op, a) = t else { return false };
+    let bit = |o: &str| matches!(o, "And" | "Or" | "Xor" | "Not");
+    let plain = |x: &eval::Term| match x {
+        eval::Term::Op(o, _) => bit(o),
+        eval::Term::Num(_) => false,
+        eval::Term::Var(_) => true,
+    };
+    bit(op) && !a.iter().all(plain) || a.iter().any(mixed)
 }
 
 fn norm_const(n: i64, num_type: &str) -> i64 {

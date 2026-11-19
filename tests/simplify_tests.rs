@@ -636,9 +636,22 @@ fn semi_linear_bitwise_shape() {
             ),
             (
                 "((((((-((0x2 * ~((z ^ z)))) + (0x2 * ((((z | 0xf0) ^ (y & x)) + (-((z ^ x)) - 0x1)) - (((z | 0xf0) ^ (y & x)) | ~((z ^ x)))))) - ((((y + 0x2156) - (y | 0x2156)) + 0x5c) - ((y & 0x2156) & 0x5c))) - (0x5 * ((((x + 0xbf) - (x & 0xbf)) + 0xff00) - ((x | 0xbf) & 0xff00)))) + ((y & 0x2156) | 0x5c)) + (0x5 * ((x | 0xbf) | 0xff00))) + (0x2 * (-(((z | z) - (z & z))) - 0x1)))",
-                &["(2 * ((z ^ ~x) & ((z & (y ^ -0xf1)) ^ 0xf0)))"],
+                &["(2 * ((z ^ ~x) & ((z & (y ^ -0xf1)) ^ 0xf0)))", "(2 * (((z & (y ^ -0xf1)) ^ 0xf0) & ~(z ^ x)))"],
                 10,
             ),
+        ],
+    );
+}
+
+/// Carry and lowest-set-bit identities (`x & -(x & -(x & y)) = x & y`), proved bit by bit.
+#[test]
+fn t_function_identities() {
+    check(
+        "i64",
+        &[
+            ("(x & (- (x & ((- (x + (- (((x | (x | y)) | (((x | ((~ (x & (- (~ y)))) & y)) + (x | y)) + (- (x | y)))) + (- y))))) ^ (~ (y | (y | (~ y))))))))", &["(x & y)"], 10),
+            ("((((x & (- x)) | ((x & (- x)) & (~ ((~ (x | y)) | ((~ (- (~ (x | y)))) & ((~ (x | y)) + (~ (x | y)))))))) | (~ ((~ (x | y)) | ((~ (- (~ (x | y)))) & ((~ (x | y)) + (~ (x | y))))))) | (~ ((~ (x | y)) | ((~ (- (~ (x | y)))) & ((~ (x | y)) + (~ (x | y)))))))", &["(x | y)"], 10),
+            ("(~ ((((~ x) + (- y)) + y) + (- ((((~ x) + (- y)) + y) + (- ((((~ x) + (- y)) + y) ^ (~ (~ (y | (- ((- y) | (y + y))))))))))))", &["(x ^ y)"], 10),
         ],
     );
 }
@@ -1395,6 +1408,6 @@ fn extract_restart() {
     // The final answer must be a fixpoint: one more round on a fresh
     // e-graph seeded with it extracts the same term again.
     let seed = infix_to_egglog(&result, true);
-    let again = simplify_round(&make_egg(&cli.num_type), &seed, &cli).unwrap();
+    let again = simplify_round(&make_egg(&cli.num_type), &seed, &cli, true).unwrap();
     assert_eq!(seed, again, "simplify result is not a fixpoint");
 }

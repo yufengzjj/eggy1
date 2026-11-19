@@ -30,7 +30,7 @@ impl Width {
     pub(crate) fn new(w: u32) -> Width {
         Width { w, mask: if w == 64 { u64::MAX } else { (1u64 << w) - 1 } }
     }
-    fn signed(&self, v: u64) -> i64 {
+    pub(crate) fn signed(&self, v: u64) -> i64 {
         let sh = 64 - self.w;
         ((v << sh) as i64) >> sh
     }
@@ -1608,9 +1608,26 @@ fn substitute_atoms(t: &T, w: &Width) -> T {
 /// MBA region, and every polynomial MBA region,
 /// rebuilt in a smaller form. Returns `egg` unchanged when nothing gets smaller.
 pub fn simplify_linear(egg: &str, w: u32) -> String {
+    thread_local! {
+        static LAST: std::cell::RefCell<Option<(String, u32, String)>> = const { std::cell::RefCell::new(None) };
+    }
+    if let Some(r) = LAST.with(|c| c.borrow().as_ref().filter(|(e, bits, _)| e == egg && *bits == w).map(|(_, _, r)| r.clone())) {
+        return r;
+    }
+    let r = simplify_linear_uncached(egg, w);
+    LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, r.clone())));
+    r
+}
+
+fn simplify_linear_uncached(egg: &str, w: u32) -> String {
     let w = Width::new(w);
     let t = parse(egg);
-    let r = rewrite(&t, &w);
+    // Subterms are replaced only after the rebuild: earlier, `~(y - 1)` would become
+    // `-y`, a leaf the rebuild no longer relates to `y - 1`.
+    let r = match crate::tfunc::replacement(&t, &w) {
+        Some(r) => r,
+        None => crate::tfunc::simplify(&rewrite(&t, &w), &w),
+    };
     REWRITTEN.with(|c| c.borrow_mut().clear());
     if r == t { egg.to_string() } else { show(&r) }
 }
