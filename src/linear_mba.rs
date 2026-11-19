@@ -347,8 +347,74 @@ fn bool_expr_uncached(tt: u64, n: usize) -> BE {
             best = Some(cand);
         }
     }
+    if let Some(cand) = decompose(tt, n).filter(|d| best.as_ref().is_none_or(|(c, _)| d.0 < *c)) {
+        best = Some(cand);
+    }
     let (c, b) = best.unwrap();
     BE::E(c, b)
+}
+
+/// Most variables `decompose` splits; its cost grows with the pairs of subsets.
+const MAX_DECOMPOSE: usize = 5;
+
+/// Smallest `g(A) op h(B)` with `A ∪ B` all variables and both proper subsets, as in
+/// `((w ^ x) | (x & y)) & ~(y ^ z)`. For `&`, `g` and `h` are `tt` ORed over the
+/// variables outside their set; for `|`, ANDed; for `^`, `g = tt(B \ A = 0)` and
+/// `h = tt(A \ B = 0) ^ tt(A \ B = 0, B \ A = 0)`. Each is checked against `tt`.
+fn decompose(tt: u64, n: usize) -> Option<(usize, B)> {
+    if n > MAX_DECOMPOSE {
+        return None;
+    }
+    let full_vars = (1usize << n) - 1;
+    let full = table_full(n);
+    // Table with variable `i` forced to `v`, still over all `n` variables.
+    let fix = |t: u64, i: usize, v: usize| {
+        let low = [0x5555_5555_5555_5555u64, 0x3333_3333_3333_3333, 0x0f0f_0f0f_0f0f_0f0f, 0x00ff_00ff_00ff_00ff, 0x0000_ffff_0000_ffff, 0x0000_0000_ffff_ffff][i];
+        let half = (if v == 0 { t } else { t >> (1 << i) }) & low & full;
+        half | half << (1 << i)
+    };
+    let over = |t: u64, keep: usize, f: &dyn Fn(u64, u64) -> u64| {
+        (0..n).filter(|&i| keep >> i & 1 == 0).fold(t, |t, i| f(fix(t, i, 0), fix(t, i, 1)))
+    };
+    let zero_out = |t: u64, keep: usize| (0..n).filter(|&i| keep >> i & 1 == 0).fold(t, |t, i| fix(t, i, 0));
+    let sub = |t: u64, keep: usize| -> Option<(usize, B)> {
+        let vars: Vec<usize> = (0..n).filter(|&i| keep >> i & 1 == 1).collect();
+        let st = (0..1usize << vars.len())
+            .filter(|&q| t >> vars.iter().enumerate().fold(0, |p, (j, &i)| p | (q >> j & 1) << i) & 1 == 1)
+            .fold(0u64, |a, q| a | 1 << q);
+        match bool_expr(st, &vars) {
+            BE::E(c, b) => Some((c, b)),
+            _ => None,
+        }
+    };
+    let mut best: Option<(usize, B)> = None;
+    for a in 1..full_vars {
+        for b in a..full_vars {
+            if a | b != full_vars {
+                continue;
+            }
+            let pairs = [
+                ("And", over(tt, a, &|x, y| x | y), over(tt, b, &|x, y| x | y)),
+                ("Or", over(tt, a, &|x, y| x & y), over(tt, b, &|x, y| x & y)),
+                ("Xor", zero_out(tt, a), zero_out(tt, b) ^ zero_out(tt, a & b)),
+            ];
+            for (op, g, h) in pairs {
+                let joined = match op {
+                    "And" => g & h,
+                    "Or" => g | h,
+                    _ => g ^ h,
+                } & full;
+                if joined != tt {
+                    continue;
+                }
+                let (Some((cg, eg)), Some((ch, eh))) = (sub(g, a), sub(h, b)) else { continue };
+                if best.as_ref().is_none_or(|(c, _)| cg + ch + 1 < *c) {
+                    best = Some((cg + ch + 1, B::Bin(op, Box::new(eg), Box::new(eh))));
+                }
+            }
+        }
+    }
+    best
 }
 
 fn b_to_t(b: &B, leaves: &[T]) -> T {
@@ -483,6 +549,9 @@ fn bit_degree(t: &T, w: &Width) -> usize {
     }
 }
 
+/// Most combinations of block choices `small_blocks` tries exhaustively.
+const MAX_BLOCK_COMBOS: usize = 1 << 15;
+
 /// Rebuild a linear region from its conjunction-basis expansion when every maximal
 /// set of leaves with a non-zero coefficient (a block) has at most 3 leaves: one
 /// term `c·f` per block, with `f` any bitwise function of the block's leaves and `c`
@@ -596,8 +665,28 @@ fn small_blocks(t: &T, w: &Width) -> Option<T> {
     let mut choice = vec![0usize; blocks.len()];
     let mut best = build(&choice);
     let mut best_size = wsize(&best);
-    // Coordinate descent: the remaining terms only couple blocks that share leaves.
-    for _ in 0..4 {
+    // Blocks that share leaves can need to change together (`2*~(a|c) + 2*(e & (c|d))`),
+    // so few enough combinations are all tried; otherwise coordinate descent.
+    let combos = opts.iter().try_fold(1usize, |acc, o| acc.checked_mul(o.len())).unwrap_or(usize::MAX);
+    if combos <= MAX_BLOCK_COMBOS {
+        let mut c = vec![0usize; blocks.len()];
+        'all: loop {
+            let cand = build(&c);
+            let cs = wsize(&cand);
+            if cs < best_size {
+                (best, best_size) = (cand, cs);
+            }
+            for (e, o) in opts.iter().enumerate() {
+                c[e] += 1;
+                if c[e] < o.len() {
+                    continue 'all;
+                }
+                c[e] = 0;
+            }
+            break;
+        }
+    }
+    for _ in 0..if combos <= MAX_BLOCK_COMBOS { 0 } else { 4 } {
         let mut improved = false;
         for e in 0..blocks.len() {
             for ci in 0..opts[e].len() {
@@ -728,7 +817,21 @@ fn rebuild_gp(gp: &[u64], lv: &[T], mut konst: u64, w: &Width) -> (Vec<(u64, T)>
 /// `+ x` makes them 0, 1, 2.
 fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
     let m = w.mask;
-    let (e0, groups) = bit_groups(t, lv, w)?;
+    let (e0, all_groups) = bit_groups(t, lv, w)?;
+    // Leaves that cancel out are dropped, so the shape search sees fewer leaves.
+    let used: Vec<usize> = (0..lv.len())
+        .filter(|&i| all_groups.iter().any(|(g, _)| (0..g.len()).any(|q| g[q] != g[q & !(1 << i)])))
+        .collect();
+    if used.is_empty() {
+        return Some(T::Num(w.signed(e0)));
+    }
+    let project = |gs: Vec<(Vec<u64>, u64)>| -> Vec<(Vec<u64>, u64)> {
+        let at = |q: usize| used.iter().enumerate().fold(0, |p, (j, &i)| p | (q >> j & 1) << i);
+        gs.into_iter().map(|(g, mask)| ((0..1usize << used.len()).map(|q| g[at(q)]).collect(), mask)).collect()
+    };
+    let groups = project(all_groups);
+    let full_lv = lv;
+    let lv: &[T] = &used.iter().map(|&i| full_lv[i].clone()).collect::<Vec<_>>();
     let mut cands = Vec::new();
     semi_linear_candidates(&groups, lv, e0, w, &mut cands);
     let mut peels = Vec::new();
@@ -736,7 +839,8 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
     for (i, l) in lv.iter().enumerate() {
         for a in [1i64, -1, 2, -2, 3, -3] {
             let peeled = T::Op("Sub".into(), vec![t.clone(), T::Op("Mul".into(), vec![T::Num(a), l.clone()])]);
-            let Some((e0, gs)) = bit_groups(&peeled, lv, w) else { continue };
+            let Some((e0, gs)) = bit_groups(&peeled, full_lv, w) else { continue };
+            let gs = project(gs);
             let s = spread(&gs, w);
             if gs.len() <= groups.len() && s < best.map_or(spread(&groups, w), |b| b.0) {
                 best = Some((s, peels.len()));
@@ -773,15 +877,17 @@ fn spread(groups: &[(Vec<u64>, u64)], w: &Width) -> (u64, u64) {
 }
 
 /// Largest bitwise expression size `shape_candidates` searches.
-const MAX_SHAPE: usize = 14;
+const MAX_SHAPE: usize = 15;
 
 #[derive(Clone, Copy)]
 enum Shape {
-    Leaf(usize),
+    Leaf(u8),
     Const,
-    Not(usize),
-    Bin(&'static str, usize, usize),
+    Not(u32),
+    Bin(u8, u32, u32),
 }
+
+const SHAPE_OPS: [&str; 3] = ["And", "Or", "Xor"];
 
 /// Bitwise expressions of `n` leaves and constants, one per set of truth tables
 /// they can give at one bit position when every constant bit is free. Tables are
@@ -809,7 +915,7 @@ impl Shapes {
         let mut level = Vec::new();
         for i in 0..n {
             let f = (0..1usize << n).filter(|q| q >> i & 1 == 1).fold(0u8, |acc, q| acc | 1 << q);
-            level.push((one(f), Shape::Leaf(i)));
+            level.push((one(f), Shape::Leaf(i as u8)));
         }
         let mut c = one(0);
         c.iter_mut().zip(one(full)).for_each(|(a, b)| *a |= b);
@@ -825,27 +931,33 @@ impl Shapes {
     fn push_level(&mut self, level: Vec<([u64; 4], Shape)>) {
         let start = self.sets.len();
         for (s, how) in level {
-            if self.seen.insert(s) {
-                self.elems.push((0..=255u8).filter(|&f| s[(f >> 6) as usize] >> (f & 63) & 1 == 1).collect());
-                self.sets.push(s);
-                self.how.push(how);
-            }
+            self.push(s, how, true);
         }
         self.levels.push(start..self.sets.len());
+    }
+
+    /// Entries of the last level are never operands, so they need no `elems`.
+    fn push(&mut self, s: [u64; 4], how: Shape, operand: bool) {
+        if self.seen.insert(s) {
+            self.elems.push(if operand { (0..=255u8).filter(|&f| s[(f >> 6) as usize] >> (f & 63) & 1 == 1).collect() } else { Vec::new() });
+            self.sets.push(s);
+            self.how.push(how);
+        }
     }
 
     fn grow(&mut self, size: usize) {
         let full = self.full();
         while self.levels.len() <= size {
             let s = self.levels.len();
-            let mut level = Vec::new();
+            let operand = s < MAX_SHAPE;
+            let start = self.sets.len();
             for i in self.levels[s - 1].clone() {
                 let mut set = [0; 4];
                 for &f in &self.elems[i] {
                     let g = !f & full;
                     set[(g >> 6) as usize] |= 1 << (g & 63);
                 }
-                level.push((set, Shape::Not(i)));
+                self.push(set, Shape::Not(i as u32), operand);
             }
             for a in 1..=(s - 1) / 2 {
                 for i in self.levels[a].clone() {
@@ -860,13 +972,13 @@ impl Shapes {
                                 }
                             }
                         }
-                        for (set, op) in sets.into_iter().zip(["And", "Or", "Xor"]) {
-                            level.push((set, Shape::Bin(op, i, k)));
+                        for (op, set) in sets.into_iter().enumerate() {
+                            self.push(set, Shape::Bin(op as u8, i as u32, k as u32), operand);
                         }
                     }
                 }
             }
-            self.push_level(level);
+            self.levels.push(start..self.sets.len());
         }
     }
 
@@ -884,11 +996,12 @@ impl Shapes {
                 }
                 *slot += 1;
             }
-            Shape::Not(a) => self.solve(a, !f & self.full(), j, consts, slot),
+            Shape::Not(a) => self.solve(a as usize, !f & self.full(), j, consts, slot),
             Shape::Bin(op, a, b) => {
+                let (a, b) = (a as usize, b as usize);
                 let apply = |x: u8, y: u8| match op {
-                    "And" => x & y,
-                    "Or" => x | y,
+                    0 => x & y,
+                    1 => x | y,
                     _ => x ^ y,
                 };
                 let (x, y) = self.elems[a]
@@ -903,15 +1016,15 @@ impl Shapes {
 
     fn build(&self, i: usize, lv: &[T], consts: &[u64], slot: &mut usize, w: &Width) -> T {
         match self.how[i] {
-            Shape::Leaf(k) => lv[k].clone(),
+            Shape::Leaf(k) => lv[k as usize].clone(),
             Shape::Const => {
                 *slot += 1;
                 T::Num(w.signed(consts.get(*slot - 1).copied().unwrap_or(0) & w.mask))
             }
-            Shape::Not(a) => T::Op("Not".into(), vec![self.build(a, lv, consts, slot, w)]),
+            Shape::Not(a) => T::Op("Not".into(), vec![self.build(a as usize, lv, consts, slot, w)]),
             Shape::Bin(op, a, b) => {
-                let x = self.build(a, lv, consts, slot, w);
-                T::Op(op.into(), vec![x, self.build(b, lv, consts, slot, w)])
+                let x = self.build(a as usize, lv, consts, slot, w);
+                T::Op(SHAPE_OPS[op as usize].into(), vec![x, self.build(b as usize, lv, consts, slot, w)])
             }
         }
     }
