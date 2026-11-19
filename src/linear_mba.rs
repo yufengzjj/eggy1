@@ -882,7 +882,136 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
     limit = cands.iter().map(size).min().unwrap_or(limit);
     cands.extend(semi_split(&groups, lv, e0, w, limit));
     // Masks that differ only in bits that cannot matter tie on size; keep the short one.
-    cands.into_iter().min_by_key(|c| (size(c), const_bits(c)))
+    let best = cands.into_iter().min_by_key(|c| (size(c), const_bits(c)))?;
+    Some(short_consts(best, lv, w))
+}
+
+/// `t` with each constant replaced by the shortest sign- or zero-extension of its
+/// low bits that leaves the function unchanged (`-0x7fffffffffffff6e` → `0x92`):
+/// semi-linear terms are equal exactly when `e(0)` and every bit's table agree.
+fn short_consts(t: T, lv: &[T], w: &Width) -> T {
+    // `Prog` finds leaves by their context, which a rebuilt term may change, so
+    // the leaves are replaced by placeholder variables first.
+    let ph: Vec<T> = (0..lv.len()).map(|i| T::Var(format!("\u{4}{i}"))).collect();
+    fn hide(t: &T, lv: &[T], ph: &[T]) -> T {
+        if let Some(i) = lv.iter().position(|l| l == t) {
+            return ph[i].clone();
+        }
+        match t {
+            T::Op(op, a) => T::Op(op.clone(), a.iter().map(|x| hide(x, lv, ph)).collect()),
+            _ => t.clone(),
+        }
+    }
+    // Placeholders as the only variables, and no arithmetic under a bitwise operation.
+    fn only_ph(t: &T, in_bit: bool) -> bool {
+        match t {
+            T::Var(v) => v.starts_with('\u{4}'),
+            T::Num(_) => true,
+            T::Op(op, a) => {
+                let bit = matches!(op.as_str(), "And" | "Or" | "Xor" | "Not");
+                (bit || !in_bit) && a.iter().all(|x| only_ph(x, bit))
+            }
+        }
+    }
+    fn show_leaves(t: &T, lv: &[T]) -> T {
+        match t {
+            T::Var(v) if v.starts_with('\u{4}') => lv[v[1..].parse::<usize>().unwrap()].clone(),
+            T::Op(op, a) => T::Op(op.clone(), a.iter().map(|x| show_leaves(x, lv)).collect()),
+            _ => t.clone(),
+        }
+    }
+    let hidden = hide(&t, lv, &ph);
+    if !only_ph(&hidden, false) {
+        return t;
+    }
+    let Some(r) = short_consts_over(hidden, &ph, w) else { return t };
+    show_leaves(&r, lv)
+}
+
+fn short_consts_over(t: T, lv: &[T], w: &Width) -> Option<T> {
+    let reference = bit_groups(&t, lv, w)?;
+    let mut t = t;
+    let count = {
+        fn n(t: &T) -> usize {
+            match t {
+                T::Num(_) => 1,
+                T::Op(_, a) => a.iter().map(n).sum(),
+                _ => 0,
+            }
+        }
+        n(&t)
+    };
+    fn replace(t: &T, idx: &mut usize, target: usize, v: i64) -> T {
+        match t {
+            T::Num(_) => {
+                *idx += 1;
+                if *idx - 1 == target { T::Num(v) } else { t.clone() }
+            }
+            T::Op(op, a) => T::Op(op.clone(), a.iter().map(|x| replace(x, idx, target, v)).collect()),
+            _ => t.clone(),
+        }
+    }
+    fn nth(t: &T, idx: &mut usize, target: usize) -> Option<i64> {
+        match t {
+            T::Num(v) => {
+                *idx += 1;
+                (*idx - 1 == target).then_some(*v)
+            }
+            T::Op(_, a) => a.iter().find_map(|x| nth(x, idx, target)),
+            _ => None,
+        }
+    }
+    let large = |k: i64| w.signed(k as u64 & w.mask).unsigned_abs() >> (w.w / 2) != 0;
+    // Bits that cancel between constants (`(w ^ K) - (z ^ K')` with the top bit in
+    // both) only go away together, so first all large constants are cut at once.
+    for b in 0..w.w {
+        let low = if b + 1 >= 64 { u64::MAX } else { (1u64 << (b + 1)) - 1 };
+        fn cut(t: &T, f: &dyn Fn(i64) -> i64) -> T {
+            match t {
+                T::Num(v) => T::Num(f(*v)),
+                T::Op(op, a) => T::Op(op.clone(), a.iter().map(|x| cut(x, f)).collect()),
+                _ => t.clone(),
+            }
+        }
+        let f = |v: i64| {
+            let k = v as u64 & w.mask;
+            if !large(v) {
+                return v;
+            }
+            let sign = if k >> b & 1 == 1 { !low } else { 0 };
+            w.signed((k & low | sign) & w.mask)
+        };
+        let cand = cut(&t, &f);
+        if cand != t && bit_groups(&cand, lv, w).as_ref() == Some(&reference) {
+            t = cand;
+            break;
+        }
+    }
+    for i in 0..count {
+        let Some(k) = nth(&t, &mut 0, i) else { continue };
+        if !large(k) {
+            continue;
+        }
+        let k = k as u64 & w.mask;
+        let mut options: Vec<i64> = (0..w.w)
+            .flat_map(|b| {
+                let low = if b + 1 >= 64 { u64::MAX } else { (1u64 << (b + 1)) - 1 };
+                let sign = if k >> b & 1 == 1 { !low } else { 0 };
+                [w.signed((k & low | sign) & w.mask), w.signed(k & low)]
+            })
+            .filter(|&v| v != w.signed(k))
+            .collect();
+        options.sort_by_key(|v| v.unsigned_abs());
+        options.dedup();
+        for v in options.into_iter().filter(|v| v.unsigned_abs() < w.signed(k).unsigned_abs()) {
+            let cand = replace(&t, &mut 0, i, v);
+            if bit_groups(&cand, lv, w).as_ref() == Some(&reference) {
+                t = cand;
+                break;
+            }
+        }
+    }
+    Some(t)
 }
 
 /// Smallest of the grouped and shape candidates for a semi-linear table.
@@ -947,18 +1076,39 @@ fn semi_split(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, limit: u
     let free: Vec<Option<T>> = parts.iter().map(|(gs, sl)| semi_from_groups(gs, sl, 0, w, limit)).collect();
     let mut best: Option<T> = None;
     for last in 0..parts.len() {
-        let mut terms = Vec::new();
-        for (_, f) in free.iter().enumerate().filter(|&(k, _)| k != last) {
-            terms.push((1, f.clone()?));
-        }
-        let (gs, sl) = &parts[last];
-        terms.push((1, semi_from_groups(gs, sl, e0, w, limit)?));
-        let cand = build_sum(&terms, 0, w);
-        if best.as_ref().is_none_or(|b| size(&cand) < size(b)) {
-            best = Some(cand);
+        // The other sets either keep their own constant, or drop it and pass it to `last`.
+        for strip in [false, true] {
+            let mut terms = Vec::new();
+            let mut target = e0;
+            for (_, f) in free.iter().enumerate().filter(|&(k, _)| k != last) {
+                let (body, k) = if strip { split_const(f.as_ref()?, w) } else { (f.clone()?, 0) };
+                target = target.wrapping_add(k) & w.mask;
+                terms.push((1, body));
+            }
+            let (gs, sl) = &parts[last];
+            terms.push((1, semi_from_groups(gs, sl, target, w, limit)?));
+            let cand = build_sum(&terms, 0, w);
+            if best.as_ref().is_none_or(|b| size(&cand) < size(b)) {
+                best = Some(cand);
+            }
         }
     }
     best
+}
+
+/// `(x, k)` with `t = x + k` for a trailing constant `k` of `t`, else `(t, 0)`.
+fn split_const(t: &T, w: &Width) -> (T, u64) {
+    match t {
+        T::Op(op, a) if op == "Add" => match (&a[0], &a[1]) {
+            (x, T::Num(k)) | (T::Num(k), x) => (x.clone(), *k as u64 & w.mask),
+            _ => (t.clone(), 0),
+        },
+        T::Op(op, a) if op == "Sub" => match &a[1] {
+            T::Num(k) => (a[0].clone(), (*k as u64).wrapping_neg() & w.mask),
+            _ => (t.clone(), 0),
+        },
+        _ => (t.clone(), 0),
+    }
 }
 
 /// Largest table value in magnitude, then the sum of each group's largest.

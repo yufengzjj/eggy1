@@ -656,7 +656,8 @@ fn linear_common_power_of_two() {
 }
 
 /// Shapes of size 15, leaves that cancel out, 4-variable bitwise functions split
-/// as `g(A) & h(B)`, blocks that must change together, and leaf sets rebuilt apart.
+/// as `g(A) & h(B)`, blocks that must change together, leaf sets rebuilt apart, and
+/// constants cut to the bits that matter.
 #[test]
 fn semi_linear_large_shapes_and_splits() {
     check(
@@ -685,6 +686,11 @@ fn semi_linear_large_shapes_and_splits() {
             (
                 "(((((((-((0x3 * (~(x) & 0xdcab))) + (0x3 * ((((y + 0xe45c) - (y | 0xe45c)) + 0x1c5f) - ((y & 0xe45c) | 0x1c5f)))) + (0x3 * (~(z) & 0x3b))) - (0x3 * (((-(z) - 0x1) + 0x3b) - (~(z) | 0x3b)))) - (0x3 * ((y & 0xe45c) & 0x1c5f))) + (0x3 * ((((v + 0xbb) - (v & 0xbb)) + ((v + v) - (v | v))) - ((v | 0xbb) & (v & v))))) - ((((z + 0xf0) - (z | 0xf0)) + ((w + 0xe734) - (w | 0xe734))) - ((z & 0xf0) & (w & 0xe734)))) + (0x3 * (((-(x) - 0x1) + 0xdcab) - (~(x) | 0xdcab))))",
                 &["(((0xbb | v) * 3) - ((w & 0xe734) | (z & 0xf0)))"],
+                10,
+            ),
+            (
+                "((((((((((w ^ x) | 0x5c) - ((w ^ x) & 0x5c)) - ((w ^ x) ^ 0x5c)) - ((((z | 0xcc) - (z & 0xcc)) + 0x5e) - ((z ^ 0xcc) | 0x5e))) + ((~(v) | (v ^ 0x70)) - (~(v) & (v ^ 0x70)))) - (0x3 * ((((w + 0x85) - (w | 0x85)) + 0x72) - ((w & 0x85) & 0x72)))) - (~(v) ^ (v ^ 0x70))) + ((w ^ 0xa1) ^ 0x33)) + (0x3 * ((w & 0x85) | 0x72)))",
+                &["((0x92 ^ w) - ((z ^ 0xcc) & 0x5e))"],
                 10,
             ),
         ],
