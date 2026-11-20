@@ -463,18 +463,21 @@ pub(crate) fn build_sum(terms: &[(u64, T)], konst: u64, w: &Width) -> T {
 
 /// `size(&build_sum(terms, konst, w))` without building it.
 fn sum_size(terms: &[(u64, T)], konst: u64, w: &Width) -> usize {
+    let terms: Vec<(u64, usize, bool)> = terms.iter().map(|(c, t)| (*c, size(t), matches!(t, T::Op(op, _) if op == "Not"))).collect();
+    folded_sum_size(&terms, konst, w)
+}
+
+/// `sum_size` from each term's coefficient, size and whether it is a `Not`.
+fn folded_sum_size(terms: &[(u64, usize, bool)], konst: u64, w: &Width) -> usize {
     if konst != 0 && (konst != 1 || terms.len() > 1) {
-        if let Some(i) = terms.iter().position(|(c, _)| *c == konst) {
-            let not_size = match &terms[i].1 {
-                T::Op(op, _) if op == "Not" => size(&terms[i].1) - 1,
-                t => size(t) + 1,
-            };
+        if let Some(i) = terms.iter().position(|t| t.0 == konst) {
+            let not_size = if terms[i].2 { terms[i].1 - 1 } else { terms[i].1 + 1 };
             let neg = konst.wrapping_neg() & w.mask;
-            let rest = terms.iter().enumerate().filter(|&(j, _)| j != i).map(|(_, (c, t))| (*c, size(t)));
+            let rest = terms.iter().enumerate().filter(|&(j, _)| j != i).map(|(_, t)| (t.0, t.1));
             return sized_sum(rest.chain([(neg, not_size)]), 0, w);
         }
     }
-    sized_sum(terms.iter().map(|(c, t)| (*c, size(t))), konst, w)
+    sized_sum(terms.iter().map(|t| (t.0, t.1)), konst, w)
 }
 
 fn sized_sum(terms: impl Iterator<Item = (u64, usize)>, konst: u64, w: &Width) -> usize {
@@ -1380,6 +1383,20 @@ impl Shapes {
         }
     }
 
+    /// Size of what `build` gives for entry `i`.
+    fn size_of(&self, i: usize, leaf_sizes: &[usize]) -> usize {
+        match self.how[i] {
+            Shape::Leaf(k) => leaf_sizes[k as usize],
+            Shape::Const => 1,
+            Shape::Not(a) => 1 + self.size_of(a as usize, leaf_sizes),
+            Shape::Bin(_, a, b) => 1 + self.size_of(a as usize, leaf_sizes) + self.size_of(b as usize, leaf_sizes),
+        }
+    }
+
+    fn is_not(&self, i: usize) -> bool {
+        matches!(self.how[i], Shape::Not(_))
+    }
+
     fn build(&self, i: usize, lv: &[T], consts: &[u64], slot: &mut usize, w: &Width) -> T {
         match self.how[i] {
             Shape::Leaf(k) => lv[k as usize].clone(),
@@ -1491,7 +1508,7 @@ fn shape_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, mu
     }
 }
 
-/// Most groups `pair_candidates` handles, and most shape pairs it checks.
+/// Most groups `pair_candidates` handles, and most shape entries it checks.
 const MAX_PAIR_GROUPS: usize = 8;
 const PAIR_BUDGET: usize = 500_000;
 /// Largest total size of the two shapes.
@@ -1529,6 +1546,11 @@ fn pair_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, lim
     let coef = |c: u64| if c == 1 { 0 } else if c == m { 1 } else { 2 };
     let mut budget = PAIR_BUDGET;
     let mut best = limit;
+    let leaf_sizes: Vec<usize> = lv.iter().map(size).collect();
+    let group_of: Vec<usize> = (0..w.w).map(|j| groups.iter().position(|(_, mask)| mask >> j & 1 == 1).unwrap_or(0)).collect();
+    // fits[acc2][s2]: the entries of size s2 that meet every group's acc2; many
+    // shapes B1 and coefficient pairs give the same acc2.
+    let mut fits: std::collections::HashMap<Vec<[u64; 4]>, Vec<Option<Vec<usize>>>> = Default::default();
     for (a, &c1) in scales.iter().enumerate() {
         for &c2 in &scales[a..] {
             let overhead = coef(c1) + coef(c2) + 1;
@@ -1592,6 +1614,10 @@ fn pair_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, lim
             }
             let mut sh = shapes(n).lock().unwrap();
             let top = (best - overhead - 1).min(MAX_PAIR_SIZE);
+            let other = (2..).map(|v: u64| v & m).find(|&v| v != c1 && v != c2).unwrap();
+            // Whether some choice of tables at 0 makes r = 0, per group's set of
+            // reachable (f1(0), f2(0)); None when pick_bits gives up.
+            let mut zero_r: std::collections::HashMap<Vec<u8>, Option<bool>> = Default::default();
             'sizes: for s in 2..=top {
                 if s + overhead >= best {
                     break;
@@ -1619,12 +1645,39 @@ fn pair_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, lim
                                 acc
                             })
                             .collect();
-                        for k in sh.levels[s2].clone() {
-                            if budget == 0 {
-                                return;
+                        let row = fits.entry(acc2.clone()).or_default();
+                        if row.len() <= s2 {
+                            row.resize(s2 + 1, None);
+                        }
+                        if row[s2].is_none() {
+                            let level = sh.levels[s2].clone();
+                            budget = budget.saturating_sub(level.len());
+                            row[s2] = Some(level.filter(|&k| acc2.iter().all(|acc| meets(acc, &sh.sets[k]))).collect());
+                        }
+                        for &k in row[s2].as_ref().unwrap() {
+                            // The candidate's size depends only on the shapes and on r, and
+                            // r = 0 exactly when the carry DP finds a choice, so most
+                            // candidates are ruled out without building them.
+                            let terms = [(c1, sh.size_of(i, &leaf_sizes), sh.is_not(i)), (c2, sh.size_of(k, &leaf_sizes), sh.is_not(k))];
+                            let size_with = |r: u64| folded_sum_size(&terms, r, w);
+                            let (folded, unfolded) = (size_with(0), size_with(c1).min(size_with(c2)).min(size_with(other)));
+                            if folded.min(unfolded) >= best {
+                                continue;
                             }
-                            budget -= 1;
-                            if !acc2.iter().all(|acc| meets(acc, &sh.sets[k])) {
+                            let classes: Vec<u8> = (0..groups.len()).map(|gi| zero_classes(&sh, (i, k), &p1[gi], &comp[gi])).collect();
+                            let folds = *zero_r.entry(classes).or_insert_with_key(|classes| {
+                                let options: Vec<Vec<(u8, u8)>> = classes.iter().map(|&c| (0..4u8).filter(|t| c >> t & 1 == 1).map(|t| (t >> 1, t & 1)).collect()).collect();
+                                match carry_layers(&group_of, &options, (c1, c2), e0, w) {
+                                    Ok(_) => Some(true),
+                                    Err(gave_up) => (!gave_up).then_some(false),
+                                }
+                            });
+                            let low = match folds {
+                                Some(true) => folded,
+                                Some(false) => unfolded,
+                                None => folded.min(unfolded),
+                            };
+                            if low >= best {
                                 continue;
                             }
                             let cand = build_pair(&sh, (i, k), (c1, c2), groups, &comp, lv, e0, w);
@@ -1647,7 +1700,25 @@ fn pair_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, lim
 /// Per bit, an index into its group's options so that `Σ_j (c1·a_j + c2·b_j)·2^j = e0`,
 /// with `(a_j, b_j)` the option's tables at 0; found from the low bit up with the
 /// carry as state. All zeros when there is no such choice.
-fn pick_bits(group_of: &[usize], options: &[Vec<(u8, u8)>], (c1, c2): (u64, u64), e0: u64, w: &Width) -> Vec<usize> {
+fn pick_bits(group_of: &[usize], options: &[Vec<(u8, u8)>], c: (u64, u64), e0: u64, w: &Width) -> Vec<usize> {
+    let bits = w.w as usize;
+    let Ok(layers) = carry_layers(group_of, options, c, e0, w) else {
+        return vec![0; bits];
+    };
+    let mut out = vec![0; bits];
+    let mut carry = *layers[bits].keys().next().unwrap();
+    for j in (0..bits).rev() {
+        let (prev, o) = layers[j + 1][&carry];
+        out[j] = o;
+        carry = prev;
+    }
+    out
+}
+
+/// The carry DP of `pick_bits`; `Err(true)` when it gives up past 4096 carries,
+/// `Err(false)` when no choice exists.
+#[allow(clippy::type_complexity)]
+fn carry_layers(group_of: &[usize], options: &[Vec<(u8, u8)>], (c1, c2): (u64, u64), e0: u64, w: &Width) -> Result<Vec<std::collections::HashMap<i128, (i128, usize)>>, bool> {
     let bits = w.w as usize;
     let val = |o: (u8, u8)| (w.signed(c1) as i128) * (o.0 & 1) as i128 + (w.signed(c2) as i128) * (o.1 & 1) as i128;
     // layers[j]: carry into bit j -> (carry into bit j-1, option at bit j-1).
@@ -1663,18 +1734,28 @@ fn pick_bits(group_of: &[usize], options: &[Vec<(u8, u8)>], (c1, c2): (u64, u64)
             }
         }
         if next.is_empty() || next.len() > 4096 {
-            return vec![0; bits];
+            return Err(!next.is_empty());
         }
         layers.push(next);
     }
-    let mut out = vec![0; bits];
-    let mut carry = *layers[bits].keys().next().unwrap();
-    for j in (0..bits).rev() {
-        let (prev, o) = layers[j + 1][&carry];
-        out[j] = o;
-        carry = prev;
+    Ok(layers)
+}
+
+/// The reachable `(f1(0), f2(0))` of a group for the shapes `(i, k)`, as a mask
+/// over `2·f1(0) + f2(0)`.
+fn zero_classes(sh: &Shapes, (i, k): (usize, usize), p1: &[u64; 4], comp: &[[u64; 4]]) -> u8 {
+    const EVEN: u64 = 0x5555_5555_5555_5555;
+    let mut classes = 0u8;
+    for &f1 in sh.elems[i].iter().filter(|&&f1| p1[(f1 >> 6) as usize] >> (f1 & 63) & 1 == 1) {
+        let row = &comp[f1 as usize];
+        let (even, odd) = (0..4).fold((false, false), |(e, o), t| {
+            let x = row[t] & sh.sets[k][t];
+            (e || x & EVEN != 0, o || x & !EVEN != 0)
+        });
+        let a = (f1 & 1) * 2;
+        classes |= (even as u8) << a | (odd as u8) << (a + 1);
     }
-    out
+    classes
 }
 
 /// `c1·B1 + c2·B2 + r` for the shapes `(i, k)`, with per bit a table pair whose
@@ -2119,49 +2200,66 @@ fn independent_groups(gp: &[u64], n: usize, w: &Width) -> Vec<Vec<usize>> {
 /// Shortest `(terms, konst')` with `konst + Σ_j 2^j gp(bit j of x) = Σ terms + konst'`.
 fn rebuild_table(gp: &[u64], lv: &[T], konst: u64, w: &Width) -> (Vec<(u64, T)>, u64) {
     // The result depends on a leaf only through its size and whether it is a `~`
-    // (`build_sum` strips one), so other leaves become placeholders of the same size.
-    let ph: Vec<T> = lv
-        .iter()
-        .enumerate()
-        .map(|(i, l)| match l {
-            T::Op(op, _) if op == "Not" => l.clone(),
-            _ => T::Op(format!("\u{2}{i}"), vec![T::Num(0); size(l) - 1]),
-        })
-        .collect();
-    let key = (gp.to_vec(), ph.clone(), konst, w.w);
-    let r = match REBUILT.with(|c| c.borrow().get(&key).cloned()) {
-        Some(r) => r,
-        None => {
-            let r = rebuild_table_uncached(gp, &ph, konst, w);
-            REBUILT.with(|c| c.borrow_mut().insert(key, r.clone()));
-            r
-        }
-    };
+    // (`build_sum` strips one), so the cache is keyed on those and the leaves become
+    // one-node placeholders (`\u{3}i` for the operand of a `~` leaf) whose sizes
+    // `rebuild_table_uncached` takes from `shape`.
+    let shape: Vec<(usize, bool)> = lv.iter().map(|l| (size(l), matches!(l, T::Op(op, _) if op == "Not"))).collect();
+    let key = (gp.to_vec(), shape, konst, w.w);
     fn fill(t: &T, lv: &[T]) -> T {
         match t {
             T::Op(op, _) if op.starts_with('\u{2}') => lv[op[1..].parse::<usize>().unwrap()].clone(),
+            T::Op(op, _) if op.starts_with('\u{3}') => match &lv[op[1..].parse::<usize>().unwrap()] {
+                T::Op(_, a) => a[0].clone(),
+                _ => unreachable!("only a `~` leaf has an operand placeholder"),
+            },
             T::Op(op, a) => T::Op(op.clone(), a.iter().map(|x| fill(x, lv)).collect()),
             _ => t.clone(),
         }
     }
-    (r.0.iter().map(|(c, t)| (*c, fill(t, lv))).collect(), r.1)
+    let filled = |r: &(Vec<(u64, T)>, u64)| (r.0.iter().map(|(c, t)| (*c, fill(t, lv))).collect(), r.1);
+    if let Some(r) = REBUILT.with(|c| c.borrow().get(&key).map(filled)) {
+        return r;
+    }
+    let ph: Vec<T> = key
+        .1
+        .iter()
+        .enumerate()
+        .map(|(i, &(_, not))| match not {
+            true => T::Op("Not".into(), vec![T::Op(format!("\u{3}{i}"), Vec::new())]),
+            false => T::Op(format!("\u{2}{i}"), Vec::new()),
+        })
+        .collect();
+    let r = rebuild_table_uncached(gp, &ph, &key.1, konst, w);
+    let out = filled(&r);
+    REBUILT.with(|c| c.borrow_mut().insert(key, r));
+    out
 }
 
-fn rebuild_table_uncached(gp: &[u64], lv: &[T], konst: u64, w: &Width) -> (Vec<(u64, T)>, u64) {
+fn rebuild_table_uncached(gp: &[u64], lv: &[T], shape: &[(usize, bool)], konst: u64, w: &Width) -> (Vec<(u64, T)>, u64) {
+    fn ph_size(t: &T, shape: &[(usize, bool)]) -> usize {
+        match t {
+            T::Op(op, _) if op.starts_with('\u{2}') => shape[op[1..].parse::<usize>().unwrap()].0,
+            T::Op(op, _) if op.starts_with('\u{3}') => shape[op[1..].parse::<usize>().unwrap()].0 - 1,
+            T::Op(_, a) => 1 + a.iter().map(|x| ph_size(x, shape)).sum::<usize>(),
+            _ => 1,
+        }
+    }
+    let sum_size = |ts: &[(u64, T)], k: u64, w: &Width| {
+        let terms: Vec<(u64, usize, bool)> = ts.iter().map(|(c, t)| (*c, ph_size(t, shape), matches!(t, T::Op(op, _) if op == "Not"))).collect();
+        folded_sum_size(&terms, k, w)
+    };
     let n = lv.len();
     let pts = 1usize << n;
     let m = w.mask;
     let all_vars: Vec<usize> = (0..n).collect();
     let mut cands: Vec<(Vec<(u64, T)>, u64)> = Vec::new();
-    // Leaves with their own coefficient, then one term per remaining value.
-    for subset in 0..(1usize << n) {
+    // Leaves with their own coefficient, then one term per remaining value. A leaf
+    // with coefficient 0 would repeat the subset without it.
+    for subset in (0..1usize << n).filter(|s| (0..n).all(|i| s >> i & 1 == 0 || gp[1 << i] != 0)) {
         let mut terms = Vec::new();
         let mut r = gp.to_vec();
         for i in (0..n).filter(|i| subset >> i & 1 == 1) {
             let c = gp[1 << i];
-            if c == 0 {
-                continue;
-            }
             terms.push((c, lv[i].clone()));
             for (p, rv) in r.iter_mut().enumerate() {
                 if p >> i & 1 == 1 {
@@ -2312,7 +2410,7 @@ fn split_by_sums(h: &[u64], h_vals: &[u64], coefs: &[u64], vars: &[usize], lv: &
 thread_local! {
     static REWRITTEN: std::cell::RefCell<std::collections::HashMap<(u32, T), T>> = Default::default();
     #[allow(clippy::type_complexity)]
-    static REBUILT: std::cell::RefCell<std::collections::HashMap<(Vec<u64>, Vec<T>, u64, u32), (Vec<(u64, T)>, u64)>> = Default::default();
+    static REBUILT: std::cell::RefCell<std::collections::HashMap<(Vec<u64>, Vec<(usize, bool)>, u64, u32), (Vec<(u64, T)>, u64)>> = Default::default();
 }
 
 /// Replace every linear or polynomial region (and, recursively, regions inside

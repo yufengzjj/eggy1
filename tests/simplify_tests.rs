@@ -839,6 +839,19 @@ fn lowest_set_bit_mask() {
 }
 
 #[test]
+fn trailing_zeros_of_multiple() {
+    let cases: &[(&str, &[&str], usize)] = &[
+        ("(x * y) & (-y | y)", &["(x * y)"], 10),
+        ("2 - ((((2 - y*x) & ~k) & 1) | (((y | -y) & (-x*y)) + 2))", &["(x * y)"], 10),
+        ("((x << z) * y + (y & k) * 3) & (y | ~(y - 1))", &["(((x << z) * y) + ((y & k) * 3))"], 10),
+        ("(x * y) & -(y & -y)", &["(x * y)"], 10),
+        ("(x + y) & (y | -y)", &["((x + y) & (y | -y))"], 10),
+    ];
+    check("i64", cases);
+    check("u8", cases);
+}
+
+#[test]
 fn square_parity() {
     check(
         "i8",

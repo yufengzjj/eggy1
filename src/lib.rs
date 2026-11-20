@@ -441,8 +441,31 @@ pub fn make_egg(num_type: &str) -> String {
     }
 
     egg.push_str(&known_bits(width_of(num_type), is_signed(num_type)));
+    egg.push_str(TRAILING_ZEROS);
     egg
 }
+
+/// `(tz-ge e y)`: `e` has at least as many trailing zeros as `y`, tracked only for
+/// the `y` of a `y | -y` (all ones from the lowest set bit of `y` up), so that
+/// `e & (y | -y) = e`.
+const TRAILING_ZEROS: &str = r#"
+(relation low-base (Expr))
+(relation tz-ge (Expr Expr))
+(rule ((= m (Or y (Neg y)))) ((low-base y)) :ruleset analysis)
+(rule ((low-base y)) ((tz-ge y y)) :ruleset analysis)
+(rule ((= e (Mul a b)) (tz-ge a y)) ((tz-ge e y)) :ruleset analysis)
+(rule ((= e (Mul a b)) (tz-ge b y)) ((tz-ge e y)) :ruleset analysis)
+(rule ((= e (And a b)) (tz-ge a y)) ((tz-ge e y)) :ruleset analysis)
+(rule ((= e (And a b)) (tz-ge b y)) ((tz-ge e y)) :ruleset analysis)
+(rule ((= e (Shl a b)) (tz-ge a y)) ((tz-ge e y)) :ruleset analysis)
+(rule ((= e (Neg a)) (tz-ge a y)) ((tz-ge e y)) :ruleset analysis)
+(rule ((= e (Add a b)) (tz-ge a y) (tz-ge b y)) ((tz-ge e y)) :ruleset analysis)
+(rule ((= e (Sub a b)) (tz-ge a y) (tz-ge b y)) ((tz-ge e y)) :ruleset analysis)
+(rule ((= e (Or a b)) (tz-ge a y) (tz-ge b y)) ((tz-ge e y)) :ruleset analysis)
+(rule ((= e (Xor a b)) (tz-ge a y) (tz-ge b y)) ((tz-ge e y)) :ruleset analysis)
+
+(rule ((= r (And e (Or y (Neg y)))) (tz-ge e y)) ((union r e)) :ruleset simplify)
+"#;
 
 /// Known-zero-bits analysis: `(kz e)` is a mask of bits known to be 0 in `e`.
 /// Only the low `w` bits are meaningful; the kz-* primitives and `all-ones`
