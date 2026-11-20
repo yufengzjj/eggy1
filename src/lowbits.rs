@@ -14,6 +14,9 @@ const MAX_BITS: u32 = 18;
 const MAX_CONTEXT_BITS: u32 = 12;
 const MAX_TRY: usize = 256;
 const MAX_VALUES: usize = 4;
+/// Without a variable shift, only subterms with a product whose value is fixed by
+/// this many low bits of the leaves are enumerated.
+const MAX_PRODUCT_BITS: u32 = 4;
 /// Evaluation steps per call, over all enumerations.
 const BUDGET: u64 = 1 << 26;
 
@@ -242,7 +245,7 @@ impl Pass<'_> {
         if (i.k0 | i.k1) & w.mask == w.mask {
             return konst(i.k1);
         }
-        if i.det && i.shift && size(&node) <= MAX_TRY {
+        if i.det && (i.shift || i.full <= MAX_PRODUCT_BITS && has_product(&node)) && size(&node) <= MAX_TRY {
             let m = i.full;
             if let Some((values, prog)) = self.values(&node, m) {
                 if values.len() == 1 {
@@ -318,6 +321,14 @@ impl Pass<'_> {
     }
 }
 
+fn has_product(t: &T) -> bool {
+    match t {
+        T::Op(op, a) if op == "Mul" && !a.iter().any(|x| matches!(x, T::Num(_))) => true,
+        T::Op(_, a) => a.iter().any(has_product),
+        _ => false,
+    }
+}
+
 fn replace(t: &T, from: &[T], to: &[T]) -> T {
     if let Some(i) = from.iter().position(|f| f == t) {
         return to[i].clone();
@@ -329,7 +340,7 @@ fn replace(t: &T, from: &[T], to: &[T]) -> T {
 }
 
 /// `t` with subterms determined by the low bits of their leaves folded, where that
-/// needs a variable left shift (or is a constant by known bits).
+/// needs a variable left shift or a product (or is a constant by known bits).
 pub(crate) fn simplify(t: &T, w: &Width) -> T {
     let mut p = Pass { w, cands: HashMap::new(), budget: BUDGET };
     let (r, _) = p.fold(t);
@@ -405,5 +416,56 @@ mod tests {
             }
         }
         assert!(changed > 100 && in_context > 5, "changed {changed}, in context {in_context}");
+    }
+
+    /// Polynomials of `x` and `y` under a small mask or a multiplier with trailing zeros.
+    fn noise_term(h: &mut u64) -> T {
+        let op = |o: &str, a: T, b: T| T::Op(o.into(), vec![a, b]);
+        let mut next = || {
+            *h ^= *h << 13;
+            *h ^= *h >> 7;
+            *h ^= *h << 17;
+            *h
+        };
+        let r = next();
+        let var = |r: u64| T::Var(if r & 1 == 0 { "x" } else { "y" }.into());
+        let lin = |r: u64| op("Add", op("Mul", T::Num((r >> 8) as i64), var(r)), T::Num((r >> 20) as i64));
+        let p = op("Add", op("Mul", var(r >> 1), lin(next())), T::Num((next() >> 3) as i64));
+        let p = if r >> 5 & 1 == 0 { p } else { op(["Mul", "Xor", "Or"][(r >> 6) as usize % 3], p, lin(next())) };
+        match r >> 9 & 3 {
+            0 => op("And", p, T::Num(1)),
+            1 => op("And", T::Num(3), p),
+            2 => op("Mul", T::Num((next() << (60 + (r >> 12) % 4)) as i64), p),
+            _ => op("Add", var(r >> 14), op("Mul", T::Num(next() as i64), op("And", p, T::Num(1)))),
+        }
+    }
+
+    #[test]
+    fn product_noise_matches_evaluation() {
+        let mut h = 0x3c6e_f372_fe94_f82bu64;
+        let mut changed = 0;
+        for k in 0..400 {
+            let t = noise_term(&mut h);
+            for (bits, signed) in [(8, k % 2 == 1), (64, k % 2 == 1)] {
+                let (w, ty) = (Width::new(bits), NumType { bits, signed });
+                let r = simplify(&t, &w);
+                changed += (r != t) as u32;
+                let check = |x: u64, y: u64| {
+                    let env = |v: &str| if v == "x" { x } else { y };
+                    assert_eq!(eval(&t, ty, &env), eval(&r, ty, &env), "{t:?}\n{r:?}");
+                };
+                if bits == 8 {
+                    (0..1u64 << 16).for_each(|p| check(p & 0xff, p >> 8));
+                } else {
+                    for _ in 0..256 {
+                        h ^= h << 13;
+                        h ^= h >> 7;
+                        h ^= h << 17;
+                        check(h, h.rotate_left(29));
+                    }
+                }
+            }
+        }
+        assert!(changed > 200, "changed {changed}");
     }
 }

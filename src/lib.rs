@@ -961,11 +961,12 @@ pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result
     let mut egraph = new_experimental_egraph();
     init_egg_function(&mut egraph);
     egraph.parse_and_run_program(None, egg)?;
-    let alt = linear_mba::simplify_linear(s, width_of(&cli.num_type));
+    let (alt, other) = linear_mba::simplify_linear_both(s, width_of(&cli.num_type));
+    let other = other.map_or(String::new(), |o| format!("(union expr {o})"));
     let (s, union) = match alt != s {
-        true if !keep_input => (alt.as_str(), String::new()),
-        true => (s, format!("(union expr {alt})")),
-        false => (s, String::new()),
+        true if !keep_input => (alt.as_str(), other),
+        true => (s, format!("(union expr {alt}) {other}")),
+        false => (s, other),
     };
     let result = egraph.parse_and_run_program(
         None,

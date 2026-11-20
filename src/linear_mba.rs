@@ -821,6 +821,11 @@ fn rebuild_gp(gp: &[u64], lv: &[T], mut konst: u64, w: &Width) -> (Vec<(u64, T)>
     (terms, konst)
 }
 
+thread_local! {
+    /// Most leaves a semi-linear region may have to be rebuilt.
+    static SEMI_LEAVES: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_LEAVES) };
+}
+
 /// Semi-linear region: `e(x) = e(0) + Σ_j D_j(bit j of x)` with
 /// `D_j(q) = e(q << j) - e(0)`, a multiple of `2^j`. `g_j = D_j >> j` only
 /// matters modulo `2^(w-j)`, so bit `j` joins a group (found from the low bits
@@ -832,6 +837,9 @@ fn rebuild_gp(gp: &[u64], lv: &[T], mut konst: u64, w: &Width) -> (Vec<(u64, T)>
 /// `((x ^ K) | C) + x` the bits of the bitwise term have tables 0, ±1, but the
 /// `+ x` makes them 0, 1, 2.
 fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
+    if lv.len() > SEMI_LEAVES.with(|c| c.get()) {
+        return None;
+    }
     let m = w.mask;
     let (e0, all_groups) = bit_groups(t, lv, w)?;
     // Leaves that cancel out are dropped, so the shape search sees fewer leaves.
@@ -1172,8 +1180,8 @@ fn semi_split(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, limit: u
         for strip in [false, true] {
             let mut terms = Vec::new();
             let mut target = e0;
-            for (_, f) in free.iter().enumerate().filter(|&(k, _)| k != last) {
-                let (body, k) = if strip { split_const(f.as_ref()?, w) } else { (f.clone()?, 0) };
+            for (k, f) in free.iter().enumerate().filter(|&(k, _)| k != last) {
+                let (body, k) = if strip { split_const(f.as_ref()?, &parts[k].1, w) } else { (f.clone()?, 0) };
                 target = target.wrapping_add(k) & w.mask;
                 terms.push((1, body));
             }
@@ -1224,9 +1232,11 @@ fn own_consts(groups: &[(Vec<u64>, u64)], w: &Width) -> Vec<u64> {
     out
 }
 
-/// `(x, k)` with `t = x + k` for a trailing constant `k` of `t`, else `(t, 0)`.
-fn split_const(t: &T, w: &Width) -> (T, u64) {
+/// `(x, k)` with `t = x + k` for a trailing constant `k` of `t`, else `(t, 0)`; a leaf
+/// `t` is kept whole.
+fn split_const(t: &T, lv: &[T], w: &Width) -> (T, u64) {
     match t {
+        _ if lv.contains(t) => (t.clone(), 0),
         T::Op(op, a) if op == "Add" => match (&a[0], &a[1]) {
             (x, T::Num(k)) | (T::Num(k), x) => (x.clone(), *k as u64 & w.mask),
             _ => (t.clone(), 0),
@@ -2471,12 +2481,169 @@ fn substitute_atoms(t: &T, w: &Width) -> T {
     }
 }
 
+/// `t` with each `c·(a >> s)` (`2^s | c`) and `(a >> s) << s'` (`s' ≥ s`) written
+/// with `a & -2^s` (or `~(a | (2^s - 1))` under a `~`), so that the semi-linear
+/// rebuild sees `a`: `7·(x & 0xffffffff) + 0x700000000·(x >> 32)` is `7·x`. Only for
+/// `a` built of T-function operations, so `(mulhi(x, M) >> 1)·12` keeps the shape the
+/// magic-number division rules match.
+fn unshift(t: &T, w: &Width) -> T {
+    let T::Op(op, a) = t else { return t.clone() };
+    let a: Vec<T> = a.iter().map(|x| unshift(x, w)).collect();
+    // `(a >> s) << s` for both shifts: the bits filled in by `>>` are shifted out.
+    let low_cleared = |x: &T, k: u32| -> Option<(T, u32)> {
+        let num = |v: u64| T::Num(w.signed(v & w.mask));
+        let bin = |o: &str, p: T, q: T| T::Op(o.into(), vec![p, q]);
+        fn tfunc_ops(t: &T, w: &Width) -> bool {
+            match t {
+                T::Op(o, a) if o == "Shl" => const_shift(&a[1], w).is_some() && tfunc_ops(&a[0], w),
+                T::Op(o, a) => matches!(o.as_str(), "Add" | "Sub" | "Mul" | "Neg" | "Not" | "And" | "Or" | "Xor") && a.iter().all(|x| tfunc_ops(x, w)),
+                _ => true,
+            }
+        }
+        match x {
+            T::Op(o, b) if o == "Shr" && tfunc_ops(&b[0], w) => {
+                let s = const_shift(&b[1], w).filter(|&s| s > 0 && s <= k)?;
+                Some((bin("And", b[0].clone(), num(u64::MAX << s)), s))
+            }
+            T::Op(o, b) if o == "Not" => match &b[0] {
+                T::Op(o, c) if o == "Shr" && tfunc_ops(&c[0], w) => {
+                    let s = const_shift(&c[1], w).filter(|&s| s > 0 && s <= k)?;
+                    let or = bin("Or", c[0].clone(), num((1u64 << s) - 1));
+                    Some((T::Op("Not".into(), vec![or]), s))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    match (op.as_str(), &a[..]) {
+        ("Mul", [T::Num(c), x]) | ("Mul", [x, T::Num(c)]) if *c as u64 & w.mask != 0 => {
+            if let Some((y, s)) = low_cleared(x, (*c as u64 & w.mask).trailing_zeros()) {
+                return T::Op("Mul".into(), vec![T::Num(w.signed(*c as u64 & w.mask) >> s), y]);
+            }
+        }
+        ("Shl", [x, k]) => {
+            if let Some((y, s)) = const_shift(k, w).and_then(|k| low_cleared(x, k)) {
+                let k = const_shift(k, w).unwrap() - s;
+                return if k == 0 { y } else { T::Op("Shl".into(), vec![y, T::Num(k as i64)]) };
+            }
+        }
+        _ => {}
+    }
+    T::Op(op.clone(), a)
+}
+
+/// `(a, c)` with `t = 2^k·a + c` and `0 ≤ c < 2^k`, if `t` is built so.
+fn split_low(t: &T, k: u32, w: &Width) -> Option<(T, u64)> {
+    let lk = (1u64 << k) - 1;
+    let op = |o: &str, a: Vec<T>| T::Op(o.into(), a);
+    let num = |v: u64| T::Num(w.signed(v & w.mask));
+    let scaled = |c: i64, e: &T| -> Option<(T, u64)> {
+        let c = c as u64 & w.mask;
+        if c == 0 || c.trailing_zeros() < k {
+            return None;
+        }
+        let c = w.signed(c) >> k;
+        Some((if c == 1 { e.clone() } else { op("Mul", vec![T::Num(c), e.clone()]) }, 0))
+    };
+    match t {
+        T::Num(v) => Some((T::Num(w.signed(*v as u64 & w.mask) >> k), *v as u64 & lk)),
+        T::Op(o, a) => match (o.as_str(), &a[..]) {
+            ("Mul", [T::Num(c), e]) | ("Mul", [e, T::Num(c)]) => scaled(*c, e),
+            ("Mul", [x, y]) => match (split_low(x, k, w), split_low(y, k, w)) {
+                (Some((p, 0)), _) => Some((op("Mul", vec![p, y.clone()]), 0)),
+                (_, Some((q, 0))) => Some((op("Mul", vec![x.clone(), q]), 0)),
+                _ => None,
+            },
+            ("Shl", [x, s]) => {
+                let s = const_shift(s, w).filter(|&s| s >= k)?;
+                Some((if s == k { x.clone() } else { op("Shl", vec![x.clone(), T::Num((s - k) as i64)]) }, 0))
+            }
+            ("Neg", [x]) => match split_low(x, k, w)? {
+                (p, 0) => Some((op("Neg", vec![p]), 0)),
+                (p, c) => Some((op("Not", vec![p]), (1 << k) - c)),
+            },
+            ("Not", [x]) => split_low(x, k, w).map(|(p, c)| (op("Not", vec![p]), lk - c)),
+            (o @ ("Add" | "Sub"), [x, y]) => {
+                let ((p, c), (q, d)) = (split_low(x, k, w)?, split_low(y, k, w)?);
+                let (v, carry) = if o == "Add" { (c + d, c + d > lk) } else { (c.wrapping_sub(d), c < d) };
+                let s = op(o, vec![p, q]);
+                let s = match (carry, o) {
+                    (false, _) => s,
+                    (true, "Add") => op("Add", vec![s, num(1)]),
+                    _ => op("Sub", vec![s, num(1)]),
+                };
+                Some((s, v & lk))
+            }
+            (o @ ("And" | "Or" | "Xor"), [x, y]) => {
+                let ((p, c), (q, d)) = (split_low(x, k, w)?, split_low(y, k, w)?);
+                let v = match o {
+                    "And" => c & d,
+                    "Or" => c | d,
+                    _ => c ^ d,
+                };
+                Some((op(o, vec![p, q]), v))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `t` with the constants its low `r` bits depend on sign-extended from bit `r - 1`.
+fn low_consts(t: &T, r: u32) -> T {
+    match t {
+        T::Num(v) => T::Num(v << (64 - r) >> (64 - r)),
+        T::Op(op, a) if op == "Shl" => T::Op(op.clone(), vec![low_consts(&a[0], r), a[1].clone()]),
+        T::Op(op, a) if matches!(op.as_str(), "Add" | "Sub" | "Mul" | "And" | "Or" | "Xor" | "Not" | "Neg") => {
+            T::Op(op.clone(), a.iter().map(|x| low_consts(x, r)).collect())
+        }
+        _ => t.clone(),
+    }
+}
+
+/// `t` with each bitwise operation whose operands are `2^k·a + c` (`c < 2^k`)
+/// written as `2^k·(a op b) + (c op d)`, for the largest such `k`: a bitwise
+/// operation only sees the bits of `a` that `2^k·a` keeps, so the rebuild can
+/// treat `x - ((2·x) | ~(2·K)) - K - 1` as the semi-linear `x - 2·(x | ~K) - K - 2`,
+/// which is `x ^ K`.
+fn halve(t: &T, w: &Width) -> T {
+    let T::Op(op, a) = t else { return t.clone() };
+    let a: Vec<T> = a.iter().map(|x| halve(x, w)).collect();
+    let node = T::Op(op.clone(), a);
+    let T::Op(_, a) = &node else { unreachable!() };
+    if !matches!(op.as_str(), "And" | "Or" | "Xor") || a.iter().all(|x| matches!(x, T::Num(_))) {
+        return node;
+    }
+    let mut best = None;
+    for k in 1..w.w {
+        match split_low(&node, k, w) {
+            Some(s) => best = Some((k, s)),
+            None => break,
+        }
+    }
+    let Some((k, (T::Op(op, a), c))) = best else { return node };
+    // Only the low `w - k` bits of the operands matter, so their constants are cut
+    // to that width, once the rebuild has merged them: `(2^63 + 1)·y` becomes `y`.
+    let inner = T::Op(op, a.iter().map(|x| low_consts(&rewrite(x, w), w.w - k)).collect());
+    let scaled = T::Op("Mul".into(), vec![T::Num(w.signed(1 << k)), inner]);
+    if c == 0 { scaled } else { T::Op("Add".into(), vec![scaled, T::Num(c as i64)]) }
+}
+
 /// Rewrite the egglog term `egg` (W-bit wrapping semantics) with every linear
 /// MBA region, and every polynomial MBA region,
 /// rebuilt in a smaller form. Returns `egg` unchanged when nothing gets smaller.
 pub fn simplify_linear(egg: &str, w: u32) -> String {
+    simplify_linear_both(egg, w).0
+}
+
+/// `simplify_linear`, and the next smallest rebuild, if any: `egg` and its first rebuild
+/// are also rebuilt with bitwise operations of even operands halved (`halve`), and
+/// which result the rules finish best is not known.
+pub fn simplify_linear_both(egg: &str, w: u32) -> (String, Option<String>) {
+    type Last = Option<(String, u32, (String, Option<String>))>;
     thread_local! {
-        static LAST: std::cell::RefCell<Option<(String, u32, String)>> = const { std::cell::RefCell::new(None) };
+        static LAST: std::cell::RefCell<Last> = const { std::cell::RefCell::new(None) };
     }
     if let Some(r) = LAST.with(|c| c.borrow().as_ref().filter(|(e, bits, _)| e == egg && *bits == w).map(|(_, _, r)| r.clone())) {
         return r;
@@ -2486,20 +2653,39 @@ pub fn simplify_linear(egg: &str, w: u32) -> String {
     r
 }
 
-fn simplify_linear_uncached(egg: &str, w: u32) -> String {
+fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Option<String>) {
     let w = Width::new(w);
     let t = parse(egg);
     let t0 = t.clone();
-    let t = crate::lowbits::simplify(&t, &w);
+    let t = unshift(&crate::lowbits::simplify(&t, &w), &w);
     // Subterms are replaced only after the rebuild: earlier, `~(y - 1)` would become
     // `-y`, a leaf the rebuild no longer relates to `y - 1`.
-    let r = match crate::tfunc::replacement(&t, &w) {
+    let run = |t: &T| match crate::tfunc::replacement(t, &w) {
         Some(r) => r,
-        None => crate::tfunc::simplify(&rewrite(&t, &w), &w),
+        None => crate::tfunc::simplify(&rewrite(t, &w), &w),
     };
+    let r = run(&t);
+    let mut rebuilt = vec![r.clone()];
+    let hr = halve(&r, &w);
+    if hr != r {
+        rebuilt.push(run(&hr));
+    }
+    // Halving the whole input can give semi-linear regions that are slow to search,
+    // so only small ones are rebuilt there.
+    let ht = halve(&t, &w);
+    if ht != t {
+        SEMI_LEAVES.with(|c| c.set(3));
+        rebuilt.push(run(&ht));
+        SEMI_LEAVES.with(|c| c.set(MAX_LEAVES));
+    }
     REWRITTEN.with(|c| c.borrow_mut().clear());
     REBUILT.with(|c| c.borrow_mut().clear());
-    if r == t0 { egg.to_string() } else { show(&r) }
+    rebuilt.sort_by_key(size);
+    rebuilt.dedup();
+    let other = rebuilt.get(1).cloned();
+    let r = rebuilt.swap_remove(0);
+    let r = if r == t0 { egg.to_string() } else { show(&r) };
+    (r, other.map(|o| show(&o)))
 }
 
 #[cfg(test)]
@@ -2547,6 +2733,67 @@ mod tests {
             10 => T::Op("Shl".into(), vec![sub(r), T::Num((r.next() % 10) as i64)]),
             _ => T::Op("Shr".into(), vec![sub(r), T::Num((r.next() % 4) as i64)]),
         }
+    }
+
+    /// Terms with the shapes `unshift` and `halve` rewrite, over `x` and `y`.
+    fn shifted_term(r: &mut Rng, depth: u32) -> T {
+        let op = |o: &str, a: Vec<T>| T::Op(o.into(), a);
+        if depth == 0 {
+            return match r.next() % 4 {
+                0 => T::Num((r.next() % 9) as i64 - 4),
+                1 => T::Var("x".into()),
+                _ => T::Var("y".into()),
+            };
+        }
+        let sub = |r: &mut Rng| shifted_term(r, depth - 1);
+        let k = 1 + (r.next() % 3) as i64;
+        let c = [1i64, -1, 3, -3, 5][(r.next() % 5) as usize];
+        let even = |r: &mut Rng| match r.next() % 6 {
+            0 => op("Mul", vec![T::Num(c << k), sub(r)]),
+            1 => op("Add", vec![op("Mul", vec![sub(r), T::Num(4)]), T::Num((r.next() % 4) as i64)]),
+            2 => op("Neg", vec![op("Mul", vec![T::Num(2), sub(r)])]),
+            3 => op("Not", vec![op("Shl", vec![sub(r), T::Num(k)])]),
+            4 => op("Sub", vec![op("Mul", vec![T::Num(2), sub(r)]), op("Mul", vec![sub(r), op("Mul", vec![T::Num(2), sub(r)])])]),
+            _ => T::Num((r.next() % 512) as i64 - 256),
+        };
+        let bit = ["And", "Or", "Xor"][(r.next() % 3) as usize];
+        match r.next() % 8 {
+            0 => op("Mul", vec![T::Num(c << k), op("Shr", vec![sub(r), T::Num(k)])]),
+            1 => op("Shl", vec![op("Shr", vec![sub(r), T::Num(k)]), T::Num(k + (r.next() % 3) as i64)]),
+            2 => op("Mul", vec![op("Not", vec![op("Shr", vec![sub(r), T::Num(k)])]), T::Num(c << (k + 1))]),
+            3 | 4 => op(bit, vec![even(r), even(r)]),
+            5 => op("Add", vec![sub(r), sub(r)]),
+            6 => op(bit, vec![sub(r), sub(r)]),
+            _ => op("Mul", vec![sub(r), sub(r)]),
+        }
+    }
+
+    #[test]
+    fn unshift_and_halve_preserve_value() {
+        let mut r = Rng(0x6a09e667f3bcc909);
+        let (mut unshifted, mut halved) = (0, 0);
+        for _ in 0..400 {
+            let depth = 1 + (r.next() % 3) as u32;
+            let t = shifted_term(&mut r, depth);
+            for (bits, signed) in [(8, false), (8, true), (64, false), (64, true)] {
+                let (w, ty) = (Width::new(bits), NumType { bits, signed });
+                let (u, h) = (unshift(&t, &w), halve(&t, &w));
+                unshifted += (u != t) as u32;
+                halved += (h != t) as u32;
+                let check = |x: u64, y: u64| {
+                    let env = |v: &str| if v == "x" { x } else { y };
+                    let want = eval(&t, ty, &env);
+                    assert_eq!(want, eval(&u, ty, &env), "{}\n{}", show(&t), show(&u));
+                    assert_eq!(want, eval(&h, ty, &env), "{}\n{}", show(&t), show(&h));
+                };
+                if bits == 8 {
+                    (0..1u64 << 16).for_each(|p| check(p & 0xff, p >> 8));
+                } else {
+                    (0..256).for_each(|_| check(r.next(), r.next()));
+                }
+            }
+        }
+        assert!(unshifted > 200 && halved > 200, "unshifted {unshifted}, halved {halved}");
     }
 
     #[test]

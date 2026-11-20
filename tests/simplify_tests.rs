@@ -1534,3 +1534,65 @@ fn variable_shift_low_bits() {
     check("u8", &[("x & (y | ((1 << (x & 7)) & 1))", &["(x & y)"], 10), ("x + ((y << (y & 15)) & 1)", &["x"], 10)]);
     check("i8", &[("x + ((y << (y & 7)) & 1)", &["x"], 10)]);
 }
+
+
+/// A split-off constant of a set that is a leaf keeps the leaf whole: `L + 0` with
+/// `L = x >> 32` is not cut to `x >> 32` outside the leaf.
+#[test]
+fn semi_split_keeps_leaf_constant() {
+    check(
+        "i64",
+        &[
+            ("((((x >> 32) + 0) ^ 5) + ((((x >> 32) + 0) & 5) * 2)) - x", &["((5 - x) + (x >> 0x20))"], 10),
+            ("(((((((7 * (x >> 32)) << 32) + (7 * (x & 4294967295))) + 0) ^ 5) + ((((((7 * (x >> 32)) << 32) + (7 * (x & 4294967295))) + 0) & 5) * 2)) - x)", &["((6 * x) + 5)"], 10),
+        ],
+    );
+}
+
+/// Ensia noise: polynomials whose low bits are fixed, under a small mask.
+#[test]
+fn product_low_bits() {
+    check(
+        "i64",
+        &[
+            ("(x - y) + (-0x1f88d2cab8273600 * (1 & ((x * (x + 3)) + 2)))", &["(x - y)"], 10),
+            ("((z - 1) | (2 * x)) - x - 0x2ba6503ce8e84137 * (1 & ((x * ((-0x65c105c26804167 * x) + -0x4c6db1b60f12763)) + -0x5479651dde4c58b4))", &["(((z + -1) | (2 * x)) - x)"], 10),
+            ("(~(6 * y) + (0x4d6ff48b4444e1b5 * ((y * ((0x56538a7d55b73729 * y) + -0x3cc405088511d04d)) & 1))) * (y + (2 * x))", &["((y + (2 * x)) * ~(6 * y))"], 10),
+            ("y + (((x*(x+1))*((x+2)*(x+3))) & 7)", &["y"], 10),
+        ],
+    );
+}
+
+/// `c·(a >> s)` with `2^s | c` is `(c >> s)·(a & -2^s)`, which joins the semi-linear rebuild.
+#[test]
+fn multiple_of_right_shift() {
+    check(
+        "i64",
+        &[
+            ("(5 * (x & 0xffffffff)) + (0x500000000 * (x >> 0x20))", &["(5 * x)"], 10),
+            ("(3 * (y | -0xfffffffe)) + (-0x300000000 * ~((y | 2) >> 0x20))", &["(3 * (y | 2))"], 10),
+        ],
+    );
+    check("u32", &[("(7 * ((z + x) & 0xffff)) + (0x70000 * ((z + x) >> 0x10))", &["(7 * (z + x))"], 10)]);
+}
+
+/// Tigress EncodeData: bitwise operations of even operands are halved, so
+/// `x - ((2*x) | ~(2*K)) - K - 1` becomes the semi-linear `x ^ K`.
+#[test]
+fn halved_bitwise_operands() {
+    check(
+        "i64",
+        &[
+            ("(x - ((2 * x) | -0x1bd5b7ddf)) + -0xdeadbef0", &["(x ^ 0xdeadbeef)"], 10),
+            ("((y - x) - (((y - x) * 2) & 0x1fe)) + 0xff", &["((y - x) ^ 0xff)"], 10),
+            ("(0xb * x) + (2 * y) - ((4 * y) & (0x16 * x))", &["((2 * y) ^ (0xb * x))"], 10),
+        ],
+    );
+    check(
+        "u32",
+        &[
+            ("(y - ((2 * y) & 0x2468)) + 0x1234", &["(y ^ 0x1234)"], 10),
+            ("(z - ((2 * z) | 0xffffdb97)) + 0xffffedcb", &["(z ^ 0x1234)"], 10),
+        ],
+    );
+}
