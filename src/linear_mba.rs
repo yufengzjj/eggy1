@@ -2391,6 +2391,8 @@ pub fn simplify_linear(egg: &str, w: u32) -> String {
 fn simplify_linear_uncached(egg: &str, w: u32) -> String {
     let w = Width::new(w);
     let t = parse(egg);
+    let t0 = t.clone();
+    let t = crate::lowbits::simplify(&t, &w);
     // Subterms are replaced only after the rebuild: earlier, `~(y - 1)` would become
     // `-y`, a leaf the rebuild no longer relates to `y - 1`.
     let r = match crate::tfunc::replacement(&t, &w) {
@@ -2399,7 +2401,7 @@ fn simplify_linear_uncached(egg: &str, w: u32) -> String {
     };
     REWRITTEN.with(|c| c.borrow_mut().clear());
     REBUILT.with(|c| c.borrow_mut().clear());
-    if r == t { egg.to_string() } else { show(&r) }
+    if r == t0 { egg.to_string() } else { show(&r) }
 }
 
 #[cfg(test)]

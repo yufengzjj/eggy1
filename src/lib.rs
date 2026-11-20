@@ -2,6 +2,7 @@ pub mod eval;
 pub mod expr_convert;
 pub mod linear_mba;
 mod poly_mba;
+mod lowbits;
 mod tfunc;
 
 use crate::expr_convert::{egglog_to_infix, infix_to_egglog};
@@ -458,6 +459,7 @@ fn known_bits(w: u32, signed: bool) -> String {
 (rule ((= e (Xor a b)) (= za (kz a)) (= zb (kz b))) ((set (kz e) (& za zb))) :ruleset analysis)
 (rule ((= e (Shl a (Num k))) (= v (kz-shl 0 k {w}))) ((set (kz e) v)) :ruleset analysis)
 (rule ((= e (Shl a (Num k))) (= z (kz a)) (= v (kz-shl z k {w}))) ((set (kz e) v)) :ruleset analysis)
+(rule ((= e (Shl a b)) (= z (kz a))) ((set (kz e) (kz-low z {w}))) :ruleset analysis)
 (rule ((= e (Shr a (Num k))) (= v (kz-shr 0 k {w} {s}))) ((set (kz e) v)) :ruleset analysis)
 (rule ((= e (Shr a (Num k))) (= z (kz a)) (= v (kz-shr z k {w} {s}))) ((set (kz e) v)) :ruleset analysis)
 (rule ((= e (Mul a b)) (= z (kz a))) ((set (kz e) (kz-low z {w}))) :ruleset analysis)

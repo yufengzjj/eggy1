@@ -226,36 +226,72 @@ impl Circuit {
     }
 }
 
+impl Circuit {
+    /// Evaluates the gates at bit `i` from carry state `s` with input `j` given by
+    /// `inp(j)`; returns the next state.
+    fn step(&self, s: u128, i: u32, inp: impl Fn(usize) -> bool, v: &mut [bool]) -> u128 {
+        let mut ns = s;
+        for (k, g) in self.gates.iter().enumerate() {
+            v[k] = match *g {
+                Gate::In(j) => inp(j),
+                Gate::Const(x) => x >> i & 1 == 1,
+                Gate::Not(a) => !v[a],
+                Gate::And(a, b) => v[a] & v[b],
+                Gate::Or(a, b) => v[a] | v[b],
+                Gate::Xor(a, b) => v[a] ^ v[b],
+                Gate::Add(a, b, ci) => {
+                    let cin = s >> ci & 1 == 1;
+                    let (x, y) = (v[a], v[b]);
+                    let cout = x & y | cin & (x ^ y);
+                    ns = ns & !(1 << ci) | (cout as u128) << ci;
+                    x ^ y ^ cin
+                }
+            };
+        }
+        ns
+    }
+}
+
 /// Whether `f` and `g` agree on all inputs; `None` if a term has an unsupported
 /// operation or the carry states grow too many.
 fn equal(f: &T, g: &T, vars: &[String], w: &Width) -> Option<bool> {
+    equal_low(f, g, vars, vars.len(), 0, &|_| Vec::new(), w)
+}
+
+/// Like `equal`, where inputs `vars[n..]` are not free but `extra` of the low `m`
+/// bits of inputs `0..n`, with bits from `m` up the same for all of them.
+pub(crate) fn equal_low(f: &T, g: &T, vars: &[String], n: usize, m: u32, extra: &dyn Fn(&[u64]) -> Vec<u64>, w: &Width) -> Option<bool> {
     let mut c = Circuit::default();
     let (fo, go) = (c.compile(f, vars, w)?, c.compile(g, vars, w)?);
-    let n = vars.len();
-    let mut states: HashSet<u128> = HashSet::from([c.init]);
     let mut v = vec![false; c.gates.len()];
-    for i in 0..w.w {
+    let lm = (1u64 << m) - 1;
+    let mut states: HashSet<u128> = HashSet::new();
+    let mut high: Option<Vec<u64>> = None;
+    for p in 0u64..1 << (n as u32 * m) {
+        let low: Vec<u64> = (0..n).map(|j| p >> (j as u32 * m) & lm).collect();
+        let ex = extra(&low);
+        let hi: Vec<u64> = ex.iter().map(|x| x & !lm).collect();
+        if *high.get_or_insert_with(|| hi.clone()) != hi {
+            return None;
+        }
+        let mut s = c.init;
+        for i in 0..m {
+            s = c.step(s, i, |j| if j < n { low[j] >> i & 1 == 1 } else { ex[j - n] >> i & 1 == 1 }, &mut v);
+            if v[fo] != v[go] {
+                return Some(false);
+            }
+        }
+        states.insert(s);
+        if states.len() > MAX_STATES {
+            return None;
+        }
+    }
+    let high = high.unwrap_or_default();
+    for i in m..w.w {
         let mut next = HashSet::new();
         for &s in &states {
             for inp in 0..1usize << n {
-                let mut ns = s;
-                for (k, g) in c.gates.iter().enumerate() {
-                    v[k] = match *g {
-                        Gate::In(j) => inp >> j & 1 == 1,
-                        Gate::Const(x) => x >> i & 1 == 1,
-                        Gate::Not(a) => !v[a],
-                        Gate::And(a, b) => v[a] & v[b],
-                        Gate::Or(a, b) => v[a] | v[b],
-                        Gate::Xor(a, b) => v[a] ^ v[b],
-                        Gate::Add(a, b, ci) => {
-                            let cin = s >> ci & 1 == 1;
-                            let (x, y) = (v[a], v[b]);
-                            let cout = x & y | cin & (x ^ y);
-                            ns = ns & !(1 << ci) | (cout as u128) << ci;
-                            x ^ y ^ cin
-                        }
-                    };
-                }
+                let ns = c.step(s, i, |j| if j < n { inp >> j & 1 == 1 } else { high[j - n] >> i & 1 == 1 }, &mut v);
                 if v[fo] != v[go] {
                     return Some(false);
                 }
@@ -270,7 +306,7 @@ fn equal(f: &T, g: &T, vars: &[String], w: &Width) -> Option<bool> {
     Some(true)
 }
 
-fn var_names(t: &T, out: &mut Vec<String>) {
+pub(crate) fn var_names(t: &T, out: &mut Vec<String>) {
     match t {
         T::Var(v) if !out.contains(v) => out.push(v.clone()),
         T::Op(_, a) => a.iter().for_each(|x| var_names(x, out)),
