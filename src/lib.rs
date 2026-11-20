@@ -979,8 +979,6 @@ pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result
       (back-off
         :match-limit 64
         :ban-length 3
-        :growth-rate 2
-        :decay-rate 0.9
       )
     )
     (repeat {}
