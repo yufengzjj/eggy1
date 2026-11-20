@@ -2671,13 +2671,13 @@ fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Option<String>) {
         rebuilt.push(run(&hr));
     }
     // Halving the whole input can give semi-linear regions that are slow to search,
-    // so only small ones are rebuilt there.
+    // so only small ones are rebuilt there, also inside `halve`.
+    SEMI_LEAVES.with(|c| c.set(2));
     let ht = halve(&t, &w);
     if ht != t {
-        SEMI_LEAVES.with(|c| c.set(3));
         rebuilt.push(run(&ht));
-        SEMI_LEAVES.with(|c| c.set(MAX_LEAVES));
     }
+    SEMI_LEAVES.with(|c| c.set(MAX_LEAVES));
     REWRITTEN.with(|c| c.borrow_mut().clear());
     REBUILT.with(|c| c.borrow_mut().clear());
     rebuilt.sort_by_key(size);
