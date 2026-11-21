@@ -1677,6 +1677,38 @@ fn split_on_selecting_bit() {
     check("u32", &[("x - ((1 | -y) * (y & 1)) - ((1 & ~y) * (-y & 0xfffffffe))", &["(x + y)", "(y + x)"], 10)]);
 }
 
+#[test]
+fn split_on_bits_of_subterm() {
+    check(
+        "u32",
+        &[
+            (
+                "((3 | ((z + x) + 5)) * (3 & ((z + x) + 5))) + (((0xfffffffa - (z + x)) & 3) * (((z + x) + 5) & 0xfffffffc))",
+                &["((3 * (z + x)) + 0xf)", "(((z + x) + 5) * 3)", "(0xf + (3 * (z + x)))"],
+                10,
+            ),
+            (
+                "(2*x) | ((x + z) - ((2 | (x & z)) * (2 & (x & z))) - (((x & z) & 0xfffffffd) * ~((x & z) | 0xfffffffd)))",
+                &["((2 * x) | (x ^ z))", "((x + x) | (x ^ z))"],
+                10,
+            ),
+            (
+                "(((((2 | ((x & y) & z)) * (((x & y) & z) & 2)) - ((((x & y) & z) & 0xfffffffd) * (0xfffffffd | ((x & y) & z)))) + (z ^ (x & y))) + (z & ~((x & y) & 0xfffffffd)))",
+                &["((2 * z) + (x & y))", "((z + z) + (x & y))"],
+                10,
+            ),
+        ],
+    );
+    check(
+        "i64",
+        &[(
+            "(y - (z + ((2 | ((y - x) & (x - z))) * (2 & ((y - x) & (x - z)))))) - (~(((y - x) & (x - z)) | -3) * (((y - x) & (x - z)) & -3))",
+            &["((y - x) ^ (x - z))"],
+            10,
+        )],
+    );
+}
+
 /// A bitwise operation of an arithmetic term and a constant that only touches known bits is an addition.
 #[test]
 fn bitwise_constant_on_known_bits() {
