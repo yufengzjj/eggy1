@@ -245,6 +245,9 @@ impl Pass<'_> {
         if (i.k0 | i.k1) & w.mask == w.mask {
             return konst(i.k1);
         }
+        if let Some(r) = known_bitwise(op, &node, &infos, w) {
+            return (r, i);
+        }
         if i.det && (i.shift || i.full <= MAX_PRODUCT_BITS && has_product(&node)) && size(&node) <= MAX_TRY {
             let m = i.full;
             if let Some((values, prog)) = self.values(&node, m) {
@@ -329,6 +332,40 @@ fn has_product(t: &T) -> bool {
         T::Op(_, a) => a.iter().any(has_product),
         _ => false,
     }
+}
+
+/// An arithmetic operand `a` and a constant `c` whose bitwise operation only touches
+/// known bits of `a`, written as `a + d`: `(2*x + 4) ^ 1` is `(2*x + 4) + 1`, which
+/// joins the enclosing linear region (Tigress EncodeData).
+fn known_bitwise(op: &str, node: &T, infos: &[Info], w: &Width) -> Option<T> {
+    let T::Op(_, a) = node else { return None };
+    if !matches!(op, "And" | "Or" | "Xor") {
+        return None;
+    }
+    let (j, c) = match (&a[0], &a[1]) {
+        (_, T::Num(c)) => (0, *c as u64 & w.mask),
+        (T::Num(c), _) => (1, *c as u64 & w.mask),
+        _ => return None,
+    };
+    if !matches!(&a[j], T::Op(o, _) if matches!(o.as_str(), "Add" | "Sub" | "Mul" | "Neg" | "Shl")) {
+        return None;
+    }
+    let (k0, k1) = (infos[j].k0, infos[j].k1);
+    let touched = if op == "And" { !c & w.mask } else { c };
+    if touched & !(k0 | k1) != 0 {
+        return None;
+    }
+    let d = match op {
+        "Xor" => (c & k0).wrapping_sub(c & k1),
+        "Or" => c & k0,
+        _ => (touched & k1).wrapping_neg(),
+    } & w.mask;
+    Some(if d == 0 { a[j].clone() } else { T::Op("Add".into(), vec![a[j].clone(), T::Num(w.signed(d))]) })
+}
+
+/// Bits of `t` not known to be 0.
+pub(crate) fn possible_bits(t: &T, w: &Width) -> u64 {
+    !info(t, w).k0 & w.mask
 }
 
 pub(crate) fn replace(t: &T, from: &[T], to: &[T]) -> T {

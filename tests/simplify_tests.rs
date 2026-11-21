@@ -1587,7 +1587,13 @@ fn multiple_of_right_shift() {
             ("(3 * (y | -0xfffffffe)) + (-0x300000000 * ~((y | 2) >> 0x20))", &["(3 * (y | 2))"], 10),
         ],
     );
-    check("u32", &[("(7 * ((z + x) & 0xffff)) + (0x70000 * ((z + x) >> 0x10))", &["(7 * (z + x))"], 10)]);
+    check(
+        "u32",
+        &[
+            ("(7 * ((z + x) & 0xffff)) + (0x70000 * ((z + x) >> 0x10))", &["(7 * (z + x))"], 10),
+            ("((x & 0xffff) * ((3 * z) + 0xfffffffa)) + ((x >> 0x10) * ((0x30000 * z) + 0xfffa0000))", &["(x * ((3 * z) + 0xfffffffa))", "(((3 * z) + 0xfffffffa) * x)"], 10),
+        ],
+    );
 }
 
 /// Tigress EncodeData: bitwise operations of even operands are halved, so
@@ -1633,4 +1639,52 @@ fn related_leaves_by_placeholder() {
         ],
     );
     check("u32", &[("((2 * ((y | x) & ~((0xfffffffe * ~x) * y))) - (~y & x)) - (~(2 * x) * y)", &["((y | x) ^ ((0xfffffffe * ~x) * y))"], 10)]);
+}
+
+/// A region with more than six leaves is evaluated on {0,1}^n, and the leaves its
+/// values do not depend on are set to 0, which removes opaque predicates.
+#[test]
+fn unused_leaves_of_wide_regions() {
+    check(
+        "i64",
+        &[
+            (
+                "(((x + -0x4652fe91e34cde29) - y) + (-0x4652fe91e34cde29 * ((((y | ~aux1) | ((aux0 ^ x) & (aux0 ^ (~aux2 | aux3)))) | aux4) | (((aux1 ^ x) | (aux4 ^ (aux1 & (~(aux4 & aux3) | aux0)))) ^ (y & (~aux4 ^ (x | ((aux0 ^ aux3) & aux1))))))))",
+                &["(x - y)"],
+                10,
+            ),
+        ],
+    );
+    check("u32", &[("(x * (y + (0xbd05a805 * (((aux2 & ((~y & aux1) ^ aux4)) & (aux0 & (aux1 & (x & (~(aux3 & aux4) & y))))) & (aux4 ^ aux1)))))", &["(x * y)", "(y * x)"], 10)]);
+}
+
+/// A product with a factor that is 0 or `2^k` by bit `k` of a variable is rebuilt by cases on that bit.
+#[test]
+fn split_on_selecting_bit() {
+    check(
+        "i64",
+        &[
+            ("x + ((1 & ~y) * (-y & -2)) + ((-y | 1) * (y & 1))", &["(x - y)"], 10),
+            ("(((x | -x) - ((~x & 1) * ((x | -x) | 1))) - ~((~(x | -x) & -2) * (x & 1)))", &["0"], 10),
+            ("(((((y | 2) ^ 1) * (y & 2)) + (~(y | -3) * ((y & -3) ^ 1))) - (y ^ 1)) | 1", &["(y | 1)", "(1 | y)"], 10),
+            (
+                "(((-0x7affce5604f8bf5f - (~(x + 0x7affce5604f8bf5f) & y)) + (((~y & -2) & (x + 0x7affce5604f8bf5f)) * (1 & (y | x)))) + (((~y & (x + 0x7affce5604f8bf5f)) | 1) * (1 & ~(y | x))))",
+                &["(x - y)"],
+                10,
+            ),
+        ],
+    );
+    check("u32", &[("x - ((1 | -y) * (y & 1)) - ((1 & ~y) * (-y & 0xfffffffe))", &["(x + y)", "(y + x)"], 10)]);
+}
+
+/// A bitwise operation of an arithmetic term and a constant that only touches known bits is an addition.
+#[test]
+fn bitwise_constant_on_known_bits() {
+    check(
+        "i64",
+        &[
+            ("(-0x6a79d978bdb719 * (((0xe646d4c5d6e4ad7 * (y | 3)) + 0x1a662449b3e750f5) ^ 1)) + 0x48dc610d0214c207", &["((y | 3) + 1)", "(1 + (y | 3))"], 10),
+            ("((4 * x) + 8) | 3", &["((4 * x) + 0xb)", "(0xb + (4 * x))"], 10),
+        ],
+    );
 }

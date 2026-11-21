@@ -504,7 +504,10 @@ pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
     let n = lv.len();
-    if n == 0 || n > MAX_LEAVES {
+    if n > MAX_LEAVES {
+        return drop_unused(t, &lv, w);
+    }
+    if n == 0 {
         return None;
     }
     let rebuilt = if has_const_bitwise(t, w) {
@@ -521,6 +524,49 @@ pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
     Some(rebuilt).filter(|b| size(b) < size(t))
 }
 
+
+/// Most leaves `drop_unused` evaluates a region on.
+const MAX_WIDE_LEAVES: usize = 16;
+/// Most instructions times points `drop_unused` runs.
+const WIDE_BUDGET: usize = 1 << 25;
+
+/// A region with more than `MAX_LEAVES` leaves, rewritten with the leaves its values on
+/// {0,1}^n do not depend on set to 0, as in opaque predicates over many variables.
+fn drop_unused(t: &T, lv: &[T], w: &Width) -> Option<T> {
+    let n = lv.len();
+    if n > MAX_WIDE_LEAVES || has_const_bitwise(t, w) {
+        return None;
+    }
+    let prog = Prog::new(t, lv, w);
+    if prog.0.len() << n > WIDE_BUDGET {
+        return None;
+    }
+    let vals: Vec<u64> = (0..1usize << n).map(|p| prog.at(p, w)).collect();
+    let unused: Vec<T> = (0..n)
+        .filter(|&i| (0..1usize << n).all(|p| p >> i & 1 == 1 || vals[p] == vals[p | 1 << i]))
+        .map(|i| lv[i].clone())
+        .collect();
+    if unused.is_empty() {
+        return None;
+    }
+    if unused.len() == n {
+        return Some(T::Num(w.signed(vals[0])));
+    }
+    // Leaves are found as `Prog` finds them: the first subterm equal to one, anywhere.
+    fn zero(t: &T, lv: &[T], unused: &[T]) -> T {
+        match t {
+            _ if unused.contains(t) => T::Num(0),
+            _ if lv.contains(t) => t.clone(),
+            T::Op(op, a) => T::Op(op.clone(), a.iter().map(|x| zero(x, lv, unused)).collect()),
+            _ => t.clone(),
+        }
+    }
+    let z = zero(t, lv, &unused);
+    if z == *t {
+        return None;
+    }
+    Some(rewrite(&z, w)).filter(|r| size(r) < size(t))
+}
 
 /// The linear MBA over `lv` with values `vals` on {0,1}^n. When every value is a
 /// multiple of `2^k`, `2^k·L` with `L` rebuilt from `vals / 2^k` is also tried, as in
@@ -2665,7 +2711,7 @@ fn substitute_atoms(t: &T, w: &Width) -> T {
     }
 }
 
-/// `t` with each `c·(a >> s)` (`2^s | c`) and `(a >> s) << s'` (`s' ≥ s`) written
+/// `t` with each `p·(a >> s)` (`p = 2^s·q` as `split_low` builds it) and `(a >> s) << s'` (`s' ≥ s`) written
 /// with `a & -2^s` (or `~(a | (2^s - 1))` under a `~`), so that the semi-linear
 /// rebuild sees `a`: `7·(x & 0xffffffff) + 0x700000000·(x >> 32)` is `7·x`. Only for
 /// `a` built of T-function operations, so `(mulhi(x, M) >> 1)·12` keeps the shape the
@@ -2704,6 +2750,12 @@ fn unshift(t: &T, w: &Width) -> T {
         ("Mul", [T::Num(c), x]) | ("Mul", [x, T::Num(c)]) if *c as u64 & w.mask != 0 => {
             if let Some((y, s)) = low_cleared(x, (*c as u64 & w.mask).trailing_zeros()) {
                 return T::Op("Mul".into(), vec![T::Num(w.signed(*c as u64 & w.mask) >> s), y]);
+            }
+        }
+        ("Mul", [x, p]) | ("Mul", [p, x]) if low_cleared(x, w.w).is_some() => {
+            let (y, s) = low_cleared(x, w.w).unwrap();
+            if let Some((q, 0)) = split_low(p, s, w) {
+                return T::Op("Mul".into(), vec![y, q]);
             }
         }
         ("Shl", [x, k]) => {
@@ -2814,6 +2866,83 @@ fn halve(t: &T, w: &Width) -> T {
     if c == 0 { scaled } else { T::Op("Add".into(), vec![scaled, T::Num(c as i64)]) }
 }
 
+/// Most variable bits `split_bits` tries on one term, how deep it nests, and the
+/// largest first rebuild it runs on.
+const MAX_SPLITS: usize = 4;
+const SPLIT_DEPTH: usize = 2;
+const MAX_SPLIT_SIZE: usize = 64;
+/// Most rebuilds one `split_bits` call runs.
+const SPLIT_RUNS: usize = 16;
+
+/// `(v, k)` for each variable `v` of a product factor that is 0 or `2^k` by known bits.
+fn selectors(t: &T, w: &Width) -> Vec<(String, u32)> {
+    fn go(t: &T, w: &Width, out: &mut Vec<(String, u32)>) {
+        let T::Op(op, a) = t else { return };
+        if op == "Mul" && !a.iter().any(|x| matches!(x, T::Num(_))) {
+            for f in a {
+                let bits = crate::lowbits::possible_bits(f, w);
+                if bits.is_power_of_two() {
+                    for v in crate::eval::vars(f) {
+                        if !out.contains(&(v.clone(), bits.trailing_zeros())) {
+                            out.push((v, bits.trailing_zeros()));
+                        }
+                    }
+                }
+            }
+        }
+        a.iter().for_each(|x| go(x, w, out));
+    }
+    let mut out = Vec::new();
+    go(t, w, &mut out);
+    out
+}
+
+/// `t` rebuilt by cases on bit `k` of a variable `v` that selects a product, as in
+/// `(1 & ~y)*(-y & -2) + (-y | 1)*(y & 1)`, which is `-y`: with `r0` and `r1` the
+/// rebuilds of `t` with that bit cleared and set, `t = r0 + ((v >> k) & 1)*(r1 - r0)`.
+/// The halves are split again, up to `depth` variables.
+/// Returns `t` when nothing smaller without selecting products is found or `budget`
+/// (rebuilds left) runs out.
+fn split_bits(t: T, depth: usize, budget: &std::cell::Cell<usize>, w: &Width, run: &dyn Fn(&T) -> T) -> T {
+    if depth == 0 {
+        return t;
+    }
+    let run = |t: &T| {
+        budget.set(budget.get().saturating_sub(1));
+        run(t)
+    };
+    let op = |o: &str, a: Vec<T>| T::Op(o.into(), a);
+    for (v, k) in selectors(&t, w).into_iter().take(MAX_SPLITS) {
+        if budget.get() < 3 {
+            break;
+        }
+        let var = T::Var(v);
+        let m = 1u64 << k;
+        let half = |b: T| split_bits(run(&crate::lowbits::replace(&t, std::slice::from_ref(&var), &[b])), depth - 1, budget, w, &run);
+        let r0 = half(op("And", vec![var.clone(), T::Num(w.signed(!m & w.mask))]));
+        if !selectors(&r0, w).is_empty() {
+            continue;
+        }
+        let r1 = half(op("Or", vec![var.clone(), T::Num(w.signed(m))]));
+        if !selectors(&r1, w).is_empty() {
+            continue;
+        }
+        let d = run(&op("Sub", vec![r1, r0.clone()]));
+        let ty = crate::eval::NumType { bits: w.w, signed: false };
+        let c = Some(()).filter(|_| crate::eval::vars(&d).is_empty()).and_then(|_| crate::eval::eval(&d, ty, &|_| 0));
+        let sel = match c {
+            Some(c) if c & (m - 1) == 0 => op("Mul", vec![op("And", vec![var.clone(), T::Num(w.signed(m))]), T::Num(w.signed(c >> k))]),
+            _ if k == 0 => op("Mul", vec![op("And", vec![var.clone(), T::Num(1)]), d]),
+            _ => op("Mul", vec![op("And", vec![op("Shr", vec![var.clone(), T::Num(k as i64)]), T::Num(1)]), d]),
+        };
+        let r = run(&op("Add", vec![r0, sel]));
+        if size(&r) < size(&t) && selectors(&r, w).is_empty() {
+            return r;
+        }
+    }
+    t
+}
+
 /// Rewrite the egglog term `egg` (W-bit wrapping semantics) with every linear
 /// MBA region, and every polynomial MBA region,
 /// rebuilt in a smaller form. Returns `egg` unchanged when nothing gets smaller.
@@ -2853,6 +2982,13 @@ fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Option<String>) {
     };
     let r = run(&t, true);
     let mut rebuilt = vec![r.clone()];
+    if size(&r) <= MAX_SPLIT_SIZE {
+        let budget = std::cell::Cell::new(SPLIT_RUNS);
+        let s = split_bits(r.clone(), SPLIT_DEPTH, &budget, &w, &|t| run(&unshift(&crate::lowbits::simplify(t, &w), &w), false));
+        if s != r {
+            rebuilt.push(s);
+        }
+    }
     let hr = halve(&r, &w);
     if hr != r {
         rebuilt.push(run(&hr, false));
@@ -3060,6 +3196,51 @@ mod tests {
                 assert_eq!(sum_size(&terms, konst, &wd), size(&build_sum(&terms, konst, &wd)), "{terms:?} {konst}");
             }
         }
+    }
+
+    #[test]
+    fn split_bits_and_wide_regions_preserve_value() {
+        let op = |o: &str, a: Vec<T>| T::Op(o.into(), a);
+        let mut r = Rng(0x0bad_5eed_1234_5678);
+        let ty = NumType { bits: 8, signed: false };
+        let mut changed = 0;
+        for k in 0..30 {
+            let t = if k % 3 == 2 {
+                let wide = ["x", "y", "a", "b", "c", "d", "e"];
+                let bit = random_term_in(&mut r, 3, &wide);
+                op("Add", vec![random_term_in(&mut r, 2, &["x", "y"]), op("Mul", vec![T::Num(0x35), bit])])
+            } else {
+                (0..2 + r.next() % 2)
+                    .map(|_| {
+                        let a = random_term_in(&mut r, 1, &["x", "y"]);
+                        let sel = match r.next() % 4 {
+                            0 => op("And", vec![a, T::Num(1)]),
+                            1 => op("And", vec![op("Not", vec![a]), T::Num(1)]),
+                            2 => op("And", vec![a, T::Num(2)]),
+                            _ => op("Not", vec![op("Or", vec![a, T::Num(-3)])]),
+                        };
+                        op("Mul", vec![sel, random_term_in(&mut r, 2, &["x", "y"])])
+                    })
+                    .reduce(|a, b| op("Add", vec![a, b]))
+                    .unwrap()
+            };
+            let alt = parse(&simplify_linear(&show(&t), 8));
+            if alt == t {
+                continue;
+            }
+            changed += 1;
+            let mut names = crate::eval::vars(&t);
+            names.extend(crate::eval::vars(&alt));
+            for p in (0..1u64 << 16).step_by(3) {
+                let env = |v: &str| match v {
+                    "x" => p & 0xff,
+                    "y" => p >> 8,
+                    _ => (p.wrapping_mul(0x9e37_79b9) >> (names.iter().position(|n| n == v).unwrap() * 3)) & 0xff,
+                };
+                assert_eq!(eval(&t, ty, &env), eval(&alt, ty, &env), "{}\n{}", show(&t), show(&alt));
+            }
+        }
+        assert!(changed > 10, "changed {changed}");
     }
 
     #[test]
