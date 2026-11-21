@@ -5,7 +5,7 @@
 //! independent variables, so equal normal forms imply equal values but not the
 //! reverse.
 
-use crate::eval::{Term as T, size};
+use crate::eval::{Op, Term as T, size};
 use crate::linear_mba::{Kind, MAX_LEAVES, Width, build_sum, Prog, const_shift, kind, leaves, rewrite, simba_memo};
 use std::collections::BTreeMap;
 
@@ -107,37 +107,37 @@ impl Ctx<'_> {
                 _ => self.leaf_poly(t),
             };
         };
-        Some(match op.as_str() {
-            "Add" => {
+        Some(match op {
+            Op::Add => {
                 let (x, y) = (self.poly(&a[0])?, self.poly(&a[1])?);
                 self.sum(x, y)
             }
-            "Sub" => {
+            Op::Sub => {
                 let (x, y) = (self.poly(&a[0])?, self.poly(&a[1])?);
                 self.sum(x, self.scale(y, neg1))
             }
-            "Neg" => {
+            Op::Neg => {
                 let x = self.poly(&a[0])?;
                 self.scale(x, neg1)
             }
-            "Not" => {
+            Op::Not => {
                 let x = self.poly(&a[0])?;
                 self.sum(self.scale(x, neg1), self.constant(neg1))
             }
             // Semi-linear factors expand into many independent leaves (`x | K`, ...);
             // rebuilt first, `(x + K) - (x | K)` is the single leaf `x & K`. Other factors
             // stay as they are: rebuilt, `~(y - 1)` becomes `-y`, a leaf unrelated to `y - 1`.
-            "Mul" => {
+            Op::Mul => {
                 let f = |t: &T| if has_const_bit(t, self.w) { rewrite(t, self.w) } else { t.clone() };
                 let (x, y) = (self.poly(&f(&a[0]))?, self.poly(&f(&a[1]))?);
                 self.product(&x, &y)?
             }
-            "Shl" if const_shift(&a[1], self.w).is_some() => {
+            Op::Shl if const_shift(&a[1], self.w).is_some() => {
                 let k = const_shift(&a[1], self.w).unwrap();
                 let x = self.poly(&a[0])?;
                 self.scale(x, 1 << k)
             }
-            "And" | "Or" | "Xor" if kind(t, self.w) == Kind::Bit => self.bitwise(t)?,
+            Op::And | Op::Or | Op::Xor if kind(t, self.w) == Kind::Bit => self.bitwise(t)?,
             _ => self.leaf_poly(t)?,
         })
     }
@@ -224,7 +224,7 @@ impl Ctx<'_> {
         (0..Conj::BITS as usize)
             .filter(|i| c >> i & 1 == 1)
             .map(|i| self.leaves[i].clone())
-            .reduce(|acc, l| T::Op("And".into(), vec![acc, l]))
+            .reduce(|acc, l| T::Op(Op::And, vec![acc, l]))
             .unwrap()
     }
 
@@ -252,7 +252,7 @@ impl Ctx<'_> {
             konst = 0;
             built.push(simba_memo(&t, self.w).unwrap_or(t));
         }
-        built.into_iter().reduce(|a, b| T::Op("Add".into(), vec![a, b])).unwrap_or_else(|| build_sum(&[], konst, self.w))
+        built.into_iter().reduce(|a, b| T::Op(Op::Add, vec![a, b])).unwrap_or_else(|| build_sum(&[], konst, self.w))
     }
 
     /// `p` of degree 2 as `(v + r)·(a·v + s)` with `r`, `s` affine in the other conjunctions,
@@ -374,7 +374,7 @@ impl Ctx<'_> {
         cands.sort_by_key(|&(c, n)| (std::cmp::Reverse(n), c.count_ones()));
         let mut best: Option<T> = None;
         for (l1, l2) in self.factor2(p) {
-            let cand = T::Op("Mul".into(), vec![self.build_linear(&l1), self.build_linear(&l2)]);
+            let cand = T::Op(Op::Mul, vec![self.build_linear(&l1), self.build_linear(&l2)]);
             if best.as_ref().is_none_or(|b| size(&cand) < size(b)) {
                 best = Some(cand);
             }
@@ -402,10 +402,10 @@ impl Ctx<'_> {
             let ft = self.conj_term(f);
             let prod = match self.build(&q, 1) {
                 T::Num(1) => ft,
-                T::Num(-1) => T::Op("Neg".into(), vec![ft]),
-                qt => T::Op("Mul".into(), vec![ft, qt]),
+                T::Num(-1) => T::Op(Op::Neg, vec![ft]),
+                qt => T::Op(Op::Mul, vec![ft, qt]),
             };
-            let cand = if r.is_empty() { prod } else { T::Op("Add".into(), vec![prod, self.build(&r, 1)]) };
+            let cand = if r.is_empty() { prod } else { T::Op(Op::Add, vec![prod, self.build(&r, 1)]) };
             if best.as_ref().is_none_or(|b| size(&cand) < size(b)) {
                 best = Some(cand);
             }
@@ -425,10 +425,10 @@ fn has_const_bit(t: &T, w: &Width) -> bool {
 /// into leaves via `rewrite`, which would recurse back here on the same term.
 fn has_product(t: &T, w: &Width) -> bool {
     let T::Op(op, a) = t else { return false };
-    match op.as_str() {
-        "Mul" if !matches!(a[0], T::Num(_)) && !matches!(a[1], T::Num(_)) => true,
-        "Shl" if const_shift(&a[1], w).is_none() => false,
-        "Add" | "Sub" | "Neg" | "Not" | "Mul" | "Shl" => a.iter().any(|x| has_product(x, w)),
+    match op {
+        Op::Mul if !matches!(a[0], T::Num(_)) && !matches!(a[1], T::Num(_)) => true,
+        Op::Shl if const_shift(&a[1], w).is_none() => false,
+        Op::Add | Op::Sub | Op::Neg | Op::Not | Op::Mul | Op::Shl => a.iter().any(|x| has_product(x, w)),
         _ => false,
     }
 }
@@ -481,8 +481,8 @@ mod tests {
         }
     }
 
-    fn op(name: &str, args: Vec<T>) -> T {
-        T::Op(name.into(), args)
+    fn op(name: Op, args: Vec<T>) -> T {
+        T::Op(name, args)
     }
 
     fn bitwise(r: &mut Rng, depth: u32) -> T {
@@ -490,26 +490,26 @@ mod tests {
             return T::Var(["x", "y", "z"][(r.next() % 3) as usize].into());
         }
         match r.next() % 4 {
-            0 => op("Not", vec![bitwise(r, depth - 1)]),
-            1 => op("And", vec![bitwise(r, depth - 1), bitwise(r, depth - 1)]),
-            2 => op("Or", vec![bitwise(r, depth - 1), bitwise(r, depth - 1)]),
-            _ => op("Xor", vec![bitwise(r, depth - 1), bitwise(r, depth - 1)]),
+            0 => op(Op::Not, vec![bitwise(r, depth - 1)]),
+            1 => op(Op::And, vec![bitwise(r, depth - 1), bitwise(r, depth - 1)]),
+            2 => op(Op::Or, vec![bitwise(r, depth - 1), bitwise(r, depth - 1)]),
+            _ => op(Op::Xor, vec![bitwise(r, depth - 1), bitwise(r, depth - 1)]),
         }
     }
 
     fn linear(r: &mut Rng) -> T {
         let terms = 1 + r.next() % 3;
         (0..terms)
-            .map(|_| op("Mul", vec![T::Num((r.next() % 11) as i64 - 5), bitwise(r, 2)]))
-            .reduce(|a, b| op("Add", vec![a, b]))
+            .map(|_| op(Op::Mul, vec![T::Num((r.next() % 11) as i64 - 5), bitwise(r, 2)]))
+            .reduce(|a, b| op(Op::Add, vec![a, b]))
             .unwrap()
     }
 
     /// The same value written differently: operands of `Add`/`Mul` swapped.
     fn swapped(t: &T) -> T {
         match t {
-            T::Op(o, a) if o == "Add" || o == "Mul" => op(o, vec![swapped(&a[1]), swapped(&a[0])]),
-            T::Op(o, a) => op(o, a.iter().map(swapped).collect()),
+            T::Op(o, a) if *o == Op::Add || *o == Op::Mul => op(*o, vec![swapped(&a[1]), swapped(&a[0])]),
+            T::Op(o, a) => op(*o, a.iter().map(swapped).collect()),
             _ => t.clone(),
         }
     }
@@ -521,7 +521,7 @@ mod tests {
             let w = Width::new(bits);
             let ty = NumType { bits, signed: false };
             for _ in 0..300 {
-                let t = op("Add", vec![op("Mul", vec![linear(&mut r), linear(&mut r)]), linear(&mut r)]);
+                let t = op(Op::Add, vec![op(Op::Mul, vec![linear(&mut r), linear(&mut r)]), linear(&mut r)]);
                 let alt = rewrite(&t, &w);
                 for _ in 0..32 {
                     let (x, y, z) = (r.next(), r.next(), r.next());
@@ -532,7 +532,7 @@ mod tests {
                     };
                     assert_eq!(eval(&t, ty, &env), eval(&alt, ty, &env), "w={bits}\n  {t:?}\n  {alt:?}");
                 }
-                let zero = op("Sub", vec![t.clone(), swapped(&t)]);
+                let zero = op(Op::Sub, vec![t.clone(), swapped(&t)]);
                 assert_eq!(rewrite(&zero, &w), T::Num(0), "w={bits}: {t:?}");
             }
         }

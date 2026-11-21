@@ -1048,7 +1048,7 @@ pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
 /// Whether `t` has an arithmetic operation or a constant directly under a bitwise one.
 fn mixed(t: &eval::Term) -> bool {
     let eval::Term::Op(op, a) = t else { return false };
-    let bit = |o: &str| matches!(o, "And" | "Or" | "Xor" | "Not");
+    let bit = |o: &eval::Op| matches!(o, eval::Op::And | eval::Op::Or | eval::Op::Xor | eval::Op::Not);
     let plain = |x: &eval::Term| match x {
         eval::Term::Op(o, _) => bit(o),
         eval::Term::Num(_) => false,
