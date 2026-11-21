@@ -11,7 +11,9 @@ use std::collections::HashMap;
 
 /// Most leaf bits enumerated for one subterm, and for a proof in context.
 const MAX_BITS: u32 = 18;
-const MAX_CONTEXT_BITS: u32 = 12;
+const MAX_CONTEXT_BITS: u32 = 18;
+/// Proofs over more leaf bits than this also draw on `WIDE_BUDGET`.
+const NARROW_CONTEXT_BITS: u32 = 12;
 const MAX_TRY: usize = 256;
 const MAX_VALUES: usize = 4;
 /// Without a variable shift, only subterms with a product whose value is fixed by
@@ -19,6 +21,7 @@ const MAX_VALUES: usize = 4;
 const MAX_PRODUCT_BITS: u32 = 4;
 /// Evaluation steps per call, over all enumerations.
 const BUDGET: u64 = 1 << 26;
+const WIDE_BUDGET: u64 = 1 << 23;
 
 #[derive(Clone, Copy)]
 struct Info {
@@ -209,6 +212,7 @@ struct Pass<'a> {
     w: &'a Width,
     cands: HashMap<T, Cand>,
     budget: u64,
+    wide: u64,
 }
 
 impl Pass<'_> {
@@ -303,11 +307,12 @@ impl Pass<'_> {
             let cost = (1u64 << (n as u32 * m)) * size(t) as u64;
             for (i, c) in found.iter().enumerate() {
                 for &v in &self.cands[c].values {
-                    let Some(budget) = self.budget.checked_sub(cost) else {
+                    let wide = if n as u32 * m > NARROW_CONTEXT_BITS { self.wide.checked_sub(cost) } else { Some(self.wide) };
+                    let (Some(budget), Some(wide)) = (self.budget.checked_sub(cost), wide) else {
                         unknown = true;
                         break;
                     };
-                    self.budget = budget;
+                    (self.budget, self.wide) = (budget, wide);
                     let num = T::Num(self.w.signed(v));
                     let g = replace(&abs, &[T::Var(names[i].clone())], std::slice::from_ref(&num));
                     match crate::tfunc::equal_low(&abs, &g, &all, n, m, &extra, self.w) {
@@ -387,7 +392,7 @@ pub(crate) fn replace(t: &T, from: &[T], to: &[T]) -> T {
 /// `t` with subterms determined by the low bits of their leaves folded, where that
 /// needs a variable left shift or a product (or is a constant by known bits).
 pub(crate) fn simplify(t: &T, w: &Width) -> T {
-    let mut p = Pass { w, cands: HashMap::new(), budget: BUDGET };
+    let mut p = Pass { w, cands: HashMap::new(), budget: BUDGET, wide: WIDE_BUDGET };
     let (r, _) = p.fold(t);
     if p.cands.is_empty() { r } else { p.context(&r) }
 }
@@ -445,7 +450,7 @@ mod tests {
         for k in 0..500 {
             let ty = NumType { bits: 8, signed: k % 2 == 1 };
             let t = if k < 200 { random_term(&mut h, 4) } else { context_term(&mut h) };
-            let mut p = Pass { w: &w, cands: HashMap::new(), budget: BUDGET };
+            let mut p = Pass { w: &w, cands: HashMap::new(), budget: BUDGET, wide: WIDE_BUDGET };
             let folded = p.fold(&t).0;
             let r = p.context(&folded);
             if r == t {

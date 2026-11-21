@@ -291,6 +291,7 @@ pub fn make_egg(num_type: &str) -> String {
     // -(y | -a) | y = a for y ⊆ a.
     egg.push_str(&rewrite!("-(y|-(x|y))|y"=>"x|y";"simplify"));
     egg.push_str(&rewrite!("~x^~y"=>"x^y";"simplify"));
+    egg.push_str(&rewrite!("~x^((Num c)-y)"=>"x^(y+~(Num c))";"simplify"));
     egg.push_str(&rewrite!("(x|y)^(~x|~y)"=>"~(x^y)";"simplify"));
     egg.push_str(&rewrite!("(x&y)|~(x|y)"=>"~(x^y)";"simplify"));
     egg.push_str(&rewrite!("(x&y)|(~x&~y)"=>"~(x^y)";"simplify"));

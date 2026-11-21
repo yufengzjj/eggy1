@@ -1633,7 +1633,7 @@ fn related_leaves_by_placeholder() {
             ("(y * (z + -1)) + (2 * (x - ((x - y) & (y * z))))", &["(x + ((x - y) ^ (y * z)))"], 10),
             (
                 "(0x80000002 - ((x * x) + (~y * y))) + (2 * (((x * x) + ~(y * y)) | (-0x80000001 - y)))",
-                &["(((x * x) + ~(y * y)) ^ (-0x80000001 - y))"],
+                &["(((y * y) - (x * x)) ^ (y + 0x80000000))", "(((y + x) * (y - x)) ^ (y + 0x80000000))"],
                 10,
             ),
         ],
@@ -1719,4 +1719,48 @@ fn bitwise_constant_on_known_bits() {
             ("((4 * x) + 8) | 3", &["((4 * x) + 0xb)", "(0xb + (4 * x))"], 10),
         ],
     );
+}
+
+/// A degree-2 polynomial is factored into two linear ones, `(v + r)·(a·v + s)`.
+#[test]
+fn quadratic_factors() {
+    check(
+        "i64",
+        &[
+            ("x*x - y*y + 3*x + 3*y", &["((x + y) * ((x + 3) - y))", "((x + y) * (3 + (x - y)))"], 10),
+            ("(x&y)*(x|y) + 3*(x&y) + 2*(x|y) + 6", &["(((x & y) + 2) * ((x | y) + 3))"], 10),
+        ],
+    );
+    check("u8", &[("3*x*x + 7*x*y + 2*y*y + x + 2*y", &["((x + (2 * y)) * ((3 * x) - ~y))", "((x + (2 * y)) * (((3 * x) + y) + 1))"], 10)]);
+}
+
+/// A bitwise region with constants over 4 to 6 leaves is split into `P op Q` over smaller leaf sets.
+#[test]
+fn bitwise_split_with_constants() {
+    check(
+        "i64",
+        &[(
+            "((((a | (b | e)) & -0x2ff8) - (((b & (~e & (c & d))) & 0x807) - ((e | ((a | b) ^ (b & (c & d)))) & 0x2360))) + 0xc97)",
+            &["(e | ((a | (b | 0xc97)) ^ (c & (b & (d & 0x2b67)))))"],
+            10,
+        )],
+    );
+}
+
+/// `~x ^ (c - y)` is `x ^ (y + ~c)`.
+#[test]
+fn not_with_constant_operand() {
+    check("i64", &[("~((y+x)*(y-x)) ^ (-0x80000001 - y)", &["(((y + x) * (y - x)) ^ (y + 0x80000000))"], 10)]);
+}
+
+/// A linear MBA whose values are all multiples of `2^k` is also rebuilt as `-2^k·L`.
+#[test]
+fn negative_power_of_two_scale() {
+    check("u8", &[("(4 * (x & y)) + (0xf8 * x)", &["(0xfc * ((~y & x) + x))"], 10)]);
+}
+
+/// The low-bits context proof enumerates up to 18 leaf bits: 3 leaves of 6 bits here.
+#[test]
+fn low_bits_context_of_three_leaves() {
+    check("i64", &[("(y ^ x) | (2 & ((2 * c) << ((~y ^ x) & 63)))", &["(y ^ x)", "(x ^ y)"], 10)]);
 }

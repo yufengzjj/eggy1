@@ -594,7 +594,7 @@ fn drop_unused(t: &T, lv: &[T], w: &Width) -> Option<T> {
 }
 
 /// The linear MBA over `lv` with values `vals` on {0,1}^n. When every value is a
-/// multiple of `2^k`, `2^k·L` with `L` rebuilt from `vals / 2^k` is also tried, as in
+/// multiple of `2^k`, `±2^k·L` with `L` rebuilt from `±vals / 2^k` is also tried, as in
 /// `2*x - 4*(x & y) = 2*((x ^ y) - y)`; `L` only matters modulo `2^(w-k)`.
 fn rebuild_values(vals: &[u64], lv: &[T], w: &Width) -> T {
     let plain = rebuild_values_plain(vals, lv, w);
@@ -603,8 +603,11 @@ fn rebuild_values(vals: &[u64], lv: &[T], w: &Width) -> T {
         return plain;
     }
     let low: Vec<u64> = vals.iter().map(|&v| (w.signed(v) >> k) as u64 & w.mask).collect();
-    let scaled = T::Op("Mul".into(), vec![T::Num(w.signed(1 << k)), rebuild_values_plain(&low, lv, w)]);
-    if size(&scaled) < size(&plain) { scaled } else { plain }
+    let neg: Vec<u64> = low.iter().map(|v| v.wrapping_neg() & w.mask).collect();
+    [(1i64 << k, &low), (-1i64 << k, &neg)]
+        .into_iter()
+        .map(|(c, l)| T::Op("Mul".into(), vec![T::Num(w.signed(c as u64 & w.mask)), rebuild_values_plain(l, lv, w)]))
+        .fold(plain, |best, t| if size(&t) < size(&best) { t } else { best })
 }
 
 fn rebuild_values_plain(vals: &[u64], lv: &[T], w: &Width) -> T {
@@ -1159,9 +1162,219 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
     }
     cands.extend(semi_split(&groups, lv, e0, w, smallest(&cands)));
     cands.extend(scaled(&groups, lv, e0, w, smallest(&cands)));
+    cands.extend(bit_split(&groups, lv, e0, w, smallest(&cands)));
     // Masks that differ only in bits that cannot matter tie on size; keep the short one.
     let best = cands.into_iter().min_by_key(|c| (size(c), const_bits(c)))?;
     Some(short_consts(best, lv, w))
+}
+
+/// Most leaf splits `bit_split` rebuilds per region.
+const MAX_BIT_SPLITS: usize = 4;
+/// Most `P op Q` pairs `bit_split` rebuilds per `simplify_linear` call.
+const BIT_SPLIT_BUDGET: usize = 8;
+
+thread_local! {
+    static BIT_SPLITS: std::cell::Cell<usize> = const { std::cell::Cell::new(BIT_SPLIT_BUDGET) };
+}
+
+/// A purely bitwise semi-linear region of 4 to 6 leaves as `P op Q`, `P` over the
+/// leaves `A` and `Q` over `B` (they may share leaves, neither holds the other),
+/// each rebuilt on its own: `(x0 ^ x3 ^ K1) & (x3 | K2 | (x5 & x6))`. Bits are grouped
+/// by their Boolean function `f`; `P` and `Q` take its projections onto `A` and `B`
+/// (`f(x & !onlyB)` and the rest for `^`), and bits with a constant `f` try each
+/// pair of constants that gives it.
+fn bit_split(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, mut limit: usize) -> Vec<T> {
+    let n = lv.len();
+    // Arithmetic leaves are left to `relate`, which needs the rebuilt region's shape.
+    if !(4..=6).contains(&n) || BIT_SPLITS.with(|c| c.get()) == 0 || lv.iter().any(|l| kind(l, w) == Kind::Lin) {
+        return Vec::new();
+    }
+    let pts = 1usize << n;
+    let all = if pts == 64 { u64::MAX } else { (1u64 << pts) - 1 };
+    let mut funcs: Vec<(u64, u64)> = Vec::new();
+    for (g, mask) in groups {
+        for b in [0u64, 1] {
+            let sub = mask & if b == 1 { e0 } else { !e0 } & w.mask;
+            if sub == 0 {
+                continue;
+            }
+            let rest = w.w - sub.trailing_zeros();
+            let rm = if rest == 64 { u64::MAX } else { (1u64 << rest) - 1 };
+            let mut table = 0u64;
+            for (q, &v) in g.iter().enumerate() {
+                let f = b.wrapping_add(v) & 1;
+                if (f.wrapping_sub(b) ^ v) & rm != 0 {
+                    return Vec::new();
+                }
+                table |= f << q;
+            }
+            match funcs.iter_mut().find(|(_, t)| *t == table) {
+                Some(e) => e.0 |= sub,
+                None => funcs.push((sub, table)),
+            }
+        }
+    }
+    let at = |t: u64, p: usize| t >> p & 1;
+    // Points with leaf `i` set, as a table.
+    let ones: Vec<u64> = (0..n).map(|i| (0..pts).filter(|p| p >> i & 1 == 1).fold(0, |m, p| m | 1 << p)).collect();
+    let over = |mut t: u64, free: usize, any: bool| -> u64 {
+        for i in (0..n).filter(|i| free >> i & 1 == 1) {
+            let (hi, lo) = (t & ones[i], t & !ones[i] & all);
+            let (up, down) = (lo << (1 << i), hi >> (1 << i));
+            t = if any { t | up | down } else { (hi & up) | (lo & down) };
+        }
+        t
+    };
+    let zeroed = |mut t: u64, free: usize| -> u64 {
+        for i in (0..n).filter(|i| free >> i & 1 == 1) {
+            let lo = t & !ones[i] & all;
+            t = lo | lo << (1 << i);
+        }
+        t
+    };
+    let split = |op: &str, t: u64, a: usize, b: usize| -> Option<(u64, u64)> {
+        let (only_a, only_b) = (a & !b, b & !a);
+        let (p, q) = match op {
+            "And" => (over(t, only_b, true), over(t, only_a, true)),
+            "Or" => (over(t, only_b, false), over(t, only_a, false)),
+            _ => {
+                let p = zeroed(t, only_b);
+                (p, t ^ p)
+            }
+        };
+        let ok = match op {
+            "And" => p & q == t,
+            "Or" => p | q == t,
+            _ => zeroed(q, only_a) == q,
+        };
+        ok.then_some((p, q))
+    };
+    let const_pairs = |op: &str, f: u64| -> Vec<(u64, u64)> {
+        match (op, f) {
+            ("And", 0) => vec![(0, 0), (0, 1), (1, 0)],
+            ("And", _) => vec![(1, 1)],
+            ("Or", 0) => vec![(0, 0)],
+            ("Or", _) => vec![(1, 1), (1, 0), (0, 1)],
+            (_, 0) => vec![(0, 0), (1, 1)],
+            _ => vec![(1, 0), (0, 1)],
+        }
+    };
+    let full = pts - 1;
+    // Variants 0-2 give constant bits each constant pair; 3 and 4 leave the side that
+    // does not decide such bits (`q` in `1 | q`) the table of the widest other bits.
+    let pick = |op: &str, a: usize, b: usize, v: usize| -> Option<(Vec<(u64, u64)>, Vec<(u64, u64)>)> {
+        let mut split_all = Vec::new();
+        for &(_, t) in &funcs {
+            split_all.push(if t == 0 || t == all { None } else { Some(split(op, t, a, b)?) });
+        }
+        let widest = funcs.iter().zip(&split_all).filter_map(|((m, _), s)| s.map(|s| (m.count_ones(), s))).max_by_key(|x| x.0).map(|x| x.1);
+        let (mut ps, mut qs, mut fresh) = (Vec::new(), Vec::new(), v == 0);
+        for (&(mask, t), s) in funcs.iter().zip(&split_all) {
+            let (p, q) = match s {
+                Some(pq) => *pq,
+                None => {
+                    let pairs = const_pairs(op, t & 1);
+                    let forced = pairs.len() == 3;
+                    let (p, q) = match (v, widest) {
+                        (0..3, _) => {
+                            fresh |= v < pairs.len();
+                            let (p, q) = pairs[v.min(pairs.len() - 1)];
+                            (p * all, q * all)
+                        }
+                        (3, Some((_, wq))) if forced => {
+                            fresh = true;
+                            (pairs[1].0 * all, wq)
+                        }
+                        (4, Some((wp, _))) if forced => {
+                            fresh = true;
+                            (wp, pairs[2].1 * all)
+                        }
+                        _ => (pairs[0].0 * all, pairs[0].1 * all),
+                    };
+                    (p, q)
+                }
+            };
+            let joined = match op {
+                "And" => p & q,
+                "Or" => p | q,
+                _ => p ^ q,
+            };
+            if joined != t {
+                return None;
+            }
+            ps.push((mask, p));
+            qs.push((mask, q));
+        }
+        fresh.then_some((ps, qs))
+    };
+    let support = |parts: &[(u64, u64)]| -> u32 {
+        let dep = (0..n).filter(|&i| parts.iter().any(|&(_, t)| (0..pts).any(|p| at(t, p) != at(t, p ^ 1 << i)))).count();
+        let mut tables: Vec<u64> = parts.iter().map(|&(_, t)| t).filter(|&t| t != 0 && t != all).collect();
+        tables.sort_unstable();
+        tables.dedup();
+        dep as u32 + tables.len() as u32
+    };
+    let mut found: Vec<(u32, &str, usize, usize, Vec<(u64, u64)>, Vec<(u64, u64)>)> = Vec::new();
+    for code in 0..3usize.pow(n as u32) {
+        let (mut a, mut b, mut c) = (0usize, 0usize, code);
+        for i in 0..n {
+            match c % 3 {
+                0 => a |= 1 << i,
+                1 => b |= 1 << i,
+                _ => {
+                    a |= 1 << i;
+                    b |= 1 << i;
+                }
+            }
+            c /= 3;
+        }
+        if a == full || b == full || a > b {
+            continue;
+        }
+        for op in ["And", "Or", "Xor"] {
+            if let Some((ps, qs)) = pick(op, a, b, 0)
+                && !found.iter().any(|f| f.1 == op && f.4 == ps && f.5 == qs)
+            {
+                found.push((support(&ps) + support(&qs), op, a, b, ps, qs));
+            }
+        }
+    }
+    found.sort_by_key(|f| f.0);
+    let side = |parts: &[(u64, u64)], vars: usize| -> T {
+        let terms: Vec<T> = parts
+            .iter()
+            .filter(|&&(_, t)| t != 0)
+            .map(|&(mask, t)| {
+                let k = T::Num(w.signed(mask));
+                if t == all {
+                    return k;
+                }
+                let minterms = (0..pts).filter(|&p| p & !vars == 0 && at(t, p) == 1).map(|p| {
+                    (0..n)
+                        .filter(|i| vars >> i & 1 == 1)
+                        .map(|i| if p >> i & 1 == 1 { lv[i].clone() } else { T::Op("Not".into(), vec![lv[i].clone()]) })
+                        .reduce(|x, y| T::Op("And".into(), vec![x, y]))
+                        .unwrap()
+                });
+                T::Op("And".into(), vec![k, minterms.reduce(|x, y| T::Op("Or".into(), vec![x, y])).unwrap()])
+            })
+            .collect();
+        terms.into_iter().reduce(|x, y| T::Op("Or".into(), vec![x, y])).unwrap_or(T::Num(0))
+    };
+    let mut out = Vec::new();
+    // Each side has a leaf per leaf it depends on and a mask per table, so most
+    // splits are ruled out by size before they are rebuilt.
+    for &(low, op, a, b, ..) in found.iter().take(MAX_BIT_SPLITS) {
+        for (ps, qs) in (0..5).filter_map(|v| pick(op, a, b, v)) {
+            if low as usize + 1 >= limit || BIT_SPLITS.with(|c| c.replace(c.get().saturating_sub(1))) == 0 {
+                return out;
+            }
+            let t = T::Op(op.into(), vec![rewrite(&side(&ps, a), w), rewrite(&side(&qs, b), w)]);
+            limit = limit.min(size(&t));
+            out.push(t);
+        }
+    }
+    out
 }
 
 /// When `e0` and every table value are multiples of `2^k`, the region is `2^k·L`.
@@ -3095,6 +3308,7 @@ fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Option<String>) {
     let w = Width::new(w);
     let t = parse(egg);
     let t0 = t.clone();
+    BIT_SPLITS.with(|c| c.set(BIT_SPLIT_BUDGET));
     let t = unshift(&crate::lowbits::simplify(&t, &w), &w);
     // Subterms are replaced only after the rebuild: earlier, `~(y - 1)` would become
     // `-y`, a leaf the rebuild no longer relates to `y - 1`.

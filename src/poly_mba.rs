@@ -20,6 +20,12 @@ const MAX_MONOS: usize = 4096;
 const FACTOR_TRIES: usize = 3;
 /// Most products `build` tries with every choice before it keeps to the first.
 const MAX_BUILDS: usize = 512;
+const MAX_FACTOR_MONOS: usize = 64;
+const MAX_FACTOR_VARS: usize = 12;
+const MAX_PIVOTS: usize = 4;
+const MAX_ROOTS: usize = 16;
+const MAX_FACTOR_STEPS: usize = 4096;
+const MAX_SOLUTIONS: usize = 8;
 
 struct Ctx<'a> {
     w: &'a Width,
@@ -249,6 +255,99 @@ impl Ctx<'_> {
         built.into_iter().reduce(|a, b| T::Op("Add".into(), vec![a, b])).unwrap_or_else(|| build_sum(&[], konst, self.w))
     }
 
+    /// `p` of degree 2 as `(v + r)·(a·v + s)` with `r`, `s` affine in the other conjunctions,
+    /// solved coefficient by coefficient: each `r_j` is a root of `a·r² - b_j·r + c_jj`,
+    /// and every pair must give `c_jk = r_j·b_k + r_k·b_j - 2a·r_j·r_k`.
+    fn factor2(&self, p: &Poly) -> Vec<(Poly, Poly)> {
+        let mut out = Vec::new();
+        if p.len() > MAX_FACTOR_MONOS || p.keys().any(|m| m.len() > 2) {
+            return out;
+        }
+        let mut vars: Vec<Conj> = p.keys().flatten().copied().collect();
+        vars.sort_unstable();
+        vars.dedup();
+        if vars.len() > MAX_FACTOR_VARS {
+            return out;
+        }
+        let coef = |m: &[Option<Conj>]| {
+            let mut m: Mono = m.iter().flatten().copied().collect();
+            m.sort_unstable();
+            p.get(&m).copied().unwrap_or(0)
+        };
+        let mut pivots: Vec<(bool, Conj)> =
+            vars.iter().filter(|&&v| p.keys().any(|m| m.len() == 2 && m.contains(&v))).map(|&v| (coef(&[Some(v), Some(v)]) & 1 == 0, v)).collect();
+        pivots.sort_unstable();
+        let mask = self.w.mask;
+        for &(_, v) in pivots.iter().take(MAX_PIVOTS) {
+            let a = coef(&[Some(v), Some(v)]);
+            let us: Vec<Option<Conj>> = vars.iter().filter(|&&u| u != v).map(|&u| Some(u)).chain([None]).collect();
+            let b: Vec<u64> = us.iter().map(|&u| coef(&[Some(v), u])).collect();
+            let roots: Vec<Vec<u64>> = us.iter().zip(&b).map(|(&u, &bj)| self.quad_roots(a, bj, coef(&[u, u]))).collect();
+            if roots.iter().any(|r| r.is_empty()) {
+                continue;
+            }
+            let (mut r, mut sols, mut steps) = (vec![0u64; us.len()], Vec::new(), 0);
+            let fits = |r: &[u64], k: usize| {
+                (0..k).all(|j| {
+                    let c = r[j].wrapping_mul(b[k]).wrapping_add(r[k].wrapping_mul(b[j])).wrapping_sub(a.wrapping_mul(2).wrapping_mul(r[j]).wrapping_mul(r[k]));
+                    c & mask == coef(&[us[j], us[k]])
+                })
+            };
+            Self::assign(&roots, &mut r, 0, &fits, &mut steps, &mut sols);
+            for r in sols {
+                let (mut l1, mut l2) = (Poly::new(), Poly::new());
+                self.add_to(&mut l1, vec![v], 1);
+                self.add_to(&mut l2, vec![v], a);
+                for (j, u) in us.iter().enumerate() {
+                    let m: Mono = u.iter().copied().collect();
+                    self.add_to(&mut l1, m.clone(), r[j]);
+                    self.add_to(&mut l2, m, b[j].wrapping_sub(a.wrapping_mul(r[j])));
+                }
+                out.push((l1, l2));
+            }
+        }
+        out
+    }
+
+    fn assign(roots: &[Vec<u64>], r: &mut [u64], k: usize, fits: &dyn Fn(&[u64], usize) -> bool, steps: &mut usize, sols: &mut Vec<Vec<u64>>) {
+        if k == roots.len() {
+            sols.push(r.to_vec());
+            return;
+        }
+        for &x in &roots[k] {
+            *steps += 1;
+            if *steps > MAX_FACTOR_STEPS || sols.len() >= MAX_SOLUTIONS {
+                return;
+            }
+            r[k] = x;
+            if fits(r, k) {
+                Self::assign(roots, r, k + 1, fits, steps, sols);
+            }
+        }
+    }
+
+    /// Roots of `a·r² - b·r + c`, smallest signed value first, found by lifting bit by bit;
+    /// when there are too many, only `0` and `b/a` (odd `a`) are kept, if they are roots.
+    fn quad_roots(&self, a: u64, b: u64, c: u64) -> Vec<u64> {
+        let f = |r: u64| a.wrapping_mul(r).wrapping_mul(r).wrapping_sub(b.wrapping_mul(r)).wrapping_add(c);
+        let mut rs = vec![0u64];
+        for k in 0..self.w.w {
+            let m = if k + 1 == 64 { u64::MAX } else { (1u64 << (k + 1)) - 1 };
+            rs = rs.iter().flat_map(|&r| [r, r | 1 << k]).filter(|&r| f(r) & m == 0).collect();
+            if rs.len() > MAX_ROOTS {
+                let mut inv = a;
+                for _ in 0..6 {
+                    inv = inv.wrapping_mul(2u64.wrapping_sub(a.wrapping_mul(inv)));
+                }
+                rs = [0, if a & 1 == 1 { b.wrapping_mul(inv) & self.w.mask } else { 0 }].into_iter().filter(|&r| f(r) & self.w.mask == 0).collect();
+                rs.dedup();
+                return rs;
+            }
+        }
+        rs.sort_by_key(|&r| self.w.signed(r).unsigned_abs());
+        rs
+    }
+
     /// Short term for `p`: pull out a common conjunction `f` (`p = f·q + r`)
     /// so that `q` gets rebuilt as a linear MBA, recursively.
     fn build(&self, p: &Poly, tries: usize) -> T {
@@ -274,6 +373,12 @@ impl Ctx<'_> {
         let mut cands: Vec<(Conj, usize)> = counts.into_iter().collect();
         cands.sort_by_key(|&(c, n)| (std::cmp::Reverse(n), c.count_ones()));
         let mut best: Option<T> = None;
+        for (l1, l2) in self.factor2(p) {
+            let cand = T::Op("Mul".into(), vec![self.build_linear(&l1), self.build_linear(&l2)]);
+            if best.as_ref().is_none_or(|b| size(&cand) < size(b)) {
+                best = Some(cand);
+            }
+        }
         // Pulling `f` out of its degree-1 monomial too (`x*y - 7*x` → `x*(y - 7)`)
         // can block a shorter linear rebuild of the rest, so try both, while the
         // budget lasts: the choices multiply at every level.
