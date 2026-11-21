@@ -325,6 +325,14 @@ fn has_product(t: &T, w: &Width) -> bool {
 /// Rebuilt form of the polynomial region rooted at `t`, if it has a product of
 /// non-constant terms or is a linear region with more than `MAX_LEAVES` leaves,
 /// and the rebuilt form is smaller.
+/// Number of monomials in the expansion of `t`, after the null polynomials are reduced
+/// if that leaves fewer.
+pub(crate) fn monomials(t: &T, w: &Width) -> Option<usize> {
+    let mut ctx = Ctx { w, leaves: Vec::new(), built: Default::default() };
+    let p = ctx.poly(t)?;
+    Some(p.len().min(ctx.reduce_null(&p).len()))
+}
+
 pub(crate) fn simplify_poly(t: &T, w: &Width) -> Option<T> {
     // A bitwise root would be its own leaf, and `leaf` rewrites leaves.
     let wide = kind(t, w) == Kind::Lin && {

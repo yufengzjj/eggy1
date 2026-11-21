@@ -796,6 +796,190 @@ fn related_leaves(t: &T, lv: &[T], w: &Width) -> Option<T> {
         .min_by_key(size)
 }
 
+/// `t` with each region also rebuilt after an arithmetic leaf `L` of a bitwise
+/// operation is replaced by a placeholder `v` and `μ·(v - L)` added, which
+/// `rewrite` then expands, so products and constant masks cancel too, unlike in
+/// `related_leaves`: with `L = y*z - (z ^ y)`, `(z ^ y) - B + 2*(L | B) - y*z` is
+/// `L ^ B`. Other leaves equal to `L` or `~L` become `v` or `~v`.
+fn relate(t: &T, w: &Width) -> T {
+    let T::Op(op, a) = t else { return t.clone() };
+    if kind(t, w) == Kind::Atom {
+        return T::Op(op.clone(), a.iter().map(|x| relate(x, w)).collect());
+    }
+    let mut lv = Vec::new();
+    leaves(t, w, &mut lv);
+    let inner: Vec<T> = lv.iter().map(|l| relate(l, w)).collect();
+    let t = crate::lowbits::replace(t, &lv, &inner);
+    relate_region(&t, w).filter(|r| size(r) < size(&t)).unwrap_or(t)
+}
+
+/// Most arithmetic leaves `relate_region` tries.
+const MAX_RELATED: usize = 4;
+/// Largest product leaf `relate_region` tries when it is not an operand of a bitwise operation.
+const MAX_FREE_PRODUCT: usize = 20;
+
+fn relate_region(t: &T, w: &Width) -> Option<T> {
+    let mut lv = Vec::new();
+    leaves(t, w, &mut lv);
+    if lv.len() > MAX_LEAVES {
+        return None;
+    }
+    fn bit_operands(t: &T, w: &Width, out: &mut Vec<T>) {
+        let T::Op(op, a) = t else { return };
+        if kind(t, w) == Kind::Atom {
+            return;
+        }
+        for x in a {
+            if matches!(op.as_str(), "And" | "Or" | "Xor") {
+                let mut x = x;
+                while let T::Op(o, b) = x {
+                    if o != "Not" {
+                        break;
+                    }
+                    x = &b[0];
+                }
+                out.push(x.clone());
+            }
+            bit_operands(x, w, out);
+        }
+    }
+    let mut operands = Vec::new();
+    bit_operands(t, w, &mut operands);
+    let vars: Vec<Vec<String>> = lv.iter().map(crate::eval::vars).collect();
+    let arith: Vec<usize> = (0..lv.len())
+        .filter(|&i| matches!(&lv[i], T::Op(..)) && kind(&lv[i], w) != Kind::Bit && (operands.contains(&lv[i]) || size(&lv[i]) <= MAX_FREE_PRODUCT) && (0..lv.len()).any(|j| j != i && vars[j].iter().any(|v| vars[i].contains(v))))
+        .take(MAX_RELATED)
+        .collect();
+    if arith.is_empty() {
+        return None;
+    }
+    let op = |o: &str, a: Vec<T>| T::Op(o.into(), a);
+    let zero = |e: T| maybe_zero(&e, w) && rewrite(&e, w) == T::Num(0);
+    // `same[k]`: the other leaves equal to `lv[arith[k]]` (false) or to its complement (true).
+    let same: Vec<Vec<(usize, bool)>> = arith
+        .iter()
+        .map(|&i| {
+            (0..lv.len())
+                .filter(|&j| j != i && kind(&lv[j], w) != Kind::Bit)
+                .filter_map(|j| {
+                    if zero(op("Sub", vec![lv[i].clone(), lv[j].clone()])) {
+                        Some((j, false))
+                    } else if zero(op("Add", vec![op("Add", vec![lv[i].clone(), lv[j].clone()]), T::Num(1)])) {
+                        Some((j, true))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let mut combos: Vec<Vec<(usize, i64)>> = Vec::new();
+    for k in 0..arith.len() {
+        if !same[k].is_empty() {
+            combos.push(vec![(k, 0)]);
+        }
+        for mu in [1, -1, 2, -2] {
+            combos.push(vec![(k, mu)]);
+        }
+        for k2 in k + 1..arith.len() {
+            for (a, b) in [(1, 1), (1, -1), (-1, 1), (-1, -1)] {
+                combos.push(vec![(k, a), (k2, b)]);
+            }
+        }
+    }
+    let ph: Vec<T> = (0..arith.len()).map(|k| T::Var(format!("\u{2}{k}"))).collect();
+    // Rebuilds can be slow, so only the combinations that leave a semi-linear region the
+    // fewest leaves (fewer than before), or another the fewest monomials (no more than
+    // before), are rebuilt.
+    let semi_used = |t: &T| -> Option<usize> {
+        let t = &signed_products(t);
+        let mut lv = Vec::new();
+        leaves(t, w, &mut lv);
+        if lv.len() > MAX_LEAVES {
+            return None;
+        }
+        let (_, groups) = bit_groups(t, &lv, w)?;
+        Some((0..lv.len()).filter(|&i| groups.iter().any(|(g, _)| (0..g.len()).any(|q| g[q] != g[q & !(1 << i)]))).count())
+    };
+    let base_used = if has_const_bitwise(t, w) { Some(semi_used(t).unwrap_or(lv.len())) } else { None };
+    let base_monos = if base_used.is_none() { crate::poly_mba::monomials(t, w) } else { None };
+    let mut tried: Vec<(usize, Vec<(usize, i64)>, T)> = Vec::new();
+    for combo in combos {
+        let (mut from, mut to) = (Vec::new(), Vec::new());
+        for &(k, _) in &combo {
+            from.push(lv[arith[k]].clone());
+            to.push(ph[k].clone());
+            for &(j, comp) in &same[k] {
+                if !from.contains(&lv[j]) {
+                    from.push(lv[j].clone());
+                    to.push(if comp { op("Not", vec![ph[k].clone()]) } else { ph[k].clone() });
+                }
+            }
+        }
+        let mut s = crate::lowbits::replace(t, &from, &to);
+        for &(k, mu) in combo.iter().filter(|c| c.1 != 0) {
+            let rel = op("Sub", vec![ph[k].clone(), lv[arith[k]].clone()]);
+            s = op("Add", vec![s, op("Mul", vec![T::Num(mu), rel])]);
+        }
+        let score = match (base_used, base_monos) {
+            (Some(b), _) => semi_used(&s).filter(|&u| u < b),
+            (_, Some(b)) => crate::poly_mba::monomials(&s, w).filter(|&u| u <= b),
+            _ => Some(0),
+        };
+        if let Some(score) = score {
+            tried.push((score, combo, s));
+        }
+    }
+    let low = tried.iter().map(|c| c.0).min()?;
+    let mut best: Option<T> = None;
+    for (_, combo, s) in tried.into_iter().filter(|c| c.0 == low) {
+        let r = rewrite(&s, w);
+        let back: Vec<T> = combo.iter().map(|&(k, _)| lv[arith[k]].clone()).collect();
+        let used: Vec<T> = combo.iter().map(|&(k, _)| ph[k].clone()).collect();
+        let r = crate::lowbits::replace(&r, &used, &back);
+        if best.as_ref().is_none_or(|b| size(&r) < size(b)) {
+            best = Some(r);
+        }
+    }
+    best
+}
+
+/// Whether `t` is 0 at a few fixed points, a quick check before a proof.
+fn maybe_zero(t: &T, w: &Width) -> bool {
+    let ty = crate::eval::NumType { bits: w.w, signed: false };
+    (1..=3u64).all(|k| {
+        let env = |v: &str| v.bytes().fold(k.wrapping_mul(0x9e37_79b9_7f4a_7c15), |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3).rotate_left(29));
+        crate::eval::eval(t, ty, &env).is_none_or(|v| v & w.mask == 0)
+    })
+}
+
+/// `t` with each product of non-constant factors written as `c·(f1 * f2 * ...)`,
+/// its factors sorted and their negations and constant factors moved into `c`.
+fn signed_products(t: &T) -> T {
+    fn factors(t: &T, c: &mut i64, out: &mut Vec<T>) {
+        match t {
+            T::Op(op, a) if op == "Mul" => a.iter().for_each(|x| factors(x, c, out)),
+            T::Op(op, a) if op == "Neg" => {
+                *c = c.wrapping_neg();
+                factors(&a[0], c, out);
+            }
+            T::Num(k) => *c = c.wrapping_mul(*k),
+            _ => out.push(signed_products(t)),
+        }
+    }
+    match t {
+        T::Op(op, a) if op == "Mul" && !a.iter().any(|x| matches!(x, T::Num(_))) => {
+            let (mut c, mut fs) = (1i64, Vec::new());
+            factors(t, &mut c, &mut fs);
+            fs.sort_by_key(show);
+            let p = fs.into_iter().reduce(|a, b| T::Op("Mul".into(), vec![a, b])).unwrap_or(T::Num(1));
+            if c == 1 { p } else { T::Op("Mul".into(), vec![T::Num(c), p]) }
+        }
+        T::Op(op, a) => T::Op(op.clone(), a.iter().map(signed_products).collect()),
+        _ => t.clone(),
+    }
+}
+
 /// Whether the linear region `t` has a bitwise operation with a constant operand.
 fn has_const_bitwise(t: &T, w: &Width) -> bool {
     match (t, kind(t, w)) {
@@ -2660,22 +2844,25 @@ fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Option<String>) {
     let t = unshift(&crate::lowbits::simplify(&t, &w), &w);
     // Subterms are replaced only after the rebuild: earlier, `~(y - 1)` would become
     // `-y`, a leaf the rebuild no longer relates to `y - 1`.
-    let run = |t: &T| match crate::tfunc::replacement(t, &w) {
+    let run = |t: &T, related: bool| match crate::tfunc::replacement(t, &w) {
         Some(r) => r,
-        None => crate::tfunc::simplify(&rewrite(t, &w), &w),
+        None => {
+            let r = rewrite(t, &w);
+            crate::tfunc::simplify(&if related { relate(&r, &w) } else { r }, &w)
+        }
     };
-    let r = run(&t);
+    let r = run(&t, true);
     let mut rebuilt = vec![r.clone()];
     let hr = halve(&r, &w);
     if hr != r {
-        rebuilt.push(run(&hr));
+        rebuilt.push(run(&hr, false));
     }
     // Halving the whole input can give semi-linear regions that are slow to search,
     // so only small ones are rebuilt there, also inside `halve`.
     SEMI_LEAVES.with(|c| c.set(2));
     let ht = halve(&t, &w);
     if ht != t {
-        rebuilt.push(run(&ht));
+        rebuilt.push(run(&ht, false));
     }
     SEMI_LEAVES.with(|c| c.set(MAX_LEAVES));
     REWRITTEN.with(|c| c.borrow_mut().clear());
@@ -2712,14 +2899,18 @@ mod tests {
     const VARS: [&str; 6] = ["x", "y", "z", "u", "v", "w"];
 
     fn random_term(r: &mut Rng, depth: u32) -> T {
-        let var = |r: &mut Rng| T::Var(VARS[(r.next() % VARS.len() as u64) as usize].into());
+        random_term_in(r, depth, &VARS)
+    }
+
+    fn random_term_in(r: &mut Rng, depth: u32, vars: &[&str]) -> T {
+        let var = |r: &mut Rng| T::Var(vars[(r.next() % vars.len() as u64) as usize].into());
         if depth == 0 {
             return match r.next() % 6 {
                 0 => T::Num((r.next() % 7) as i64 - 3),
                 _ => var(r),
             };
         }
-        let sub = |r: &mut Rng| random_term(r, depth - 1);
+        let sub = |r: &mut Rng| random_term_in(r, depth - 1, vars);
         match r.next() % 12 {
             0 => T::Op("Not".into(), vec![sub(r)]),
             1 => T::Op("Neg".into(), vec![sub(r)]),
@@ -2794,6 +2985,59 @@ mod tests {
             }
         }
         assert!(unshifted > 200 && halved > 200, "unshifted {unshifted}, halved {halved}");
+    }
+
+    /// `a op b` written as a linear MBA in `a`, `b` and `a & b`, with `a_lin`
+    /// (equal to `a`) where `a` is not under a bitwise operation.
+    fn mba_op(r: &mut Rng, a: &T, a_lin: &T, b: &T) -> T {
+        let op = |o: &str, x: Vec<T>| T::Op(o.into(), x);
+        let and = op("And", vec![a.clone(), b.clone()]);
+        let sum = op("Add", vec![a_lin.clone(), b.clone()]);
+        match r.next() % 3 {
+            0 => op("Sub", vec![sum, op("Mul", vec![T::Num(2), and])]),
+            1 => op("Sub", vec![sum, and]),
+            _ => op("Sub", vec![op("Mul", vec![T::Num(2), op("Or", vec![a.clone(), b.clone()])]), sum]),
+        }
+    }
+
+    #[test]
+    fn relate_preserves_value() {
+        let mut r = Rng(0x3c6ef372fe94f82b);
+        let op = |o: &str, x: Vec<T>| T::Op(o.into(), x);
+        let mut changed = 0;
+        for i in 0..60 {
+            let vars: &[&str] = if i % 2 == 0 { &["x", "y"] } else { &VARS };
+            let (p, q) = (random_term_in(&mut r, 1, vars), random_term_in(&mut r, 1, vars));
+            let (l, l_lin) = match r.next() % 3 {
+                0 => (op("Add", vec![p.clone(), q.clone()]), op("Sub", vec![p, op("Neg", vec![q])])),
+                1 => (op("Sub", vec![p.clone(), q.clone()]), op("Add", vec![p, op("Neg", vec![q])])),
+                _ => (op("Mul", vec![p.clone(), q.clone()]), op("Mul", vec![q, p])),
+            };
+            let depth = 1 + (r.next() % 2) as u32;
+            let mut b = random_term_in(&mut r, depth, vars);
+            if r.next() % 2 == 0 {
+                b = op(["And", "Or", "Xor"][(r.next() % 3) as usize], vec![b, T::Num((r.next() % 200) as i64 - 100)]);
+            }
+            let t = mba_op(&mut r, &l, &l_lin, &b);
+            for (bits, signed) in [(8, false), (64, true)] {
+                let (wd, ty) = (Width::new(bits), NumType { bits, signed });
+                let base = rewrite(&t, &wd);
+                let alt = relate(&base, &wd);
+                changed += (alt != base) as u32;
+                fn check(t: &T, alt: &T, ty: NumType, env: &impl Fn(&str) -> u64) {
+                    assert_eq!(eval(t, ty, env), eval(alt, ty, env), "{}\n{}", show(t), show(alt));
+                }
+                if bits == 8 && vars.len() == 2 {
+                    (0..1u64 << 16).for_each(|p| check(&t, &alt, ty, &|v: &str| if v == "x" { p & 0xff } else { p >> 8 }));
+                } else {
+                    for _ in 0..256 {
+                        let env: HashMap<String, u64> = VARS.iter().map(|v| (v.to_string(), r.next())).collect();
+                        check(&t, &alt, ty, &|v: &str| env[v]);
+                    }
+                }
+            }
+        }
+        assert!(changed > 20, "only {changed} relations fired");
     }
 
     #[test]

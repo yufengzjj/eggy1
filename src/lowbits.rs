@@ -329,7 +329,7 @@ fn has_product(t: &T) -> bool {
     }
 }
 
-fn replace(t: &T, from: &[T], to: &[T]) -> T {
+pub(crate) fn replace(t: &T, from: &[T], to: &[T]) -> T {
     if let Some(i) = from.iter().position(|f| f == t) {
         return to[i].clone();
     }

@@ -1596,3 +1596,27 @@ fn halved_bitwise_operands() {
         ],
     );
 }
+
+/// An arithmetic or product leaf of a bitwise operation that depends on other leaves
+/// is replaced by a placeholder `v`, adding `μ·(v - L)`, so the rest cancels.
+#[test]
+fn related_leaves_by_placeholder() {
+    check(
+        "i64",
+        &[
+            (
+                "(((z ^ y) - ((z & 0x80000000) ^ (y * 5))) + (2 * (((y * z) - (z ^ y)) | ((z & 0x80000000) ^ (y * 5))))) - (y * z)",
+                &["(((y * 5) ^ ((y * z) - (z ^ y))) ^ (z & 0x80000000))"],
+                10,
+            ),
+            ("0xb * ((~(y & x) | (x + 0xff)) - ((y & x) | (-0x100 - x)))", &["(((x & ~y) + 0xff) * 0xb)"], 10),
+            ("(y * (z + -1)) + (2 * (x - ((x - y) & (y * z))))", &["(x + ((x - y) ^ (y * z)))"], 10),
+            (
+                "(0x80000002 - ((x * x) + (~y * y))) + (2 * (((x * x) + ~(y * y)) | (-0x80000001 - y)))",
+                &["(((x * x) + ~(y * y)) ^ (-0x80000001 - y))"],
+                10,
+            ),
+        ],
+    );
+    check("u32", &[("((2 * ((y | x) & ~((0xfffffffe * ~x) * y))) - (~y & x)) - (~(2 * x) * y)", &["((y | x) ^ ((0xfffffffe * ~x) * y))"], 10)]);
+}
