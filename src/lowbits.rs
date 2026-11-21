@@ -368,6 +368,12 @@ pub(crate) fn possible_bits(t: &T, w: &Width) -> u64 {
     !info(t, w).k0 & w.mask
 }
 
+/// Bits of `t` known neither 0 nor 1.
+pub(crate) fn unknown_bits(t: &T, w: &Width) -> u64 {
+    let i = info(t, w);
+    !(i.k0 | i.k1) & w.mask
+}
+
 pub(crate) fn replace(t: &T, from: &[T], to: &[T]) -> T {
     if let Some(i) = from.iter().position(|f| f == t) {
         return to[i].clone();

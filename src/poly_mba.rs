@@ -6,7 +6,7 @@
 //! reverse.
 
 use crate::eval::{Term as T, size};
-use crate::linear_mba::{Kind, MAX_LEAVES, Width, build_sum, Prog, const_shift, kind, leaves, rewrite, simba};
+use crate::linear_mba::{Kind, MAX_LEAVES, Width, build_sum, Prog, const_shift, kind, leaves, rewrite, simba_memo};
 use std::collections::BTreeMap;
 
 /// Conjunction of leaves, as a set of leaf indices.
@@ -18,11 +18,14 @@ type Poly = BTreeMap<Mono, u64>;
 const MAX_MONOS: usize = 4096;
 /// Candidate factors tried at the top level of `build`; one below it.
 const FACTOR_TRIES: usize = 3;
+/// Most products `build` tries with every choice before it keeps to the first.
+const MAX_BUILDS: usize = 512;
 
 struct Ctx<'a> {
     w: &'a Width,
     leaves: Vec<T>,
     built: std::cell::RefCell<std::collections::HashMap<(Poly, usize), T>>,
+    builds: std::cell::Cell<usize>,
 }
 
 impl Ctx<'_> {
@@ -241,7 +244,7 @@ impl Ctx<'_> {
             let terms: Vec<(u64, T)> = ms.iter().map(|&(c, m)| (c, self.conj_term(m))).collect();
             let t = build_sum(&terms, konst, self.w);
             konst = 0;
-            built.push(simba(&t, self.w).unwrap_or(t));
+            built.push(simba_memo(&t, self.w).unwrap_or(t));
         }
         built.into_iter().reduce(|a, b| T::Op("Add".into(), vec![a, b])).unwrap_or_else(|| build_sum(&[], konst, self.w))
     }
@@ -272,8 +275,11 @@ impl Ctx<'_> {
         cands.sort_by_key(|&(c, n)| (std::cmp::Reverse(n), c.count_ones()));
         let mut best: Option<T> = None;
         // Pulling `f` out of its degree-1 monomial too (`x*y - 7*x` → `x*(y - 7)`)
-        // can block a shorter linear rebuild of the rest, so try both.
-        let choices = cands.iter().take(tries).flat_map(|&(f, _)| [(f, false), (f, true)]);
+        // can block a shorter linear rebuild of the rest, so try both, while the
+        // budget lasts: the choices multiply at every level.
+        self.builds.set(self.builds.get() + 1);
+        let (tries, both) = if self.builds.get() > MAX_BUILDS { (1, 1) } else { (tries, 2) };
+        let choices = cands.iter().take(tries).flat_map(|&(f, _)| [(f, false), (f, true)].into_iter().take(both));
         for (f, with_linear) in choices {
             let (mut q, mut r) = (Poly::new(), Poly::new());
             for (m, &c) in p {
@@ -328,7 +334,7 @@ fn has_product(t: &T, w: &Width) -> bool {
 /// Number of monomials in the expansion of `t`, after the null polynomials are reduced
 /// if that leaves fewer.
 pub(crate) fn monomials(t: &T, w: &Width) -> Option<usize> {
-    let mut ctx = Ctx { w, leaves: Vec::new(), built: Default::default() };
+    let mut ctx = Ctx { w, leaves: Vec::new(), built: Default::default(), builds: Default::default() };
     let p = ctx.poly(t)?;
     Some(p.len().min(ctx.reduce_null(&p).len()))
 }
@@ -343,9 +349,14 @@ pub(crate) fn simplify_poly(t: &T, w: &Width) -> Option<T> {
     if !wide && !has_product(t, w) {
         return None;
     }
-    let mut ctx = Ctx { w, leaves: Vec::new(), built: Default::default() };
+    let mut ctx = Ctx { w, leaves: Vec::new(), built: Default::default(), builds: Default::default() };
     let p = ctx.poly(t)?;
     let q = ctx.reduce_null(&p);
+    // Far more monomials than nodes (products of bitwise terms over many leaves)
+    // rarely rebuild smaller, and building them is slow.
+    if p.len().min(q.len()) > 4 * size(t) {
+        return None;
+    }
     let r = ctx.build(if q.len() < p.len() { &q } else { &p }, FACTOR_TRIES);
     (size(&r) < size(t)).then_some(r)
 }

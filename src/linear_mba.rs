@@ -80,26 +80,34 @@ fn bit_operand(t: &T, w: &Width) -> Kind {
 /// Leaves of the linear region rooted at `t`: variables, atom subterms, and
 /// arithmetic operands of bitwise operations.
 pub(crate) fn leaves(t: &T, w: &Width, out: &mut Vec<T>) {
-    leaves_in(t, w, out, false);
+    let mut seen = out.iter().map(term_hash).collect();
+    leaves_in(t, w, out, &mut seen, false);
 }
 
-fn leaves_in(t: &T, w: &Width, out: &mut Vec<T>, in_bitwise: bool) {
+fn term_hash(t: &T) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    t.hash(&mut h);
+    h.finish()
+}
+
+/// `seen` holds the hashes of `out`, so that only a hash match is compared in full.
+fn leaves_in(t: &T, w: &Width, out: &mut Vec<T>, seen: &mut std::collections::HashSet<u64>, in_bitwise: bool) {
+    let mut add = |t: &T| {
+        if seen.insert(term_hash(t)) || !out.contains(t) {
+            out.push(t.clone());
+        }
+    };
     match t {
         T::Num(_) => {}
-        T::Var(_) => {
-            if !out.contains(t) {
-                out.push(t.clone());
-            }
-        }
+        T::Var(_) => add(t),
         T::Op(op, a) => {
             let k = kind(t, w);
             if k == Kind::Atom || (in_bitwise && k == Kind::Lin && op != "Not") {
-                if !out.contains(t) {
-                    out.push(t.clone());
-                }
+                add(t);
             } else {
                 let inner = in_bitwise || matches!(op.as_str(), "And" | "Or" | "Xor");
-                a.iter().for_each(|x| leaves_in(x, w, out, inner));
+                a.iter().for_each(|x| leaves_in(x, w, out, seen, inner));
             }
         }
     }
@@ -497,6 +505,23 @@ fn sized_sum(terms: impl Iterator<Item = (u64, usize)>, konst: u64, w: &Width) -
         Some(a) if konst == 0 => a,
         Some(a) => a + 2,
     }
+}
+
+thread_local! {
+    #[allow(clippy::type_complexity)]
+    static SIMBA_MEMO: std::cell::RefCell<std::collections::HashMap<(u32, usize, T), Option<T>>> = Default::default();
+}
+
+/// `simba` memoized per thread, for the linear cofactors `poly_mba` rebuilds: the same
+/// ones come back across its factoring choices and across regions.
+pub(crate) fn simba_memo(t: &T, w: &Width) -> Option<T> {
+    let key = (w.w, SEMI_LEAVES.with(|c| c.get()), t.clone());
+    if let Some(r) = SIMBA_MEMO.with(|c| c.borrow().get(&key).cloned()) {
+        return r;
+    }
+    let r = simba(t, w);
+    SIMBA_MEMO.with(|c| c.borrow_mut().insert(key, r.clone()));
+    r
 }
 
 /// Smallest rebuilt form of the linear region `t`, if it has 1..=MAX_LEAVES leaves.
@@ -1071,7 +1096,12 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
         return None;
     }
     let m = w.mask;
-    let (e0, all_groups) = bit_groups(t, lv, w)?;
+    let pts = 1usize << lv.len();
+    let base: Vec<u64> = {
+        let prog = Prog::new(t, lv, w);
+        (0..w.w).flat_map(|j| (0..pts).map(move |q| (j, q))).map(|(j, q)| prog.run(|i| ((q >> i & 1) as u64) << j, w)).collect()
+    };
+    let (e0, all_groups) = groups_from(&|j, q| base[j as usize * pts + q], lv.len(), w)?;
     // Leaves that cancel out are dropped, so the shape search sees fewer leaves.
     let used: Vec<usize> = (0..lv.len())
         .filter(|&i| all_groups.iter().any(|(g, _)| (0..g.len()).any(|q| g[q] != g[q & !(1 << i)])))
@@ -1090,10 +1120,10 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
     semi_linear_candidates(&groups, lv, e0, w, &mut cands);
     let mut peels = Vec::new();
     let mut best: Option<((u64, u64), usize)> = None;
-    for (i, l) in lv.iter().enumerate() {
+    for i in 0..lv.len() {
         for a in [1i64, -1, 2, -2, 3, -3] {
-            let peeled = T::Op("Sub".into(), vec![t.clone(), T::Op("Mul".into(), vec![T::Num(a), l.clone()])]);
-            let Some((e0, gs)) = bit_groups(&peeled, full_lv, w) else { continue };
+            let peeled = |j: u32, q: usize| base[j as usize * pts + q].wrapping_sub((a as u64).wrapping_mul(((q >> used[i] & 1) as u64) << j)) & m;
+            let Some((e0, gs)) = groups_from(&peeled, full_lv.len(), w) else { continue };
             let gs = project(gs);
             let s = spread(&gs, w);
             if gs.len() <= groups.len() && s < best.map_or(spread(&groups, w), |b| b.0) {
@@ -1109,12 +1139,17 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
         semi_linear_candidates(gs, lv, *e0, w, &mut sub);
         cands.extend(sub.into_iter().map(|c| add(c, *i, *a)));
     }
-    let mut limit = cands.iter().map(size).min().unwrap_or(usize::MAX).min(size(t));
-    shape_candidates(&groups, lv, e0, w, limit, &mut cands);
-    limit = cands.iter().map(size).min().unwrap_or(limit);
-    pair_candidates(&groups, lv, e0, w, limit, &mut cands);
+    // Leaves can be large, so each candidate's size is taken once.
+    let (mut sized, mut limit) = (0, size(t));
+    let mut smallest = |cands: &[T]| {
+        limit = cands[sized..].iter().map(size).fold(limit, usize::min);
+        sized = cands.len();
+        limit
+    };
+    shape_candidates(&groups, lv, e0, w, smallest(&cands), &mut cands);
+    pair_candidates(&groups, lv, e0, w, smallest(&cands), &mut cands);
     for (i, a, e0, gs) in &peels {
-        limit = cands.iter().map(size).min().unwrap_or(limit);
+        let limit = smallest(&cands);
         let extra = size(&add(T::Num(1), *i, *a)) - 1;
         if limit > extra {
             let mut sub = Vec::new();
@@ -1122,10 +1157,8 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
             cands.extend(sub.into_iter().map(|c| add(c, *i, *a)));
         }
     }
-    limit = cands.iter().map(size).min().unwrap_or(limit);
-    cands.extend(semi_split(&groups, lv, e0, w, limit));
-    limit = cands.iter().map(size).min().unwrap_or(limit);
-    cands.extend(scaled(&groups, lv, e0, w, limit));
+    cands.extend(semi_split(&groups, lv, e0, w, smallest(&cands)));
+    cands.extend(scaled(&groups, lv, e0, w, smallest(&cands)));
     // Masks that differ only in bits that cannot matter tie on size; keep the short one.
     let best = cands.into_iter().min_by_key(|c| (size(c), const_bits(c)))?;
     Some(short_consts(best, lv, w))
@@ -1210,6 +1243,14 @@ fn short_consts(t: T, lv: &[T], w: &Width) -> T {
 
 fn short_consts_over(t: T, lv: &[T], w: &Width) -> Option<T> {
     let reference = bit_groups(&t, lv, w)?;
+    // Equal tables mean equal functions, so values at a few points rule out most
+    // candidates before their tables are computed.
+    let probe = |t: &T| {
+        let prog = Prog::new(t, lv, w);
+        [0x9e37_79b9_7f4a_7c15u64, 0x6a09_e667_f3bc_c909].map(|s| prog.run(|i| s.wrapping_mul(2 * i as u64 + 1).rotate_left(i as u32 * 7), w) & w.mask)
+    };
+    let at_probes = probe(&t);
+    let same = |cand: &T| probe(cand) == at_probes && bit_groups(cand, lv, w).as_ref() == Some(&reference);
     let mut t = t;
     let count = {
         fn n(t: &T) -> usize {
@@ -1262,7 +1303,7 @@ fn short_consts_over(t: T, lv: &[T], w: &Width) -> Option<T> {
             w.signed((k & low | sign) & w.mask)
         };
         let cand = cut(&t, &f);
-        if cand != t && bit_groups(&cand, lv, w).as_ref() == Some(&reference) {
+        if cand != t && same(&cand) {
             t = cand;
             break;
         }
@@ -1285,7 +1326,7 @@ fn short_consts_over(t: T, lv: &[T], w: &Width) -> Option<T> {
         options.dedup();
         for v in options.into_iter().filter(|v| v.unsigned_abs() < w.signed(k).unsigned_abs()) {
             let cand = replace(&t, &mut 0, i, v);
-            if bit_groups(&cand, lv, w).as_ref() == Some(&reference) {
+            if same(&cand) {
                 t = cand;
                 break;
             }
@@ -1834,8 +1875,17 @@ fn pair_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, lim
                         if !ok {
                             continue;
                         }
-                        for f2 in (0..nf).filter(|&f2| (f2 & 1) as u64 == d0 && f2 & ones == ones && f2 & zeros == 0) {
-                            set[f2 >> 6] |= 1 << (f2 & 63);
+                        let free = (nf - 1) & !(ones | zeros);
+                        let mut s = free;
+                        loop {
+                            let f2 = ones | s;
+                            if (f2 & 1) as u64 == d0 {
+                                set[f2 >> 6] |= 1 << (f2 & 63);
+                            }
+                            if s == 0 {
+                                break;
+                            }
+                            s = (s - 1) & free;
                         }
                     }
                     if set != [0; 4] {
@@ -2064,10 +2114,13 @@ fn smallest_shape(acc: &[[u64; 4]], n: usize, top: usize, lv: &[T], w: &Width) -
 /// `e(0)` and the bits of the semi-linear region `t` grouped by table, as
 /// `(table, mask)`; `None` if `t` is not semi-linear.
 fn bit_groups(t: &T, lv: &[T], w: &Width) -> Option<(u64, Vec<(Vec<u64>, u64)>)> {
-    let n = lv.len();
-    let m = w.mask;
     let prog = Prog::new(t, lv, w);
-    let at = |j: u32, q: usize| prog.run(|i| ((q >> i & 1) as u64) << j, w);
+    groups_from(&|j, q| prog.run(|i| ((q >> i & 1) as u64) << j, w), lv.len(), w)
+}
+
+/// `bit_groups` from `at(j, q)`, the value with leaf `i` set to bit `j` of `q >> i & 1`.
+fn groups_from(at: &dyn Fn(u32, usize) -> u64, n: usize, w: &Width) -> Option<(u64, Vec<(Vec<u64>, u64)>)> {
+    let m = w.mask;
     let e0 = at(0, 0);
     let mut groups: Vec<(Vec<u64>, u64)> = Vec::new();
     for j in 0..w.w {
@@ -2874,6 +2927,47 @@ const MAX_SPLIT_SIZE: usize = 64;
 /// Most rebuilds one `split_bits` call runs.
 const SPLIT_RUNS: usize = 16;
 
+/// `(s, k)` for a product factor with one or two bits not known, `k` the lowest of them:
+/// first the subterm `s` it is built from with constants alone, as `z + x` in
+/// `3 & ((z + x) + 5)`, then each variable `s` of it.
+fn split_points(t: &T, w: &Width) -> Vec<(T, u32)> {
+    fn is_const(t: &T) -> bool {
+        match t {
+            T::Var(_) => false,
+            T::Num(_) => true,
+            T::Op(_, a) => a.iter().all(is_const),
+        }
+    }
+    fn core(t: &T) -> &T {
+        match t {
+            T::Op(_, a) if a.iter().filter(|x| !is_const(x)).count() == 1 => core(a.iter().find(|x| !is_const(x)).unwrap()),
+            _ => t,
+        }
+    }
+    fn go(t: &T, w: &Width, out: &mut Vec<(T, u32)>) {
+        let T::Op(op, a) = t else { return };
+        if op == "Mul" && !a.iter().any(|x| matches!(x, T::Num(_))) {
+            for f in a {
+                let bits = crate::lowbits::unknown_bits(f, w);
+                if bits != 0 && bits.count_ones() <= 2 {
+                    let k = bits.trailing_zeros();
+                    let s = core(f);
+                    let vars = crate::eval::vars(f).into_iter().map(T::Var);
+                    for s in std::iter::once(s.clone()).filter(|s| matches!(s, T::Op(..))).chain(vars) {
+                        if !out.contains(&(s.clone(), k)) {
+                            out.push((s, k));
+                        }
+                    }
+                }
+            }
+        }
+        a.iter().for_each(|x| go(x, w, out));
+    }
+    let mut out = Vec::new();
+    go(t, w, &mut out);
+    out
+}
+
 /// `(v, k)` for each variable `v` of a product factor that is 0 or `2^k` by known bits.
 fn selectors(t: &T, w: &Width) -> Vec<(String, u32)> {
     fn go(t: &T, w: &Width, out: &mut Vec<(String, u32)>) {
@@ -2900,7 +2994,8 @@ fn selectors(t: &T, w: &Width) -> Vec<(String, u32)> {
 /// `t` rebuilt by cases on bit `k` of a variable `v` that selects a product, as in
 /// `(1 & ~y)*(-y & -2) + (-y | 1)*(y & 1)`, which is `-y`: with `r0` and `r1` the
 /// rebuilds of `t` with that bit cleared and set, `t = r0 + ((v >> k) & 1)*(r1 - r0)`.
-/// The halves are split again, up to `depth` variables.
+/// A subterm `s` is split as a variable `v` that replaces it, which holds for any `v`
+/// and so for `v = s`. The halves are split again, up to `depth` times.
 /// Returns `t` when nothing smaller without selecting products is found or `budget`
 /// (rebuilds left) runs out.
 fn split_bits(t: T, depth: usize, budget: &std::cell::Cell<usize>, w: &Width, run: &dyn Fn(&T) -> T) -> T {
@@ -2912,13 +3007,20 @@ fn split_bits(t: T, depth: usize, budget: &std::cell::Cell<usize>, w: &Width, ru
         run(t)
     };
     let op = |o: &str, a: Vec<T>| T::Op(o.into(), a);
-    for (v, k) in selectors(&t, w).into_iter().take(MAX_SPLITS) {
+    for (s, k) in split_points(&t, w).into_iter().take(MAX_SPLITS) {
         if budget.get() < 3 {
             break;
         }
-        let var = T::Var(v);
+        let (var, ts) = match s {
+            T::Var(_) => (s.clone(), t.clone()),
+            _ => {
+                let v = T::Var(format!("\u{3}{depth}"));
+                let ts = crate::lowbits::replace(&t, std::slice::from_ref(&s), std::slice::from_ref(&v));
+                (v, ts)
+            }
+        };
         let m = 1u64 << k;
-        let half = |b: T| split_bits(run(&crate::lowbits::replace(&t, std::slice::from_ref(&var), &[b])), depth - 1, budget, w, &run);
+        let half = |b: T| split_bits(run(&crate::lowbits::replace(&ts, std::slice::from_ref(&var), &[b])), depth - 1, budget, w, &run);
         let r0 = half(op("And", vec![var.clone(), T::Num(w.signed(!m & w.mask))]));
         if !selectors(&r0, w).is_empty() {
             continue;
@@ -2935,12 +3037,35 @@ fn split_bits(t: T, depth: usize, budget: &std::cell::Cell<usize>, w: &Width, ru
             _ if k == 0 => op("Mul", vec![op("And", vec![var.clone(), T::Num(1)]), d]),
             _ => op("Mul", vec![op("And", vec![op("Shr", vec![var.clone(), T::Num(k as i64)]), T::Num(1)]), d]),
         };
-        let r = run(&op("Add", vec![r0, sel]));
+        let mut r = run(&op("Add", vec![r0, sel]));
+        if var != s {
+            r = run(&crate::lowbits::replace(&r, std::slice::from_ref(&var), std::slice::from_ref(&s)));
+        }
         if size(&r) < size(&t) && selectors(&r, w).is_empty() {
             return r;
         }
     }
     t
+}
+
+/// `split_bits` on `t`, then on the operands of `t` when it is a bitwise operation, since
+/// a case split rarely gives a constant difference through one; each with its own budget.
+fn split_in(t: &T, w: &Width, run: &dyn Fn(&T) -> T) -> T {
+    let s = split_bits(t.clone(), SPLIT_DEPTH, &std::cell::Cell::new(SPLIT_RUNS), w, run);
+    if s != *t {
+        return s;
+    }
+    match t {
+        T::Op(op, a) if matches!(op.as_str(), "And" | "Or" | "Xor" | "Not") => {
+            let b: Vec<T> = a.iter().map(|x| if split_points(x, w).is_empty() { x.clone() } else { split_in(x, w, run) }).collect();
+            if b == *a {
+                return t.clone();
+            }
+            let r = run(&T::Op(op.clone(), b));
+            if size(&r) < size(t) { r } else { t.clone() }
+        }
+        _ => t.clone(),
+    }
 }
 
 /// Rewrite the egglog term `egg` (W-bit wrapping semantics) with every linear
@@ -2983,8 +3108,7 @@ fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Option<String>) {
     let r = run(&t, true);
     let mut rebuilt = vec![r.clone()];
     if size(&r) <= MAX_SPLIT_SIZE {
-        let budget = std::cell::Cell::new(SPLIT_RUNS);
-        let s = split_bits(r.clone(), SPLIT_DEPTH, &budget, &w, &|t| run(&unshift(&crate::lowbits::simplify(t, &w), &w), false));
+        let s = split_in(&r, &w, &|t| run(&unshift(&crate::lowbits::simplify(t, &w), &w), false));
         if s != r {
             rebuilt.push(s);
         }
@@ -3003,6 +3127,7 @@ fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Option<String>) {
     SEMI_LEAVES.with(|c| c.set(MAX_LEAVES));
     REWRITTEN.with(|c| c.borrow_mut().clear());
     REBUILT.with(|c| c.borrow_mut().clear());
+    SIMBA_MEMO.with(|c| c.borrow_mut().clear());
     rebuilt.sort_by_key(size);
     rebuilt.dedup();
     let other = rebuilt.get(1).cloned();
