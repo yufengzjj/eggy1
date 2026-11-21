@@ -285,7 +285,8 @@ impl Pass<'_> {
         let mut unknown = n as u32 * m > MAX_CONTEXT_BITS || size(t) > MAX_TRY;
         if !unknown {
             let names: Vec<String> = (0..found.len()).map(|i| format!("\u{4}{i}")).collect();
-            let abs = replace(t, &found, &names.iter().map(|s| T::Var(s.clone())).collect::<Vec<_>>());
+            let holes: Vec<T> = names.iter().map(|s| T::Var(s.clone())).collect();
+            let abs = replace(t, &found, &holes);
             let maps: Vec<Vec<usize>> = found
                 .iter()
                 .map(|c| self.cands[c].prog.leaves.iter().map(|l| vars.iter().position(|v| T::Var(v.clone()) == *l).unwrap()).collect())
@@ -307,7 +308,8 @@ impl Pass<'_> {
                     let num = T::Num(self.w.signed(v));
                     let g = replace(&abs, &[T::Var(names[i].clone())], std::slice::from_ref(&num));
                     match crate::tfunc::equal_low(&abs, &g, &all, n, m, &extra, self.w) {
-                        Some(true) => return self.context(&replace(t, std::slice::from_ref(c), &[num])),
+                        // Only the occurrences `abs` abstracted: `c` inside another candidate was not proved.
+                        Some(true) => return self.context(&replace(&g, &holes, &found)),
                         Some(false) => {}
                         None => unknown = true,
                     }
@@ -467,5 +469,49 @@ mod tests {
             }
         }
         assert!(changed > 200, "changed {changed}");
+    }
+
+    /// A sum of a small product term `p`, used both alone and inside a larger candidate.
+    fn nested_term(h: &mut u64) -> T {
+        let op = |o: &str, a: T, b: T| T::Op(o.into(), vec![a, b]);
+        let mut next = || {
+            *h ^= *h << 13;
+            *h ^= *h >> 7;
+            *h ^= *h << 17;
+            *h
+        };
+        let r = next();
+        let var = |r: u64| T::Var(if r & 1 == 0 { "x" } else { "y" }.into());
+        let bit = |r: u64| {
+            let v = if r >> 1 & 1 == 0 { var(r) } else { T::Op("Not".into(), vec![var(r)]) };
+            let c = [1, 4, 5, -5, -2][(r >> 2) as usize % 5];
+            op(["And", "Or"][(r >> 5) as usize % 2], v, T::Num(c))
+        };
+        let p = op(["Sub", "Add"][r as usize % 2], op("Mul", bit(next()), bit(next())), op("Mul", bit(next()), bit(next())));
+        let ops = ["Add", "Sub", "And", "Or", "Xor"];
+        let wrap = op(ops[(r >> 8) as usize % 5], p.clone(), [T::Num(0), T::Num(1), var(r >> 11)][(r >> 12) as usize % 3].clone());
+        let inner = op(ops[(r >> 16) as usize % 5], op(ops[(r >> 20) as usize % 5], var(r >> 24), wrap), p.clone());
+        op(ops[(r >> 28) as usize % 5], p, inner)
+    }
+
+    #[test]
+    fn nested_candidates_match_exhaustive_check_at_8_bits() {
+        let w = Width::new(8);
+        let mut h = 0x6a09_e667_f3bc_c908u64;
+        let mut changed = 0;
+        for k in 0..3000 {
+            let ty = NumType { bits: 8, signed: k % 2 == 1 };
+            let t = nested_term(&mut h);
+            let r = simplify(&t, &w);
+            if r == t {
+                continue;
+            }
+            changed += 1;
+            for p in 0..1u64 << 16 {
+                let env = |v: &str| if v == "x" { p & 0xff } else { p >> 8 };
+                assert_eq!(eval(&t, ty, &env), eval(&r, ty, &env), "{t:?}\n{r:?}");
+            }
+        }
+        assert!(changed > 300, "changed {changed}");
     }
 }

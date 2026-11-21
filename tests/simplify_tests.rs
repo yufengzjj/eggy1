@@ -1563,6 +1563,20 @@ fn product_low_bits() {
     );
 }
 
+/// A low-bits candidate `P` that also occurs inside another candidate `P | 0`: replacing
+/// `P` by a value is proved only for the occurrences outside `P | 0`.
+#[test]
+fn product_low_bits_nested_candidate() {
+    check(
+        "i64",
+        &[(
+            "(((~x & 1) * (x & 4)) - ((~x | -5) * (x & 1))) + ((x & ((((~x & 1) * (x & 4)) - ((~x | -5) * (x & 1))) | 0)) ^ (((~x & 1) * (x & 4)) - ((~x | -5) * (x & 1))))",
+            &["(x & 5)"],
+            10,
+        )],
+    );
+}
+
 /// `c·(a >> s)` with `2^s | c` is `(c >> s)·(a & -2^s)`, which joins the semi-linear rebuild.
 #[test]
 fn multiple_of_right_shift() {
