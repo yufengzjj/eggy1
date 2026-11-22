@@ -399,6 +399,8 @@ pub fn make_egg(num_type: &str) -> String {
     }
     egg.push_str(&format!("(rewrite (Shr (And a (Num m)) (Num c)) (Shr a (Num c)) :when ((covers-high m c {w})) :ruleset simplify)\n"));
     egg.push_str(&format!("(rewrite (Mul (And a (Num m)) (Num p)) (Mul a (Num p)) :when ((covers-low m p {w})) :ruleset simplify)\n"));
+    // `below-pow2` skips `|K| < 16`: such `K` are mostly constants the rules made, and rewriting them grows the e-graph.
+    egg.push_str(&format!("(rewrite (Add (Mul (Xor a (Num k)) (Num p)) (Num c)) (Xor (Mul a (Num p)) (Num (wrapping-add-{num_type} (wrapping-mul-{num_type} k p) c))) :when ((below-pow2 c p k {w})) :ruleset simplify)\n"));
 
     // HD ch. 10: recognize magic-number division and rewrite back to `n / d`.
     // The divisor d is recovered from (M, s) by the magic-div-* primitive, which
@@ -884,6 +886,7 @@ fn init_egg_function(eg: &mut EGraph) {
     add_primitive!(eg, "is-neg-in" = |c: i64, w: i64| -?> () { (((c as u64) & width_mask(w)) > (width_mask(w) >> 1) + 1).then_some(()) });
     add_primitive!(eg, "is-pow2-of" = |p: i64, c: i64, w: i64| -?> () { (c >= 1 && c < w && (p as u64) & width_mask(w) == 1u64 << c).then_some(()) });
     add_primitive!(eg, "covers-high" = |m: i64, c: i64, w: i64| -?> () { (c >= 1 && c < w && ((m as u64) | ((1u64 << c) - 1)) & width_mask(w) == width_mask(w)).then_some(()) });
+    add_primitive!(eg, "below-pow2" = |c: i64, p: i64, k: i64, w: i64| -?> () { {let m = width_mask(w); let p = (p as u64) & m; (p > 1 && p & (p - 1) == 0 && (c as u64) & m < p && (c as u64) & m != 0 && { let s = 64 - w as u32; let k = (((k as u64) << s) as i64) >> s; !(-16..16).contains(&k) }).then_some(())} });
     add_primitive!(eg, "covers-low" = |m: i64, p: i64, w: i64| -?> () { covers_low(m, p, w).then_some(()) });
     add_primitive!( eg, "is-shl-in-i64" = |a: i64| -?> () { (a >= 1 && a <= 63).then_some(()) });
     add_primitive!( eg, "is-shl-in-u64" = |a: i64| -?> () { (a >= 1 && a <= 63).then_some(()) });

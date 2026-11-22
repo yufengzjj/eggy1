@@ -28,7 +28,8 @@ pub enum Op {
     Neg,
     Leaf(usize),
     LeafOperand(usize),
-    Slot(usize, usize),
+    // `u32` keeps `Op` at 16 bytes; a wider payload grows every `Term` node.
+    Slot(u32, u32),
 }
 
 impl Op {
@@ -78,7 +79,8 @@ impl Op {
 impl std::fmt::Display for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Op::Leaf(i) | Op::LeafOperand(i) | Op::Slot(i, _) => write!(f, "{}{i}", self.name()),
+            Op::Leaf(i) | Op::LeafOperand(i) => write!(f, "{}{i}", self.name()),
+            Op::Slot(i, _) => write!(f, "{}{i}", self.name()),
             _ => f.write_str(self.name()),
         }
     }
@@ -149,7 +151,7 @@ pub fn show(t: &Term) -> String {
 /// Number of nodes.
 pub fn size(t: &Term) -> usize {
     match t {
-        Term::Op(Op::Slot(_, s), _) => *s,
+        Term::Op(Op::Slot(_, s), _) => *s as usize,
         Term::Op(_, args) => 1 + args.iter().map(size).sum::<usize>(),
         _ => 1,
     }

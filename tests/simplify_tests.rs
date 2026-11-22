@@ -1824,3 +1824,13 @@ fn product_with_trailing_zeros() {
         ],
     );
 }
+
+/// `2^k·(a ^ K) + c` with `0 < c < 2^k` is `(2^k·a) ^ (2^k·K + c)`, since the low `k` bits of `2^k·a` are 0.
+#[test]
+fn shifted_xor_plus_low_constant() {
+    check("i64", &[("2*(x ^ 0x2aaa) + 1", &["((x * 2) ^ 0x5555)"], 10)]);
+    check("u8", &[("(x ^ 0x2a)*2 + 1", &["((x * 2) ^ 0x55)"], 10)]);
+    check("i32", &[("(x ^ 0x55)*8 + 7", &["((x * 8) ^ 0x2af)"], 10)]);
+    check("u16", &[("(y ^ 0x1234)*0x10 + 0xf", &["((y * 0x10) ^ 0x234f)"], 10)]);
+    check("u32", &[("(x ^ 5)*8 + 8", &["(0xfffffff8 * (x ^ 0xfffffffa))", "(((x ^ 5) * 8) + 8)"], 10)]);
+}

@@ -1237,7 +1237,7 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
     let arith = real.iter().any(|l| kind(l, w) == Kind::Lin);
     // The search only needs each leaf's size, so it runs on slots: cheap to copy,
     // and the memoized searches repeat across regions with other leaves.
-    let lv: &[T] = &real.iter().enumerate().map(|(i, l)| T::Op(Op::Slot(i, size(l)), Vec::new())).collect::<Vec<_>>();
+    let lv: &[T] = &real.iter().enumerate().map(|(i, l)| T::Op(Op::Slot(i as u32, size(l) as u32), Vec::new())).collect::<Vec<_>>();
     let mut cands = Vec::new();
     semi_linear_candidates(&groups, lv, e0, w, &mut cands);
     let mut peels = Vec::new();
@@ -1289,7 +1289,7 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
 
 fn fill_slots(t: &T, lv: &[&T]) -> T {
     match t {
-        T::Op(Op::Slot(i, _), _) => lv[*i].clone(),
+        T::Op(Op::Slot(i, _), _) => lv[*i as usize].clone(),
         T::Op(op, a) => T::Op(*op, a.iter().map(|x| fill_slots(x, lv)).collect()),
         _ => t.clone(),
     }
