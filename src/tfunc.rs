@@ -5,7 +5,7 @@
 //! bits `0..=i` of the inputs), so equality follows from running both terms bit by
 //! bit over all input bits while tracking the reachable sets of carries.
 
-use crate::eval::{Term as T, size};
+use crate::eval::{Op, Term as T, size};
 use crate::linear_mba::Width;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
@@ -44,13 +44,13 @@ fn points(w: &Width) -> [[u64; MAX_VARS]; POINTS] {
     out
 }
 
-fn op_vals(op: &str, a: &Fp, b: &Fp, m: u64) -> Fp {
+fn op_vals(op: Op, a: &Fp, b: &Fp, m: u64) -> Fp {
     let f: fn(u64, u64) -> u64 = match op {
-        "Add" => u64::wrapping_add,
-        "Sub" => u64::wrapping_sub,
-        "Mul" => u64::wrapping_mul,
-        "And" => |x, y| x & y,
-        "Or" => |x, y| x | y,
+        Op::Add => u64::wrapping_add,
+        Op::Sub => u64::wrapping_sub,
+        Op::Mul => u64::wrapping_mul,
+        Op::And => |x, y| x & y,
+        Op::Or => |x, y| x | y,
         _ => |x, y| x ^ y,
     };
     std::array::from_fn(|k| f(a[k], b[k]) & m)
@@ -66,12 +66,12 @@ fn values(t: &T, vars: &[String], pts: &[[u64; MAX_VARS]; POINTS], w: &Width) ->
             let j = vars.iter().position(|x| x == v)?;
             std::array::from_fn(|k| pts[k][j])
         }
-        T::Op(op, a) => match op.as_str() {
-            "Not" => values(&a[0], vars, pts, w)?.map(|x| !x & m),
-            "Neg" => values(&a[0], vars, pts, w)?.map(|x| x.wrapping_neg() & m),
-            "Add" | "Sub" | "And" | "Or" | "Xor" => op_vals(op, &values(&a[0], vars, pts, w)?, &values(&a[1], vars, pts, w)?, m),
-            "Mul" if matches!(a[0], T::Num(_)) || matches!(a[1], T::Num(_)) => {
-                op_vals(op, &values(&a[0], vars, pts, w)?, &values(&a[1], vars, pts, w)?, m)
+        T::Op(op, a) => match op {
+            Op::Not => values(&a[0], vars, pts, w)?.map(|x| !x & m),
+            Op::Neg => values(&a[0], vars, pts, w)?.map(|x| x.wrapping_neg() & m),
+            Op::Add | Op::Sub | Op::And | Op::Or | Op::Xor => op_vals(*op, &values(&a[0], vars, pts, w)?, &values(&a[1], vars, pts, w)?, m),
+            Op::Mul if matches!(a[0], T::Num(_)) || matches!(a[1], T::Num(_)) => {
+                op_vals(*op, &values(&a[0], vars, pts, w)?, &values(&a[1], vars, pts, w)?, m)
             }
             _ => return None,
         },
@@ -112,15 +112,15 @@ fn build_table(n: usize, w: &Width) -> Table {
         levels.push(Vec::new());
         let mut new = Vec::new();
         for (t, _) in &levels[s - 1] {
-            for op in ["Not", "Neg"] {
-                new.push(T::Op(op.into(), vec![t.clone()]));
+            for op in [Op::Not, Op::Neg] {
+                new.push(T::Op(op, vec![t.clone()]));
             }
         }
         for a in 1..s - 1 {
             for (x, _) in &levels[a] {
                 for (y, _) in &levels[s - 1 - a] {
-                    for op in ["Add", "Sub", "And", "Or", "Xor"] {
-                        new.push(T::Op(op.into(), vec![x.clone(), y.clone()]));
+                    for op in [Op::Add, Op::Sub, Op::And, Op::Or, Op::Xor] {
+                        new.push(T::Op(op, vec![x.clone(), y.clone()]));
                     }
                 }
             }
@@ -190,33 +190,33 @@ impl Circuit {
         Some(match t {
             T::Num(c) => self.gate(Gate::Const(*c as u64 & w.mask)),
             T::Var(v) => self.gate(Gate::In(vars.iter().position(|x| x == v)?)),
-            T::Op(op, a) => match op.as_str() {
-                "Not" => {
+            T::Op(op, a) => match op {
+                Op::Not => {
                     let x = self.compile(&a[0], vars, w)?;
                     self.gate(Gate::Not(x))
                 }
-                "Neg" => {
+                Op::Neg => {
                     let x = self.compile(&a[0], vars, w)?;
                     self.neg(x)?
                 }
-                "Mul" => match (&a[0], &a[1]) {
+                Op::Mul => match (&a[0], &a[1]) {
                     (T::Num(c), e) | (e, T::Num(c)) => {
                         let x = self.compile(e, vars, w)?;
                         self.times(*c as u64 & w.mask, x, w)?
                     }
                     _ => return None,
                 },
-                "Add" | "Sub" | "And" | "Or" | "Xor" => {
+                Op::Add | Op::Sub | Op::And | Op::Or | Op::Xor => {
                     let x = self.compile(&a[0], vars, w)?;
                     let y = self.compile(&a[1], vars, w)?;
-                    match op.as_str() {
-                        "Add" => self.adder(x, y, false)?,
-                        "Sub" => {
+                    match op {
+                        Op::Add => self.adder(x, y, false)?,
+                        Op::Sub => {
                             let ny = self.gate(Gate::Not(y));
                             self.adder(x, ny, true)?
                         }
-                        "And" => self.gate(Gate::And(x, y)),
-                        "Or" => self.gate(Gate::Or(x, y)),
+                        Op::And => self.gate(Gate::And(x, y)),
+                        Op::Or => self.gate(Gate::Or(x, y)),
                         _ => self.gate(Gate::Xor(x, y)),
                     }
                 }
@@ -317,7 +317,7 @@ pub(crate) fn var_names(t: &T, out: &mut Vec<String>) {
 fn rename(t: &T, vars: &[String]) -> T {
     match t {
         T::Var(j) => T::Var(vars[j.parse::<usize>().unwrap()].clone()),
-        T::Op(op, a) => T::Op(op.clone(), a.iter().map(|x| rename(x, vars)).collect()),
+        T::Op(op, a) => T::Op(*op, a.iter().map(|x| rename(x, vars)).collect()),
         _ => t.clone(),
     }
 }
@@ -344,7 +344,7 @@ fn direct(t: &T, w: &Width) -> Option<T> {
 fn bitwise_only(t: &T) -> bool {
     match t {
         T::Var(_) | T::Num(_) => true,
-        T::Op(op, a) => matches!(op.as_str(), "And" | "Or" | "Xor" | "Not") && a.iter().all(bitwise_only),
+        T::Op(op, a) => matches!(op, Op::And | Op::Or | Op::Xor | Op::Not) && a.iter().all(bitwise_only),
     }
 }
 
@@ -354,7 +354,7 @@ fn bitwise_only(t: &T) -> bool {
 fn over_atoms(t: &T, w: &Width) -> Option<T> {
     fn collect(t: &T, out: &mut Vec<T>) {
         match t {
-            T::Op(op, a) if op == "Not" => collect(&a[0], out),
+            T::Op(op, a) if *op == Op::Not => collect(&a[0], out),
             T::Op(..) if bitwise_only(t) => {
                 if !out.contains(t) {
                     out.push(t.clone());
@@ -373,11 +373,11 @@ fn over_atoms(t: &T, w: &Width) -> Option<T> {
     collect(t, &mut atoms);
     loop {
         let strip = |x: &T| match x {
-            T::Op(op, a) if op == "Not" => a[0].clone(),
+            T::Op(op, a) if *op == Op::Not => a[0].clone(),
             _ => x.clone(),
         };
         let Some(i) = atoms.iter().position(|s| match s {
-            T::Op(op, a) if op != "Not" => a.iter().any(|x| atoms.contains(&strip(x))),
+            T::Op(op, a) if *op != Op::Not => a.iter().any(|x| atoms.contains(&strip(x))),
             _ => false,
         }) else {
             break;
@@ -398,7 +398,7 @@ fn over_atoms(t: &T, w: &Width) -> Option<T> {
             return names[i].clone();
         }
         match t {
-            T::Op(op, a) => T::Op(op.clone(), a.iter().map(|x| abstracted(x, atoms, names)).collect()),
+            T::Op(op, a) => T::Op(*op, a.iter().map(|x| abstracted(x, atoms, names)).collect()),
             _ => t.clone(),
         }
     }
@@ -407,7 +407,7 @@ fn over_atoms(t: &T, w: &Width) -> Option<T> {
             return atoms[i].clone();
         }
         match t {
-            T::Op(op, a) => T::Op(op.clone(), a.iter().map(|x| fill(x, atoms, names)).collect()),
+            T::Op(op, a) => T::Op(*op, a.iter().map(|x| fill(x, atoms, names)).collect()),
             _ => t.clone(),
         }
     }
@@ -422,7 +422,7 @@ pub(crate) fn simplify(t: &T, w: &Width) -> T {
     if let Some(r) = replacement(t, w) {
         return r;
     }
-    let inner = T::Op(op.clone(), a.iter().map(|x| simplify(x, w)).collect());
+    let inner = T::Op(*op, a.iter().map(|x| simplify(x, w)).collect());
     if inner == *t {
         return inner;
     }
@@ -445,11 +445,11 @@ mod tests {
                 _ => T::Var("y".into()),
             };
         }
-        let op = ["Add", "Sub", "And", "Or", "Xor", "Not", "Neg", "Mul"][(r >> 16) as usize % 8];
+        let op = [Op::Add, Op::Sub, Op::And, Op::Or, Op::Xor, Op::Not, Op::Neg, Op::Mul][(r >> 16) as usize % 8];
         match op {
-            "Not" | "Neg" => T::Op(op.into(), vec![random_term(h, depth - 1)]),
-            "Mul" => T::Op(op.into(), vec![T::Num((r >> 24) as i64 % 9 - 4), random_term(h, depth - 1)]),
-            _ => T::Op(op.into(), vec![random_term(h, depth - 1), random_term(h, depth - 1)]),
+            Op::Not | Op::Neg => T::Op(op, vec![random_term(h, depth - 1)]),
+            Op::Mul => T::Op(op, vec![T::Num((r >> 24) as i64 % 9 - 4), random_term(h, depth - 1)]),
+            _ => T::Op(op, vec![random_term(h, depth - 1), random_term(h, depth - 1)]),
         }
     }
 

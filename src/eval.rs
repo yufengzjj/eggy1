@@ -5,10 +5,83 @@
 pub enum Term {
     Num(i64),
     Var(String),
-    Op(String, Vec<Term>),
+    Op(Op, Vec<Term>),
 }
 
-/// Parse an egglog term such as `(Add (Var "x") (Num 1))`. Panics on malformed input.
+/// An `Expr` constructor other than `Num` and `Var`; `Leaf` and `LeafOperand` are
+/// nullary placeholders that `linear_mba` uses internally and never parses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Op {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    And,
+    Or,
+    Xor,
+    Shl,
+    Shr,
+    Mulhi,
+    Not,
+    Neg,
+    Leaf(usize),
+    LeafOperand(usize),
+}
+
+impl Op {
+    const NAMED: [Op; 13] = [
+        Op::Add,
+        Op::Sub,
+        Op::Mul,
+        Op::Div,
+        Op::Mod,
+        Op::And,
+        Op::Or,
+        Op::Xor,
+        Op::Shl,
+        Op::Shr,
+        Op::Mulhi,
+        Op::Not,
+        Op::Neg,
+    ];
+
+    /// The egglog constructor name; for a placeholder, the prefix `show` puts before its index.
+    pub fn name(self) -> &'static str {
+        match self {
+            Op::Add => "Add",
+            Op::Sub => "Sub",
+            Op::Mul => "Mul",
+            Op::Div => "Div",
+            Op::Mod => "Mod",
+            Op::And => "And",
+            Op::Or => "Or",
+            Op::Xor => "Xor",
+            Op::Shl => "Shl",
+            Op::Shr => "Shr",
+            Op::Mulhi => "Mulhi",
+            Op::Not => "Not",
+            Op::Neg => "Neg",
+            Op::Leaf(_) => "\u{2}",
+            Op::LeafOperand(_) => "\u{3}",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Op> {
+        Op::NAMED.into_iter().find(|op| op.name() == name)
+    }
+}
+
+impl std::fmt::Display for Op {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Op::Leaf(i) | Op::LeafOperand(i) => write!(f, "{}{i}", self.name()),
+            _ => f.write_str(self.name()),
+        }
+    }
+}
+
+/// Parse an egglog term such as `(Add (Var "x") (Num 1))`. Panics on malformed input or an unknown constructor.
 pub fn parse(s: &str) -> Term {
     let mut toks = Vec::new();
     let mut cur = String::new();
@@ -51,7 +124,8 @@ fn parse_at(t: &[String], i: &mut usize) -> Term {
             while t[*i] != ")" {
                 args.push(parse_at(t, i));
             }
-            Term::Op(head, args)
+            let op = Op::from_name(&head).unwrap_or_else(|| panic!("unknown constructor {head}"));
+            Term::Op(op, args)
         }
     };
     *i += 1;
@@ -132,28 +206,28 @@ pub fn eval(t: &Term, ty: NumType, env: &impl Fn(&str) -> u64) -> Option<u64> {
                 None => 0,
             };
             let (sx, sy) = (ty.sext(x), ty.sext(y));
-            match op.as_str() {
-                "Add" => x.wrapping_add(y),
-                "Sub" => x.wrapping_sub(y),
-                "Mul" => x.wrapping_mul(y),
-                "And" => x & y,
-                "Or" => x | y,
-                "Xor" => x ^ y,
-                "Not" => !x,
-                "Neg" => x.wrapping_neg(),
-                "Shl" if y >= w => 0,
-                "Shl" => x << y,
-                "Shr" if ty.signed => (sx >> y.min(w - 1)) as u64,
-                "Shr" if y >= w => 0,
-                "Shr" => x >> y,
-                "Div" | "Mod" if y == 0 => return None,
-                "Div" if ty.signed => sx.wrapping_div(sy) as u64,
-                "Div" => x / y,
-                "Mod" if ty.signed => sx.wrapping_rem(sy) as u64,
-                "Mod" => x % y,
-                "Mulhi" if ty.signed => ((sx as i128 * sy as i128) >> w) as u64,
-                "Mulhi" => ((x as u128 * y as u128) >> w) as u64,
-                _ => panic!("unknown operator {op}"),
+            match op {
+                Op::Add => x.wrapping_add(y),
+                Op::Sub => x.wrapping_sub(y),
+                Op::Mul => x.wrapping_mul(y),
+                Op::And => x & y,
+                Op::Or => x | y,
+                Op::Xor => x ^ y,
+                Op::Not => !x,
+                Op::Neg => x.wrapping_neg(),
+                Op::Shl if y >= w => 0,
+                Op::Shl => x << y,
+                Op::Shr if ty.signed => (sx >> y.min(w - 1)) as u64,
+                Op::Shr if y >= w => 0,
+                Op::Shr => x >> y,
+                Op::Div | Op::Mod if y == 0 => return None,
+                Op::Div if ty.signed => sx.wrapping_div(sy) as u64,
+                Op::Div => x / y,
+                Op::Mod if ty.signed => sx.wrapping_rem(sy) as u64,
+                Op::Mod => x % y,
+                Op::Mulhi if ty.signed => ((sx as i128 * sy as i128) >> w) as u64,
+                Op::Mulhi => ((x as u128 * y as u128) >> w) as u64,
+                Op::Leaf(_) | Op::LeafOperand(_) => panic!("unknown operator {op}"),
             }
         }
     };
