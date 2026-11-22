@@ -22,6 +22,8 @@ const MAX_PRODUCT_BITS: u32 = 4;
 /// Evaluation steps per call, over all enumerations.
 const BUDGET: u64 = 1 << 26;
 const WIDE_BUDGET: u64 = 1 << 23;
+/// Largest product factor `shorter_low` rebuilds after cutting its constants.
+const MAX_LOW_REBUILD: usize = 64;
 
 #[derive(Clone, Copy)]
 struct Info {
@@ -413,6 +415,75 @@ fn low_factor(node: T, infos: &[Info], w: &Width) -> T {
     node
 }
 
+/// `t` with the factor of each product beside a factor with `k` known trailing zeros
+/// shortened by `shorter_low`. Run on rebuilt terms: on the input, the cut factor no
+/// longer shares its constants with equal subterms elsewhere.
+pub(crate) fn cut_products(t: &T, w: &Width) -> T {
+    fn go(t: &T, w: &Width) -> (T, Info) {
+        let T::Op(op, a) = t else { return (t.clone(), info(t, w)) };
+        let (mut args, infos): (Vec<T>, Vec<Info>) = a.iter().map(|x| go(x, w)).unzip();
+        let i = combine(*op, &infos, is_square(&T::Op(*op, args.clone())), w);
+        if *op == Op::Mul && !args.iter().any(|x| matches!(x, T::Num(_))) {
+            for j in 0..2 {
+                let k = infos[j].k0.trailing_ones().min(w.w);
+                if k > 0 && k < w.w {
+                    if let Some(q) = shorter_low(&args[1 - j], w.w - k, w) {
+                        args[1 - j] = q;
+                        break;
+                    }
+                }
+            }
+        }
+        (T::Op(*op, args), i)
+    }
+    go(t, w).0
+}
+
+/// `q` with every constant cut to its low `r` bits, when that drops an operand
+/// (`(x + z)*0x10000001` with `r = 24` is `x + z`) or a small `q` then rebuilds smaller.
+fn shorter_low(q: &T, r: u32, w: &Width) -> Option<T> {
+    let cut = crate::linear_mba::low_consts(q, r);
+    if cut == *q {
+        return None;
+    }
+    let folded = drop_identities(&cut, w);
+    if size(&folded) < size(q) {
+        return Some(folded);
+    }
+    if size(q) > MAX_LOW_REBUILD {
+        return None;
+    }
+    let rebuilt = crate::linear_mba::rewrite(&folded, w);
+    (size(&rebuilt) < size(q) && size(&rebuilt) < size(&crate::linear_mba::rewrite(q, w))).then_some(rebuilt)
+}
+
+/// `t` without operations whose constant operand leaves the other unchanged (`a*1`, `a + 0`, `a & -1`, ...).
+fn drop_identities(t: &T, w: &Width) -> T {
+    let T::Op(op, a) = t else { return t.clone() };
+    let a: Vec<T> = a.iter().map(|x| drop_identities(x, w)).collect();
+    if a.len() == 2 {
+        let unit = |x: &T| match x {
+            T::Num(c) => {
+                let c = *c as u64 & w.mask;
+                match op {
+                    Op::Mul => c == 1,
+                    Op::Add | Op::Or | Op::Xor => c == 0,
+                    Op::And => c == w.mask,
+                    _ => false,
+                }
+            }
+            _ => false,
+        };
+        if unit(&a[1]) || (*op == Op::Sub && matches!(&a[1], T::Num(c) if *c as u64 & w.mask == 0)) {
+            return a[0].clone();
+        }
+        if unit(&a[0]) && *op != Op::Sub {
+            return a[1].clone();
+        }
+    }
+    T::Op(*op, a)
+}
+
 fn visit(t: &T, f: &mut impl FnMut(&T)) {
     f(t);
     if let T::Op(_, a) = t {
@@ -455,6 +526,27 @@ fn known_bitwise(op: Op, node: &T, infos: &[Info], w: &Width) -> Option<T> {
         _ => (touched & k1).wrapping_neg(),
     } & w.mask;
     Some(if d == 0 { a[j].clone() } else { T::Op(Op::Add, vec![a[j].clone(), T::Num(w.signed(d))]) })
+}
+
+/// `t` with each `2^k·(a ^ K) + c` (`0 < c < 2^k`) written as `(2^k·a) ^ (2^k·K + c)`:
+/// the low `k` bits of `2^k·(a ^ K)` are 0, so adding `c` sets them.
+pub(crate) fn shifted_xor(t: &T, w: &Width) -> T {
+    let T::Op(op, a) = t else { return t.clone() };
+    let a: Vec<T> = a.iter().map(|x| shifted_xor(x, w)).collect();
+    if *op == Op::Add {
+        if let (T::Op(Op::Mul, m), T::Num(c)) | (T::Num(c), T::Op(Op::Mul, m)) = (&a[0], &a[1]) {
+            if let (T::Num(p), T::Op(Op::Xor, b)) | (T::Op(Op::Xor, b), T::Num(p)) = (&m[0], &m[1]) {
+                if let (x, T::Num(k)) | (T::Num(k), x) = (&b[0], &b[1]) {
+                    let (p, c, k) = (*p as u64 & w.mask, *c as u64 & w.mask, *k as u64 & w.mask);
+                    if p > 1 && p.is_power_of_two() && c != 0 && c < p {
+                        let scaled = T::Op(Op::Mul, vec![T::Num(w.signed(p)), x.clone()]);
+                        return T::Op(Op::Xor, vec![scaled, T::Num(w.signed(k.wrapping_mul(p).wrapping_add(c) & w.mask))]);
+                    }
+                }
+            }
+        }
+    }
+    T::Op(*op, a)
 }
 
 /// Bits of `t` not known to be 0.

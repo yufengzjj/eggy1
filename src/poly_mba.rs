@@ -309,6 +309,117 @@ impl Ctx<'_> {
         out
     }
 
+    /// `p` of degree 3 as `(v + r)·Q` with `r` affine in the other conjunctions and `Q` the
+    /// quotient: each `r_j` is a root of `-A·r³ + B_j·r² - C_jj·r + D_jjj` (`A` the `v³`
+    /// coefficient), and the division by `v + r` must leave no remainder.
+    fn factor3(&self, p: &Poly) -> Vec<(Poly, Poly)> {
+        let mut out = Vec::new();
+        if p.len() > MAX_FACTOR_MONOS || p.keys().any(|m| m.len() > 3) || !p.keys().any(|m| m.len() == 3) {
+            return out;
+        }
+        let mut vars: Vec<Conj> = p.keys().flatten().copied().collect();
+        vars.sort_unstable();
+        vars.dedup();
+        if vars.len() > MAX_FACTOR_VARS {
+            return out;
+        }
+        let coef = |m: &[Option<Conj>]| {
+            let mut m: Mono = m.iter().flatten().copied().collect();
+            m.sort_unstable();
+            p.get(&m).copied().unwrap_or(0)
+        };
+        let mut pivots: Vec<(bool, Conj)> = vars.iter().filter(|&&v| coef(&[Some(v); 3]) != 0).map(|&v| (coef(&[Some(v); 3]) & 1 == 0, v)).collect();
+        pivots.sort_unstable();
+        let neg1 = self.w.mask;
+        for &(_, v) in pivots.iter().take(MAX_PIVOTS) {
+            let a = coef(&[Some(v); 3]);
+            let us: Vec<Option<Conj>> = vars.iter().filter(|&&u| u != v).map(|&u| Some(u)).chain([None]).collect();
+            let roots: Vec<Vec<u64>> = us.iter().map(|&u| self.cubic_roots(a, coef(&[Some(v), Some(v), u]), coef(&[Some(v), u, u]), coef(&[u, u, u]))).collect();
+            if roots.iter().any(|r| r.is_empty()) {
+                continue;
+            }
+            let mut parts = vec![Poly::new(); 4];
+            for (m, &c) in p {
+                let k = m.iter().filter(|&&x| x == v).count();
+                self.add_to(&mut parts[k], m.iter().copied().filter(|&x| x != v).collect(), c);
+            }
+            let mut pick = vec![0usize; us.len()];
+            // Fixed points where `p(-r, u)` must vanish, checked before dividing.
+            let points: Vec<Vec<u64>> = (1..=2u64).map(|k| (0..us.len()).map(|j| k.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(7 * j as u32 + 3) | 1).collect()).collect();
+            for _ in 0..MAX_FACTOR_STEPS {
+                let r: Vec<u64> = pick.iter().zip(&roots).map(|(&i, rs)| rs[i]).collect();
+                let vanishes = points.iter().all(|pt| {
+                    let val = |x: Conj| us.iter().position(|&u| u == Some(x)).map_or(0, |j| pt[j]);
+                    let rv = us.iter().zip(&r).fold(0u64, |acc, (u, &c)| acc.wrapping_add(c.wrapping_mul(u.map_or(1, val))));
+                    let at = |x: Conj| if x == v { rv.wrapping_neg() } else { val(x) };
+                    p.iter().fold(0u64, |acc, (m, &c)| acc.wrapping_add(m.iter().fold(c, |f, &x| f.wrapping_mul(at(x))))) & neg1 == 0
+                });
+                if let Some(f) = vanishes.then(|| self.divide_cubic(&r, &us, v, a, &parts)).flatten() {
+                    out.push(f);
+                    if out.len() >= MAX_SOLUTIONS {
+                        return out;
+                    }
+                }
+                let Some(j) = (0..pick.len()).find(|&j| pick[j] + 1 < roots[j].len()) else { break };
+                pick[j] += 1;
+                pick[..j].iter_mut().for_each(|i| *i = 0);
+            }
+        }
+        out
+    }
+
+    /// `(v + r, Q)` when `v + r` divides `Σ v^k·parts[k]` exactly (synthetic division), `Q` the quotient.
+    fn divide_cubic(&self, r: &[u64], us: &[Option<Conj>], v: Conj, a: u64, parts: &[Poly]) -> Option<(Poly, Poly)> {
+        let neg1 = self.w.mask;
+        let mut rp = Poly::new();
+        for (u, &c) in us.iter().zip(r) {
+            self.add_to(&mut rp, u.iter().copied().collect(), c);
+        }
+        let div = |acc: &Poly, part: &Poly| self.product(&rp, acc).map(|x| self.sum(part.clone(), self.scale(x, neg1)));
+        let q1 = div(&self.constant(a), &parts[2])?;
+        let q0 = div(&q1, &parts[1])?;
+        if !div(&q0, &parts[0])?.is_empty() {
+            return None;
+        }
+        let mut l0 = rp.clone();
+        self.add_to(&mut l0, vec![v], 1);
+        let mut q = q0;
+        for (mut m, c) in q1 {
+            m.push(v);
+            m.sort_unstable();
+            self.add_to(&mut q, m, c);
+        }
+        self.add_to(&mut q, vec![v, v], a);
+        Some((l0, q))
+    }
+
+    /// Roots of `-a·r³ + b·r² - c·r + d`, found by lifting bit by bit; when there are too
+    /// many (a repeated root), the roots of its derivative and `b/3a` (odd `a`) that are roots.
+    fn cubic_roots(&self, a: u64, b: u64, c: u64, d: u64) -> Vec<u64> {
+        let f = |r: u64| d.wrapping_sub(c.wrapping_mul(r)).wrapping_add(b.wrapping_mul(r).wrapping_mul(r)).wrapping_sub(a.wrapping_mul(r).wrapping_mul(r).wrapping_mul(r));
+        let mut rs = vec![0u64];
+        for k in 0..self.w.w {
+            let m = if k + 1 == 64 { u64::MAX } else { (1u64 << (k + 1)) - 1 };
+            rs = rs.iter().flat_map(|&r| [r, r | 1 << k]).filter(|&r| f(r) & m == 0).collect();
+            if rs.len() > MAX_ROOTS {
+                let mut cands = self.quad_roots(a.wrapping_mul(3), b.wrapping_mul(2), c);
+                if a & 1 == 1 {
+                    let a3 = a.wrapping_mul(3);
+                    let mut inv = a3;
+                    for _ in 0..6 {
+                        inv = inv.wrapping_mul(2u64.wrapping_sub(a3.wrapping_mul(inv)));
+                    }
+                    cands.push(b.wrapping_mul(inv) & self.w.mask);
+                }
+                rs = cands.into_iter().filter(|&r| f(r) & self.w.mask == 0).collect();
+                break;
+            }
+        }
+        rs.sort_by_key(|&r| self.w.signed(r).unsigned_abs());
+        rs.dedup();
+        rs
+    }
+
     fn assign(roots: &[Vec<u64>], r: &mut [u64], k: usize, fits: &dyn Fn(&[u64], usize) -> bool, steps: &mut usize, sols: &mut Vec<Vec<u64>>) {
         if k == roots.len() {
             sols.push(r.to_vec());
@@ -378,23 +489,44 @@ impl Ctx<'_> {
         cands.sort_by_key(|&(c, n)| (std::cmp::Reverse(n), c.count_ones()));
         let mut best: Option<T> = None;
         let neg1 = self.w.mask;
-        for (l1, l2) in self.factor2(p) {
-            let (n1, n2) = (self.scale(l1.clone(), neg1), self.scale(l2.clone(), neg1));
-            let lin = |p: &Poly| match self.build_linear(p) {
-                T::Op(Op::Add, mut a) if matches!(&a[0], T::Op(Op::Neg, _)) => {
-                    let T::Op(_, mut neg) = a.remove(0) else { unreachable!() };
-                    T::Op(Op::Sub, vec![a.remove(0), neg.remove(0)])
-                }
-                t => t,
-            };
-            let cand = T::Op(Op::Mul, vec![self.build_linear(&l1), self.build_linear(&l2)]);
-            let alt = T::Op(Op::Mul, vec![lin(&n1), lin(&n2)]);
-            for cand in [cand, alt] {
-                if best.as_ref().is_none_or(|b| size(&cand) < size(b)) {
-                    best = Some(cand);
+        let side = |l: &Poly, neg: bool| match (neg, self.build_linear(&if neg { self.scale(l.clone(), neg1) } else { l.clone() })) {
+            (true, T::Op(Op::Add, mut a)) if matches!(&a[0], T::Op(Op::Neg, _)) => {
+                let T::Op(_, mut n) = a.remove(0) else { unreachable!() };
+                T::Op(Op::Sub, vec![a.remove(0), n.remove(0)])
+            }
+            (_, t) => t,
+        };
+        let mul = |a: T, b: T| T::Op(Op::Mul, vec![a, b]);
+        let factored = |target: &Poly, two: bool, three: bool| {
+            let mut cands = Vec::new();
+            if two {
+                for (l1, l2) in self.factor2(target) {
+                    cands.extend([false, true].map(|n| mul(side(&l1, n), side(&l2, n))));
                 }
             }
-        }
+            for (l0, q) in if three { self.factor3(target) } else { Vec::new() } {
+                let quads = self.factor2(&q);
+                if quads.is_empty() {
+                    cands.push(mul(side(&l0, false), self.build(&q, 1)));
+                    cands.push(mul(side(&l0, true), self.build(&self.scale(q.clone(), neg1), 1)));
+                }
+                for (l1, l2) in quads {
+                    for (n0, n1, n2) in [(false, false, false), (true, true, false), (true, false, true), (false, true, true)] {
+                        cands.push(mul(mul(side(&l0, n0), side(&l1, n1)), side(&l2, n2)));
+                    }
+                }
+            }
+            cands
+        };
+        let keep = |best: &mut Option<T>, cands: Vec<T>| {
+            for cand in cands {
+                if best.as_ref().is_none_or(|b| size(&cand) < size(b)) {
+                    *best = Some(cand);
+                }
+            }
+        };
+        keep(&mut best, factored(p, true, false));
+        let top = tries == FACTOR_TRIES;
         // Pulling `f` out of its degree-1 monomial too (`x*y - 7*x` → `x*(y - 7)`)
         // can block a shorter linear rebuild of the rest, so try both, while the
         // budget lasts: the choices multiply at every level.
@@ -424,6 +556,21 @@ impl Ctx<'_> {
             let cand = if r.is_empty() { prod } else { T::Op(Op::Add, vec![prod, self.build(&r, 1)]) };
             if best.as_ref().is_none_or(|b| size(&cand) < size(b)) {
                 best = Some(cand);
+            }
+        }
+        // Tried last, so that they replace the forms above only when strictly smaller: a cubic
+        // factoring, and both factorings of the part of degree 2 and up beside a linear rest
+        // (`(x + y)·(x + y) + ~(w | y)`).
+        if top {
+            keep(&mut best, factored(p, false, true));
+            let low: Poly = p.iter().filter(|(m, _)| m.len() <= 1).map(|(m, &c)| (m.clone(), c)).collect();
+            if !low.is_empty() && low.len() < p.len() {
+                let high: Poly = p.iter().filter(|(m, _)| m.len() >= 2).map(|(m, &c)| (m.clone(), c)).collect();
+                let cands = factored(&high, true, true);
+                if !cands.is_empty() {
+                    let rest = self.build_linear(&low);
+                    keep(&mut best, cands.into_iter().map(|c| T::Op(Op::Add, vec![c, rest.clone()])).collect());
+                }
             }
         }
         best.unwrap()
@@ -552,5 +699,34 @@ mod tests {
                 assert_eq!(rewrite(&zero, &w), T::Num(0), "w={bits}: {t:?}");
             }
         }
+    }
+
+    #[test]
+    fn cubes_of_linear_mbas() {
+        let mut r = Rng(0x2545_f491_4f6c_dd1d);
+        let mut factored = 0;
+        for bits in [8u32, 64] {
+            let w = Width::new(bits);
+            let ty = NumType { bits, signed: false };
+            for k in 0..200 {
+                let (a, b) = (linear(&mut r), linear(&mut r));
+                let c = if k % 2 == 0 { a.clone() } else { linear(&mut r) };
+                let t = op(Op::Mul, vec![op(Op::Mul, vec![a.clone(), b]), c]);
+                let mut ctx = Ctx { w: &w, leaves: Vec::new(), built: Default::default(), builds: Default::default() };
+                let Some(p) = ctx.poly(&t) else { continue };
+                let built = ctx.build(&p, FACTOR_TRIES);
+                factored += (size(&built) <= size(&t)) as u32;
+                for _ in 0..32 {
+                    let (x, y, z) = (r.next(), r.next(), r.next());
+                    let env = |v: &str| match v {
+                        "x" => x,
+                        "y" => y,
+                        _ => z,
+                    };
+                    assert_eq!(eval(&t, ty, &env), eval(&built, ty, &env), "w={bits}\n  {t:?}\n  {built:?}");
+                }
+            }
+        }
+        assert!(factored > 50, "factored {factored}");
     }
 }

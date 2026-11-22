@@ -1834,3 +1834,36 @@ fn shifted_xor_plus_low_constant() {
     check("u16", &[("(y ^ 0x1234)*0x10 + 0xf", &["((y * 0x10) ^ 0x234f)"], 10)]);
     check("u32", &[("(x ^ 5)*8 + 8", &["(0xfffffff8 * (x ^ 0xfffffffa))", "(((x ^ 5) * 8) + 8)"], 10)]);
 }
+
+/// `c·P1·Q1 + c·P2·Q2` with `P1 = Q1 + P2 + Q2` is `c·(Q1 + P2)·(Q1 + Q2)`: `a·b` split as `(a | b)·(a & b) + (a & ~b)·(~a & b)`, also with a constant `a`.
+#[test]
+fn split_product_recombined() {
+    check("u64", &[("(((x ^ y) | (y & 0xf)) * ((~x & y) & 0xf)) + ((y ^ ((y & 0xf) | x)) * ((x & y) & 0xf))", &["((x ^ y) * (y & 0xf))"], 10)]);
+    check("u32", &[("(((~y & x) | 0xff) * (~(x | 0xff) & y)) + (((x & y) & 0xffffff00) * (x | (y | 0xff)))", &["((x | 0xff) * (y & 0xffffff00))"], 10)]);
+    check("u64", &[("((0xb & ((s | t) ^ v)) * (0xb | ((s | t) ^ v))) + ((((s | t) ^ v) & -0xc) * ((~v ^ (s | t)) & 0xb)) - y", &["((0xb * ((s | t) ^ v)) - y)"], 10)]);
+}
+
+/// Beside a factor with `k` trailing zeros, the constants of the other factor are cut to `w - k` bits.
+#[test]
+fn product_constants_cut_below_trailing_zeros() {
+    check("u32", &[("(y & 0xff00) * ((x + z) * 0x10000001)", &["((y & 0xff00) * (x + z))"], 10)]);
+    check("u64", &[("(y & 0xff00) * (0x3800000000000001 * (z ^ x))", &["((y & 0xff00) * (z ^ x))"], 10)]);
+    check("u64", &[("(y & 0xf0) * ((x & -0x1235) + -0x4fffffffffffedcc)", &["((y & 0xf0) * (x | 0x1234))"], 10)]);
+}
+
+/// Cubes and products of three affine factors are factored back, also beside a linear rest.
+#[test]
+fn cubes_factored() {
+    check("u64", &[("((((z * 3) - y) * (y * y)) + ((z * (z + (-3 * y))) * z))", &["(((z - y) * (z - y)) * (z - y))", "(((y - z) * (y - z)) * (z - y))"], 10)]);
+    check("u32", &[("~((3 + ((w + 3) * w)) * w)", &["((~w * ~w) * ~w)"], 10)]);
+    check("u32", &[("((y * (((z + y) * (3 * z)) + (y * y))) + ((z * (z * z)) + (~y | z)))", &["((((y + z) * (y + z)) * (y + z)) + (~y | z))"], 10)]);
+    check("u64", &[("((x * (x + (2 * y))) + ((y * y) + ~(y | w)))", &["(((x + y) * (x + y)) + ~(y | w))"], 10)]);
+}
+
+/// `2^k·(a ^ K) + c` is `(2^k·a) ^ (2^k·K + c)` for small `K` too, by the pre-pass.
+#[test]
+fn shifted_xor_small_constant() {
+    check("u64", &[("2*(x ^ 3) + 1", &["((x * 2) ^ 7)"], 10)]);
+    check("u32", &[("4*(x ^ 5) + 3", &["((x * 4) ^ 0x17)"], 10)]);
+    check("i64", &[("8*(y ^ 0xa) + 7", &["((y * 8) ^ 0x57)"], 10)]);
+}

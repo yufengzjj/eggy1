@@ -3096,6 +3096,94 @@ pub(crate) fn rewrite(t: &T, w: &Width) -> T {
     r
 }
 
+/// The terms `(c, t)` and the constant of the sum `t`, scaled by `c`.
+fn sum_terms(t: &T, c: u64, w: &Width, out: &mut Vec<(u64, T)>, konst: &mut u64) {
+    match t {
+        T::Num(v) => *konst = konst.wrapping_add(c.wrapping_mul(*v as u64)) & w.mask,
+        T::Op(Op::Add, a) => a.iter().for_each(|x| sum_terms(x, c, w, out, konst)),
+        T::Op(Op::Sub, a) => {
+            sum_terms(&a[0], c, w, out, konst);
+            sum_terms(&a[1], c.wrapping_neg() & w.mask, w, out, konst);
+        }
+        T::Op(Op::Neg, a) => sum_terms(&a[0], c.wrapping_neg() & w.mask, w, out, konst),
+        T::Op(Op::Mul, a) if matches!((&a[0], &a[1]), (T::Num(_), _) | (_, T::Num(_))) => {
+            let ((T::Num(k), x) | (x, T::Num(k))) = (&a[0], &a[1]) else { unreachable!() };
+            sum_terms(x, c.wrapping_mul(*k as u64) & w.mask, w, out, konst);
+        }
+        _ => out.push((c, t.clone())),
+    }
+}
+
+/// `t` with `recombine_products` applied to each linear region, innermost first, and the
+/// changed regions rewritten again (`11·L` then joins the rest of its region).
+fn recombine_regions(t: &T, w: &Width, in_lin: bool) -> T {
+    let T::Op(op, a) = t else { return t.clone() };
+    let lin = kind(t, w) == Kind::Lin;
+    let node = T::Op(*op, a.iter().map(|x| recombine_regions(x, w, lin)).collect());
+    if !lin || in_lin {
+        return node;
+    }
+    match recombine_products(&node, w) {
+        Some(s) => {
+            let again = rewrite(&s, w);
+            if size(&again) < size(&s) { again } else { s }
+        }
+        None => node,
+    }
+}
+
+/// The sum `t` with two products `c·P1·Q1 + c·P2·Q2` where `P1 = Q1 + P2 + Q2` written as
+/// `c·(Q1 + P2)·(Q1 + Q2)`, which expands to the same: the product identity
+/// `a·b = (a | b)·(a & b) + (a & ~b)·(~a & b)` with its factors rebuilt.
+fn recombine_products(t: &T, w: &Width) -> Option<T> {
+    if kind(t, w) != Kind::Lin {
+        return None;
+    }
+    let (mut terms, mut konst) = (Vec::new(), 0);
+    sum_terms(t, 1, w, &mut terms, &mut konst);
+    let factors = |x: &T| match x {
+        T::Op(Op::Mul, a) if !matches!(a[0], T::Num(_)) && !matches!(a[1], T::Num(_)) => Some((a[0].clone(), a[1].clone())),
+        _ => None,
+    };
+    if terms.iter().filter(|(_, x)| factors(x).is_some()).count() < 2 {
+        return None;
+    }
+    let sub = |a: T, b: T| T::Op(Op::Sub, vec![a, b]);
+    let add = |a: T, b: T| T::Op(Op::Add, vec![a, b]);
+    let mut changed = false;
+    'search: loop {
+        for i in 0..terms.len() {
+            let Some((a, b)) = factors(&terms[i].1) else { continue };
+            for j in i + 1..terms.len() {
+                let Some((c, d)) = factors(&terms[j].1) else { continue };
+                if terms[i].0 != terms[j].0 {
+                    continue;
+                }
+                let ways = [(&a, &b, &c, &d), (&b, &a, &c, &d), (&c, &d, &a, &b), (&d, &c, &a, &b)];
+                for (p1, q1, p2, q2) in ways {
+                    let diff = sub(sub(sub(p1.clone(), q1.clone()), p2.clone()), q2.clone());
+                    if !maybe_zero(&diff, w) || rewrite(&diff, w) != T::Num(0) {
+                        continue;
+                    }
+                    let f1 = rewrite(&add(q1.clone(), p2.clone()), w);
+                    let f2 = rewrite(&add(q1.clone(), q2.clone()), w);
+                    let coef = terms[i].0;
+                    terms.remove(j);
+                    terms[i] = match (f1, f2) {
+                        (T::Num(k), f) | (f, T::Num(k)) => (coef.wrapping_mul(k as u64) & w.mask, f),
+                        (f1, f2) => (coef, T::Op(Op::Mul, vec![f1, f2])),
+                    };
+                    changed = true;
+                    continue 'search;
+                }
+            }
+        }
+        break;
+    }
+    let r = build_sum(&terms, konst, w);
+    (changed && size(&r) < size(t)).then_some(r)
+}
+
 fn rewrite_linear(t: &T, w: &Width) -> T {
     let T::Op(op, args) = t else { return t.clone() };
     if kind(t, w) != Kind::Atom {
@@ -3455,6 +3543,15 @@ pub fn simplify_linear_both(egg: &str, w: u32) -> (String, Option<String>) {
     r
 }
 
+/// Rewrites of a rebuilt candidate that would break subterms the rebuild relates if done
+/// earlier: recombined products, product factors with constants cut below trailing zeros,
+/// and `shifted_xor`.
+fn finish(t: &T, w: &Width) -> T {
+    // Products selected by a bit are left whole for `split_bits` in the next round (Hikari).
+    let t = if selectors(t, w).is_empty() { recombine_regions(t, w, false) } else { t.clone() };
+    crate::lowbits::shifted_xor(&crate::lowbits::cut_products(&t, w), w)
+}
+
 fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Option<String>) {
     let w = Width::new(w);
     let t = parse(egg);
@@ -3490,6 +3587,7 @@ fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Option<String>) {
         rebuilt.push(run(&ht, false));
     }
     SEMI_LEAVES.with(|c| c.set(MAX_LEAVES));
+    let mut rebuilt: Vec<T> = rebuilt.iter().map(|t| finish(t, &w)).collect();
     REWRITTEN.with(|c| c.borrow_mut().clear());
     REBUILT.with(|c| c.borrow_mut().clear());
     SIMBA_MEMO.with(|c| c.borrow_mut().clear());
@@ -3732,6 +3830,34 @@ mod tests {
             }
         }
         assert!(changed > 10, "changed {changed}");
+    }
+
+    #[test]
+    fn recombined_products_preserve_value() {
+        let mut r = Rng(0x1234_5678_9abc_def1);
+        let mut changed = 0;
+        for k in 0..300 {
+            let bits = if k % 2 == 0 { 8 } else { 64 };
+            let w = Width::new(bits);
+            let op = |o: Op, a: Vec<T>| T::Op(o, a);
+            let (a, b) = (random_term_in(&mut r, 2, &["x", "y", "z"]), random_term_in(&mut r, 2, &["x", "y", "z"]));
+            let b = if k % 3 == 0 { op(Op::And, vec![b, T::Num((r.next() % 64) as i64)]) } else { b };
+            let not = |t: &T| op(Op::Not, vec![t.clone()]);
+            let t = op(
+                Op::Add,
+                vec![
+                    op(Op::Mul, vec![op(Op::Or, vec![a.clone(), b.clone()]), op(Op::And, vec![a.clone(), b.clone()])]),
+                    op(Op::Mul, vec![op(Op::And, vec![a.clone(), not(&b)]), op(Op::And, vec![not(&a), b.clone()])]),
+                ],
+            );
+            let Some(alt) = recombine_products(&t, &w) else { continue };
+            changed += 1;
+            for _ in 0..64 {
+                let env: HashMap<String, u64> = ["x", "y", "z"].iter().map(|v| (v.to_string(), r.next())).collect();
+                assert_eq!(full_eval(&t, &w, &env), full_eval(&alt, &w, &env), "{t:?}\n{alt:?}");
+            }
+        }
+        assert!(changed > 100, "changed {changed}");
     }
 
     #[test]
