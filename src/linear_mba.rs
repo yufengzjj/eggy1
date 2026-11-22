@@ -558,24 +558,23 @@ const WIDE_BUDGET: usize = 1 << 25;
 /// A region with more than `MAX_LEAVES` leaves, rewritten with the leaves its values on
 /// {0,1}^n do not depend on set to 0, as in opaque predicates over many variables.
 fn drop_unused(t: &T, lv: &[T], w: &Width) -> Option<T> {
+    if has_const_bitwise(t, w) {
+        return None;
+    }
+    drop_leaves(t, lv, w)
+}
+
+/// `drop_unused` for any region; with constant masks only where `relate` has cancelled leaves,
+/// since elsewhere the rebuilds of the operands do better.
+fn drop_leaves(t: &T, lv: &[T], w: &Width) -> Option<T> {
     let n = lv.len();
-    if n > MAX_WIDE_LEAVES || has_const_bitwise(t, w) {
-        return None;
-    }
-    let prog = Prog::new(t, lv, w);
-    if prog.0.len() << n > WIDE_BUDGET {
-        return None;
-    }
-    let vals: Vec<u64> = (0..1usize << n).map(|p| prog.at(p, w)).collect();
-    let unused: Vec<T> = (0..n)
-        .filter(|&i| (0..1usize << n).all(|p| p >> i & 1 == 1 || vals[p] == vals[p | 1 << i]))
-        .map(|i| lv[i].clone())
-        .collect();
+    let (e0, used) = used_leaves(t, lv, w)?;
+    let unused: Vec<T> = (0..n).filter(|&i| !used[i]).map(|i| lv[i].clone()).collect();
     if unused.is_empty() {
         return None;
     }
     if unused.len() == n {
-        return Some(T::Num(w.signed(vals[0])));
+        return Some(T::Num(w.signed(e0)));
     }
     // Leaves are found as `Prog` finds them: the first subterm equal to one, anywhere.
     fn zero(t: &T, lv: &[T], unused: &[T]) -> T {
@@ -591,6 +590,58 @@ fn drop_unused(t: &T, lv: &[T], w: &Width) -> Option<T> {
         return None;
     }
     Some(rewrite(&z, w)).filter(|r| size(r) < size(t))
+}
+
+/// `e(0)` and the leaves the region's value depends on, from its values on {0,1}^n,
+/// or per bit position for a semi-linear region (see `semi_linear`); `None` past
+/// `MAX_WIDE_LEAVES` leaves or `WIDE_BUDGET`.
+fn used_leaves(t: &T, lv: &[T], w: &Width) -> Option<(u64, Vec<bool>)> {
+    let n = lv.len();
+    if n > MAX_WIDE_LEAVES {
+        return None;
+    }
+    // Bit `j`'s table agrees modulo `2^(w-j)` with that of any lower bit with the same bits
+    // of every mask, so only the lowest bit of each such column is evaluated.
+    fn masks(t: &T, lv: &[T], out: &mut Vec<u64>) {
+        if let T::Op(op, a) = t
+            && !lv.contains(t)
+        {
+            for x in a {
+                match x {
+                    T::Num(c) if matches!(op, Op::And | Op::Or | Op::Xor | Op::Not) => out.push(*c as u64),
+                    _ => masks(x, lv, out),
+                }
+            }
+        }
+    }
+    let mut ks = Vec::new();
+    masks(t, lv, &mut ks);
+    let mut bits: Vec<u32> = Vec::new();
+    let column = |j: u32| ks.iter().map(|k| k >> j & 1 == 1).collect::<Vec<_>>();
+    for j in 0..if ks.is_empty() { 1 } else { w.w } {
+        if bits.iter().all(|&b| column(b) != column(j)) {
+            bits.push(j);
+        }
+    }
+    let prog = Prog::new(t, lv, w);
+    if (prog.0.len() * bits.len()) << n > WIDE_BUDGET {
+        return None;
+    }
+    let e0 = prog.at(0, w);
+    let mut tables: Vec<Vec<u64>> = Vec::new();
+    for &j in &bits {
+        let mut g = Vec::with_capacity(1 << n);
+        for q in 0..1usize << n {
+            let d = prog.run(|i| ((q >> i & 1) as u64) << j, w).wrapping_sub(e0) & w.mask;
+            if d & ((1u64 << j) - 1) != 0 {
+                return None;
+            }
+            g.push(d >> j);
+        }
+        tables.push(g);
+    }
+    let used = (0..n).map(|i| tables.iter().any(|g| (0..g.len()).any(|q| g[q] != g[q & !(1 << i)]))).collect();
+    Some((e0, used))
 }
 
 /// The linear MBA over `lv` with values `vals` on {0,1}^n. When every value is a
@@ -916,7 +967,7 @@ const MAX_FREE_PRODUCT: usize = 20;
 fn relate_region(t: &T, w: &Width) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
-    if lv.len() > MAX_LEAVES {
+    if lv.len() > MAX_WIDE_LEAVES {
         return None;
     }
     fn bit_operands(t: &T, w: &Width, out: &mut Vec<T>) {
@@ -968,17 +1019,47 @@ fn relate_region(t: &T, w: &Width) -> Option<T> {
                 .collect()
         })
         .collect();
+    // Besides small `μ`, the most common one that cancels a leaf `ℓ` of `L` by itself: `ρ = μ·λ`
+    // for the coefficients of `ℓ` alone in the region and in `L`.
+    let region = Prog::new(t, &lv, w);
+    let r0 = region.at(0, w);
+    let derived: Vec<Option<i64>> = arith
+        .iter()
+        .map(|&i| {
+            let own = {
+                let mut own = Vec::new();
+                leaves(&lv[i], w, &mut own);
+                own
+            };
+            let prog = Prog::new(&lv[i], &own, w);
+            let l0 = prog.at(0, w);
+            let mut found: Vec<(i64, usize)> = Vec::new();
+            for (j, l) in own.iter().enumerate() {
+                let Some(r) = lv.iter().position(|x| x == l) else { continue };
+                let rho = region.at(1 << r, w).wrapping_sub(r0) & w.mask;
+                let lambda = prog.at(1 << j, w).wrapping_sub(l0) & w.mask;
+                let Some(mu) = solve_mul(lambda, rho, w).map(|m| w.signed(m)) else { continue };
+                match found.iter_mut().find(|f| f.0 == mu) {
+                    Some(f) => f.1 += 1,
+                    None => found.push((mu, 1)),
+                }
+            }
+            found.into_iter().filter(|f| ![1, -1, 2, -2].contains(&f.0)).max_by_key(|f| f.1).map(|f| f.0)
+        })
+        .collect();
     let mut combos: Vec<Vec<(usize, i64)>> = Vec::new();
     for k in 0..arith.len() {
         if !same[k].is_empty() {
             combos.push(vec![(k, 0)]);
         }
-        for mu in [1, -1, 2, -2] {
+        for mu in [1, -1, 2, -2].into_iter().chain(derived[k]) {
             combos.push(vec![(k, mu)]);
         }
         for k2 in k + 1..arith.len() {
-            for (a, b) in [(1, 1), (1, -1), (-1, 1), (-1, -1)] {
-                combos.push(vec![(k, a), (k2, b)]);
+            let firsts: Vec<i64> = [1, -1].into_iter().chain(derived[k]).collect();
+            let seconds: Vec<i64> = [1, -1].into_iter().chain(derived[k2]).collect();
+            for &a in &firsts {
+                combos.extend(seconds.iter().map(|&b| vec![(k, a), (k2, b)]));
             }
         }
     }
@@ -990,15 +1071,14 @@ fn relate_region(t: &T, w: &Width) -> Option<T> {
         let t = &signed_products(t);
         let mut lv = Vec::new();
         leaves(t, w, &mut lv);
-        if lv.len() > MAX_LEAVES {
-            return None;
-        }
-        let (_, groups) = bit_groups(t, &lv, w)?;
-        Some((0..lv.len()).filter(|&i| groups.iter().any(|(g, _)| (0..g.len()).any(|q| g[q] != g[q & !(1 << i)]))).count())
+        Some(used_leaves(t, &lv, w)?.1.into_iter().filter(|&u| u).count())
     };
-    let base_used = if has_const_bitwise(t, w) { Some(semi_used(t).unwrap_or(lv.len())) } else { None };
-    let base_monos = if base_used.is_none() { crate::poly_mba::monomials(t, w) } else { None };
-    let mut tried: Vec<(usize, Vec<(usize, i64)>, T)> = Vec::new();
+    // A region of more than `MAX_LEAVES` leaves is also scored by used leaves, since there
+    // the cancelled ones are dropped before rebuilding.
+    let (semi, wide) = (has_const_bitwise(t, w), lv.len() > MAX_LEAVES);
+    let base_used = if semi || wide { Some(semi_used(t).unwrap_or(lv.len())) } else { None };
+    let base_monos = if semi { None } else { crate::poly_mba::monomials(t, w) };
+    let mut tried: Vec<(Option<usize>, Option<usize>, Vec<(usize, i64)>, T)> = Vec::new();
     for combo in combos {
         let (mut from, mut to) = (Vec::new(), Vec::new());
         for &(k, _) in &combo {
@@ -1016,23 +1096,37 @@ fn relate_region(t: &T, w: &Width) -> Option<T> {
             let rel = op(Op::Sub, vec![ph[k].clone(), lv[arith[k]].clone()]);
             s = op(Op::Add, vec![s, op(Op::Mul, vec![T::Num(mu), rel])]);
         }
-        let score = match (base_used, base_monos) {
-            (Some(b), _) => semi_used(&s).filter(|&u| u < b),
-            (_, Some(b)) => crate::poly_mba::monomials(&s, w).filter(|&u| u <= b),
-            _ => Some(0),
+        let by_used = base_used.and_then(|b| semi_used(&s).filter(|&u| u < b));
+        let by_monos = match base_monos {
+            _ if semi => None,
+            Some(b) => crate::poly_mba::monomials(&s, w).filter(|&u| u <= b),
+            None => (!wide).then_some(0),
         };
-        if let Some(score) = score {
-            tried.push((score, combo, s));
+        if by_used.is_some() || by_monos.is_some() {
+            tried.push((by_used, by_monos, combo, s));
         }
     }
-    let low = tried.iter().map(|c| c.0).min()?;
+    let low_used = tried.iter().filter_map(|c| c.0).min();
+    let low_monos = tried.iter().filter_map(|c| c.1).min();
+    if low_used.is_none() && low_monos.is_none() {
+        return None;
+    }
     let mut best: Option<T> = None;
-    for (_, combo, s) in tried.into_iter().filter(|c| c.0 == low) {
-        let r = rewrite(&s, w);
+    for (_, _, combo, s) in tried.into_iter().filter(|c| (c.0.is_some() && c.0 == low_used) || (c.1.is_some() && c.1 == low_monos)) {
+        let mut slv = Vec::new();
+        leaves(&s, w, &mut slv);
+        let dropped = if wide && slv.len() > MAX_LEAVES { drop_leaves(&s, &slv, w) } else { None };
+        let r = dropped.unwrap_or_else(|| rewrite(&s, w));
         let back: Vec<T> = combo.iter().map(|&(k, _)| lv[arith[k]].clone()).collect();
         let used: Vec<T> = combo.iter().map(|&(k, _)| ph[k].clone()).collect();
         let r = crate::lowbits::replace(&r, &used, &back);
-        if best.as_ref().is_none_or(|b| size(&r) < size(b)) {
+        let fewer = || {
+            let mut rlv = Vec::new();
+            leaves(&r, w, &mut rlv);
+            rlv.len() < lv.len()
+        };
+        // In a wide region only results where leaves cancelled: others shift extraction for little gain.
+        if (!wide || fewer()) && best.as_ref().is_none_or(|b| size(&r) < size(b)) {
             best = Some(r);
         }
     }
@@ -1139,7 +1233,11 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
     };
     let groups = project(all_groups);
     let full_lv = lv;
-    let lv: &[T] = &used.iter().map(|&i| full_lv[i].clone()).collect::<Vec<_>>();
+    let real: Vec<&T> = used.iter().map(|&i| &full_lv[i]).collect();
+    let arith = real.iter().any(|l| kind(l, w) == Kind::Lin);
+    // The search only needs each leaf's size, so it runs on slots: cheap to copy,
+    // and the memoized searches repeat across regions with other leaves.
+    let lv: &[T] = &real.iter().enumerate().map(|(i, l)| T::Op(Op::Slot(i, size(l)), Vec::new())).collect::<Vec<_>>();
     let mut cands = Vec::new();
     semi_linear_candidates(&groups, lv, e0, w, &mut cands);
     let mut peels = Vec::new();
@@ -1183,10 +1281,18 @@ fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
     }
     cands.extend(semi_split(&groups, lv, e0, w, smallest(&cands)));
     cands.extend(scaled(&groups, lv, e0, w, smallest(&cands)));
-    cands.extend(bit_split(&groups, lv, e0, w, smallest(&cands)));
+    cands.extend(bit_split(&groups, lv, arith, e0, w, smallest(&cands)));
     // Masks that differ only in bits that cannot matter tie on size; keep the short one.
     let best = cands.into_iter().min_by_key(|c| (size(c), const_bits(c)))?;
-    Some(short_consts(best, lv, w))
+    Some(fill_slots(&short_consts(best, lv, w), &real))
+}
+
+fn fill_slots(t: &T, lv: &[&T]) -> T {
+    match t {
+        T::Op(Op::Slot(i, _), _) => lv[*i].clone(),
+        T::Op(op, a) => T::Op(*op, a.iter().map(|x| fill_slots(x, lv)).collect()),
+        _ => t.clone(),
+    }
 }
 
 /// Most leaf splits `bit_split` rebuilds per region.
@@ -1204,10 +1310,10 @@ thread_local! {
 /// by their Boolean function `f`; `P` and `Q` take its projections onto `A` and `B`
 /// (`f(x & !onlyB)` and the rest for `^`), and bits with a constant `f` try each
 /// pair of constants that gives it.
-fn bit_split(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, mut limit: usize) -> Vec<T> {
+fn bit_split(groups: &[(Vec<u64>, u64)], lv: &[T], arith: bool, e0: u64, w: &Width, mut limit: usize) -> Vec<T> {
     let n = lv.len();
     // Arithmetic leaves are left to `relate`, which needs the rebuilt region's shape.
-    if !(4..=6).contains(&n) || BIT_SPLITS.with(|c| c.get()) == 0 || lv.iter().any(|l| kind(l, w) == Kind::Lin) {
+    if !(4..=6).contains(&n) || BIT_SPLITS.with(|c| c.get()) == 0 || arith {
         return Vec::new();
     }
     let pts = 1usize << n;

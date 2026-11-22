@@ -728,6 +728,27 @@ fn related_arithmetic_leaves() {
     );
 }
 
+/// Related arithmetic leaves in regions of more than 6 leaves, where cancelling a leaf
+/// of `L` needs `μ` other than ±1, ±2 (here -3), or the region has constant masks.
+#[test]
+fn related_leaves_in_wide_regions() {
+    check(
+        "i64",
+        &[
+            (
+                "(((y + ((~(z ^ x) - u) - (u | w))) * 3) + (((((((z ^ x) + u) + v) - y) & ((u | w) + v)) - v) * 6))",
+                &["(3 * (((u | w) + v) ^ (~u + ((y - v) - (z ^ x)))))"],
+                10,
+            ),
+            (
+                "((((v + 1) * y) + (((t & w) - (v | u)) + (-2 * ((y | z) & (((t & w) - (v | u)) + ((y & z) + (y | 0xdeadbeef))))))) + ((y | 0xdeadbeef) + z))",
+                &["((y * v) + ((y | z) ^ (((t & w) - (v | u)) + ((y & z) + (y | 0xdeadbeef)))))"],
+                10,
+            ),
+        ],
+    );
+}
+
 /// The last extraction still holds a region the linear pre-pass rebuilds.
 #[test]
 fn extra_round_after_last_extraction() {

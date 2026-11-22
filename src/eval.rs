@@ -8,8 +8,9 @@ pub enum Term {
     Op(Op, Vec<Term>),
 }
 
-/// An `Expr` constructor other than `Num` and `Var`; `Leaf` and `LeafOperand` are
-/// nullary placeholders that `linear_mba` uses internally and never parses.
+/// An `Expr` constructor other than `Num` and `Var`; `Leaf`, `LeafOperand` and `Slot` are
+/// nullary placeholders that `linear_mba` uses internally and never parses. `Slot(i, s)`
+/// stands for leaf `i` and counts as `s` nodes in `size`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Op {
     Add,
@@ -27,6 +28,7 @@ pub enum Op {
     Neg,
     Leaf(usize),
     LeafOperand(usize),
+    Slot(usize, usize),
 }
 
 impl Op {
@@ -64,6 +66,7 @@ impl Op {
             Op::Neg => "Neg",
             Op::Leaf(_) => "\u{2}",
             Op::LeafOperand(_) => "\u{3}",
+            Op::Slot(..) => "\u{5}",
         }
     }
 
@@ -75,7 +78,7 @@ impl Op {
 impl std::fmt::Display for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Op::Leaf(i) | Op::LeafOperand(i) => write!(f, "{}{i}", self.name()),
+            Op::Leaf(i) | Op::LeafOperand(i) | Op::Slot(i, _) => write!(f, "{}{i}", self.name()),
             _ => f.write_str(self.name()),
         }
     }
@@ -146,6 +149,7 @@ pub fn show(t: &Term) -> String {
 /// Number of nodes.
 pub fn size(t: &Term) -> usize {
     match t {
+        Term::Op(Op::Slot(_, s), _) => *s,
         Term::Op(_, args) => 1 + args.iter().map(size).sum::<usize>(),
         _ => 1,
     }
@@ -227,7 +231,7 @@ pub fn eval(t: &Term, ty: NumType, env: &impl Fn(&str) -> u64) -> Option<u64> {
                 Op::Mod => x % y,
                 Op::Mulhi if ty.signed => ((sx as i128 * sy as i128) >> w) as u64,
                 Op::Mulhi => ((x as u128 * y as u128) >> w) as u64,
-                Op::Leaf(_) | Op::LeafOperand(_) => panic!("unknown operator {op}"),
+                Op::Leaf(_) | Op::LeafOperand(_) | Op::Slot(..) => panic!("unknown operator {op}"),
             }
         }
     };
