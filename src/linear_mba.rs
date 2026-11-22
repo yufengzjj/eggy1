@@ -859,15 +859,36 @@ fn related_leaves(t: &T, lv: &[T], w: &Width) -> Option<T> {
             }
         }
     }
-    combos
+    // Rebuilding is the slow part, so only the combinations whose values need the fewest
+    // leaves and conjunctions are rebuilt.
+    let n = ext.len();
+    let mut cands: Vec<((u32, usize), Vec<u64>)> = combos
         .into_iter()
         .map(|combo| {
             let vals: Vec<u64> = (0..pts)
                 .map(|p| combo.iter().fold(base[p], |v, &(i, mu)| v.wrapping_add(mu.wrapping_mul(diffs[i][p])) & w.mask))
                 .collect();
-            rebuild_values(&vals, &ext, w)
+            (conj_measure(&vals, n, w), vals)
         })
-        .min_by_key(size)
+        .collect();
+    cands.sort_by_key(|c| c.0);
+    cands.into_iter().take(MAX_RELATED_REBUILDS).map(|(_, vals)| rebuild_values(&vals, &ext, w)).min_by_key(size)
+}
+
+const MAX_RELATED_REBUILDS: usize = 8;
+
+/// Leaves used and non-zero coefficients of `vals` (on {0,1}^n) in the conjunction basis.
+fn conj_measure(vals: &[u64], n: usize, w: &Width) -> (u32, usize) {
+    let mut a = vals.to_vec();
+    for i in 0..n {
+        for p in 0..a.len() {
+            if p >> i & 1 == 1 {
+                a[p] = a[p].wrapping_sub(a[p ^ 1 << i]) & w.mask;
+            }
+        }
+    }
+    let used = a.iter().enumerate().filter(|&(_, &c)| c != 0).fold(0usize, |u, (p, _)| u | p);
+    (used.count_ones(), a.iter().filter(|&&c| c != 0).count())
 }
 
 /// `t` with each region also rebuilt after an arithmetic leaf `L` of a bitwise

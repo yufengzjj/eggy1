@@ -1734,6 +1734,21 @@ fn quadratic_factors() {
     check("u8", &[("3*x*x + 7*x*y + 2*y*y + x + 2*y", &["((x + (2 * y)) * ((3 * x) - ~y))", "((x + (2 * y)) * (((3 * x) + y) + 1))"], 10)]);
 }
 
+/// Squares have double roots `b/2a`; both factors may also be negated (`(x + 1)·…` as `~x·…`).
+#[test]
+fn square_factors() {
+    check(
+        "u32",
+        &[
+            ("((y&x)*(0xfffffffc*(y|x))) + y*(y+2*x) + x*x", &["((y ^ x) * (y ^ x))"], 10),
+            ("(w^y)*y + (w^y)*w + (w&y)*(w&y)", &["((w | y) * (w | y))"], 10),
+            ("x*(0xfffffffe*(z^w) + x) + (z&w)*(0xfffffffc*(z|w)) + z*(z + 2*w) + w*w", &["((x - (z ^ w)) * (x - (z ^ w)))", "(((z ^ w) - x) * ((z ^ w) - x))"], 10),
+            ("(x + 1)*(x + 0xfffffffe*z)", &["(~x * ((2 * z) - x))"], 10),
+        ],
+    );
+    check("u64", &[("z*(z + ~y*2) + ~y*~y", &["((z + ~y) * (z + ~y))"], 10)]);
+}
+
 /// A bitwise region with constants over 4 to 6 leaves is split into `P op Q` over smaller leaf sets.
 #[test]
 fn bitwise_split_with_constants() {

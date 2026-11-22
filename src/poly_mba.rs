@@ -327,7 +327,7 @@ impl Ctx<'_> {
     }
 
     /// Roots of `a·r² - b·r + c`, smallest signed value first, found by lifting bit by bit;
-    /// when there are too many, only `0` and `b/a` (odd `a`) are kept, if they are roots.
+    /// when there are too many, only `0`, `b/a` and `b/2a` (odd `a`) are kept, if they are roots.
     fn quad_roots(&self, a: u64, b: u64, c: u64) -> Vec<u64> {
         let f = |r: u64| a.wrapping_mul(r).wrapping_mul(r).wrapping_sub(b.wrapping_mul(r)).wrapping_add(c);
         let mut rs = vec![0u64];
@@ -339,7 +339,11 @@ impl Ctx<'_> {
                 for _ in 0..6 {
                     inv = inv.wrapping_mul(2u64.wrapping_sub(a.wrapping_mul(inv)));
                 }
-                rs = [0, if a & 1 == 1 { b.wrapping_mul(inv) & self.w.mask } else { 0 }].into_iter().filter(|&r| f(r) & self.w.mask == 0).collect();
+                let odd = a & 1 == 1;
+                let q = if odd { b.wrapping_mul(inv) & self.w.mask } else { 0 };
+                let h = if odd && b & 1 == 0 { ((self.w.signed(b) >> 1) as u64).wrapping_mul(inv) & self.w.mask } else { 0 };
+                rs = [0, q, h].into_iter().filter(|&r| f(r) & self.w.mask == 0).collect();
+                rs.sort_by_key(|&r| self.w.signed(r).unsigned_abs());
                 rs.dedup();
                 return rs;
             }
@@ -373,10 +377,22 @@ impl Ctx<'_> {
         let mut cands: Vec<(Conj, usize)> = counts.into_iter().collect();
         cands.sort_by_key(|&(c, n)| (std::cmp::Reverse(n), c.count_ones()));
         let mut best: Option<T> = None;
+        let neg1 = self.w.mask;
         for (l1, l2) in self.factor2(p) {
+            let (n1, n2) = (self.scale(l1.clone(), neg1), self.scale(l2.clone(), neg1));
+            let lin = |p: &Poly| match self.build_linear(p) {
+                T::Op(o, mut a) if o == "Add" && matches!(&a[0], T::Op(n, _) if n == "Neg") => {
+                    let T::Op(_, mut neg) = a.remove(0) else { unreachable!() };
+                    T::Op("Sub".into(), vec![a.remove(0), neg.remove(0)])
+                }
+                t => t,
+            };
             let cand = T::Op("Mul".into(), vec![self.build_linear(&l1), self.build_linear(&l2)]);
-            if best.as_ref().is_none_or(|b| size(&cand) < size(b)) {
-                best = Some(cand);
+            let alt = T::Op("Mul".into(), vec![lin(&n1), lin(&n2)]);
+            for cand in [cand, alt] {
+                if best.as_ref().is_none_or(|b| size(&cand) < size(b)) {
+                    best = Some(cand);
+                }
             }
         }
         // Pulling `f` out of its degree-1 monomial too (`x*y - 7*x` → `x*(y - 7)`)
