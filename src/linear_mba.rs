@@ -2424,7 +2424,27 @@ fn half_flips(groups: &[(Vec<u64>, u64)], w: &Width) -> Vec<Vec<(Vec<u64>, u64)>
     out
 }
 
+type GroupedKey = (Vec<(Vec<u64>, u64)>, Vec<T>, u64, u32);
+thread_local! {
+    static GROUPED: std::cell::RefCell<std::collections::HashMap<GroupedKey, T>> = Default::default();
+}
+
+/// The first smallest of `grouped_candidates_all`, memoized: callers only keep the first
+/// smallest candidate, and semi-linear searches repeat the same groups.
 fn grouped_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, cands: &mut Vec<T>) {
+    let key = (groups.to_vec(), lv.to_vec(), e0, w.w);
+    if let Some(t) = GROUPED.with(|c| c.borrow().get(&key).cloned()) {
+        cands.push(t);
+        return;
+    }
+    let mut all = Vec::new();
+    grouped_candidates_all(groups, lv, e0, w, &mut all);
+    let Some(best) = all.into_iter().min_by_key(|c| (size(c), const_bits(c))) else { return };
+    GROUPED.with(|c| c.borrow_mut().insert(key, best.clone()));
+    cands.push(best);
+}
+
+fn grouped_candidates_all(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, cands: &mut Vec<T>) {
     let m = w.mask;
     let r = groups.len();
     cands.push(masked_groups(groups, lv, e0, w));
@@ -3114,7 +3134,7 @@ fn split_low(t: &T, k: u32, w: &Width) -> Option<(T, u64)> {
 }
 
 /// `t` with the constants its low `r` bits depend on sign-extended from bit `r - 1`.
-fn low_consts(t: &T, r: u32) -> T {
+pub(crate) fn low_consts(t: &T, r: u32) -> T {
     match t {
         T::Num(v) => T::Num(v << (64 - r) >> (64 - r)),
         T::Op(op, a) if *op == Op::Shl => T::Op(*op, vec![low_consts(&a[0], r), a[1].clone()]),
@@ -3152,6 +3172,10 @@ fn halve(t: &T, w: &Width) -> T {
     let scaled = T::Op(Op::Mul, vec![T::Num(w.signed(1 << k)), inner]);
     if c == 0 { scaled } else { T::Op(Op::Add, vec![scaled, T::Num(c as i64)]) }
 }
+
+/// Rebuilds of at most this size are not searched further: the input is not halved, and
+/// the driver does not saturate the input beside them.
+pub const TINY: usize = 3;
 
 /// Most variable bits `split_bits` tries on one term, how deep it nests, and the
 /// largest first rebuild it runs on.
@@ -3355,7 +3379,7 @@ fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Option<String>) {
     // Halving the whole input can give semi-linear regions that are slow to search,
     // so only small ones are rebuilt there, also inside `halve`.
     SEMI_LEAVES.with(|c| c.set(2));
-    let ht = halve(&t, &w);
+    let ht = if size(&r) <= TINY { t.clone() } else { halve(&t, &w) };
     if ht != t {
         rebuilt.push(run(&ht, false));
     }
@@ -3363,6 +3387,7 @@ fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Option<String>) {
     REWRITTEN.with(|c| c.borrow_mut().clear());
     REBUILT.with(|c| c.borrow_mut().clear());
     SIMBA_MEMO.with(|c| c.borrow_mut().clear());
+    GROUPED.with(|c| c.borrow_mut().clear());
     rebuilt.sort_by_key(size);
     rebuilt.dedup();
     let other = rebuilt.get(1).cloned();

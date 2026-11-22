@@ -52,13 +52,31 @@ fn high(i: &Info, w: &Width) -> u32 {
     64 - (!(i.k0 | i.k1) & w.mask).leading_zeros()
 }
 
+/// Known bits of `a + b + cin`, bit by bit with the carry known where two of the three inputs agree.
+fn known_add(a: (u64, u64), b: (u64, u64), cin: u64, w: &Width) -> (u64, u64) {
+    let (mut k0, mut k1) = (0, 0);
+    let (mut c0, mut c1) = (cin ^ 1, cin);
+    for i in 0..w.w {
+        let bit = |k: u64| k >> i & 1;
+        let (a0, a1, b0, b1) = (bit(a.0), bit(a.1), bit(b.0), bit(b.1));
+        if (a0 | a1) & (b0 | b1) & (c0 | c1) == 1 {
+            let s = a1 ^ b1 ^ c1;
+            k0 |= (s ^ 1) << i;
+            k1 |= s << i;
+        }
+        (c0, c1) = (u64::from(a0 + b0 + c0 >= 2), u64::from(a1 + b1 + c1 >= 2));
+    }
+    (k0, k1)
+}
+
 fn known_low(a: &Info, b: &Info, f: impl Fn(u64, u64) -> u64, w: &Width) -> (u64, u64) {
     let l = (a.k0 | a.k1).trailing_ones().min((b.k0 | b.k1).trailing_ones()).min(w.w);
     let r = f(a.k1, b.k1) & lowmask(l);
     (!r & lowmask(l), r)
 }
 
-fn combine(op: Op, args: &[Info], w: &Width) -> Info {
+/// `square`: the operands of a product are the same term, so bit 1 is 0 (`a² mod 4` is 0 or 1).
+fn combine(op: Op, args: &[Info], square: bool, w: &Width) -> Info {
     let m = w.mask;
     let a: Vec<Info> = args.iter().map(|i| if i.det { *i } else { leaf_info(i.k0, i.k1, w) }).collect();
     let tz = |i: &Info| lowmask(i.k0.trailing_ones().min(w.w));
@@ -74,13 +92,13 @@ fn combine(op: Op, args: &[Info], w: &Width) -> Info {
         Op::And => (x.k0 | y.k0, x.k1 & y.k1),
         Op::Or => (x.k0 & y.k0, x.k1 | y.k1),
         Op::Xor => (x.k0 & y.k0 | x.k1 & y.k1, x.k0 & y.k1 | x.k1 & y.k0),
-        Op::Neg => known_low(&x, &x, |p, _| p.wrapping_neg(), w),
+        Op::Neg => known_add((m, 0), (x.k1, x.k0), 1, w),
         Op::Sub => {
-            let (k0, k1) = known_low(&x, &y, u64::wrapping_sub, w);
+            let (k0, k1) = known_add((x.k0, x.k1), (y.k1, y.k0), 1, w);
             (k0 | bound((x.k1 >= max(&y)).then(|| max(&x) - y.k1)), k1)
         }
         Op::Add => {
-            let (k0, k1) = known_low(&x, &y, u64::wrapping_add, w);
+            let (k0, k1) = known_add((x.k0, x.k1), (y.k0, y.k1), 0, w);
             (k0 | bound(max(&x).checked_add(max(&y))), k1)
         }
         Op::Mul => {
@@ -89,7 +107,8 @@ fn combine(op: Op, args: &[Info], w: &Width) -> Info {
             if let Some((c, o)) = konst(&x).map(|c| (c, y)).or_else(|| konst(&y).map(|c| (c, x))) {
                 full = full.min(o.need.max(w.w.saturating_sub(c.trailing_zeros())));
             }
-            (k0 | tzs | bound(max(&x).checked_mul(max(&y))), k1)
+            let sq = if square { 2 & !k1 } else { 0 };
+            (k0 | tzs | sq | bound(max(&x).checked_mul(max(&y))), k1)
         }
         Op::Shl if (y.k0 | y.k1) & m == m => match y.k1 {
             s if s >= w.w as u64 => (m, 0),
@@ -114,7 +133,7 @@ fn info(t: &T, w: &Width) -> Info {
     match t {
         T::Var(_) => leaf_info(0, 0, w),
         T::Num(c) => leaf_info(!(*c as u64) & w.mask, *c as u64 & w.mask, w),
-        T::Op(op, a) => combine(*op, &a.iter().map(|x| info(x, w)).collect::<Vec<_>>(), w),
+        T::Op(op, a) => combine(*op, &a.iter().map(|x| info(x, w)).collect::<Vec<_>>(), is_square(t), w),
     }
 }
 
@@ -159,7 +178,7 @@ impl Prog {
         };
         let start = self.ops.len();
         let infos: Vec<Info> = a.iter().map(|x| self.compile(x, w)).collect();
-        let i = combine(*op, &infos, w);
+        let i = combine(*op, &infos, is_square(t), w);
         if !i.det {
             self.ops.truncate(start);
             self.leaf(t);
@@ -244,7 +263,8 @@ impl Pass<'_> {
         let T::Op(op, a) = t else { return (t.clone(), info(t, w)) };
         let (args, infos): (Vec<T>, Vec<Info>) = a.iter().map(|x| self.fold(x)).unzip();
         let node = T::Op(*op, args);
-        let i = combine(*op, &infos, w);
+        let i = combine(*op, &infos, is_square(&node), w);
+        let node = if *op == Op::Mul { low_factor(node, &infos, w) } else { node };
         let konst = |v: u64| (T::Num(w.signed(v)), info(&T::Num(w.signed(v)), w));
         if (i.k0 | i.k1) & w.mask == w.mask {
             return konst(i.k1);
@@ -328,6 +348,75 @@ impl Pass<'_> {
             return t.clone();
         }
         T::Op(*op, a.iter().map(|x| self.context(x)).collect())
+    }
+}
+
+fn is_square(t: &T) -> bool {
+    matches!(t, T::Op(Op::Mul, a) if a.len() == 2 && a[0] == a[1])
+}
+
+fn split_add(t: &T) -> Option<(&T, i64)> {
+    match t {
+        T::Op(Op::Add, a) => match (&a[0], &a[1]) {
+            (q, T::Num(c)) | (T::Num(c), q) => Some((q, *c)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// A product with a factor of `t` known trailing zeros only sees the low `w - t` bits of
+/// the other factor: that factor becomes a subterm `q + K` of the first one that agrees
+/// with it there (`(A & -2^32)*(q + c)` with `A = q + K` is `(A & -2^32)*A`), or else
+/// has a constant operand cut to `w - t` bits where that gives a constant of the first
+/// factor (`(a & -8)*(K ^ s)` with `K = 2^63 + 7` is `(a & -8)*(7 ^ s)`).
+fn low_factor(node: T, infos: &[Info], w: &Width) -> T {
+    let T::Op(op, a) = &node else { return node };
+    for j in 0..2 {
+        let t = infos[j].k0.trailing_ones().min(w.w);
+        if t == 0 || t >= w.w || a.iter().any(|x| matches!(x, T::Num(_))) {
+            continue;
+        }
+        let r = w.w - t;
+        let q = &a[1 - j];
+        let mut same = None;
+        if let Some((s, c)) = split_add(q) {
+            let mut found = |x: &T| {
+                if same.is_none() && x != q && split_add(x).is_some_and(|(s2, k)| s2 == s && (k.wrapping_sub(c) as u64) & lowmask(r) == 0) {
+                    same = Some(x.clone());
+                }
+            };
+            visit(&a[j], &mut found);
+        }
+        // Only direct constant operands, and only to a constant (or complement) of the first
+        // factor: other cuts break what `q` shares, as `K` in `(a & ~K)*(~a & K)`.
+        let mut consts = Vec::new();
+        visit(&a[j], &mut |x: &T| {
+            if let T::Num(c) = x {
+                consts.extend([*c as u64 & w.mask, !*c as u64 & w.mask]);
+            }
+        });
+        let cut = |x: &T| match (x, crate::linear_mba::low_consts(x, r)) {
+            (T::Num(c), T::Num(d)) if consts.contains(&(d as u64 & w.mask)) && !consts.contains(&(*c as u64 & w.mask)) => T::Num(d),
+            _ => x.clone(),
+        };
+        let next = same.unwrap_or_else(|| match q {
+            T::Op(o, b) if matches!(o, Op::Add | Op::Sub | Op::Mul | Op::And | Op::Or | Op::Xor) => T::Op(*o, b.iter().map(cut).collect()),
+            _ => q.clone(),
+        });
+        if next != *q {
+            let mut b = a.clone();
+            b[1 - j] = next;
+            return T::Op(*op, b);
+        }
+    }
+    node
+}
+
+fn visit(t: &T, f: &mut impl FnMut(&T)) {
+    f(t);
+    if let T::Op(_, a) = t {
+        a.iter().for_each(|x| visit(x, f));
     }
 }
 
@@ -419,6 +508,10 @@ mod tests {
         match op {
             None => T::Op(Op::And, vec![sub(h), T::Num((r >> 24) as i64 % 4 + 1)]),
             Some(op @ (Op::Not | Op::Neg)) => T::Op(op, vec![sub(h)]),
+            Some(Op::Mul) if r >> 31 & 3 == 0 => {
+                let s = sub(h);
+                T::Op(Op::Mul, vec![s.clone(), s])
+            }
             Some(Op::Shl) if r >> 30 & 1 == 0 => T::Op(Op::Shl, vec![sub(h), T::Op(Op::And, vec![sub(h), T::Num(7)])]),
             Some(op) => T::Op(op, vec![sub(h), sub(h)]),
         }
@@ -440,6 +533,21 @@ mod tests {
         let ops = [Op::Add, Op::Sub, Op::And, Op::Or, Op::Xor];
         let inner = op(ops[(*h >> 24) as usize % 5], var(*h >> 28), t);
         op(ops[(*h >> 32) as usize % 5], var(*h >> 36), inner)
+    }
+
+    #[test]
+    fn known_bits_match_evaluation() {
+        let w = Width::new(8);
+        let ty = NumType { bits: 8, signed: false };
+        let mut h = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..300 {
+            let t = random_term(&mut h, 4);
+            let i = info(&t, &w);
+            for p in 0u64..1 << 16 {
+                let v = eval(&t, ty, &|n: &str| if n == "x" { p & 0xff } else { p >> 8 }).unwrap() & 0xff;
+                assert!(v & i.k0 == 0 && !v & i.k1 & 0xff == 0, "{t:?} at {p:#x}: {v:#x}");
+            }
+        }
     }
 
     #[test]

@@ -1779,3 +1779,27 @@ fn negative_power_of_two_scale() {
 fn low_bits_context_of_three_leaves() {
     check("i64", &[("(y ^ x) | (2 & ((2 * c) << ((~y ^ x) & 63)))", &["(y ^ x)", "(x ^ y)"], 10)]);
 }
+
+/// Bit 1 of a square is 0, and carries are tracked through known bits of a sum.
+#[test]
+fn square_low_bits() {
+    check("u64", &[("((((((x - y) * (x - y)) ^ 0x6d13500) + 2) & 0xfffffffffffffffd) ^ 0x6d13500)", &["((x - y) * (x - y))"], 10)]);
+    check("i32", &[("(((x * x) ^ 0x10) + 2) & -3", &["((x * x) ^ 0x10)"], 10)]);
+    check("u8", &[("((x + 3) * (x + 3)) & 0xfd", &["((x + 3) * (x + 3))"], 10)]);
+}
+
+/// A factor with `t` trailing zeros only sees the low `w - t` bits of the other factor.
+#[test]
+fn product_with_trailing_zeros() {
+    check(
+        "i64",
+        &[
+            (
+                "((((x & z) + 0x57c3382e1a728dbc) & -0x100000000) * ((x & z) + 0x1a728dbc)) + ((((x & z) + 0x57c3382e1a728dbc) & 0xffffffff) * ((x & z) + 0x57c3382e1a728dbc)) + (0x50798fa3cb1ae488 * (x & z)) - 0x5650a79cb9e8a210",
+                &["((x & z) * (x & z))"],
+                10,
+            ),
+            ("(((y & x) & 7) * ((y & x) | 7)) + (((y & x) & -8) * (-0x5ffffffffffffff9 ^ ((y & x) & 7)))", &["((y & x) * 7)", "(7 * (y & x))"], 10),
+        ],
+    );
+}

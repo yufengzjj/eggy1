@@ -1022,8 +1022,9 @@ pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
         // Saturating a large input is most of the run time and rarely beats its
         // rebuild; it is kept only where rules do better from the input: results
         // that still mix arithmetic or constants into bitwise operations, and
-        // inputs with shifts, division or mulhi.
-        let opaque = ["(Shl ", "(Shr ", "(Div ", "(Mod ", "(Mulhi "].iter().any(|o| seed.contains(o));
+        // inputs with shifts, division or mulhi, unless the rebuild is already tiny.
+        let opaque = ["(Shl ", "(Shr ", "(Div ", "(Mod ", "(Mulhi "].iter().any(|o| seed.contains(o))
+            && !(first && eval::size(&eval::parse(&linear_mba::simplify_linear(&seed, width_of(&cli.num_type)))) <= linear_mba::TINY);
         let mut extracted = simplify_round(&egg, &seed, cli, first && opaque)?;
         if first && !opaque && mixed(&eval::parse(&extracted)) {
             let full = simplify_round(&egg, &seed, cli, true)?;
