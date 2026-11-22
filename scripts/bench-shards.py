@@ -7,11 +7,16 @@ directory in its command line. Results are merged into one table in the bench fo
     python -I scripts/bench-shards.py -j 26 -o out/run1 bench-data/a.txt bench-data/b_u32.txt@u32
 
 A file may end in @TYPE to bench it with that numeric type (default: -n).
+
+Timeouts are timing-sensitive under load, so after the main pass every timed-out case is run
+again on its own, --retry-jobs at a time, and the table counts the retry's result; the first
+pass's table is kept in table-first.txt.
 """
 
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -106,7 +111,7 @@ class Runner:
 
     def run_shard(self, shard):
         sid, ty, cases, _ = shard
-        d = Path(self.args.out) / "shards" / f"{sid:05d}"
+        d = Path(self.args.out) / "shards" / (f"{sid:05d}" if isinstance(sid, int) else sid)
         d.mkdir(parents=True, exist_ok=True)
         by_file = {}
         for _, stem, header, line in cases:
@@ -141,7 +146,8 @@ class Runner:
                 self.rows[key] = ([x + y for x, y in zip(old[0], counts)], old[1] + s)
             fp = d / "fails.txt"
             if fp.exists():
-                self.fails.append((sid, fp.read_text(encoding="utf-8")))
+                for entry in split_fails(fp.read_text(encoding="utf-8")):
+                    self.fails.append((sid, ty, entry))
             self.done_cases += len(cases)
             self.done_secs += secs
             self.done_bytes += sum(len(c[3]) for c in cases)
@@ -166,6 +172,85 @@ class Runner:
             oldest = max((time.time() - t for t, _ in self.running.values()), default=0)
             return (f"{self.done_cases}/{n} cases, {len(self.running)} shards running "
                     f"(oldest {oldest:.0f}s), {el:.0f}s elapsed, ETA {eta:.0f}s, wrong+error {bad}")
+
+
+FAIL_HEAD = re.compile(r"\[(\w+)\] (.*?) / (.*)")
+
+
+def split_fails(text):
+    entries = []
+    for line in text.splitlines(keepends=True):
+        if line.startswith("[") or not entries:
+            entries.append(line)
+        else:
+            entries[-1] += line
+    return entries
+
+
+def timeout_case(ty, entry):
+    """(type, stem, section, line) of a timeout entry in a bench fails file, else None."""
+    lines = entry.splitlines()
+    m = FAIL_HEAD.fullmatch(lines[0])
+    if not m or m.group(1) != "timeout" or len(lines) < 3:
+        return None
+    if not (lines[1].startswith("  in:  ") and lines[2].startswith("  gt:  ")):
+        return None
+    return (ty, m.group(2), m.group(3), lines[1][7:] + "," + lines[2][7:])
+
+
+def retry_timeouts(runner):
+    """Run each timed-out case again on its own and replace its count and fail entry."""
+    a = runner.args
+    todo = []
+    for i, (sid, ty, entry) in enumerate(runner.fails):
+        case = timeout_case(ty, entry)
+        if case:
+            todo.append((i, case))
+    if not todo or a.retry_jobs <= 0:
+        return None
+    ra = argparse.Namespace(**vars(a))
+    ra.timeout = a.retry_timeout or a.timeout
+    retry = Runner(ra, [c for _, c in todo])
+    retry.next = len(todo)
+    shards = [(f"retry{k:05d}", c[0], [c], 0.0) for k, (_, c) in enumerate(todo)]
+    lock = threading.Lock()
+
+    def worker():
+        while True:
+            with lock:
+                if not shards:
+                    return
+                shard = shards.pop(0)
+            retry.run_shard(shard)
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(a.retry_jobs)]
+    for t in threads:
+        t.start()
+    out = Path(a.out)
+    while any(t.is_alive() for t in threads):
+        time.sleep(5)
+        line = f"retrying {len(todo)} timeouts, {a.retry_jobs} at a time: {retry.done_cases} done"
+        (out / "progress.txt").write_text(line + "\n", encoding="utf-8")
+        print(line, file=sys.stderr, flush=True)
+    ti = STATUSES.index("timeout")
+    for key, (counts, secs) in retry.rows.items():
+        old = runner.rows[key]
+        n = counts[-1]
+        fixed = [x + y for x, y in zip(old[0], counts)]
+        fixed[ti] -= n
+        fixed[-1] -= n
+        runner.rows[key] = (fixed, old[1] - n * a.timeout + secs)
+    new_fails = {}
+    for sid, ty, entry in retry.fails:
+        new_fails.setdefault(sid, []).append((sid, ty, entry))
+    drop = {i for i, _ in todo}
+    kept = [f for i, f in enumerate(runner.fails) if i not in drop]
+    for k, (i, _) in enumerate(todo):
+        kept += [(runner.fails[i][0], ty, e) for _, ty, e in new_fails.get(f"retry{k:05d}", [])]
+    runner.fails = kept
+    runner.failed_shards += retry.failed_shards
+    still = sum(c[ti] for c, _ in retry.rows.values())
+    return f"retried {len(todo)} timeouts on their own, {a.retry_jobs} at a time: {still} still time out\n"
 
 
 def parse_table(text):
@@ -193,7 +278,7 @@ def table(rows):
             old = totals.setdefault(t, ([0] * len(STATUSES), 0.0))
             totals[t] = ([x + y for x, y in zip(old[0], counts)], old[1] + secs)
     types = sorted(t for t in totals if t != "ALL")
-    for t in (types if len(types) > 1 else []) + ["ALL"]:
+    for t in (types if len(types) > 1 else []) + (["ALL"] if totals else []):
         counts, secs = totals[t]
         out.append(f"| TOTAL | {t} |  | " + " | ".join(map(str, counts)) + f" | {secs / max(counts[-1], 1):.2f} |")
     return "\n".join(out) + "\n"
@@ -212,6 +297,8 @@ def main():
     ap.add_argument("--first-cases", type=int, default=20, help="shard size before any timing is known")
     ap.add_argument("--bench", help="bench binary (default: build it with cargo and use target/release/examples/bench)")
     ap.add_argument("--keep", action="store_true", help="keep the shard directories")
+    ap.add_argument("--retry-jobs", type=int, default=4, help="timed-out cases rerun at a time (0: no retry)")
+    ap.add_argument("--retry-timeout", type=float, help="seconds per case in the retry (default: -t)")
     args, args.extra = ap.parse_known_args()
     if args.bench is None:
         subprocess.run(["cargo", "build", "--release", "-q", "--example", "bench"], check=True)
@@ -235,11 +322,17 @@ def main():
         line = runner.progress()
         (out / "progress.txt").write_text(line + "\n", encoding="utf-8")
         print(line, file=sys.stderr, flush=True)
+    runner.fails.sort(key=lambda f: f[0])
+    first = table(runner.rows)
+    note = retry_timeouts(runner)
     text = table(runner.rows)
+    if note:
+        (out / "table-first.txt").write_text(first, encoding="utf-8")
+        text += "\n" + note
     if runner.failed_shards:
         text += f"\nshards without a result (see shards/*/out.txt with --keep): {runner.failed_shards}\n"
     (out / "table.txt").write_text(text, encoding="utf-8")
-    (out / "fails.txt").write_text("".join(f for _, f in sorted(runner.fails)), encoding="utf-8")
+    (out / "fails.txt").write_text("".join(e for _, _, e in runner.fails), encoding="utf-8")
     (out / "progress.txt").write_text(runner.progress() + "\nDONE\n", encoding="utf-8")
     print(text, end="")
 
