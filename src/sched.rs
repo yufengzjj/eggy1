@@ -111,6 +111,8 @@ const PASSES: &[Pass] = &[
     },
     Pass { name: "halve", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::linear_mba::halve(t, w)) },
     Pass { name: "join_constants", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::linear_mba::join_constants(t, w, false)) },
+    Pass { name: "over_const_bitwise", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::linear_mba::over_const_bitwise(t, w)) },
+    Pass { name: "over_shared_bitwise", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::linear_mba::over_shared_bitwise(t, w)) },
     Pass { name: "over_products", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::lowbits::over_products(t, w, |a| crate::linear_mba::rebuild_once(a, w))) },
     Pass { name: "split_bits", scope: Scope::Best, budget: 1, run: |t, w| changed(t, crate::linear_mba::split_rebuilt(t, w)) },
     Pass {

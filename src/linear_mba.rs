@@ -3952,6 +3952,67 @@ pub(crate) fn rebuild_once(t: &T, w: &Ctx) -> T {
     crate::tfunc::replacement(&t, w).unwrap_or_else(|| crate::tfunc::simplify(&cluster_regions(&rewrite(&t, w), w, false), w))
 }
 
+/// `rebuild_once` with each bitwise operation of a term and a constant (`y ^ 0xdeadbeef`)
+/// first replaced by a fresh variable: a region whose constants all sit in such subterms
+/// becomes linear, `(z & (u ^ ((K & p) ^ ~w))) + 2·(z & p & ~(u ^ w) & K)` is
+/// `(z & ~(u ^ w)) + (z & p & K)`.
+pub(crate) fn over_const_bitwise(t: &T, w: &Ctx) -> T {
+    over_subterms(t, w, &|x| match x {
+        T::Op(Op::And | Op::Or | Op::Xor, a) => a.iter().any(|y| matches!(y, T::Num(_))) && !a.iter().all(|y| matches!(y, T::Num(_))),
+        _ => false,
+    })
+}
+
+/// `rebuild_once` with each bitwise subterm of at least 3 nodes that occurs more than once
+/// first replaced by a fresh variable: the region then has fewer leaves, and a table over
+/// few leaves rebuilds exactly, `6·(t & u & A & B) - 3·(A ^ (t & ~(B & u)))` is
+/// `3·((t & u & B) - (t ^ A))` with `A = y ^ (u + w)`, `B = y ^ w`.
+pub(crate) fn over_shared_bitwise(t: &T, w: &Ctx) -> T {
+    fn count(t: &T, seen: &mut std::collections::HashMap<T, usize>) {
+        let T::Op(op, a) = t else { return };
+        if matches!(op, Op::And | Op::Or | Op::Xor) && size(t) >= 3 {
+            let n = seen.entry(t.clone()).or_insert(0);
+            *n += 1;
+            if *n > 1 {
+                return;
+            }
+        }
+        a.iter().for_each(|x| count(x, seen));
+    }
+    let mut seen = std::collections::HashMap::new();
+    count(t, &mut seen);
+    over_subterms(t, w, &|x| seen.get(x).is_some_and(|&n| n > 1))
+}
+
+/// `rebuild_once` with the outermost subterms that `pick` selects replaced by fresh
+/// variables, which are put back after; kept when smaller. The identity found holds for
+/// every value of the variables, so for the subterms too.
+fn over_subterms(t: &T, w: &Ctx, pick: &dyn Fn(&T) -> bool) -> T {
+    fn go(t: &T, pick: &dyn Fn(&T) -> bool, found: &mut Vec<T>) -> T {
+        if pick(t) {
+            let i = found.iter().position(|f| f == t).unwrap_or_else(|| {
+                found.push(t.clone());
+                found.len() - 1
+            });
+            return T::Var(format!("%k{i}"));
+        }
+        let T::Op(op, a) = t else { return t.clone() };
+        T::Op(*op, a.iter().map(|x| go(x, pick, found)).collect())
+    }
+    let mut found = Vec::new();
+    let a = go(t, pick, &mut found);
+    if found.is_empty() {
+        return t.clone();
+    }
+    let r = rebuild_once(&a, w);
+    if r == a {
+        return t.clone();
+    }
+    let vars: Vec<T> = (0..found.len()).map(|i| T::Var(format!("%k{i}"))).collect();
+    let back = crate::lowbits::replace(&r, &vars, &found);
+    if size(&back) < size(t) { back } else { t.clone() }
+}
+
 /// `split_bits` on `t`, then on the operands of `t` when it is a bitwise operation, since
 /// a case split rarely gives a constant difference through one; each with its own budget.
 fn split_in(t: &T, w: &Ctx, run: &dyn Fn(&T) -> T) -> T {
