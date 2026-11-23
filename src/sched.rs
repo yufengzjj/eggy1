@@ -28,7 +28,7 @@ pub struct Options {
 const ALTS: usize = 4;
 /// Ancestor nodes made per call.
 const MAX_INSTANCES: usize = 512;
-/// Seeds larger than this are not scheduled.
+/// Seeds larger than this are not scheduled; a larger input is left out of the table.
 const MAX_SEED_SIZE: usize = 4000;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -382,7 +382,7 @@ pub fn take_stats() -> Option<Stats> {
 /// Forms of the input equal to it, smallest first, found by the passes starting from the
 /// input and the legacy rebuilds `seeds`. Empty when the scheduler is off or skipped.
 pub(crate) fn schedule(input: &T, seeds: &[T], w: &Ctx, opts: &Options) -> Vec<T> {
-    if !opts.on || std::iter::once(input).chain(seeds).any(|t| size(t) > MAX_SEED_SIZE) {
+    if !opts.on || seeds.is_empty() || seeds.iter().any(|t| size(t) > MAX_SEED_SIZE) {
         return Vec::new();
     }
     let start = Instant::now();
@@ -404,8 +404,12 @@ pub(crate) fn schedule(input: &T, seeds: &[T], w: &Ctx, opts: &Options) -> Vec<T
         instances: 0,
         timed_out: false,
     };
-    s.root = s.intern(input, Origin::Seed(usize::MAX));
-    s.origin[s.root as usize] = Origin::Seed(usize::MAX);
+    if size(input) <= MAX_SEED_SIZE {
+        s.root = s.intern(input, Origin::Seed(usize::MAX));
+        s.origin[s.root as usize] = Origin::Seed(usize::MAX);
+    } else {
+        s.root = s.intern(&seeds[0], Origin::Seed(0));
+    }
     for (i, t) in seeds.iter().enumerate() {
         let id = s.intern(t, Origin::Seed(i));
         s.union(s.root, id);
