@@ -509,18 +509,18 @@ fn sized_sum(terms: impl Iterator<Item = (u64, usize)>, konst: u64, w: &Width) -
 
 thread_local! {
     #[allow(clippy::type_complexity)]
-    static SIMBA_MEMO: std::cell::RefCell<std::collections::HashMap<(u32, usize, T), Option<T>>> = Default::default();
+    static SIMBA_MEMO: std::cell::RefCell<std::collections::HashMap<(u32, usize, T), (Option<T>, bool)>> = Default::default();
 }
 
 /// `simba` memoized per thread, for the linear cofactors `poly_mba` rebuilds: the same
 /// ones come back across its factoring choices and across regions.
 pub(crate) fn simba_memo(t: &T, w: &Width) -> Option<T> {
     let key = (w.w, SEMI_LEAVES.with(|c| c.get()), t.clone());
-    if let Some(r) = SIMBA_MEMO.with(|c| c.borrow().get(&key).cloned()) {
+    if let Some(r) = memo_get(&SIMBA_MEMO, &key) {
         return r;
     }
-    let r = simba(t, w);
-    SIMBA_MEMO.with(|c| c.borrow_mut().insert(key, r.clone()));
+    let (r, used) = tracking_clusters(|| simba(t, w));
+    SIMBA_MEMO.with(|c| c.borrow_mut().insert(key, (r.clone(), used)));
     r
 }
 
@@ -531,8 +531,12 @@ pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
     let n = lv.len();
     if n > MAX_LEAVES {
         return match (drop_unused(t, &lv, w), clustered(t, w)) {
-            (Some(d), Some(c)) => Some(if size(&c) < size(&d) { c } else { d }),
-            (d, c) => d.or(c),
+            (Some(d), Some(c)) if size(&c) >= size(&d) => Some(d),
+            (d, None) => d,
+            (_, c) => {
+                CLUSTERED.with(|f| f.set(true));
+                c
+            }
         };
     }
     if n == 0 {
@@ -962,6 +966,23 @@ fn relate(t: &T, w: &Width) -> T {
     relate_region(&t, w).filter(|r| size(r) < size(&t)).unwrap_or(t)
 }
 
+thread_local! {
+    /// Most leaves of a region `relate_region` tries.
+    static RELATE_LEAVES: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_WIDE_LEAVES) };
+}
+/// `RELATE_LEAVES` in the rebuild without `clustered`, where wider regions take seconds.
+const UNCLUSTERED_RELATE_LEAVES: usize = 10;
+/// Most `rewrite` calls the rebuild without `clustered` makes; past them it is dropped.
+const UNCLUSTERED_REWRITES: usize = 256;
+/// Most `rewrite` calls of the other rebuilds after which the one without `clustered` is
+/// still tried: inputs that need more are slow to rebuild without it.
+const UNCLUSTERED_AFTER: usize = 1024;
+
+thread_local! {
+    /// `rewrite` calls left before it returns its input unchanged.
+    static REWRITES_LEFT: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+}
+
 /// Most arithmetic leaves `relate_region` tries.
 const MAX_RELATED: usize = 4;
 /// Largest product leaf `relate_region` tries when it is not an operand of a bitwise operation.
@@ -970,7 +991,7 @@ const MAX_FREE_PRODUCT: usize = 20;
 fn relate_region(t: &T, w: &Width) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
-    if lv.len() > MAX_WIDE_LEAVES {
+    if lv.len() > RELATE_LEAVES.with(|c| c.get()) {
         return None;
     }
     fn bit_operands(t: &T, w: &Width, out: &mut Vec<T>) {
@@ -3064,7 +3085,7 @@ fn split_by_sums(h: &[u64], h_vals: &[u64], coefs: &[u64], vars: &[usize], lv: &
 }
 
 thread_local! {
-    static REWRITTEN: std::cell::RefCell<std::collections::HashMap<(u32, T), T>> = Default::default();
+    static REWRITTEN: std::cell::RefCell<std::collections::HashMap<(u32, T), (T, bool)>> = Default::default();
     #[allow(clippy::type_complexity)]
     static REBUILT: std::cell::RefCell<std::collections::HashMap<(Vec<u64>, Vec<(usize, bool)>, u64, u32), (Vec<(u64, T)>, u64)>> = Default::default();
 }
@@ -3076,9 +3097,18 @@ pub(crate) fn rewrite(t: &T, w: &Width) -> T {
         return t.clone();
     }
     let key = (w.w, t.clone());
-    if let Some(r) = REWRITTEN.with(|c| c.borrow().get(&key).cloned()) {
+    if let Some(r) = memo_get(&REWRITTEN, &key) {
         return r;
     }
+    if REWRITES_LEFT.with(|c| c.replace(c.get().saturating_sub(1))) == 0 {
+        return t.clone();
+    }
+    let (r, used) = tracking_clusters(|| rewrite_uncached(t, w));
+    REWRITTEN.with(|c| c.borrow_mut().insert(key, (r.clone(), used)));
+    r
+}
+
+fn rewrite_uncached(t: &T, w: &Width) -> T {
     let lin = rewrite_linear(t, w);
     let mut r = match crate::poly_mba::simplify_poly(t, w) {
         Some(p) if size(&p) < size(&lin) => p,
@@ -3095,7 +3125,6 @@ pub(crate) fn rewrite(t: &T, w: &Width) -> T {
             r = again;
         }
     }
-    REWRITTEN.with(|c| c.borrow_mut().insert(key, r.clone()));
     r
 }
 
@@ -3253,7 +3282,35 @@ fn cluster_regions(t: &T, w: &Width, in_lin: bool) -> T {
     if lv.len() <= MAX_LEAVES {
         return node;
     }
-    clustered(&node, w).unwrap_or(node)
+    match clustered(&node, w) {
+        Some(c) => {
+            CLUSTERED.with(|f| f.set(true));
+            c
+        }
+        None => node,
+    }
+}
+
+/// `f()`, and whether a form from `clustered` was kept during it (which then also counts
+/// for the enclosing call).
+fn tracking_clusters<R>(f: impl FnOnce() -> R) -> (R, bool) {
+    let outer = CLUSTERED.with(|c| c.replace(false));
+    let r = f();
+    let used = CLUSTERED.with(|c| c.get());
+    CLUSTERED.with(|c| c.set(outer || used));
+    (r, used)
+}
+
+type Memo<K, V> = std::thread::LocalKey<std::cell::RefCell<std::collections::HashMap<K, (V, bool)>>>;
+
+/// A memoized result, unless it came from `clustered` while that is off.
+fn memo_get<K: std::hash::Hash + Eq, V: Clone>(memo: &'static Memo<K, V>, key: &K) -> Option<V> {
+    let (r, used) = memo.with(|c| c.borrow().get(key).cloned())?;
+    if used && NO_CLUSTER.with(|c| c.get()) {
+        return None;
+    }
+    CLUSTERED.with(|c| c.set(c.get() || used));
+    Some(r)
 }
 
 /// Most `clustered` calls nested inside each other.
@@ -3261,6 +3318,10 @@ const MAX_CLUSTER_DEPTH: usize = 2;
 
 thread_local! {
     static CLUSTERING: std::cell::RefCell<Vec<T>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Turns `clustered` off, for the rebuild without it.
+    static NO_CLUSTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether a form from `clustered` was kept since the last reset.
+    static CLUSTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A region with more than `MAX_LEAVES` leaves rebuilt in parts: its terms grouped by the
@@ -3271,7 +3332,7 @@ thread_local! {
 fn clustered(t: &T, w: &Width) -> Option<T> {
     // Rewriting a group can reach regions whose groups lead back to new forms of the
     // enclosing ones.
-    if CLUSTERING.with(|c| c.borrow().len() >= MAX_CLUSTER_DEPTH || c.borrow().contains(t)) {
+    if NO_CLUSTER.with(|c| c.get()) || CLUSTERING.with(|c| c.borrow().len() >= MAX_CLUSTER_DEPTH || c.borrow().contains(t)) {
         return None;
     }
     CLUSTERING.with(|c| c.borrow_mut().push(t.clone()));
@@ -3705,11 +3766,12 @@ pub fn simplify_linear(egg: &str, w: u32) -> String {
     simplify_linear_both(egg, w).0
 }
 
-/// `simplify_linear`, and the next smallest rebuild, if any: `egg` and its first rebuild
-/// are also rebuilt with bitwise operations of even operands halved (`halve`), and
-/// which result the rules finish best is not known.
-pub fn simplify_linear_both(egg: &str, w: u32) -> (String, Option<String>) {
-    type Last = Option<(String, u32, (String, Option<String>))>;
+/// `simplify_linear`, and the other rebuilds worth unioning: the next smallest (`egg` and
+/// its first rebuild are also rebuilt with bitwise operations of even operands halved,
+/// `halve`, and which result the rules finish best is not known) and the first rebuild
+/// without `clustered`, when that was used.
+pub fn simplify_linear_both(egg: &str, w: u32) -> (String, Vec<String>) {
+    type Last = Option<(String, u32, (String, Vec<String>))>;
     thread_local! {
         static LAST: std::cell::RefCell<Last> = const { std::cell::RefCell::new(None) };
     }
@@ -3730,11 +3792,25 @@ fn finish(t: &T, w: &Width) -> T {
     crate::lowbits::shifted_xor(&crate::lowbits::cut_products(&t, w), w)
 }
 
-fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Option<String>) {
+/// `t` without additions of 0 and multiplications by 1.
+fn drop_identities(t: &T, w: &Width) -> T {
+    let T::Op(op, a) = t else { return t.clone() };
+    let a: Vec<T> = a.iter().map(|x| drop_identities(x, w)).collect();
+    let is = |x: &T, k: u64| matches!(x, T::Num(v) if *v as u64 & w.mask == k);
+    match (op, a.as_slice()) {
+        (Op::Add, [x, z]) | (Op::Add, [z, x]) | (Op::Sub, [x, z]) if is(z, 0) => x.clone(),
+        (Op::Mul, [x, o]) | (Op::Mul, [o, x]) if is(o, 1) => x.clone(),
+        _ => T::Op(*op, a),
+    }
+}
+
+fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Vec<String>) {
     let w = Width::new(w);
     let t = parse(egg);
     let t0 = t.clone();
     BIT_SPLITS.with(|c| c.set(BIT_SPLIT_BUDGET));
+    CLUSTERED.with(|c| c.set(false));
+    REWRITES_LEFT.with(|c| c.set(usize::MAX));
     let t = unshift(&crate::lowbits::simplify(&t, &w), &w);
     // Subterms are replaced only after the rebuild: earlier, `~(y - 1)` would become
     // `-y`, a leaf the rebuild no longer relates to `y - 1`.
@@ -3766,16 +3842,42 @@ fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Option<String>) {
     }
     SEMI_LEAVES.with(|c| c.set(MAX_LEAVES));
     let mut rebuilt: Vec<T> = rebuilt.iter().map(|t| finish(t, &w)).collect();
+    // A region rebuilt in clusters is smaller there but can leave the rules a worse
+    // start than rebuilding it whole, so the rebuild without clusters is kept too.
+    let made = usize::MAX - REWRITES_LEFT.with(|c| c.get());
+    let unclustered = if CLUSTERED.with(|c| c.get()) && made <= UNCLUSTERED_AFTER && crate::tfunc::replacement(&t, &w).is_none() {
+        BIT_SPLITS.with(|c| c.set(BIT_SPLIT_BUDGET));
+        NO_CLUSTER.with(|c| c.set(true));
+        RELATE_LEAVES.with(|c| c.set(UNCLUSTERED_RELATE_LEAVES));
+        REWRITES_LEFT.with(|c| c.set(UNCLUSTERED_REWRITES));
+        let within = || REWRITES_LEFT.with(|c| c.get()) > 0;
+        let r = Some(rewrite(&t, &w)).filter(|_| within());
+        let r = r.map(|r| relate(&r, &w)).filter(|_| within());
+        let u = r.map(|r| drop_identities(&finish(&crate::tfunc::simplify(&r, &w), &w), &w));
+        REWRITES_LEFT.with(|c| c.set(usize::MAX));
+        RELATE_LEAVES.with(|c| c.set(MAX_WIDE_LEAVES));
+        NO_CLUSTER.with(|c| c.set(false));
+        u
+    } else {
+        None
+    };
     REWRITTEN.with(|c| c.borrow_mut().clear());
     REBUILT.with(|c| c.borrow_mut().clear());
     SIMBA_MEMO.with(|c| c.borrow_mut().clear());
     GROUPED.with(|c| c.borrow_mut().clear());
     rebuilt.sort_by_key(size);
     rebuilt.dedup();
-    let other = rebuilt.get(1).cloned();
+    rebuilt.truncate(2);
+    // An equal-size one can take the extraction from the first rebuild with nothing gained.
+    match unclustered {
+        Some(u) if size(&u) < size(&rebuilt[0]) => rebuilt.insert(0, u),
+        Some(u) if size(&u) > size(&rebuilt[0]) && size(&u) < size(&t0) && !rebuilt.contains(&u) => rebuilt.push(u),
+        _ => {}
+    }
+    let others = rebuilt.split_off(1);
     let r = rebuilt.swap_remove(0);
     let r = if r == t0 { egg.to_string() } else { show(&r) };
-    (r, other.map(|o| show(&o)))
+    (r, others.iter().map(show).collect())
 }
 
 #[cfg(test)]

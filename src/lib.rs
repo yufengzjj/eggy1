@@ -966,7 +966,7 @@ pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result
     init_egg_function(&mut egraph);
     egraph.parse_and_run_program(None, egg)?;
     let (alt, other) = linear_mba::simplify_linear_both(s, width_of(&cli.num_type));
-    let other = other.map_or(String::new(), |o| format!("(union expr {o})"));
+    let other: String = other.iter().map(|o| format!("(union expr {o})")).collect();
     let (s, union) = match alt != s {
         true if !keep_input => (alt.as_str(), other),
         true => (s, format!("(union expr {alt}) {other}")),
