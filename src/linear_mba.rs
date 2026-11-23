@@ -3207,7 +3207,7 @@ fn rewrite_uncached(t: &T, w: &Ctx) -> T {
 }
 
 /// The terms `(c, t)` and the constant of the sum `t`, scaled by `c`.
-fn sum_terms(t: &T, c: u64, w: &Ctx, out: &mut Vec<(u64, T)>, konst: &mut u64) {
+pub(crate) fn sum_terms(t: &T, c: u64, w: &Ctx, out: &mut Vec<(u64, T)>, konst: &mut u64) {
     match t {
         T::Num(v) => *konst = konst.wrapping_add(c.wrapping_mul(*v as u64)) & w.mask,
         T::Op(Op::Add, a) => a.iter().for_each(|x| sum_terms(x, c, w, out, konst)),
@@ -3842,11 +3842,13 @@ pub(crate) fn split_rebuilt(t: &T, w: &Ctx) -> T {
     if size(t) > MAX_SPLIT_SIZE {
         return t.clone();
     }
-    let run = |t: &T| {
-        let t = unshift(&crate::lowbits::simplify(t, w), w);
-        crate::tfunc::replacement(&t, w).unwrap_or_else(|| crate::tfunc::simplify(&cluster_regions(&rewrite(&t, w), w, false), w))
-    };
-    split_in(t, w, &run)
+    split_in(t, w, &|t| rebuild_once(t, w))
+}
+
+/// The rebuild `simplify_linear` applies to its input, without `relate`.
+pub(crate) fn rebuild_once(t: &T, w: &Ctx) -> T {
+    let t = unshift(&crate::lowbits::simplify(t, w), w);
+    crate::tfunc::replacement(&t, w).unwrap_or_else(|| crate::tfunc::simplify(&cluster_regions(&rewrite(&t, w), w, false), w))
 }
 
 /// `split_bits` on `t`, then on the operands of `t` when it is a bitwise operation, since

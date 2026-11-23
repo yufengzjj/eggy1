@@ -775,6 +775,82 @@ fn simplify_with(t: &T, w: &Ctx, cut: bool) -> T {
     if p.cands.is_empty() { r } else { p.context(&r) }
 }
 
+/// Most terms of a factor that `over_products` multiplies out.
+const MAX_FACTOR_TERMS: usize = 4;
+
+/// `rebuild` applied with each product of two non-constant factors first replaced by a
+/// fresh variable: an identity that holds for every value of the variable holds for the
+/// product, and `simplify` only follows a few low bits through products. Factors that
+/// are sums are multiplied out first, so `y*(x - 1)` and `x*y` share the variable of
+/// `x*y`. The result is kept when smaller.
+pub(crate) fn over_products(t: &T, w: &Ctx, rebuild: impl Fn(&T) -> T) -> T {
+    let mut monos = Vec::new();
+    let a = abstract_products(t, w, &mut monos);
+    if monos.is_empty() {
+        return t.clone();
+    }
+    let r = rebuild(&a);
+    if r == a {
+        return t.clone();
+    }
+    let vars: Vec<T> = (0..monos.len()).map(product_var).collect();
+    // A product's factors can hold the variables of earlier products.
+    let mut back = r;
+    for _ in 0..=monos.len() {
+        let next = replace(&back, &vars, &monos);
+        if next == back {
+            break;
+        }
+        back = next;
+    }
+    if size(&back) < size(t) { back } else { t.clone() }
+}
+
+fn product_var(i: usize) -> T {
+    T::Var(format!("%p{i}"))
+}
+
+/// `t` with products of non-constant factors replaced by `product_var`s; `monos[i]` is
+/// the product variable `i` stands for, its factors in a fixed order.
+fn abstract_products(t: &T, w: &Ctx, monos: &mut Vec<T>) -> T {
+    let T::Op(op, a) = t else { return t.clone() };
+    let a: Vec<T> = a.iter().map(|x| abstract_products(x, w, monos)).collect();
+    if *op != Op::Mul || a.iter().any(|x| matches!(x, T::Num(_))) {
+        return T::Op(*op, a);
+    }
+    let mut var = |x: &T, y: &T| {
+        let key = |t: &T| crate::eval::show(t);
+        let m = if key(x) <= key(y) { T::Op(Op::Mul, vec![x.clone(), y.clone()]) } else { T::Op(Op::Mul, vec![y.clone(), x.clone()]) };
+        let i = monos.iter().position(|n| *n == m).unwrap_or_else(|| {
+            monos.push(m);
+            monos.len() - 1
+        });
+        product_var(i)
+    };
+    let (mut ta, mut ka, mut tb, mut kb) = (Vec::new(), 0, Vec::new(), 0);
+    crate::linear_mba::sum_terms(&a[0], 1, w, &mut ta, &mut ka);
+    crate::linear_mba::sum_terms(&a[1], 1, w, &mut tb, &mut kb);
+    if ta.len() > MAX_FACTOR_TERMS || tb.len() > MAX_FACTOR_TERMS {
+        return var(&a[0], &a[1]);
+    }
+    let mut terms: Vec<(u64, T)> = Vec::new();
+    for (ca, xa) in &ta {
+        for (cb, xb) in &tb {
+            terms.push((ca.wrapping_mul(*cb), var(xa, xb)));
+        }
+        terms.push((ca.wrapping_mul(kb), xa.clone()));
+    }
+    terms.extend(tb.iter().map(|(cb, xb)| (cb.wrapping_mul(ka), xb.clone())));
+    let konst = ka.wrapping_mul(kb) & w.mask;
+    terms
+        .into_iter()
+        .filter(|(c, _)| c & w.mask != 0)
+        .map(|(c, x)| if c & w.mask == 1 { x } else { T::Op(Op::Mul, vec![T::Num(w.signed(c & w.mask)), x]) })
+        .chain((konst != 0).then(|| T::Num(w.signed(konst))))
+        .reduce(|s, x| T::Op(Op::Add, vec![s, x]))
+        .unwrap_or(T::Num(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
