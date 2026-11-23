@@ -4037,6 +4037,16 @@ fn split_in(t: &T, w: &Ctx, run: &dyn Fn(&T) -> T) -> T {
     }
 }
 
+/// The egglog term `egg` with each linear region's constant rebuilt with its leaf groups
+/// (`join_constants`), when smaller. Run on the final result only: as a pre-pass
+/// candidate, even a slightly smaller form changes how the rules finish.
+pub fn polish(egg: &str, w: u32) -> String {
+    let w = Ctx::new(w);
+    let t = parse(egg);
+    let r = join_constants(&t, &w, false);
+    if size(&r) < size(&t) { show(&r) } else { egg.to_string() }
+}
+
 /// Rewrite the egglog term `egg` (W-bit wrapping semantics) with every linear
 /// MBA region, and every polynomial MBA region,
 /// rebuilt in a smaller form. Returns `egg` unchanged when nothing gets smaller.
@@ -4148,6 +4158,7 @@ fn simplify_linear_uncached(egg: &str, w: u32, opts: &crate::sched::Options) -> 
     // larger, made the rules finish worse at least as often as better (Ensia, LLVM Pluto);
     // much smaller ones mostly win.
     let first = size(&rebuilt[0].1);
+    let dropped: Vec<String> = rebuilt.iter().filter(|(n, t)| ABSTRACTED.contains(n) && 4 * size(t) > 3 * first).map(|(n, t)| format!("{n} {}", size(t))).collect();
     rebuilt.retain(|(n, t)| !ABSTRACTED.contains(n) || 4 * size(t) <= 3 * first);
     // A region rebuilt in clusters is smaller there but can leave the rules a worse
     // start than rebuilding it whole, so the rebuild without clusters is kept too.
@@ -4172,7 +4183,7 @@ fn simplify_linear_uncached(egg: &str, w: u32, opts: &crate::sched::Options) -> 
     let scheduled = crate::sched::schedule(&t0, &seeds, &w, opts);
     if opts.trace {
         let all: Vec<String> = rebuilt.iter().map(|(n, t)| format!("{n} {}", size(t))).chain(unclustered.iter().map(|u| format!("unclustered {}", size(u)))).collect();
-        eprintln!("prepass: input {} candidates: {}", size(&t0), all.join(", "));
+        eprintln!("prepass: input {} candidates: {}; dropped: {}", size(&t0), all.join(", "), dropped.join(", "));
     }
     rebuilt.sort_by_key(|(_, t)| size(t));
     rebuilt.dedup_by(|a, b| a.1 == b.1);
