@@ -35,7 +35,7 @@ const MAX_SEED_SIZE: usize = 4000;
 enum Scope {
     /// Forms of the root class not much larger than its best form.
     Root,
-    /// Every new node.
+    /// New nodes that are subterms of a best root form, or instances.
     Node,
     /// New parents, rebuilt with a better child, of a subterm of a best root form and of at
     /// most `MAX_INSTANCE_SIZE` nodes.
@@ -316,12 +316,12 @@ impl Sched<'_> {
     fn run(&mut self) {
         while !self.out_of_time() {
             if let Some(n) = self.node_queue.pop_front() {
-                let instance = match self.origin[n as usize] {
-                    Origin::Instance(p) => self.table.size(n) <= MAX_INSTANCE_SIZE && self.is_live(p),
-                    _ => false,
+                let (node, instance) = match self.origin[n as usize] {
+                    Origin::Instance(p) => (true, self.table.size(n) <= MAX_INSTANCE_SIZE && self.is_live(p)),
+                    _ => (self.is_live(n), false),
                 };
                 for i in 0..PASSES.len() {
-                    if PASSES[i].scope == Scope::Node || instance && PASSES[i].scope == Scope::Instance {
+                    if node && PASSES[i].scope == Scope::Node || instance && PASSES[i].scope == Scope::Instance {
                         self.try_pass(i, n);
                     }
                 }
