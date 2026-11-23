@@ -35,6 +35,8 @@ const MAX_SEED_SIZE: usize = 4000;
 enum Scope {
     /// Forms of the root class not much larger than its best form.
     Root,
+    /// The best form of the root class when it is taken from the queue.
+    Best,
     /// New nodes that are subterms of a best root form, or instances.
     Node,
     /// New parents, rebuilt with a better child, of a subterm of a best root form and of at
@@ -44,10 +46,12 @@ enum Scope {
 
 /// Largest instance an `Instance` pass runs on.
 const MAX_INSTANCE_SIZE: u64 = 256;
+/// Largest form `relate` runs on: on wide regions it takes seconds per form.
+const MAX_RELATE_SIZE: usize = 128;
 /// Uncached `rewrite` calls all passes of one call may make together.
 const MAX_REWRITES: usize = 2000;
-/// Most leaves of a semi-linear region `rebuild_node` rebuilds: wide ones take seconds to
-/// search, as in the legacy halved rebuilds, and instances are many.
+/// Most leaves of a semi-linear region `rebuild_node` and `relate` rebuild: wide ones take
+/// seconds to search, as in the legacy halved rebuilds, and there are many forms.
 const NODE_SEMI_LEAVES: usize = 2;
 
 struct Pass {
@@ -68,10 +72,24 @@ const PASSES: &[Pass] = &[
     Pass {
         name: "rebuild",
         scope: Scope::Root,
-        budget: 8,
+        budget: 4,
         run: |t, w| changed(t, crate::linear_mba::cluster_regions(&crate::linear_mba::rewrite(t, w), w, false)),
     },
-    Pass { name: "relate", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::linear_mba::relate(t, w)) },
+    Pass {
+        name: "relate",
+        scope: Scope::Best,
+        budget: 2,
+        run: |t, w| {
+            if size(t) > MAX_RELATE_SIZE {
+                return None;
+            }
+            // Relating wide semi-linear regions takes seconds per root form.
+            w.limit_semi_leaves(NODE_SEMI_LEAVES);
+            let r = crate::linear_mba::relate(t, w);
+            w.limit_semi_leaves(crate::linear_mba::MAX_LEAVES);
+            changed(t, r)
+        },
+    },
     Pass { name: "tfunc", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::tfunc::simplify(t, w)) },
     Pass {
         name: "recombine",
@@ -94,7 +112,7 @@ const PASSES: &[Pass] = &[
     Pass { name: "halve", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::linear_mba::halve(t, w)) },
     Pass { name: "join_constants", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::linear_mba::join_constants(t, w, false)) },
     Pass { name: "over_products", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::lowbits::over_products(t, w, |a| crate::linear_mba::rebuild_once(a, w))) },
-    Pass { name: "split_bits", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::linear_mba::split_rebuilt(t, w)) },
+    Pass { name: "split_bits", scope: Scope::Best, budget: 1, run: |t, w| changed(t, crate::linear_mba::split_rebuilt(t, w)) },
     Pass {
         name: "rebuild_node",
         scope: Scope::Instance,
@@ -330,7 +348,8 @@ impl Sched<'_> {
                 continue;
             }
             let Some(n) = self.root_queue.pop_front() else { break };
-            for i in (0..PASSES.len()).filter(|&i| PASSES[i].scope == Scope::Root) {
+            let best = self.best(self.root) == n;
+            for i in (0..PASSES.len()).filter(|&i| PASSES[i].scope == Scope::Root || best && PASSES[i].scope == Scope::Best) {
                 self.try_pass(i, n);
             }
         }
@@ -472,7 +491,9 @@ pub(crate) fn schedule(input: &T, seeds: &[T], w: &Ctx, opts: &Options) -> Vec<T
     }
     s.settle();
     let root = s.find(s.root);
-    s.root_queue.extend(s.alts[&root].clone());
+    for n in s.alts[&root].clone() {
+        s.queue_root(n);
+    }
     s.run();
     w.limit_rewrites(usize::MAX);
     let root = s.find(s.root);

@@ -58,6 +58,7 @@ type GroupedKey = (Vec<(Vec<u64>, u64)>, Vec<T>, u64, u32);
 struct State {
     simba_memo: Memo<(u32, usize, T), Option<T>>,
     rewritten: Memo<(u32, T), T>,
+    related: Memo<(u32, usize, usize, T), T>,
     rebuilt: std::sync::Mutex<std::collections::HashMap<RebuiltKey, (Vec<(u64, T)>, u64)>>,
     grouped: std::sync::Mutex<std::collections::HashMap<GroupedKey, T>>,
     /// Most leaves of a region `relate_region` tries.
@@ -79,6 +80,7 @@ impl Default for State {
         State {
             simba_memo: Default::default(),
             rewritten: Default::default(),
+            related: Default::default(),
             rebuilt: Default::default(),
             grouped: Default::default(),
             relate_leaves: AtomicUsize::new(MAX_WIDE_LEAVES),
@@ -1053,6 +1055,20 @@ fn conj_measure(vals: &[u64], n: usize, w: &Ctx) -> (u32, usize) {
 /// `related_leaves`: with `L = y*z - (z ^ y)`, `(z ^ y) - B + 2*(L | B) - y*z` is
 /// `L ^ B`. Other leaves equal to `L` or `~L` become `v` or `~v`.
 pub(crate) fn relate(t: &T, w: &Ctx) -> T {
+    if !matches!(t, T::Op(..)) {
+        return t.clone();
+    }
+    // The scheduler relates many forms of one term, which share most regions.
+    let key = (w.w, w.st.relate_leaves.load(Relaxed), w.st.semi_leaves.load(Relaxed), t.clone());
+    if let Some(r) = memo_get(&w.st.related, &key, w) {
+        return r;
+    }
+    let (r, used) = tracking_clusters(w, || relate_uncached(t, w));
+    w.st.related.lock().unwrap().insert(key, (r.clone(), used));
+    r
+}
+
+fn relate_uncached(t: &T, w: &Ctx) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     if kind(t, w) == Kind::Atom {
         return T::Op(*op, a.iter().map(|x| relate(x, w)).collect());
