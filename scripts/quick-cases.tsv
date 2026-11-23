@@ -1,0 +1,1358 @@
+type	file	section	index	hash
+i32	hard	4-variable arithmetic leaves,groundtruth	36	7e683c2ca90b
+i32	hard	4-variable arithmetic leaves,groundtruth	47	2017e43cb6cc
+i32	hard	4-variable arithmetic leaves,groundtruth	57	1caf873bbfd4
+i32	hard	4-variable arithmetic leaves,groundtruth	64	b52b838f27dd
+i32	hard	8 variables in one chained group,groundtruth	26	5e89cceb2b3c
+i32	hard	8 variables in one chained group,groundtruth	31	abf693abb01c
+i32	hard	8 variables in one chained group,groundtruth	75	7828faaddf8e
+i32	hard	8 variables in one chained group,groundtruth	83	bd13f6223e1b
+i32	hard	8-variable linear MBA,groundtruth	43	9eb2ff27f640
+i32	hard	8-variable linear MBA,groundtruth	63	9481cfe5e125
+i32	hard	8-variable linear MBA,groundtruth	82	c652420f1a4c
+i32	hard	8-variable linear MBA,groundtruth	90	ad89a7a8cdd5
+i32	hard	arithmetic leaves (v + zero MBA),groundtruth	11	0a6ddc99192a
+i32	hard	arithmetic leaves (v + zero MBA),groundtruth	37	dd623b6e6e16
+i32	hard	arithmetic leaves (v + zero MBA),groundtruth	56	886bb2095feb
+i32	hard	arithmetic leaves (v + zero MBA),groundtruth	93	b5a43bebb0e7
+i32	hard	depth-3 bitwise over 4 variables,groundtruth	5	32aefb02d211
+i32	hard	depth-3 bitwise over 4 variables,groundtruth	10	097e2e1043c1
+i32	hard	depth-3 bitwise over 4 variables,groundtruth	37	d117d17bc7bb
+i32	hard	depth-3 bitwise over 4 variables,groundtruth	79	d0bd99536b02
+i32	hard	depth-3 semi-linear over 3 variables,groundtruth	19	d06f8a92a953
+i32	hard	depth-3 semi-linear over 3 variables,groundtruth	60	9460f925b43d
+i32	hard	depth-3 semi-linear over 3 variables,groundtruth	79	15df240e3d11
+i32	hard	depth-3 semi-linear over 3 variables,groundtruth	88	c2fd27860a19
+i32	hard	product identity x*y,groundtruth	21	e3dc2fe7fb68
+i32	hard	product identity x*y,groundtruth	58	f8e7eaa2fb4e
+i32	hard	product identity x*y,groundtruth	70	e3e074be6326
+i32	hard	product identity x*y,groundtruth	81	9de03df9dbe2
+i32	hard	product with noisy operands,groundtruth	10	a9b070e8e91d
+i32	hard	product with noisy operands,groundtruth	86	eac59efa767b
+i32	hard	repeated obfuscated subterm,groundtruth	23	ae6983a56a46
+i32	hard	repeated obfuscated subterm,groundtruth	51	3b4af90e8117
+i32	hard	repeated obfuscated subterm,groundtruth	87	df7e54e16e07
+i32	hard	repeated obfuscated subterm,groundtruth	89	828b62efd99a
+i32	hard	semi-linear arithmetic leaves,groundtruth	16	acea0438e532
+i32	hard	semi-linear arithmetic leaves,groundtruth	19	cdbe717b40ce
+i32	hard	semi-linear arithmetic leaves,groundtruth	65	0e35bc7abec7
+i32	hard	semi-linear arithmetic leaves,groundtruth	85	238f5dfaf784
+i32	hard	semi-linear over 4 variables,groundtruth	2	dbb49196a5c8
+i32	hard	semi-linear over 4 variables,groundtruth	5	0d0ca87b0c0a
+i32	hard	semi-linear over 4 variables,groundtruth	21	0e2ec643357b
+i32	hard	semi-linear over 4 variables,groundtruth	69	bd0e2a5155ad
+i32	hard	semi-linear with 64-bit constants,groundtruth	15	5256bb1fc034
+i32	hard	semi-linear with 64-bit constants,groundtruth	52	93040e5de669
+i32	hard	semi-linear with 64-bit constants,groundtruth	62	aee047be14b1
+i32	hard	semi-linear with 64-bit constants,groundtruth	68	8be2d30a419f
+i32	hard	semi-linear with a constant offset,groundtruth	8	d7d0ffcd23cb
+i32	hard	semi-linear with a constant offset,groundtruth	26	1886ab4a1988
+i32	hard	semi-linear with a constant offset,groundtruth	41	56e1e3741a69
+i32	hard	semi-linear with a constant offset,groundtruth	69	e0621367bb8f
+i32	hard	sum of products of linear MBA,groundtruth	8	10593c614c87
+i32	hard	sum of products of linear MBA,groundtruth	56	f2eaa4d8212f
+i32	hard	sum of products of linear MBA,groundtruth	75	52e4724b6c2a
+i32	hard	two-level zero MBA substitution,groundtruth	19	0f34e2bdd3a0
+i32	hard	two-level zero MBA substitution,groundtruth	21	c4d659b3e7bc
+i32	hard	two-level zero MBA substitution,groundtruth	31	e06ff43f4141
+i32	harder	12 variables in chained pairs,groundtruth	6	52200e4542f9
+i32	harder	12 variables in chained pairs,groundtruth	7	1ce4ada0ccb9
+i32	harder	12 variables in chained pairs,groundtruth	28	490fecf10d1c
+i32	harder	12 variables in chained pairs,groundtruth	88	3165a1ee5eb8
+i32	harder	7 variables with 3-variable terms,groundtruth	53	ee3f3046ab15
+i32	harder	7 variables with 3-variable terms,groundtruth	71	8fd9b9c37a73
+i32	harder	7 variables with 3-variable terms,groundtruth	82	bae03830dee8
+i32	harder	7 variables with 3-variable terms,groundtruth	94	f40ce50a9a7f
+i32	harder	bitwise operation of arithmetic terms,groundtruth	22	8502e845fe85
+i32	harder	bitwise operation of arithmetic terms,groundtruth	51	12dec628280f
+i32	harder	bitwise operation of arithmetic terms,groundtruth	75	3cb21b23fced
+i32	harder	bitwise operation of arithmetic terms,groundtruth	93	aba8cd27d60f
+i32	harder	depth-3 semi-linear over 4 variables,groundtruth	38	e51964f298c5
+i32	harder	depth-3 semi-linear over 4 variables,groundtruth	40	c3dce2a2011c
+i32	harder	depth-3 semi-linear over 4 variables,groundtruth	53	fe02d0d84096
+i32	harder	depth-3 semi-linear over 4 variables,groundtruth	55	64ca0bdc86b1
+i32	harder	depth-4 bitwise over 3 variables,groundtruth	23	6ba497272fdc
+i32	harder	depth-4 bitwise over 3 variables,groundtruth	24	7dc9de306b69
+i32	harder	depth-4 bitwise over 3 variables,groundtruth	37	1c3784ea283e
+i32	harder	depth-4 bitwise over 3 variables,groundtruth	47	343058df5a3a
+i32	harder	product of semi-linear factors,groundtruth	10	23f41eb89fe6
+i32	harder	product of semi-linear factors,groundtruth	18	e7af6c021878
+i32	harder	product of semi-linear factors,groundtruth	62	4b3e933a59e3
+i32	harder	product of semi-linear factors,groundtruth	63	3ae9f70ad76c
+i32	harder	product of three linear MBAs,groundtruth	1	36428b087bb1
+i32	harder	product of three linear MBAs,groundtruth	9	53cf11068eb6
+i32	harder	product of three linear MBAs,groundtruth	44	17e7e1e7d43c
+i32	harder	product of three linear MBAs,groundtruth	59	42b5ea479b53
+i32	harder	three-level zero MBA substitution,groundtruth	68	5f1e99e03b84
+i32	harder	three-level zero MBA substitution,groundtruth	73	c5513164a96e
+i32	harder	three-level zero MBA substitution,groundtruth	99	83d9df3f9a51
+i32	ops_i32	disjoint known bits,groundtruth	9	f4a0b77cbb40
+i32	ops_i32	disjoint known bits,groundtruth	37	f949f7c56044
+i32	ops_i32	disjoint known bits,groundtruth	75	59134ab824fb
+i32	ops_i32	disjoint known bits,groundtruth	87	23c7cf61cf6f
+i32	ops_i32	linear MBA inside shift/div/mod/mulhi,groundtruth	15	183e2ac7e76f
+i32	ops_i32	linear MBA inside shift/div/mod/mulhi,groundtruth	33	5f5a5fc4bba7
+i32	ops_i32	linear MBA inside shift/div/mod/mulhi,groundtruth	77	dd383e842f95
+i32	ops_i32	linear MBA inside shift/div/mod/mulhi,groundtruth	81	9d5a77dc37d9
+i32	ops_i32	magic-number division,groundtruth	19	3f7af6fa7318
+i32	ops_i32	magic-number division,groundtruth	58	85b633f3ec5c
+i32	ops_i32	magic-number division,groundtruth	67	bfe8948f3436
+i32	ops_i32	magic-number division,groundtruth	94	f54ed5b92d6f
+i32	ops_i32	shift identities,groundtruth	44	ad4596646146
+i32	ops_i32	shift identities,groundtruth	69	7445a65896a0
+i32	ops_i32	shift identities,groundtruth	82	aad9919506bf
+i32	ops_i32	shift identities,groundtruth	87	9ac6d5ab15d8
+i32	ops_i32	variable shift amounts,groundtruth	67	a58468aff498
+i32	ops_i32	variable shift amounts,groundtruth	72	1b9387e79521
+i32	ops_i32	variable shift amounts,groundtruth	74	08922d3fd2cb
+i32	ops_i32	variable shift amounts,groundtruth	79	f49e458b3660
+i32	semi_linear	1-variable semi-linear MBA,groundtruth	7	8635e583a246
+i32	semi_linear	1-variable semi-linear MBA,groundtruth	22	06c5e5688c8e
+i32	semi_linear	1-variable semi-linear MBA,groundtruth	84	4bcca647afe7
+i32	semi_linear	1-variable semi-linear MBA,groundtruth	89	04bfc5f983bb
+i32	semi_linear	2-variable semi-linear MBA,groundtruth	0	694f6a13bf43
+i32	semi_linear	2-variable semi-linear MBA,groundtruth	41	d143b3300386
+i32	semi_linear	2-variable semi-linear MBA,groundtruth	53	5c97b9e20f0b
+i32	semi_linear	2-variable semi-linear MBA,groundtruth	81	d9fe422f105e
+i32	semi_linear	3-variable semi-linear MBA,groundtruth	22	e3214f5a5d5c
+i32	semi_linear	3-variable semi-linear MBA,groundtruth	64	2203ca289855
+i32	semi_linear	3-variable semi-linear MBA,groundtruth	67	aefa4653ca65
+i32	semi_linear	3-variable semi-linear MBA,groundtruth	74	480d09950870
+i64	ext_cobra	bools_with_consts,groundtruth	0	4c0db8986a15
+i64	ext_cobra	bools_with_consts,groundtruth	1	f33ce211235e
+i64	ext_cobra	bools_with_consts,groundtruth	3	e631e90d5a4e
+i64	ext_cobra	bools_with_consts,groundtruth	4	8d722ce0dcbd
+i64	ext_cobra	msimba,groundtruth	0	19f524846f48
+i64	ext_cobra	msimba,groundtruth	14	abc6ecd994a0
+i64	ext_cobra	multivariate64,groundtruth	2	93156886e2f6
+i64	ext_cobra	multivariate64,groundtruth	25	af8259a47d81
+i64	ext_cobra	oses,groundtruth	31	673b4313792a
+i64	ext_cobra	oses,groundtruth	41	fa302b66231f
+i64	ext_cobra	oses,groundtruth	48	1caf55da2f92
+i64	ext_cobra	oses,groundtruth	64	b336793fc4f7
+i64	ext_cobra	oses,groundtruth	71	4137c70e2d34
+i64	ext_cobra	permutation64,groundtruth	0	47a7e84d17c3
+i64	ext_cobra	permutation64,groundtruth	3	43754be42832
+i64	ext_cobra	permutation64,groundtruth	8	bb0692738698
+i64	ext_cobra	permutation64,groundtruth	10	75fffb7a4a1e
+i64	ext_cobra	univariate64,groundtruth	15	4936b6ebcac2
+i64	ext_cobra	univariate64,groundtruth	22	787329a35503
+i64	ext_cobra	univariate64,groundtruth	28	4ed46c705157
+i64	ext_ensia_u64	ensia_mba1_u64,groundtruth	9	1032398494aa
+i64	ext_ensia_u64	ensia_mba1_u64,groundtruth	46	318e33fd8451
+i64	ext_ensia_u64	ensia_mba1_u64,groundtruth	57	decbe9096cd1
+i64	ext_ensia_u64	ensia_mba1_u64,groundtruth	99	103183b957ff
+i64	ext_ensia_u64	ensia_mba2_u64,groundtruth	3	1a4c193c31f2
+i64	ext_ensia_u64	ensia_mba2_u64,groundtruth	19	149891f46dab
+i64	ext_ensia_u64	ensia_mba2_u64,groundtruth	50	6e93c0023a67
+i64	ext_ensia_u64	ensia_mba2_u64,groundtruth	76	d0c4481e513d
+i64	ext_ensia_u64	ensia_mba3_u64,groundtruth	3	c4c254f95280
+i64	ext_ensia_u64	ensia_mba3_u64,groundtruth	24	24d2b9a0577b
+i64	ext_ensia_u64	ensia_mba3_u64,groundtruth	82	52461509d205
+i64	ext_ensia_u64	ensia_mba3_u64,groundtruth	103	a0f49f837e32
+i64	ext_ensia_u64	ensia_sub1_u64,groundtruth	21	ec963561f16d
+i64	ext_ensia_u64	ensia_sub1_u64,groundtruth	29	cc2e485aee17
+i64	ext_ensia_u64	ensia_sub1_u64,groundtruth	71	2398f95ed2c4
+i64	ext_ensia_u64	ensia_sub1_u64,groundtruth	104	b74cb5acb715
+i64	ext_ensia_u64	ensia_sub2_u64,groundtruth	1	6d405b6ae31a
+i64	ext_ensia_u64	ensia_sub2_u64,groundtruth	9	9d78dadb8d7a
+i64	ext_ensia_u64	ensia_sub2_u64,groundtruth	24	4cf1806261c0
+i64	ext_ensia_u64	ensia_sub2_u64,groundtruth	34	0a33a37f7133
+i64	ext_ensia_u64	ensia_sub_mba_u64,groundtruth	14	aba111398996
+i64	ext_ensia_u64	ensia_sub_mba_u64,groundtruth	43	0208cd0645b0
+i64	ext_ensia_u64	ensia_sub_mba_u64,groundtruth	46	1cca96362239
+i64	ext_ensia_u64	ensia_sub_mba_u64,groundtruth	62	d736ee87cb88
+i64	ext_hard2_ensia_u64	h2_ensia_mba3x3_u64,groundtruth	9	f19001d36bf2
+i64	ext_hard2_ensia_u64	h2_ensia_mba3x3_u64,groundtruth	18	6129883016bc
+i64	ext_hard2_ensia_u64	h2_ensia_mba3x3_u64,groundtruth	25	675666f34c4a
+i64	ext_hard2_ensia_u64	h2_ensia_mba3x3_u64,groundtruth	88	df0ad449d0d5
+i64	ext_hard2_ensia_u64	h2_ensia_poly_mba3x2_u64,groundtruth	4	b3b3207bf487
+i64	ext_hard2_ensia_u64	h2_ensia_poly_mba3x2_u64,groundtruth	29	d04832815d39
+i64	ext_hard2_ensia_u64	h2_ensia_poly_mba3x2_u64,groundtruth	79	a627abd08b9d
+i64	ext_hard2_ensia_u64	h2_ensia_poly_mba3x2_u64,groundtruth	82	663c9df3a49e
+i64	ext_hard2_ensia_u64	h2_ensia_sub3_mba2_u64,groundtruth	5	6671986ade6a
+i64	ext_hard2_ensia_u64	h2_ensia_sub3_mba2_u64,groundtruth	28	320cb3ba6028
+i64	ext_hard2_ensia_u64	h2_ensia_sub3_mba2_u64,groundtruth	44	dd26e7febc0b
+i64	ext_hard2_ensia_u64	h2_ensia_sub3_mba2_u64,groundtruth	50	39a3f8d95104
+i64	ext_hard2_ensia_u64	h2_ensia_v8_mba2_u64,groundtruth	3	bf3a77ef1f76
+i64	ext_hard2_ensia_u64	h2_ensia_v8_mba2_u64,groundtruth	4	9aa7eed14b84
+i64	ext_hard2_ensia_u64	h2_ensia_v8_mba2_u64,groundtruth	6	dd09dd5711ec
+i64	ext_hard2_ensia_u64	h2_ensia_v8_mba2_u64,groundtruth	19	11a0763ae895
+i64	ext_hard2_ensia_u64	h2_ensia_v8_mba2_u64,groundtruth	30	2f77e13afa53
+i64	ext_hard2_llvm_u64	h2_llvm_poly_pluto_mba2_u64,groundtruth	35	41b177c195f8
+i64	ext_hard2_llvm_u64	h2_llvm_poly_pluto_mba2_u64,groundtruth	57	c61064ef0045
+i64	ext_hard2_llvm_u64	h2_llvm_poly_pluto_mba2_u64,groundtruth	74	32fca6bb2fe7
+i64	ext_hard2_llvm_u64	h2_llvm_poly_pluto_mba2_u64,groundtruth	77	fa043df5f520
+i64	ext_hard2_llvm_u64	h2_llvm_v8_pluto_mba_u64,groundtruth	6	834013a91678
+i64	ext_hard2_llvm_u64	h2_llvm_v8_pluto_mba_u64,groundtruth	15	b6f27e0ed9b8
+i64	ext_hard2_llvm_u64	h2_llvm_v8_pluto_mba_u64,groundtruth	22	94d7e1aa4da7
+i64	ext_hard2_llvm_u64	h2_llvm_v8_pluto_mba_u64,groundtruth	23	31297668dc45
+i64	ext_hard2_llvm_u64	h2_llvm_v8_pluto_mba_u64,groundtruth	49	ea3cead4fef9
+i64	ext_hard2_llvm_u64	h2_llvm_v8_pluto_mba_u64,groundtruth	60	22896ca15604
+i64	ext_hard2_loki_u64	h2_loki_depth100,groundtruth	4	d249d03748a2
+i64	ext_hard2_loki_u64	h2_loki_depth100,groundtruth	49	40f246716a78
+i64	ext_hard2_loki_u64	h2_loki_depth100,groundtruth	52	4dd49ab4179b
+i64	ext_hard2_loki_u64	h2_loki_depth100,groundtruth	81	87581d83c562
+i64	ext_hard2_loki_u64	h2_loki_depth100,groundtruth	88	1ad5b1e20a50
+i64	ext_hard2_loki_u64	h2_loki_depth100,groundtruth	89	a93b56c84033
+i64	ext_hard2_loki_u64	h2_loki_depth150,groundtruth	13	7a1e6cb75370
+i64	ext_hard2_loki_u64	h2_loki_depth150,groundtruth	23	d50e5c7f788c
+i64	ext_hard2_loki_u64	h2_loki_depth150,groundtruth	28	7be3caf1e6f6
+i64	ext_hard2_loki_u64	h2_loki_depth150,groundtruth	37	0138e22724cb
+i64	ext_hard2_loki_u64	h2_loki_depth150,groundtruth	47	6abab250fdef
+i64	ext_hard2_loki_u64	h2_loki_depth150,groundtruth	50	b441d9c26fe6
+i64	ext_hard2_loki_u64	h2_loki_depth150,groundtruth	65	648665623649
+i64	ext_hard2_loki_u64	h2_loki_depth150,groundtruth	84	58a6386c20c9
+i64	ext_hard2_mbaobf_u64	h2_mbaobf_cube_lin_u64,groundtruth	43	950dd510413e
+i64	ext_hard2_mbaobf_u64	h2_mbaobf_cube_lin_u64,groundtruth	52	055716e57801
+i64	ext_hard2_mbaobf_u64	h2_mbaobf_prod_nonpoly_u64,groundtruth	32	1b3ec13bcd26
+i64	ext_hard2_mbaobf_u64	h2_mbaobf_prod_subst4_u64,groundtruth	11	7174caf0c4d4
+i64	ext_hard2_mbaobf_u64	h2_mbaobf_prod_subst4_u64,groundtruth	59	02aeb15e71f7
+i64	ext_hard2_mbaobf_u64	h2_mbaobf_square_poly_u64,groundtruth	20	35966e82d7f0
+i64	ext_hard2_mbaobf_u64	h2_mbaobf_square_poly_u64,groundtruth	40	5e6ad4c00037
+i64	ext_hard2_plzin_u64	h2_plzin_poly_big_u64,groundtruth	8	5afa53846f0d
+i64	ext_hard2_plzin_u64	h2_plzin_poly_big_u64,groundtruth	12	4f8e890a5ae9
+i64	ext_hard2_plzin_u64	h2_plzin_poly_big_u64,groundtruth	16	e22e680bfdda
+i64	ext_hard2_plzin_u64	h2_plzin_poly_big_u64,groundtruth	35	67ce7257d5b4
+i64	ext_hard2_plzin_u64	h2_plzin_poly_huge_u64,groundtruth	0	25538f7e2146
+i64	ext_hard2_plzin_u64	h2_plzin_poly_huge_u64,groundtruth	1	3260badbe17a
+i64	ext_hard2_plzin_u64	h2_plzin_poly_huge_u64,groundtruth	2	95f5308bc246
+i64	ext_hard2_stack_u64	h2_stack_ensia_mba3_tig_ea2_u64,groundtruth	17	94ea113e535a
+i64	ext_hard2_stack_u64	h2_stack_ensia_mba3_tig_ea2_u64,groundtruth	34	0a1ee12bc36e
+i64	ext_hard2_stack_u64	h2_stack_ensia_mba3_tig_ea2_u64,groundtruth	59	25ae51616314
+i64	ext_hard2_stack_u64	h2_stack_ensia_mba3_tig_ea2_u64,groundtruth	79	37584a3a3159
+i64	ext_hard2_stack_u64	h2_stack_mbaobf_tig_ea1_u64,groundtruth	18	666e44cd2558
+i64	ext_hard2_stack_u64	h2_stack_mbaobf_tig_ea1_u64,groundtruth	93	6e501f01cf8a
+i64	ext_hard2_stack_u64	h2_stack_mbaobf_tig_ea1_u64,groundtruth	96	f7739c63726e
+i64	ext_hard2_stack_u64	h2_stack_mbaobf_tig_ea1_u64,groundtruth	133	607e8fce81cc
+i64	ext_hard2_stack_u64	h2_stack_plzin_tig_ea1_u64,groundtruth	4	8e24117337ea
+i64	ext_hard2_stack_u64	h2_stack_plzin_tig_ea1_u64,groundtruth	16	5c6511a1d178
+i64	ext_hard2_stack_u64	h2_stack_plzin_tig_ea1_u64,groundtruth	32	d524a3d505de
+i64	ext_hard2_stack_u64	h2_stack_plzin_tig_ea1_u64,groundtruth	40	f5cac0cb1a7e
+i64	ext_hard2_stack_u64	h2_stack_tig_ea1_ollvm_pluto_u64,groundtruth	3	f590739b72b3
+i64	ext_hard2_stack_u64	h2_stack_tig_ea1_ollvm_pluto_u64,groundtruth	13	5bddc156d990
+i64	ext_hard2_stack_u64	h2_stack_tig_ea1_ollvm_pluto_u64,groundtruth	17	9873768e7dfc
+i64	ext_hard2_stack_u64	h2_stack_tig_ea1_ollvm_pluto_u64,groundtruth	37	3cf5c0a7bd2a
+i64	ext_hard2_stack_u64	h2_stack_tig_ea2_ensia_mba1_u64,groundtruth	13	9df5d911126c
+i64	ext_hard2_stack_u64	h2_stack_tig_ea2_ensia_mba1_u64,groundtruth	26	4f18f7ea5870
+i64	ext_hard2_stack_u64	h2_stack_tig_ea2_ensia_mba1_u64,groundtruth	32	5514484ec19b
+i64	ext_hard2_stack_u64	h2_stack_tig_ea2_ensia_mba1_u64,groundtruth	41	9e29924e5155
+i64	ext_hard2_stack_u64	h2_stack_tig_ea2_ensia_mba2_u64,groundtruth	2	fc7735f3a545
+i64	ext_hard2_stack_u64	h2_stack_tig_ea2_ensia_mba2_u64,groundtruth	9	b92bd1733c07
+i64	ext_hard2_stack_u64	h2_stack_tig_ea2_ensia_mba2_u64,groundtruth	17	6f77ba8f5967
+i64	ext_hard2_stack_u64	h2_stack_tig_ea2_ensia_mba2_u64,groundtruth	20	100f3cecb850
+i64	ext_hard2_stack_u64	h2_stack_tig_ea2_pluto_mba_u64,groundtruth	28	d16136d3d311
+i64	ext_hard2_stack_u64	h2_stack_tig_ea2_pluto_mba_u64,groundtruth	38	698ddba43dd7
+i64	ext_hard2_stack_u64	h2_stack_tig_ea2_pluto_mba_u64,groundtruth	40	4e877485f73a
+i64	ext_hard2_stack_u64	h2_stack_tig_ea2_pluto_mba_u64,groundtruth	90	919dcaf82be6
+i64	ext_hard2_tigress_u64	h2_tig_ea6_u64,groundtruth	29	7a7239f93857
+i64	ext_hard2_tigress_u64	h2_tig_ea6_u64,groundtruth	37	0f7e36af7f37
+i64	ext_hard2_tigress_u64	h2_tig_ea6_u64,groundtruth	48	527aa03c41bb
+i64	ext_hard2_tigress_u64	h2_tig_ea6_u64,groundtruth	57	bb0199f76997
+i64	ext_hard2_tigress_u64	h2_tig_ea8_u64,groundtruth	14	780ca968d5f2
+i64	ext_hard2_tigress_u64	h2_tig_ea8_u64,groundtruth	43	61a3756334e0
+i64	ext_hard2_tigress_u64	h2_tig_ea8_u64,groundtruth	63	9150042f1e48
+i64	ext_hard2_tigress_u64	h2_tig_ea8_u64,groundtruth	77	41f4e6169974
+i64	ext_hard2_tigress_u64	h2_tig_ed_ea4_u64,groundtruth	3	6fadb7153e35
+i64	ext_hard2_tigress_u64	h2_tig_ed_ea4_u64,groundtruth	14	2151fd28d456
+i64	ext_hard2_tigress_u64	h2_tig_ed_ea4_u64,groundtruth	42	1f73c77ad3f2
+i64	ext_hard2_tigress_u64	h2_tig_ed_ea4_u64,groundtruth	43	89b5aaea9672
+i64	ext_hard2_tigress_u64	h2_tig_poly_ea3_u64,groundtruth	6	c6b4072c60ad
+i64	ext_hard2_tigress_u64	h2_tig_poly_ea3_u64,groundtruth	35	66d85a34a902
+i64	ext_hard2_tigress_u64	h2_tig_poly_ea3_u64,groundtruth	59	d9bc92883628
+i64	ext_hard2_tigress_u64	h2_tig_poly_ea3_u64,groundtruth	62	81d565a5c594
+i64	ext_hard2_tigress_u64	h2_tig_poly_ed_ea2_u64,groundtruth	3	818c6fb5693b
+i64	ext_hard2_tigress_u64	h2_tig_poly_ed_ea2_u64,groundtruth	17	77c71fd4fc54
+i64	ext_hard2_tigress_u64	h2_tig_poly_ed_ea2_u64,groundtruth	61	fa0c831506f7
+i64	ext_hard2_tigress_u64	h2_tig_poly_ed_ea2_u64,groundtruth	91	6e1731b71029
+i64	ext_hard2_tigress_u64	h2_tig_v8_ea3_u64,groundtruth	10	db6d0e07d025
+i64	ext_hard2_tigress_u64	h2_tig_v8_ea3_u64,groundtruth	33	5dd2f617de5e
+i64	ext_hard2_tigress_u64	h2_tig_v8_ea3_u64,groundtruth	50	66c623812410
+i64	ext_hard2_tigress_u64	h2_tig_v8_ea3_u64,groundtruth	80	b9162e9ad40c
+i64	ext_hard_ensia_u64	hard_ensia_mba3x2_u64,groundtruth	4	0ed3da5baf63
+i64	ext_hard_ensia_u64	hard_ensia_mba3x2_u64,groundtruth	28	9067a6b7f154
+i64	ext_hard_ensia_u64	hard_ensia_mba3x2_u64,groundtruth	30	e600c49ede3a
+i64	ext_hard_ensia_u64	hard_ensia_mba3x2_u64,groundtruth	87	5d98de1b1ad0
+i64	ext_hard_ensia_u64	hard_ensia_mba4_u64,groundtruth	10	75ee01e399e1
+i64	ext_hard_ensia_u64	hard_ensia_mba4_u64,groundtruth	16	205402518573
+i64	ext_hard_ensia_u64	hard_ensia_mba4_u64,groundtruth	18	5377657da32d
+i64	ext_hard_ensia_u64	hard_ensia_mba4_u64,groundtruth	24	ce3189dcf588
+i64	ext_hard_ensia_u64	hard_ensia_sub3_u64,groundtruth	6	792df4a08371
+i64	ext_hard_ensia_u64	hard_ensia_sub3_u64,groundtruth	74	793eb1ad57e8
+i64	ext_hard_ensia_u64	hard_ensia_sub3_u64,groundtruth	105	fe2aa12d3494
+i64	ext_hard_ensia_u64	hard_ensia_sub3_u64,groundtruth	149	b71fb07292f8
+i64	ext_hard_ensia_u64	hard_ensia_sub_mba2_u64,groundtruth	14	f8245ae52b69
+i64	ext_hard_ensia_u64	hard_ensia_sub_mba2_u64,groundtruth	36	0271db344a58
+i64	ext_hard_ensia_u64	hard_ensia_sub_mba2_u64,groundtruth	37	3b251f92f697
+i64	ext_hard_ensia_u64	hard_ensia_sub_mba2_u64,groundtruth	45	f18c2709c923
+i64	ext_hard_llvm_u64	hard_llvm_ollvm_pluto_hikari_d1_u64,groundtruth	19	ce98a4bda485
+i64	ext_hard_llvm_u64	hard_llvm_ollvm_pluto_hikari_d1_u64,groundtruth	26	50e51a4ad0e9
+i64	ext_hard_llvm_u64	hard_llvm_ollvm_pluto_hikari_d1_u64,groundtruth	32	113f3bf296a4
+i64	ext_hard_llvm_u64	hard_llvm_ollvm_pluto_hikari_d1_u64,groundtruth	51	4fda9ab9368f
+i64	ext_hard_llvm_u64	hard_llvm_ollvm_pluto_hikari_u64,groundtruth	0	0a26dadd140f
+i64	ext_hard_llvm_u64	hard_llvm_ollvm_pluto_hikari_u64,groundtruth	15	48be22aed1eb
+i64	ext_hard_llvm_u64	hard_llvm_ollvm_pluto_hikari_u64,groundtruth	19	ae42d9634e7b
+i64	ext_hard_llvm_u64	hard_llvm_ollvm_pluto_hikari_u64,groundtruth	30	4cfe84927f46
+i64	ext_hard_llvm_u64	hard_llvm_pluto_mba3_d1_u64,groundtruth	6	49351ec5d09c
+i64	ext_hard_llvm_u64	hard_llvm_pluto_mba3_d1_u64,groundtruth	19	766da4e861e9
+i64	ext_hard_llvm_u64	hard_llvm_pluto_mba3_d1_u64,groundtruth	28	cc2217d58629
+i64	ext_hard_llvm_u64	hard_llvm_pluto_mba3_d1_u64,groundtruth	33	210517ad9fc0
+i64	ext_hard_llvm_u64	hard_llvm_pluto_mba3_u64,groundtruth	0	a3a5ec3124a9
+i64	ext_hard_llvm_u64	hard_llvm_pluto_mba3_u64,groundtruth	1	e37d6c1c14c8
+i64	ext_hard_llvm_u64	hard_llvm_pluto_mba3_u64,groundtruth	8	bd70f5942c99
+i64	ext_hard_llvm_u64	hard_llvm_pluto_mba3_u64,groundtruth	18	ad8b920bc34a
+i64	ext_hard_loki_u64	hard_loki_depth60,groundtruth	1	b4712542cec0
+i64	ext_hard_loki_u64	hard_loki_depth60,groundtruth	36	12369d0bf4a4
+i64	ext_hard_loki_u64	hard_loki_depth60,groundtruth	37	d3fd387b4dec
+i64	ext_hard_loki_u64	hard_loki_depth60,groundtruth	47	b4c60523867b
+i64	ext_hard_loki_u64	hard_loki_depth80,groundtruth	19	43c0cdc8b8c1
+i64	ext_hard_loki_u64	hard_loki_depth80,groundtruth	31	9b2440c9f33f
+i64	ext_hard_loki_u64	hard_loki_depth80,groundtruth	33	3c35f72221c1
+i64	ext_hard_loki_u64	hard_loki_depth80,groundtruth	36	3cd6cd775be6
+i64	ext_hard_mbaobf_u64	hard_mbaobf_nonpoly_subst4_all,groundtruth	14	8667c4f11425
+i64	ext_hard_mbaobf_u64	hard_mbaobf_nonpoly_subst4_all,groundtruth	53	7566b9a58e84
+i64	ext_hard_mbaobf_u64	hard_mbaobf_nonpoly_subst4_two,groundtruth	0	4474316021a8
+i64	ext_hard_mbaobf_u64	hard_mbaobf_nonpoly_subst4_two,groundtruth	24	7bfe2d746701
+i64	ext_hard_plzin_u64	hard_plzin_big_u64,groundtruth	7	5de420a554df
+i64	ext_hard_plzin_u64	hard_plzin_big_u64,groundtruth	14	8a000940501b
+i64	ext_hard_plzin_u64	hard_plzin_big_u64,groundtruth	15	e3921d54b05b
+i64	ext_hard_plzin_u64	hard_plzin_big_u64,groundtruth	28	cd7d7b41cbba
+i64	ext_hard_plzin_u64	hard_plzin_huge_u64,groundtruth	5	1963e149ae52
+i64	ext_hard_plzin_u64	hard_plzin_huge_u64,groundtruth	36	a91407240a9e
+i64	ext_hard_plzin_u64	hard_plzin_huge_u64,groundtruth	38	763f0ec5909c
+i64	ext_hard_plzin_u64	hard_plzin_huge_u64,groundtruth	42	343d8d836648
+i64	ext_hard_tigress_u64	hard_tig_ea4_u64,groundtruth	76	26a85f6ffd86
+i64	ext_hard_tigress_u64	hard_tig_ea4_u64,groundtruth	105	66760d8f2b8e
+i64	ext_hard_tigress_u64	hard_tig_ea4_u64,groundtruth	128	bf6b44e408a9
+i64	ext_hard_tigress_u64	hard_tig_ea4_u64,groundtruth	129	9565c4c2caea
+i64	ext_hard_tigress_u64	hard_tig_ea5_u64,groundtruth	15	ccc95175b0e7
+i64	ext_hard_tigress_u64	hard_tig_ea5_u64,groundtruth	26	138922f78512
+i64	ext_hard_tigress_u64	hard_tig_ea5_u64,groundtruth	105	6cf4c462ae3a
+i64	ext_hard_tigress_u64	hard_tig_ea5_u64,groundtruth	147	b447df1d437e
+i64	ext_hard_tigress_u64	hard_tig_ed_ea3_u64,groundtruth	17	3a7f00068bee
+i64	ext_hard_tigress_u64	hard_tig_ed_ea3_u64,groundtruth	56	1b8a457580ca
+i64	ext_hard_tigress_u64	hard_tig_ed_ea3_u64,groundtruth	71	926fb202db7a
+i64	ext_hard_tigress_u64	hard_tig_ed_ea3_u64,groundtruth	132	28b94b7a5b41
+i64	ext_hard_tigress_u64	hard_tig_v5_ea3_u64,groundtruth	17	9b6fba8333cf
+i64	ext_hard_tigress_u64	hard_tig_v5_ea3_u64,groundtruth	23	cb6c50bf1b17
+i64	ext_hard_tigress_u64	hard_tig_v5_ea3_u64,groundtruth	65	a6c7e85e764c
+i64	ext_hard_tigress_u64	hard_tig_v5_ea3_u64,groundtruth	125	a4786ddd29b6
+i64	ext_llvm_u64	hikari_constenc_u64,groundtruth	16	d9127c30009e
+i64	ext_llvm_u64	hikari_constenc_u64,groundtruth	27	adc2b32fe815
+i64	ext_llvm_u64	hikari_constenc_u64,groundtruth	63	01260c18249d
+i64	ext_llvm_u64	hikari_constenc_u64,groundtruth	126	6c8b0c5657f3
+i64	ext_llvm_u64	hikari_sub1_pluto_mba_u64,groundtruth	4	121ffe9ddab1
+i64	ext_llvm_u64	hikari_sub1_pluto_mba_u64,groundtruth	13	1d4d4c176183
+i64	ext_llvm_u64	hikari_sub1_pluto_mba_u64,groundtruth	26	183352988b62
+i64	ext_llvm_u64	hikari_sub1_pluto_mba_u64,groundtruth	92	d8662d063363
+i64	ext_llvm_u64	hikari_sub1_u64,groundtruth	2	a6da3021d540
+i64	ext_llvm_u64	hikari_sub1_u64,groundtruth	26	6d405b6ae31a
+i64	ext_llvm_u64	hikari_sub1_u64,groundtruth	30	593cde721200
+i64	ext_llvm_u64	hikari_sub1_u64,groundtruth	56	a0a6a6970757
+i64	ext_llvm_u64	hikari_sub2_u64,groundtruth	5	6154a1157916
+i64	ext_llvm_u64	hikari_sub2_u64,groundtruth	13	36a848911be6
+i64	ext_llvm_u64	hikari_sub2_u64,groundtruth	58	cd5319c4688b
+i64	ext_llvm_u64	hikari_sub2_u64,groundtruth	87	643d04fa900a
+i64	ext_llvm_u64	ollvm_sub1_pluto_mba_u64,groundtruth	12	2c757761eeff
+i64	ext_llvm_u64	ollvm_sub1_pluto_mba_u64,groundtruth	18	7bfd6b3de2f8
+i64	ext_llvm_u64	ollvm_sub1_pluto_mba_u64,groundtruth	67	51d638734b40
+i64	ext_llvm_u64	ollvm_sub1_pluto_mba_u64,groundtruth	109	a0ceff9794db
+i64	ext_llvm_u64	ollvm_sub1_u64,groundtruth	24	cc2e485aee17
+i64	ext_llvm_u64	ollvm_sub1_u64,groundtruth	31	850859c10745
+i64	ext_llvm_u64	ollvm_sub1_u64,groundtruth	67	981bbac5c464
+i64	ext_llvm_u64	ollvm_sub1_u64,groundtruth	142	c7b52d697936
+i64	ext_llvm_u64	ollvm_sub2_u64,groundtruth	11	5c4211f15d44
+i64	ext_llvm_u64	ollvm_sub2_u64,groundtruth	13	8491c5c720b3
+i64	ext_llvm_u64	ollvm_sub2_u64,groundtruth	74	1f86e2ea1816
+i64	ext_llvm_u64	ollvm_sub2_u64,groundtruth	82	c59785bee147
+i64	ext_llvm_u64	pluto_mba2_u64,groundtruth	6	ebfaa9362737
+i64	ext_llvm_u64	pluto_mba2_u64,groundtruth	20	9c1e15c6f02f
+i64	ext_llvm_u64	pluto_mba2_u64,groundtruth	30	0f3ef69dbcca
+i64	ext_llvm_u64	pluto_mba2_u64,groundtruth	45	977fe045101e
+i64	ext_llvm_u64	pluto_mba_u64,groundtruth	26	4836c0812f89
+i64	ext_llvm_u64	pluto_mba_u64,groundtruth	59	fd7ba118bb6d
+i64	ext_llvm_u64	pluto_mba_u64,groundtruth	118	9da6ab99039c
+i64	ext_llvm_u64	pluto_mba_u64,groundtruth	139	4eee4c60f1c8
+i64	ext_llvm_u64	pluto_sub_u64,groundtruth	1	6d405b6ae31a
+i64	ext_llvm_u64	pluto_sub_u64,groundtruth	57	5ed9b5e496a5
+i64	ext_llvm_u64	pluto_sub_u64,groundtruth	81	7087fa266fd6
+i64	ext_llvm_u64	pluto_sub_u64,groundtruth	116	50cd952448dc
+i64	ext_loki	depth1-10,groundtruth	26	632fc7cdb982
+i64	ext_loki	depth1-10,groundtruth	32	0bf91747a0c1
+i64	ext_loki	depth1-10,groundtruth	50	0546336f4924
+i64	ext_loki	depth1-10,groundtruth	85	242cd99f426b
+i64	ext_loki	depth11-20,groundtruth	10	4e582e2d52db
+i64	ext_loki	depth11-20,groundtruth	14	5be6ffcb0ab0
+i64	ext_loki	depth11-20,groundtruth	19	64d67b6f20ca
+i64	ext_loki	depth11-20,groundtruth	88	a4a305ffa4e0
+i64	ext_loki	depth21-30,groundtruth	11	088e271d1d2c
+i64	ext_loki	depth21-30,groundtruth	61	d22a411a6396
+i64	ext_loki	depth21-30,groundtruth	74	f4ef4be0091d
+i64	ext_loki	depth21-30,groundtruth	92	c147ec73d99f
+i64	ext_loki_gen	loki_depth03,groundtruth	0	1ceea56cfc16
+i64	ext_loki_gen	loki_depth03,groundtruth	19	5b34e80c4f11
+i64	ext_loki_gen	loki_depth03,groundtruth	29	06cb75cf81e4
+i64	ext_loki_gen	loki_depth03,groundtruth	33	54dfcfe034d7
+i64	ext_loki_gen	loki_depth08,groundtruth	7	0c75fdc3bcf0
+i64	ext_loki_gen	loki_depth08,groundtruth	13	928ca6b52107
+i64	ext_loki_gen	loki_depth08,groundtruth	15	b5373c55d2e2
+i64	ext_loki_gen	loki_depth08,groundtruth	45	f0dc9171c8c9
+i64	ext_loki_gen	loki_depth15,groundtruth	6	78a89795327b
+i64	ext_loki_gen	loki_depth15,groundtruth	8	ad85c9988a9e
+i64	ext_loki_gen	loki_depth15,groundtruth	19	c1160463c327
+i64	ext_loki_gen	loki_depth15,groundtruth	23	46ef914f7ccd
+i64	ext_loki_gen	loki_depth15,groundtruth	41	d4356f7d37fe
+i64	ext_loki_gen	loki_depth25,groundtruth	6	c6d4834f1910
+i64	ext_loki_gen	loki_depth25,groundtruth	10	07526585c7b2
+i64	ext_loki_gen	loki_depth25,groundtruth	31	8719268ca8a7
+i64	ext_loki_gen	loki_depth25,groundtruth	34	f93a8853e711
+i64	ext_loki_gen	loki_depth40,groundtruth	1	f2fb129a84a0
+i64	ext_loki_gen	loki_depth40,groundtruth	13	42988239ac11
+i64	ext_loki_gen	loki_depth40,groundtruth	23	b325d98f639f
+i64	ext_loki_gen	loki_depth40,groundtruth	29	e412b7c05259
+i64	ext_mbaobf_gen	lin4_bigcoef,groundtruth	20	08ba61fca514
+i64	ext_mbaobf_gen	lin4_bigcoef,groundtruth	36	53ec7e2f20d3
+i64	ext_mbaobf_gen	nonpoly_recur3,groundtruth	11	f9c048b86845
+i64	ext_mbaobf_gen	nonpoly_recur3,groundtruth	47	1901f8c3bbb2
+i64	ext_mbaobf_gen	nonpoly_recur3,groundtruth	104	212fa68b16e6
+i64	ext_mbaobf_gen	nonpoly_recur4,groundtruth	21	a4bbb6a69402
+i64	ext_mbaobf_gen	nonpoly_recur4,groundtruth	39	453302647d21
+i64	ext_mbaobf_gen	nonpoly_subst3,groundtruth	24	0be983c99b19
+i64	ext_mbaobf_gen	nonpoly_subst3,groundtruth	57	4b541d510399
+i64	ext_mbaobf_gen	nonpoly_subst3,groundtruth	97	f79c7135a9fa
+i64	ext_mbaobf_gen	nonpoly_subst4_two,groundtruth	3	4228ecacbb1b
+i64	ext_mbaobf_gen	nonpoly_subst4_two,groundtruth	17	2ed58a2d9352
+i64	ext_mbaobf_gen	nonpoly_zero3,groundtruth	53	bcfaba43e674
+i64	ext_mbaobf_gen	nonpoly_zero3,groundtruth	57	ed4003a1ba26
+i64	ext_mbaobf_gen	nonpoly_zero3,groundtruth	98	a48fb0ce63a9
+i64	ext_mbaobf_gen	poly3,groundtruth	40	aa6e2188d36c
+i64	ext_mbaobf_gen	poly3,groundtruth	93	6d589a4a54ac
+i64	ext_mbaobf_gen	poly3,groundtruth	99	4dd3032d4da4
+i64	ext_mbaobf_gen	poly4,groundtruth	4	63c51f9d8f05
+i64	ext_mbaobf_gen	poly4,groundtruth	54	bdc3b208016d
+i64	ext_mbasolver	linear,groundtruth	20	91242b74d831
+i64	ext_mbasolver	linear,groundtruth	22	4f46f501e625
+i64	ext_mbasolver	linear,groundtruth	59	60da75812f25
+i64	ext_mbasolver	linear,groundtruth	94	a0442638233d
+i64	ext_mbasolver	nonpoly,groundtruth	44	4ff420c78456
+i64	ext_mbasolver	nonpoly,groundtruth	61	964e8ccc70aa
+i64	ext_mbasolver	nonpoly,groundtruth	107	2d91a71d337b
+i64	ext_mbasolver	nonpoly,groundtruth	147	2e57a38712b5
+i64	ext_mbasolver	poly,groundtruth	3	3b057c56f4e4
+i64	ext_mbasolver	poly,groundtruth	25	d9f31b2ce8fb
+i64	ext_mbasolver	poly,groundtruth	33	59ef6765cb31
+i64	ext_mbasolver	poly,groundtruth	80	ab398410c08b
+i64	ext_plzin_u64	plzin_deep_u64,groundtruth	34	e0a101f8c69c
+i64	ext_plzin_u64	plzin_deep_u64,groundtruth	45	a0d276550bc1
+i64	ext_plzin_u64	plzin_deep_u64,groundtruth	76	45e029109d67
+i64	ext_plzin_u64	plzin_deep_u64,groundtruth	98	0a664fdfbcd9
+i64	ext_plzin_u64	plzin_default_u64,groundtruth	35	946a10843e97
+i64	ext_plzin_u64	plzin_default_u64,groundtruth	50	5542d52b1622
+i64	ext_plzin_u64	plzin_default_u64,groundtruth	58	82b09920d1d5
+i64	ext_plzin_u64	plzin_default_u64,groundtruth	67	1daacf25d2b1
+i64	ext_simba	e1_2vars,groundtruth	0	731dd1fc9e43
+i64	ext_simba	e1_2vars,groundtruth	1	d397074a9bde
+i64	ext_simba	e1_2vars,groundtruth	2	0070b48660de
+i64	ext_simba	e1_2vars,groundtruth	8	29e46b06d19d
+i64	ext_simba	e1_3vars,groundtruth	0	52f7e83329be
+i64	ext_simba	e1_3vars,groundtruth	1	31cc2f44e700
+i64	ext_simba	e1_3vars,groundtruth	2	7249ecf575b5
+i64	ext_simba	e1_3vars,groundtruth	5	508c4a8ee078
+i64	ext_simba	e1_4vars,groundtruth	3	1dea9adcdfe6
+i64	ext_simba	e1_4vars,groundtruth	7	28b8efc7c606
+i64	ext_simba	e1_5vars,groundtruth	7	a6d319f339e0
+i64	ext_simba	e1_6vars,groundtruth	2	88693e9395ce
+i64	ext_simba	e1_6vars,groundtruth	8	4f9efc770289
+i64	ext_simba	e2_2vars,groundtruth	0	e5c35cebf4c1
+i64	ext_simba	e2_2vars,groundtruth	1	43305b30aba6
+i64	ext_simba	e2_2vars,groundtruth	4	8ced3848708b
+i64	ext_simba	e2_2vars,groundtruth	7	f8fd80f1037b
+i64	ext_simba	e2_3vars,groundtruth	0	9ffb62f5a871
+i64	ext_simba	e2_3vars,groundtruth	6	ce6d8b2a5b65
+i64	ext_simba	e2_3vars,groundtruth	9	e9035f422503
+i64	ext_simba	e2_4vars,groundtruth	4	edb8ef67163c
+i64	ext_simba	e3_2vars,groundtruth	2	d708ea6da864
+i64	ext_simba	e3_2vars,groundtruth	4	a5b88e8827cf
+i64	ext_simba	e3_2vars,groundtruth	6	20cda06ff77f
+i64	ext_simba	e3_2vars,groundtruth	7	7af83b56b6a7
+i64	ext_simba	e3_3vars,groundtruth	0	a5435fb77e9d
+i64	ext_simba	e3_3vars,groundtruth	13	c3b2e425770b
+i64	ext_simba	e3_4vars,groundtruth	12	afa55b0eed7d
+i64	ext_simba	e4_2vars,groundtruth	0	7c437928629d
+i64	ext_simba	e4_2vars,groundtruth	3	85fce7c78c07
+i64	ext_simba	e4_2vars,groundtruth	4	8b6d27cca429
+i64	ext_simba	e4_2vars,groundtruth	9	770f31f62c26
+i64	ext_simba	e4_3vars,groundtruth	8	10921932eed1
+i64	ext_simba	e4_3vars,groundtruth	11	cbffbcc35da9
+i64	ext_simba	e4_4vars,groundtruth	7	591597155c7e
+i64	ext_simba	e5_2vars,groundtruth	5	b7a73adfd739
+i64	ext_simba	e5_2vars,groundtruth	7	40db5ed4ecb8
+i64	ext_simba	e5_2vars,groundtruth	8	be294cd51ddd
+i64	ext_simba	e5_2vars,groundtruth	11	738debfe3b1b
+i64	ext_simba	e5_3vars,groundtruth	3	71531a71537e
+i64	ext_simba	e5_3vars,groundtruth	12	9ec97abe18e3
+i64	ext_simba	e5_3vars,groundtruth	13	c70a0bbdd164
+i64	ext_simba	e5_4vars,groundtruth	5	0d77cff96975
+i64	ext_tigress_u64	tig_ea1_u64,groundtruth	5	3a8148591e3a
+i64	ext_tigress_u64	tig_ea1_u64,groundtruth	8	6d8db60a3708
+i64	ext_tigress_u64	tig_ea1_u64,groundtruth	15	4e26b89f10f5
+i64	ext_tigress_u64	tig_ea1_u64,groundtruth	65	c19964a11f5c
+i64	ext_tigress_u64	tig_ea2_u64,groundtruth	14	1c80fc8ee440
+i64	ext_tigress_u64	tig_ea2_u64,groundtruth	19	bc7419c880ec
+i64	ext_tigress_u64	tig_ea2_u64,groundtruth	63	729464df746d
+i64	ext_tigress_u64	tig_ea2_u64,groundtruth	65	2fd5f553a7e0
+i64	ext_tigress_u64	tig_ea3_u64,groundtruth	3	e86d04488ad4
+i64	ext_tigress_u64	tig_ea3_u64,groundtruth	34	4fc851955d61
+i64	ext_tigress_u64	tig_ea3_u64,groundtruth	79	a0f8e13ba014
+i64	ext_tigress_u64	tig_ea3_u64,groundtruth	142	6405ab5cb84e
+i64	ext_tigress_u64	tig_ed_mix_ea1_u64,groundtruth	72	4d2cc0e23270
+i64	ext_tigress_u64	tig_ed_mix_ea1_u64,groundtruth	91	bb20821ce523
+i64	ext_tigress_u64	tig_ed_mix_ea1_u64,groundtruth	94	a0526b4f5992
+i64	ext_tigress_u64	tig_ed_mix_ea1_u64,groundtruth	119	bf9a68a77743
+i64	ext_tigress_u64	tig_ed_mix_ea2_u64,groundtruth	24	92eab9de3a19
+i64	ext_tigress_u64	tig_ed_mix_ea2_u64,groundtruth	57	60b7bb2a8a6f
+i64	ext_tigress_u64	tig_ed_mix_ea2_u64,groundtruth	106	700b3ecfc96f
+i64	ext_tigress_u64	tig_ed_mix_ea2_u64,groundtruth	138	cfa94d0de81f
+i64	ext_tigress_u64	tig_ed_mix_u64,groundtruth	29	ad1d16fe0af9
+i64	ext_tigress_u64	tig_ed_mix_u64,groundtruth	87	295e072355de
+i64	ext_tigress_u64	tig_ed_mix_u64,groundtruth	105	1cee6201958b
+i64	ext_tigress_u64	tig_ed_mix_u64,groundtruth	110	375f0b684b68
+i64	ext_tigress_u64	tig_ed_poly1_u64,groundtruth	7	e4620e35adf0
+i64	ext_tigress_u64	tig_ed_poly1_u64,groundtruth	31	9f63d8a925e6
+i64	ext_tigress_u64	tig_ed_poly1_u64,groundtruth	50	99d6d425cf0d
+i64	ext_tigress_u64	tig_ed_poly1_u64,groundtruth	111	69684fe26cb9
+i64	ext_tigress_u64	tig_ed_xor_u64,groundtruth	48	5d2b1a2f39e9
+i64	ext_tigress_u64	tig_ed_xor_u64,groundtruth	50	955a73f4fe98
+i64	ext_tigress_u64	tig_ed_xor_u64,groundtruth	86	098d0b4b8d3e
+i64	ext_tigress_u64	tig_ed_xor_u64,groundtruth	98	e3388a0d76ca
+i64	harder	12 variables in chained pairs,groundtruth	21	0620607a98a1
+i64	harder	12 variables in chained pairs,groundtruth	36	10e960e8748c
+i64	harder	12 variables in chained pairs,groundtruth	41	fef1fb27d628
+i64	harder	12 variables in chained pairs,groundtruth	67	2960a2d24fee
+i64	harder	7 variables with 3-variable terms,groundtruth	9	bd7dbb09612f
+i64	harder	7 variables with 3-variable terms,groundtruth	57	a9575ef4c358
+i64	harder	7 variables with 3-variable terms,groundtruth	82	bae03830dee8
+i64	harder	7 variables with 3-variable terms,groundtruth	91	0f09006442ec
+i64	harder	bitwise operation of arithmetic terms,groundtruth	2	963b46264422
+i64	harder	bitwise operation of arithmetic terms,groundtruth	27	a80bdedaa5ff
+i64	harder	bitwise operation of arithmetic terms,groundtruth	59	aa652a1d61a7
+i64	harder	bitwise operation of arithmetic terms,groundtruth	83	255e58a725f3
+i64	harder	depth-3 semi-linear over 4 variables,groundtruth	24	c04355a570e1
+i64	harder	depth-3 semi-linear over 4 variables,groundtruth	25	2825ccfc8b78
+i64	harder	depth-3 semi-linear over 4 variables,groundtruth	48	9ee430b2697c
+i64	harder	depth-3 semi-linear over 4 variables,groundtruth	69	b43253d79bd3
+i64	harder	depth-4 bitwise over 3 variables,groundtruth	24	7dc9de306b69
+i64	harder	depth-4 bitwise over 3 variables,groundtruth	57	3a051ba553d0
+i64	harder	depth-4 bitwise over 3 variables,groundtruth	80	c371f5bb61b0
+i64	harder	depth-4 bitwise over 3 variables,groundtruth	91	97988a317047
+i64	harder	product of semi-linear factors,groundtruth	1	37f99906addb
+i64	harder	product of semi-linear factors,groundtruth	62	4b3e933a59e3
+i64	harder	product of semi-linear factors,groundtruth	76	4d43c24a68c2
+i64	harder	product of semi-linear factors,groundtruth	82	f41ad07c7a90
+i64	harder	product of three linear MBAs,groundtruth	17	56d8cc53a9af
+i64	harder	product of three linear MBAs,groundtruth	32	6404746e06ad
+i64	harder	product of three linear MBAs,groundtruth	65	2229ff0105ff
+i64	harder	product of three linear MBAs,groundtruth	77	c9efb281cb4a
+i64	harder	three-level zero MBA substitution,groundtruth	44	f34ebe90924d
+i64	harder	three-level zero MBA substitution,groundtruth	91	9af6dec79672
+i64	harder	three-level zero MBA substitution,groundtruth	99	83d9df3f9a51
+i64	loki_tiny	add, depth 1	55	a04dff05f0bc
+i64	loki_tiny	add, depth 1	105	4f32db2284bb
+i64	loki_tiny	add, depth 1	270	0dbebee9559f
+i64	loki_tiny	add, depth 1	384	aedfd986a7f3
+i64	loki_tiny	add, depth 2	12	b0b4973289dc
+i64	loki_tiny	add, depth 2	248	419dda4782d4
+i64	loki_tiny	add, depth 2	267	12f3699abc53
+i64	loki_tiny	add, depth 2	364	0a01d349d1b6
+i64	loki_tiny	add, depth 3	437	41cfe6600771
+i64	loki_tiny	add, depth 3	620	a7a616472fcb
+i64	loki_tiny	add, depth 3	781	76170fc2e26f
+i64	loki_tiny	add, depth 3	818	bc65b3c27280
+i64	loki_tiny	add, depth 4	265	f454b85f69a2
+i64	loki_tiny	add, depth 4	445	839874e42b18
+i64	loki_tiny	add, depth 4	818	7471eeb6f160
+i64	loki_tiny	add, depth 4	934	c8b6d75afbe7
+i64	loki_tiny	add, depth 5	282	9d7dfa18172a
+i64	loki_tiny	add, depth 5	587	58168fb0ef92
+i64	loki_tiny	add, depth 5	611	3ffef9f05d2c
+i64	loki_tiny	add, depth 5	684	350d1ecc1a06
+i64	loki_tiny	and, depth 1	16	d3059b1c2e8e
+i64	loki_tiny	and, depth 1	536	130d883fda2a
+i64	loki_tiny	and, depth 1	557	7c3b93841f9c
+i64	loki_tiny	and, depth 1	826	adbede9405b7
+i64	loki_tiny	and, depth 2	3	81b790e6985a
+i64	loki_tiny	and, depth 2	21	c82bb93f2ab7
+i64	loki_tiny	and, depth 2	405	adfe1d5c1501
+i64	loki_tiny	and, depth 2	909	e33786d2a7e0
+i64	loki_tiny	and, depth 3	508	3438af740ff4
+i64	loki_tiny	and, depth 3	512	e60138487eab
+i64	loki_tiny	and, depth 3	730	fde7c34bc3e0
+i64	loki_tiny	and, depth 3	984	cf6682641f9e
+i64	loki_tiny	and, depth 4	14	6ca0d30db74c
+i64	loki_tiny	and, depth 4	75	69d09a1b4382
+i64	loki_tiny	and, depth 4	276	f4a42d1e2b8b
+i64	loki_tiny	and, depth 4	778	63211762811a
+i64	loki_tiny	and, depth 5	21	9e92aeb56ede
+i64	loki_tiny	and, depth 5	369	120f9dfd1fd1
+i64	loki_tiny	and, depth 5	576	476c5c07e76e
+i64	loki_tiny	and, depth 5	762	57fd3a8a0b90
+i64	loki_tiny	or, depth 1	233	1e439ddd230f
+i64	loki_tiny	or, depth 1	247	b35cefb5bdbf
+i64	loki_tiny	or, depth 1	316	ffd9c239fd41
+i64	loki_tiny	or, depth 1	965	a752ea2574f7
+i64	loki_tiny	or, depth 2	383	4acaadf2ec8d
+i64	loki_tiny	or, depth 2	618	87ea22291682
+i64	loki_tiny	or, depth 2	644	262aaa0599f1
+i64	loki_tiny	or, depth 2	717	c6e1b5b3bf4a
+i64	loki_tiny	or, depth 3	240	b9119f80c9d8
+i64	loki_tiny	or, depth 3	389	ecfe31c0fa55
+i64	loki_tiny	or, depth 3	613	f0294a77eb9e
+i64	loki_tiny	or, depth 3	674	604fc47aed84
+i64	loki_tiny	or, depth 4	473	ebc2e02b9abd
+i64	loki_tiny	or, depth 4	501	5f2f2e03159d
+i64	loki_tiny	or, depth 4	593	706a752237b6
+i64	loki_tiny	or, depth 4	722	a1247e40782b
+i64	loki_tiny	or, depth 5	88	3b1c849c404b
+i64	loki_tiny	or, depth 5	494	09db85367e42
+i64	loki_tiny	or, depth 5	519	57432d47d7a7
+i64	loki_tiny	or, depth 5	730	45aae130391c
+i64	loki_tiny	sub, depth 1	9	46de9b98f02e
+i64	loki_tiny	sub, depth 1	87	da4534254515
+i64	loki_tiny	sub, depth 1	262	2cfcd43cc789
+i64	loki_tiny	sub, depth 1	962	726dcb974bb3
+i64	loki_tiny	sub, depth 2	211	3c79a184532f
+i64	loki_tiny	sub, depth 2	385	9408f2bd3a0b
+i64	loki_tiny	sub, depth 2	820	e8736e78ea76
+i64	loki_tiny	sub, depth 2	990	49e48757d6a0
+i64	loki_tiny	sub, depth 3	277	7dca8f47fb06
+i64	loki_tiny	sub, depth 3	461	4537d882f52c
+i64	loki_tiny	sub, depth 3	627	9e7452449d2c
+i64	loki_tiny	sub, depth 3	799	c1062faa1341
+i64	loki_tiny	sub, depth 4	208	0fda871fd181
+i64	loki_tiny	sub, depth 4	374	2c7b26a5f394
+i64	loki_tiny	sub, depth 4	475	e41bdb0f0baf
+i64	loki_tiny	sub, depth 4	497	e6f057069590
+i64	loki_tiny	sub, depth 5	72	c98c8be9785c
+i64	loki_tiny	sub, depth 5	310	79fe15510db9
+i64	loki_tiny	sub, depth 5	780	9fb835f6b91f
+i64	loki_tiny	sub, depth 5	990	fb9912a5e1f2
+i64	loki_tiny	xor, depth 1	5	9c05b48c425b
+i64	loki_tiny	xor, depth 1	48	b48966e4e6e4
+i64	loki_tiny	xor, depth 1	277	33a6ef30b54e
+i64	loki_tiny	xor, depth 1	362	3ee6efcf745e
+i64	loki_tiny	xor, depth 2	67	b62eeab4f898
+i64	loki_tiny	xor, depth 2	216	2301bff0308a
+i64	loki_tiny	xor, depth 2	843	f7bbd9412bbd
+i64	loki_tiny	xor, depth 2	885	9d589bcbc2d3
+i64	loki_tiny	xor, depth 3	236	8a01d901a73a
+i64	loki_tiny	xor, depth 3	439	b871d2ff6451
+i64	loki_tiny	xor, depth 3	729	b27f4aca3bf9
+i64	loki_tiny	xor, depth 3	769	386cb0672e01
+i64	loki_tiny	xor, depth 4	178	e06da9a6da88
+i64	loki_tiny	xor, depth 4	316	f2e57b7733ed
+i64	loki_tiny	xor, depth 4	362	3bddce3b2157
+i64	loki_tiny	xor, depth 4	630	7783a0c10902
+i64	loki_tiny	xor, depth 5	359	cdaa6e4d457f
+i64	loki_tiny	xor, depth 5	453	6619e3a35b4d
+i64	loki_tiny	xor, depth 5	831	8e98680f3aee
+i64	loki_tiny	xor, depth 5	839	ace27e6ec617
+i64	ops_i64	disjoint known bits,groundtruth	20	da86fa7c7102
+i64	ops_i64	disjoint known bits,groundtruth	28	976ac751a572
+i64	ops_i64	disjoint known bits,groundtruth	39	2dfc868fa064
+i64	ops_i64	disjoint known bits,groundtruth	51	5e79f1617e30
+i64	ops_i64	linear MBA inside shift/div/mod/mulhi,groundtruth	3	255979316bbc
+i64	ops_i64	linear MBA inside shift/div/mod/mulhi,groundtruth	9	abaf47fa1f0b
+i64	ops_i64	linear MBA inside shift/div/mod/mulhi,groundtruth	16	4adf8edbbbf6
+i64	ops_i64	linear MBA inside shift/div/mod/mulhi,groundtruth	87	bc3435cab60a
+i64	ops_i64	magic-number division,groundtruth	48	9a38756e0d1b
+i64	ops_i64	magic-number division,groundtruth	57	6ae08a3afd87
+i64	ops_i64	magic-number division,groundtruth	62	277983f7ef70
+i64	ops_i64	magic-number division,groundtruth	65	10359bab7ad3
+i64	ops_i64	shift identities,groundtruth	3	b97b33051695
+i64	ops_i64	shift identities,groundtruth	51	665ca47e3320
+i64	ops_i64	shift identities,groundtruth	63	4538be9a902f
+i64	ops_i64	shift identities,groundtruth	93	c11965363521
+i64	ops_i64	variable shift amounts,groundtruth	25	307a4c3c0b5e
+i64	ops_i64	variable shift amounts,groundtruth	38	e4b32387014f
+i64	ops_i64	variable shift amounts,groundtruth	93	47c068458e87
+i64	ops_i64	variable shift amounts,groundtruth	97	a113303f6da7
+i64	qsynth_ea	expression,groundtruth	112	f6d88d1bf209
+i64	qsynth_ea	expression,groundtruth	310	2278d4c9722f
+i64	qsynth_ea	expression,groundtruth	325	346af0c4cbf9
+i64	qsynth_ea	expression,groundtruth	345	96b836c39ba0
+i64	qsynth_ea	expression,groundtruth	369	96bef19bf053
+i64	qsynth_ea	expression,groundtruth	420	bd5b97a68766
+i8	ops_i8	disjoint known bits,groundtruth	25	0eb1f4511888
+i8	ops_i8	disjoint known bits,groundtruth	76	b0ddfa5ad17f
+i8	ops_i8	disjoint known bits,groundtruth	82	c959d96692da
+i8	ops_i8	disjoint known bits,groundtruth	88	d9209ff9a9c6
+i8	ops_i8	linear MBA inside shift/div/mod/mulhi,groundtruth	10	2a1e7a5b79a3
+i8	ops_i8	linear MBA inside shift/div/mod/mulhi,groundtruth	38	b87155208e2d
+i8	ops_i8	linear MBA inside shift/div/mod/mulhi,groundtruth	40	b15cb38f06ec
+i8	ops_i8	linear MBA inside shift/div/mod/mulhi,groundtruth	86	ea63e173c316
+i8	ops_i8	magic-number division,groundtruth	2	0cf63b3a6f7a
+i8	ops_i8	magic-number division,groundtruth	22	bf739a6c4860
+i8	ops_i8	magic-number division,groundtruth	42	2060a8b380b6
+i8	ops_i8	magic-number division,groundtruth	69	c721ad03af0b
+i8	ops_i8	shift identities,groundtruth	5	3fc4e9a96173
+i8	ops_i8	shift identities,groundtruth	12	4554c76b6a12
+i8	ops_i8	shift identities,groundtruth	13	3ab880a889d6
+i8	ops_i8	shift identities,groundtruth	48	e171e48daad3
+i8	ops_i8	variable shift amounts,groundtruth	11	f6dae4684d05
+i8	ops_i8	variable shift amounts,groundtruth	31	781ca2d5fc24
+i8	ops_i8	variable shift amounts,groundtruth	65	62b201c07b23
+i8	ops_i8	variable shift amounts,groundtruth	90	7ad1b8c3ca7a
+u32	ext_ensia_u32	ensia_mba1_u32,groundtruth	4	d1a6f61ac815
+u32	ext_ensia_u32	ensia_mba1_u32,groundtruth	5	bc171c8a17d9
+u32	ext_ensia_u32	ensia_mba1_u32,groundtruth	76	0f99cd57727f
+u32	ext_ensia_u32	ensia_mba1_u32,groundtruth	130	0b8e10839127
+u32	ext_ensia_u32	ensia_mba2_u32,groundtruth	22	a3b4729d374b
+u32	ext_ensia_u32	ensia_mba2_u32,groundtruth	76	21b63803683a
+u32	ext_ensia_u32	ensia_mba2_u32,groundtruth	124	44247c4fc20f
+u32	ext_ensia_u32	ensia_mba2_u32,groundtruth	125	eab0a6285786
+u32	ext_ensia_u32	ensia_mba3_u32,groundtruth	20	1e00d5d10f69
+u32	ext_ensia_u32	ensia_mba3_u32,groundtruth	23	22b13dabed5c
+u32	ext_ensia_u32	ensia_mba3_u32,groundtruth	68	217aefda6869
+u32	ext_ensia_u32	ensia_mba3_u32,groundtruth	120	53c14ffbf173
+u32	ext_ensia_u32	ensia_sub1_u32,groundtruth	1	0600cffec49f
+u32	ext_ensia_u32	ensia_sub1_u32,groundtruth	57	447e5e2d97b0
+u32	ext_ensia_u32	ensia_sub1_u32,groundtruth	99	6d405b6ae31a
+u32	ext_ensia_u32	ensia_sub1_u32,groundtruth	121	1ad59f518868
+u32	ext_ensia_u32	ensia_sub2_u32,groundtruth	9	7e11b36b9d3f
+u32	ext_ensia_u32	ensia_sub2_u32,groundtruth	11	0a30ca6d8eb1
+u32	ext_ensia_u32	ensia_sub2_u32,groundtruth	99	87f5ed589fd2
+u32	ext_ensia_u32	ensia_sub2_u32,groundtruth	134	8f85adfefc3f
+u32	ext_ensia_u32	ensia_sub_mba_u32,groundtruth	0	2da2eca34f31
+u32	ext_ensia_u32	ensia_sub_mba_u32,groundtruth	3	0817c31fe872
+u32	ext_ensia_u32	ensia_sub_mba_u32,groundtruth	13	95d9b50b9d74
+u32	ext_ensia_u32	ensia_sub_mba_u32,groundtruth	56	a3a107dc2195
+u32	ext_hard2_ensia_u32	h2_ensia_mba3x3_u32,groundtruth	5	844958bf4513
+u32	ext_hard2_ensia_u32	h2_ensia_mba3x3_u32,groundtruth	57	1e97635230df
+u32	ext_hard2_ensia_u32	h2_ensia_mba3x3_u32,groundtruth	61	b456969a2063
+u32	ext_hard2_ensia_u32	h2_ensia_mba3x3_u32,groundtruth	69	f85f212b2669
+u32	ext_hard2_ensia_u32	h2_ensia_mba3x3_u32,groundtruth	70	1f9fb705af22
+u32	ext_hard2_ensia_u32	h2_ensia_poly_mba3x2_u32,groundtruth	43	0d9b76f6117e
+u32	ext_hard2_ensia_u32	h2_ensia_poly_mba3x2_u32,groundtruth	69	ebd1fc656eb3
+u32	ext_hard2_ensia_u32	h2_ensia_poly_mba3x2_u32,groundtruth	88	8722899b9594
+u32	ext_hard2_ensia_u32	h2_ensia_poly_mba3x2_u32,groundtruth	91	f95023b365ca
+u32	ext_hard2_ensia_u32	h2_ensia_sub3_mba2_u32,groundtruth	3	76b2011dff1f
+u32	ext_hard2_ensia_u32	h2_ensia_sub3_mba2_u32,groundtruth	12	5920c0c63cfa
+u32	ext_hard2_ensia_u32	h2_ensia_sub3_mba2_u32,groundtruth	19	be400e700e48
+u32	ext_hard2_ensia_u32	h2_ensia_sub3_mba2_u32,groundtruth	28	472cf05a81c6
+u32	ext_hard2_ensia_u32	h2_ensia_v8_mba2_u32,groundtruth	0	8746c0bbb826
+u32	ext_hard2_ensia_u32	h2_ensia_v8_mba2_u32,groundtruth	12	221249db720b
+u32	ext_hard2_ensia_u32	h2_ensia_v8_mba2_u32,groundtruth	18	c6d87b78dc02
+u32	ext_hard2_ensia_u32	h2_ensia_v8_mba2_u32,groundtruth	20	a611f4ac5a20
+u32	ext_hard2_ensia_u32	h2_ensia_v8_mba2_u32,groundtruth	37	bd3bb9c1d7b4
+u32	ext_hard2_ensia_u32	h2_ensia_v8_mba2_u32,groundtruth	43	02c955b1a38f
+u32	ext_hard2_llvm_u32	h2_llvm_poly_pluto_mba2_u32,groundtruth	19	9aa51f5651d9
+u32	ext_hard2_llvm_u32	h2_llvm_poly_pluto_mba2_u32,groundtruth	20	6bf2404dbd8f
+u32	ext_hard2_llvm_u32	h2_llvm_poly_pluto_mba2_u32,groundtruth	40	21ad1e80ca6f
+u32	ext_hard2_llvm_u32	h2_llvm_poly_pluto_mba2_u32,groundtruth	61	de0f3158d461
+u32	ext_hard2_llvm_u32	h2_llvm_v8_pluto_mba_u32,groundtruth	0	86dd06cbe53c
+u32	ext_hard2_llvm_u32	h2_llvm_v8_pluto_mba_u32,groundtruth	41	d5282857a293
+u32	ext_hard2_llvm_u32	h2_llvm_v8_pluto_mba_u32,groundtruth	74	9c46b985b485
+u32	ext_hard2_llvm_u32	h2_llvm_v8_pluto_mba_u32,groundtruth	82	106702954fd8
+u32	ext_hard2_llvm_u32	h2_llvm_v8_pluto_mba_u32,groundtruth	85	d26d721fdc7a
+u32	ext_hard2_mbaobf_u32	h2_mbaobf_cube_lin_u32,groundtruth	9	20b3c1be72a2
+u32	ext_hard2_mbaobf_u32	h2_mbaobf_cube_lin_u32,groundtruth	55	51f305669fd7
+u32	ext_hard2_mbaobf_u32	h2_mbaobf_prod_nonpoly_u32,groundtruth	27	ba9c2cf03a5e
+u32	ext_hard2_mbaobf_u32	h2_mbaobf_prod_subst4_u32,groundtruth	35	8c666c5bcc4d
+u32	ext_hard2_mbaobf_u32	h2_mbaobf_prod_subst4_u32,groundtruth	62	64950a964630
+u32	ext_hard2_mbaobf_u32	h2_mbaobf_square_poly_u32,groundtruth	2	aa03ff5035e0
+u32	ext_hard2_mbaobf_u32	h2_mbaobf_square_poly_u32,groundtruth	44	0a7036e22cb3
+u32	ext_hard2_plzin_u32	h2_plzin_poly_big_u32,groundtruth	11	3fe6b063d9a7
+u32	ext_hard2_plzin_u32	h2_plzin_poly_big_u32,groundtruth	28	1053d07a350c
+u32	ext_hard2_plzin_u32	h2_plzin_poly_big_u32,groundtruth	49	6fe154c0cf0f
+u32	ext_hard2_plzin_u32	h2_plzin_poly_big_u32,groundtruth	56	576970471e2e
+u32	ext_hard2_plzin_u32	h2_plzin_poly_huge_u32,groundtruth	0	a8effd9b8491
+u32	ext_hard2_plzin_u32	h2_plzin_poly_huge_u32,groundtruth	1	d352b5c7ceee
+u32	ext_hard2_plzin_u32	h2_plzin_poly_huge_u32,groundtruth	2	d52571c5d1f9
+u32	ext_hard2_plzin_u32	h2_plzin_poly_huge_u32,groundtruth	3	82dcdbd5425c
+u32	ext_hard2_stack_u32	h2_stack_ensia_mba3_tig_ea2_u32,groundtruth	32	67ed8e10563e
+u32	ext_hard2_stack_u32	h2_stack_ensia_mba3_tig_ea2_u32,groundtruth	39	95dcba1536dd
+u32	ext_hard2_stack_u32	h2_stack_ensia_mba3_tig_ea2_u32,groundtruth	51	0ed0c7930ab4
+u32	ext_hard2_stack_u32	h2_stack_ensia_mba3_tig_ea2_u32,groundtruth	78	a21dd9772610
+u32	ext_hard2_stack_u32	h2_stack_mbaobf_tig_ea1_u32,groundtruth	40	ca50e4bab47f
+u32	ext_hard2_stack_u32	h2_stack_mbaobf_tig_ea1_u32,groundtruth	67	11bbe57ec6b5
+u32	ext_hard2_stack_u32	h2_stack_mbaobf_tig_ea1_u32,groundtruth	99	05b39bb0395b
+u32	ext_hard2_stack_u32	h2_stack_mbaobf_tig_ea1_u32,groundtruth	125	03a6813dc767
+u32	ext_hard2_stack_u32	h2_stack_plzin_tig_ea1_u32,groundtruth	28	0bd7699498ba
+u32	ext_hard2_stack_u32	h2_stack_plzin_tig_ea1_u32,groundtruth	36	f1217c52b4e1
+u32	ext_hard2_stack_u32	h2_stack_plzin_tig_ea1_u32,groundtruth	46	c29b1cba85f3
+u32	ext_hard2_stack_u32	h2_stack_plzin_tig_ea1_u32,groundtruth	47	264b043248fd
+u32	ext_hard2_stack_u32	h2_stack_tig_ea1_ollvm_pluto_u32,groundtruth	6	9920568f6355
+u32	ext_hard2_stack_u32	h2_stack_tig_ea1_ollvm_pluto_u32,groundtruth	8	daab132e305c
+u32	ext_hard2_stack_u32	h2_stack_tig_ea1_ollvm_pluto_u32,groundtruth	14	968fc41f24e1
+u32	ext_hard2_stack_u32	h2_stack_tig_ea1_ollvm_pluto_u32,groundtruth	40	bb908bb28b81
+u32	ext_hard2_stack_u32	h2_stack_tig_ea2_ensia_mba1_u32,groundtruth	0	efbbae180b8b
+u32	ext_hard2_stack_u32	h2_stack_tig_ea2_ensia_mba1_u32,groundtruth	9	8c20b9837b8f
+u32	ext_hard2_stack_u32	h2_stack_tig_ea2_ensia_mba1_u32,groundtruth	18	fa1138f9359a
+u32	ext_hard2_stack_u32	h2_stack_tig_ea2_ensia_mba1_u32,groundtruth	35	0782c615be84
+u32	ext_hard2_stack_u32	h2_stack_tig_ea2_ensia_mba2_u32,groundtruth	1	1a2c6aae1a24
+u32	ext_hard2_stack_u32	h2_stack_tig_ea2_ensia_mba2_u32,groundtruth	6	951453ea3421
+u32	ext_hard2_stack_u32	h2_stack_tig_ea2_ensia_mba2_u32,groundtruth	12	6e6fd780bc75
+u32	ext_hard2_stack_u32	h2_stack_tig_ea2_ensia_mba2_u32,groundtruth	27	e7b3e24d30d2
+u32	ext_hard2_stack_u32	h2_stack_tig_ea2_pluto_mba_u32,groundtruth	5	e2bbdcc588d3
+u32	ext_hard2_stack_u32	h2_stack_tig_ea2_pluto_mba_u32,groundtruth	9	cefc7f877e79
+u32	ext_hard2_stack_u32	h2_stack_tig_ea2_pluto_mba_u32,groundtruth	53	436200015224
+u32	ext_hard2_stack_u32	h2_stack_tig_ea2_pluto_mba_u32,groundtruth	87	9fa265588d42
+u32	ext_hard2_tigress_u32	h2_tig_ea6_u32,groundtruth	21	4b294a351460
+u32	ext_hard2_tigress_u32	h2_tig_ea6_u32,groundtruth	45	22ca1d78815e
+u32	ext_hard2_tigress_u32	h2_tig_ea6_u32,groundtruth	48	847a14b3c259
+u32	ext_hard2_tigress_u32	h2_tig_ea6_u32,groundtruth	98	a0a933ffd92d
+u32	ext_hard2_tigress_u32	h2_tig_ea8_u32,groundtruth	18	3e682f9ef1e1
+u32	ext_hard2_tigress_u32	h2_tig_ea8_u32,groundtruth	22	3ab6af069a31
+u32	ext_hard2_tigress_u32	h2_tig_ea8_u32,groundtruth	50	2282d0044854
+u32	ext_hard2_tigress_u32	h2_tig_ea8_u32,groundtruth	80	95283e1aa550
+u32	ext_hard2_tigress_u32	h2_tig_ed_ea4_u32,groundtruth	19	d8eba6cc8a9d
+u32	ext_hard2_tigress_u32	h2_tig_ed_ea4_u32,groundtruth	30	b83217c5d14f
+u32	ext_hard2_tigress_u32	h2_tig_ed_ea4_u32,groundtruth	47	6535688c813d
+u32	ext_hard2_tigress_u32	h2_tig_ed_ea4_u32,groundtruth	50	fe98a2754196
+u32	ext_hard2_tigress_u32	h2_tig_ed_ea4_u32,groundtruth	70	466b5c2ee484
+u32	ext_hard2_tigress_u32	h2_tig_poly_ea3_u32,groundtruth	13	bf98e92b5024
+u32	ext_hard2_tigress_u32	h2_tig_poly_ea3_u32,groundtruth	18	d850eeec0b33
+u32	ext_hard2_tigress_u32	h2_tig_poly_ea3_u32,groundtruth	20	2b97b36b29f8
+u32	ext_hard2_tigress_u32	h2_tig_poly_ea3_u32,groundtruth	43	9e3ae1ccd0fc
+u32	ext_hard2_tigress_u32	h2_tig_poly_ed_ea2_u32,groundtruth	0	0f251ab47155
+u32	ext_hard2_tigress_u32	h2_tig_poly_ed_ea2_u32,groundtruth	8	8ae402a3b31e
+u32	ext_hard2_tigress_u32	h2_tig_poly_ed_ea2_u32,groundtruth	11	2bd30909d9b6
+u32	ext_hard2_tigress_u32	h2_tig_poly_ed_ea2_u32,groundtruth	51	b1b820168fdc
+u32	ext_hard2_tigress_u32	h2_tig_v8_ea3_u32,groundtruth	11	367eb8e3a6de
+u32	ext_hard2_tigress_u32	h2_tig_v8_ea3_u32,groundtruth	28	3eeb581b42eb
+u32	ext_hard2_tigress_u32	h2_tig_v8_ea3_u32,groundtruth	52	9be28cf3c704
+u32	ext_hard2_tigress_u32	h2_tig_v8_ea3_u32,groundtruth	93	27a705a3d8cc
+u32	ext_hard3_ensia_u32	h3_ensia_fact_mba3x2_u32,groundtruth	6	2964406b2fb0
+u32	ext_hard3_ensia_u32	h3_ensia_fact_mba3x2_u32,groundtruth	9	f003fca15f3b
+u32	ext_hard3_ensia_u32	h3_ensia_fact_mba3x2_u32,groundtruth	11	b290a9ec3653
+u32	ext_hard3_ensia_u32	h3_ensia_fact_mba3x2_u32,groundtruth	54	fc3e909aebb6
+u32	ext_hard3_ensia_u32	h3_ensia_mask_mba3x2_u32,groundtruth	18	f7d1ac945e91
+u32	ext_hard3_ensia_u32	h3_ensia_mask_mba3x2_u32,groundtruth	44	271b9b26d3b7
+u32	ext_hard3_ensia_u32	h3_ensia_mask_mba3x2_u32,groundtruth	63	06ae269cdb4d
+u32	ext_hard3_ensia_u32	h3_ensia_mask_mba3x2_u32,groundtruth	74	9a5b6d6c02e3
+u32	ext_hard3_ensia_u32	h3_ensia_nonpoly_mba3x2_u32,groundtruth	0	d6e7b891387c
+u32	ext_hard3_ensia_u32	h3_ensia_nonpoly_mba3x2_u32,groundtruth	10	0931fa76d84f
+u32	ext_hard3_ensia_u32	h3_ensia_nonpoly_mba3x2_u32,groundtruth	15	736e934d9fbc
+u32	ext_hard3_ensia_u32	h3_ensia_nonpoly_mba3x2_u32,groundtruth	50	260011aeed3d
+u32	ext_hard3_ensia_u32	h3_ensia_ops_mba3x2_u32,groundtruth	40	0a27c8d50cf6
+u32	ext_hard3_ensia_u32	h3_ensia_ops_mba3x2_u32,groundtruth	65	8f5756dbb205
+u32	ext_hard3_ensia_u32	h3_ensia_ops_mba3x2_u32,groundtruth	80	a1646b554e9b
+u32	ext_hard3_ensia_u32	h3_ensia_ops_mba3x2_u32,groundtruth	95	5062b9f2454c
+u32	ext_hard3_ensia_u32	h3_ensia_wide_mba1_u32,groundtruth	4	2eb4a93fbadb
+u32	ext_hard3_ensia_u32	h3_ensia_wide_mba1_u32,groundtruth	6	e1129484d455
+u32	ext_hard3_ensia_u32	h3_ensia_wide_mba1_u32,groundtruth	22	e5c197cf1ee0
+u32	ext_hard3_ensia_u32	h3_ensia_wide_mba1_u32,groundtruth	23	102db1a1f2c3
+u32	ext_hard3_ensia_u32	h3_ensia_wide_p40_mba2_u32,groundtruth	5	0205a46cd285
+u32	ext_hard3_ensia_u32	h3_ensia_wide_p40_mba2_u32,groundtruth	14	5641afe02d63
+u32	ext_hard3_ensia_u32	h3_ensia_wide_p40_mba2_u32,groundtruth	17	08b2231c8079
+u32	ext_hard3_ensia_u32	h3_ensia_wide_p40_mba2_u32,groundtruth	39	863839dbd567
+u32	ext_hard3_ensia_u32	h3_ensia_wsemi_mba1_u32,groundtruth	0	6b204a3158f5
+u32	ext_hard3_ensia_u32	h3_ensia_wsemi_mba1_u32,groundtruth	3	ee8398bff482
+u32	ext_hard3_ensia_u32	h3_ensia_wsemi_mba1_u32,groundtruth	6	490ee6e9e683
+u32	ext_hard3_ensia_u32	h3_ensia_wsemi_mba1_u32,groundtruth	11	5fc08e1273ec
+u32	ext_hard3_ensia_u32	h3_ensia_wsemi_p40_mba2_u32,groundtruth	24	3ab1b44d3b91
+u32	ext_hard3_ensia_u32	h3_ensia_wsemi_p40_mba2_u32,groundtruth	40	8b48fc5a84bf
+u32	ext_hard3_ensia_u32	h3_ensia_wsemi_p40_mba2_u32,groundtruth	48	d7fcbeda3ea4
+u32	ext_hard3_ensia_u32	h3_ensia_wsemi_p40_mba2_u32,groundtruth	55	9756b3f70928
+u32	ext_hard3_llvm_u32	h3_llvm_fact_pluto_mba2_u32,groundtruth	1	423112299bea
+u32	ext_hard3_llvm_u32	h3_llvm_fact_pluto_mba2_u32,groundtruth	16	2132940efc73
+u32	ext_hard3_llvm_u32	h3_llvm_fact_pluto_mba2_u32,groundtruth	29	6ecf80b35373
+u32	ext_hard3_llvm_u32	h3_llvm_fact_pluto_mba2_u32,groundtruth	34	4fdf5752d78a
+u32	ext_hard3_llvm_u32	h3_llvm_mask_pluto_mba2_u32,groundtruth	13	3b179a15216a
+u32	ext_hard3_llvm_u32	h3_llvm_mask_pluto_mba2_u32,groundtruth	18	015e168eb5ec
+u32	ext_hard3_llvm_u32	h3_llvm_mask_pluto_mba2_u32,groundtruth	21	2646ea0ef6c2
+u32	ext_hard3_llvm_u32	h3_llvm_mask_pluto_mba2_u32,groundtruth	37	a2508ebdc0f9
+u32	ext_hard3_llvm_u32	h3_llvm_nonpoly_pluto_mba2_u32,groundtruth	8	a3538609fc3b
+u32	ext_hard3_llvm_u32	h3_llvm_nonpoly_pluto_mba2_u32,groundtruth	18	380b560d9655
+u32	ext_hard3_llvm_u32	h3_llvm_nonpoly_pluto_mba2_u32,groundtruth	24	3f9c6cfacc87
+u32	ext_hard3_llvm_u32	h3_llvm_nonpoly_pluto_mba2_u32,groundtruth	32	10a95204c7e9
+u32	ext_hard3_llvm_u32	h3_llvm_ops_ollvm_pluto_u32,groundtruth	16	6acdbf7d96fa
+u32	ext_hard3_llvm_u32	h3_llvm_ops_ollvm_pluto_u32,groundtruth	56	5b293e324a9c
+u32	ext_hard3_llvm_u32	h3_llvm_ops_ollvm_pluto_u32,groundtruth	59	7a8de3b14c3d
+u32	ext_hard3_llvm_u32	h3_llvm_ops_ollvm_pluto_u32,groundtruth	61	b2c5c90927c7
+u32	ext_hard3_llvm_u32	h3_llvm_wide_pluto_mba_u32,groundtruth	11	8c23b1519e4f
+u32	ext_hard3_llvm_u32	h3_llvm_wide_pluto_mba_u32,groundtruth	28	7567eec78e4a
+u32	ext_hard3_llvm_u32	h3_llvm_wide_pluto_mba_u32,groundtruth	36	645a6bf418b8
+u32	ext_hard3_llvm_u32	h3_llvm_wide_pluto_mba_u32,groundtruth	63	196dd5d2c063
+u32	ext_hard3_llvm_u32	h3_llvm_wsemi_pluto_mba_u32,groundtruth	24	2057bc13b6a2
+u32	ext_hard3_llvm_u32	h3_llvm_wsemi_pluto_mba_u32,groundtruth	31	8a1bbd16abcd
+u32	ext_hard3_llvm_u32	h3_llvm_wsemi_pluto_mba_u32,groundtruth	46	2c6ba75192e0
+u32	ext_hard3_llvm_u32	h3_llvm_wsemi_pluto_mba_u32,groundtruth	58	f76c411c577b
+u32	ext_hard3_llvm_u32	h3_llvm_wsemi_pluto_mba_u32,groundtruth	60	7566b1c48eae
+u32	ext_hard3_stack_u32	h3_stack_ensia_mba2_tig_ea2_u32,groundtruth	18	d0d3d767c89b
+u32	ext_hard3_stack_u32	h3_stack_ensia_mba2_tig_ea2_u32,groundtruth	27	b28f6c352101
+u32	ext_hard3_stack_u32	h3_stack_ensia_mba2_tig_ea2_u32,groundtruth	38	89767c2d50f7
+u32	ext_hard3_stack_u32	h3_stack_ensia_mba2_tig_ea2_u32,groundtruth	65	7dc1988b5dd1
+u32	ext_hard3_stack_u32	h3_stack_pluto_mba_ensia_mba1_u32,groundtruth	0	5e424c2daf56
+u32	ext_hard3_stack_u32	h3_stack_pluto_mba_ensia_mba1_u32,groundtruth	1	4c76d4b89219
+u32	ext_hard3_stack_u32	h3_stack_pluto_mba_ensia_mba1_u32,groundtruth	2	e765e72865c2
+u32	ext_hard3_stack_u32	h3_stack_pluto_mba_ensia_mba1_u32,groundtruth	3	4e9fbed58149
+u32	ext_hard3_stack_u32	h3_stack_pluto_mba_tig_ea2_u32,groundtruth	30	bf3f918de637
+u32	ext_hard3_stack_u32	h3_stack_pluto_mba_tig_ea2_u32,groundtruth	32	a66ccec16bc6
+u32	ext_hard3_stack_u32	h3_stack_pluto_mba_tig_ea2_u32,groundtruth	86	090c0b35c63c
+u32	ext_hard3_stack_u32	h3_stack_pluto_mba_tig_ea2_u32,groundtruth	91	20901952df80
+u32	ext_hard3_stack_u32	h3_stack_tig_ea1_ensia_mba1_tig_ea1_u32,groundtruth	3	7389d4b7e2c3
+u32	ext_hard3_stack_u32	h3_stack_tig_ea1_ensia_mba1_tig_ea1_u32,groundtruth	5	99808192826b
+u32	ext_hard3_stack_u32	h3_stack_tig_ea1_ensia_mba1_tig_ea1_u32,groundtruth	24	f488dc02ac94
+u32	ext_hard3_stack_u32	h3_stack_tig_ea1_ensia_mba1_tig_ea1_u32,groundtruth	30	6f4738247e4f
+u32	ext_hard3_stack_u32	h3_stack_tig_ea1_ensia_mba2_u32,groundtruth	6	e673d14979eb
+u32	ext_hard3_stack_u32	h3_stack_tig_ea1_ensia_mba2_u32,groundtruth	8	260c04cce044
+u32	ext_hard3_stack_u32	h3_stack_tig_ea1_ensia_mba2_u32,groundtruth	29	34dc5cec4a34
+u32	ext_hard3_stack_u32	h3_stack_tig_ea1_ensia_mba2_u32,groundtruth	35	13157794c2d1
+u32	ext_hard3_stack_u32	h3_stack_tig_ea2_pluto_mba_u32,groundtruth	43	bd6288a4e970
+u32	ext_hard3_stack_u32	h3_stack_tig_ea2_pluto_mba_u32,groundtruth	49	bf7d7e2d2539
+u32	ext_hard3_stack_u32	h3_stack_tig_ea2_pluto_mba_u32,groundtruth	53	29ca57d313dd
+u32	ext_hard3_stack_u32	h3_stack_tig_ea2_pluto_mba_u32,groundtruth	67	27d50cf4ea7a
+u32	ext_hard3_tigress_u32	h3_tig_fact_ea6_u32,groundtruth	0	89729ba97b3b
+u32	ext_hard3_tigress_u32	h3_tig_fact_ea6_u32,groundtruth	13	ed5766eae3e3
+u32	ext_hard3_tigress_u32	h3_tig_fact_ea6_u32,groundtruth	51	462d86f59727
+u32	ext_hard3_tigress_u32	h3_tig_fact_ea6_u32,groundtruth	83	358f5621fe7e
+u32	ext_hard3_tigress_u32	h3_tig_fact_ed_ea2_u32,groundtruth	43	6c597d3716e9
+u32	ext_hard3_tigress_u32	h3_tig_fact_ed_ea2_u32,groundtruth	51	80f58af38e09
+u32	ext_hard3_tigress_u32	h3_tig_fact_ed_ea2_u32,groundtruth	59	320ad8042cd0
+u32	ext_hard3_tigress_u32	h3_tig_fact_ed_ea2_u32,groundtruth	65	2b3821929777
+u32	ext_hard3_tigress_u32	h3_tig_fact_ed_ea4_u32,groundtruth	3	38a8fcf8114a
+u32	ext_hard3_tigress_u32	h3_tig_fact_ed_ea4_u32,groundtruth	24	9e4a9209e020
+u32	ext_hard3_tigress_u32	h3_tig_fact_ed_ea4_u32,groundtruth	36	bfd01afae73a
+u32	ext_hard3_tigress_u32	h3_tig_fact_ed_ea4_u32,groundtruth	38	7827c8d587fe
+u32	ext_hard3_tigress_u32	h3_tig_mask_ea6_u32,groundtruth	11	d3c484643915
+u32	ext_hard3_tigress_u32	h3_tig_mask_ea6_u32,groundtruth	43	327ff9964c06
+u32	ext_hard3_tigress_u32	h3_tig_mask_ea6_u32,groundtruth	46	beec3e21ef24
+u32	ext_hard3_tigress_u32	h3_tig_mask_ea6_u32,groundtruth	58	0a8ade215914
+u32	ext_hard3_tigress_u32	h3_tig_mask_ed_ea2_u32,groundtruth	18	f901e8bd7bd0
+u32	ext_hard3_tigress_u32	h3_tig_mask_ed_ea2_u32,groundtruth	25	a2b60ccb9781
+u32	ext_hard3_tigress_u32	h3_tig_mask_ed_ea2_u32,groundtruth	64	ea55a63e930c
+u32	ext_hard3_tigress_u32	h3_tig_mask_ed_ea2_u32,groundtruth	70	08a4a3d680ca
+u32	ext_hard3_tigress_u32	h3_tig_nonpoly_ea6_u32,groundtruth	36	ccfd08263528
+u32	ext_hard3_tigress_u32	h3_tig_nonpoly_ea6_u32,groundtruth	69	6d2a589520b7
+u32	ext_hard3_tigress_u32	h3_tig_nonpoly_ea6_u32,groundtruth	74	94d3bbbdf15b
+u32	ext_hard3_tigress_u32	h3_tig_nonpoly_ea6_u32,groundtruth	94	a0d58188763f
+u32	ext_hard3_tigress_u32	h3_tig_nonpoly_ed_ea4_u32,groundtruth	2	92dfa9d280c6
+u32	ext_hard3_tigress_u32	h3_tig_nonpoly_ed_ea4_u32,groundtruth	13	c11cc44ee1d9
+u32	ext_hard3_tigress_u32	h3_tig_nonpoly_ed_ea4_u32,groundtruth	16	d813aba9be4a
+u32	ext_hard3_tigress_u32	h3_tig_nonpoly_ed_ea4_u32,groundtruth	26	cb52b53c0a04
+u32	ext_hard3_tigress_u32	h3_tig_ops_ea6_u32,groundtruth	0	e96cd1f93e2a
+u32	ext_hard3_tigress_u32	h3_tig_ops_ea6_u32,groundtruth	3	bcb88d3bfed7
+u32	ext_hard3_tigress_u32	h3_tig_ops_ea6_u32,groundtruth	8	bc5885783aff
+u32	ext_hard3_tigress_u32	h3_tig_ops_ea6_u32,groundtruth	33	0d6857e66ad9
+u32	ext_hard3_tigress_u32	h3_tig_wide_ea3_u32,groundtruth	7	f75a656dce8f
+u32	ext_hard3_tigress_u32	h3_tig_wide_ea3_u32,groundtruth	10	831e32e05b57
+u32	ext_hard3_tigress_u32	h3_tig_wide_ea3_u32,groundtruth	17	26e11f1fed77
+u32	ext_hard3_tigress_u32	h3_tig_wide_ea3_u32,groundtruth	51	cfd43334cbf0
+u32	ext_hard3_tigress_u32	h3_tig_wide_ea5_u32,groundtruth	11	a97a1fd0cc69
+u32	ext_hard3_tigress_u32	h3_tig_wide_ea5_u32,groundtruth	20	3ae04db4fabe
+u32	ext_hard3_tigress_u32	h3_tig_wide_ea5_u32,groundtruth	30	83260127704f
+u32	ext_hard3_tigress_u32	h3_tig_wide_ea5_u32,groundtruth	76	21fb84bbc5c5
+u32	ext_hard3_tigress_u32	h3_tig_wsemi_ea5_u32,groundtruth	13	2c2e0f6e0e32
+u32	ext_hard3_tigress_u32	h3_tig_wsemi_ea5_u32,groundtruth	18	711c0d5b53d1
+u32	ext_hard3_tigress_u32	h3_tig_wsemi_ea5_u32,groundtruth	87	4f14a13ff54e
+u32	ext_hard3_tigress_u32	h3_tig_wsemi_ea5_u32,groundtruth	95	1a1e307a6561
+u32	ext_hard_ensia_u32	hard_ensia_mba3x2_u32,groundtruth	1	2a5d68c6be3b
+u32	ext_hard_ensia_u32	hard_ensia_mba3x2_u32,groundtruth	66	2fd8cc0a72f3
+u32	ext_hard_ensia_u32	hard_ensia_mba3x2_u32,groundtruth	67	1efd5967c3ec
+u32	ext_hard_ensia_u32	hard_ensia_mba3x2_u32,groundtruth	73	1f7b89610b56
+u32	ext_hard_ensia_u32	hard_ensia_mba4_u32,groundtruth	7	103b4a9aacc3
+u32	ext_hard_ensia_u32	hard_ensia_mba4_u32,groundtruth	17	87cfcf57ef37
+u32	ext_hard_ensia_u32	hard_ensia_mba4_u32,groundtruth	68	40257b1f80fe
+u32	ext_hard_ensia_u32	hard_ensia_mba4_u32,groundtruth	70	7a7921a31d40
+u32	ext_hard_ensia_u32	hard_ensia_sub3_u32,groundtruth	20	ef39ce505798
+u32	ext_hard_ensia_u32	hard_ensia_sub3_u32,groundtruth	46	f8fae4dfefe6
+u32	ext_hard_ensia_u32	hard_ensia_sub3_u32,groundtruth	93	31dad994f847
+u32	ext_hard_ensia_u32	hard_ensia_sub3_u32,groundtruth	111	20bdfae26270
+u32	ext_hard_ensia_u32	hard_ensia_sub_mba2_u32,groundtruth	6	475ff557a05e
+u32	ext_hard_ensia_u32	hard_ensia_sub_mba2_u32,groundtruth	12	eb7b5503ece0
+u32	ext_hard_ensia_u32	hard_ensia_sub_mba2_u32,groundtruth	16	ebf6da8c0d7e
+u32	ext_hard_ensia_u32	hard_ensia_sub_mba2_u32,groundtruth	51	15443386bef8
+u32	ext_hard_llvm_u32	hard_llvm_ollvm_pluto_hikari_d1_u32,groundtruth	1	b73bf2ca6863
+u32	ext_hard_llvm_u32	hard_llvm_ollvm_pluto_hikari_d1_u32,groundtruth	3	f94f7a982c2f
+u32	ext_hard_llvm_u32	hard_llvm_ollvm_pluto_hikari_d1_u32,groundtruth	9	ea3798de871b
+u32	ext_hard_llvm_u32	hard_llvm_ollvm_pluto_hikari_u32,groundtruth	0	5a1d5cb3cc5a
+u32	ext_hard_llvm_u32	hard_llvm_ollvm_pluto_hikari_u32,groundtruth	1	921d1d372500
+u32	ext_hard_llvm_u32	hard_llvm_ollvm_pluto_hikari_u32,groundtruth	3	492553343ab0
+u32	ext_hard_llvm_u32	hard_llvm_ollvm_pluto_hikari_u32,groundtruth	4	eb389edbb6b9
+u32	ext_hard_llvm_u32	hard_llvm_pluto_mba3_u32,groundtruth	0	ec16bcda9c44
+u32	ext_hard_plzin_u32	hard_plzin_big_u32,groundtruth	17	8cc9ce04f5c2
+u32	ext_hard_plzin_u32	hard_plzin_big_u32,groundtruth	27	6f5ce81b2fde
+u32	ext_hard_plzin_u32	hard_plzin_big_u32,groundtruth	31	66e37ffd8700
+u32	ext_hard_plzin_u32	hard_plzin_big_u32,groundtruth	40	9350919f40e5
+u32	ext_hard_plzin_u32	hard_plzin_huge_u32,groundtruth	5	103de93295ff
+u32	ext_hard_plzin_u32	hard_plzin_huge_u32,groundtruth	7	df670a108f10
+u32	ext_hard_plzin_u32	hard_plzin_huge_u32,groundtruth	11	9e0056892ffd
+u32	ext_hard_plzin_u32	hard_plzin_huge_u32,groundtruth	57	fc597264cceb
+u32	ext_hard_tigress_u32	hard_tig_ea4_u32,groundtruth	55	ccb061eaa709
+u32	ext_hard_tigress_u32	hard_tig_ea4_u32,groundtruth	81	a1caa26aa8d2
+u32	ext_hard_tigress_u32	hard_tig_ea4_u32,groundtruth	103	c06681ed9b3b
+u32	ext_hard_tigress_u32	hard_tig_ea4_u32,groundtruth	120	7f4e9cb5774e
+u32	ext_hard_tigress_u32	hard_tig_ea5_u32,groundtruth	5	a7e7ce7f7ce0
+u32	ext_hard_tigress_u32	hard_tig_ea5_u32,groundtruth	101	af192dcd0c6c
+u32	ext_hard_tigress_u32	hard_tig_ea5_u32,groundtruth	112	774610e49033
+u32	ext_hard_tigress_u32	hard_tig_ea5_u32,groundtruth	140	186ba1d66cf2
+u32	ext_hard_tigress_u32	hard_tig_ed_ea3_u32,groundtruth	67	8395038e651c
+u32	ext_hard_tigress_u32	hard_tig_ed_ea3_u32,groundtruth	93	1eee8fd4f8fd
+u32	ext_hard_tigress_u32	hard_tig_ed_ea3_u32,groundtruth	130	e2bbd2d9ba1b
+u32	ext_hard_tigress_u32	hard_tig_ed_ea3_u32,groundtruth	131	bb06caa7b52c
+u32	ext_hard_tigress_u32	hard_tig_v5_ea3_u32,groundtruth	38	4b332018c458
+u32	ext_hard_tigress_u32	hard_tig_v5_ea3_u32,groundtruth	50	30daf0a9e0cb
+u32	ext_hard_tigress_u32	hard_tig_v5_ea3_u32,groundtruth	62	403672719784
+u32	ext_hard_tigress_u32	hard_tig_v5_ea3_u32,groundtruth	111	746c16ea5a2b
+u32	ext_llvm_u32	hikari_sub2_u32,groundtruth	3	5f1ff95a0f90
+u32	ext_llvm_u32	hikari_sub2_u32,groundtruth	31	8f0f94551fa1
+u32	ext_llvm_u32	hikari_sub2_u32,groundtruth	110	9a399945ec64
+u32	ext_llvm_u32	hikari_sub2_u32,groundtruth	114	789f96d05989
+u32	ext_llvm_u32	pluto_mba_u32,groundtruth	6	768501688da1
+u32	ext_llvm_u32	pluto_mba_u32,groundtruth	49	62c4c8a52689
+u32	ext_llvm_u32	pluto_mba_u32,groundtruth	78	6a961e5f6688
+u32	ext_llvm_u32	pluto_mba_u32,groundtruth	125	8e6976de51e1
+u32	ext_plzin_u32	plzin_deep_u32,groundtruth	12	58eb42d677a8
+u32	ext_plzin_u32	plzin_deep_u32,groundtruth	68	36caffb323b9
+u32	ext_plzin_u32	plzin_deep_u32,groundtruth	73	3ed94c5dc83b
+u32	ext_plzin_u32	plzin_deep_u32,groundtruth	97	18d67878107a
+u32	ext_plzin_u32	plzin_default_u32,groundtruth	16	1b7cc972579c
+u32	ext_plzin_u32	plzin_default_u32,groundtruth	32	4e7dd9dd7757
+u32	ext_plzin_u32	plzin_default_u32,groundtruth	58	7fd9004076c6
+u32	ext_plzin_u32	plzin_default_u32,groundtruth	92	8f742a71271f
+u32	ext_tigress_u32	tig_ea1_u32,groundtruth	11	65b61902aab2
+u32	ext_tigress_u32	tig_ea1_u32,groundtruth	38	e6bce2848ae1
+u32	ext_tigress_u32	tig_ea1_u32,groundtruth	57	b633b7948414
+u32	ext_tigress_u32	tig_ea1_u32,groundtruth	144	2ca121304329
+u32	ext_tigress_u32	tig_ea2_u32,groundtruth	23	8cc8748b5a92
+u32	ext_tigress_u32	tig_ea2_u32,groundtruth	26	3b59272af177
+u32	ext_tigress_u32	tig_ea2_u32,groundtruth	36	678d518b919a
+u32	ext_tigress_u32	tig_ea2_u32,groundtruth	139	d4ccc049067d
+u32	ext_tigress_u32	tig_ea3_u32,groundtruth	20	4db210a7e3d2
+u32	ext_tigress_u32	tig_ea3_u32,groundtruth	27	c540a6bb97c5
+u32	ext_tigress_u32	tig_ea3_u32,groundtruth	47	3a7ce22eec94
+u32	ext_tigress_u32	tig_ea3_u32,groundtruth	125	0c3c6597f030
+u32	ext_tigress_u32	tig_ed_mix_ea1_u32,groundtruth	2	f154004c3de0
+u32	ext_tigress_u32	tig_ed_mix_ea1_u32,groundtruth	7	f248e7609966
+u32	ext_tigress_u32	tig_ed_mix_ea1_u32,groundtruth	50	6069af07f093
+u32	ext_tigress_u32	tig_ed_mix_ea1_u32,groundtruth	64	b4cad2fa4d65
+u32	ext_tigress_u32	tig_ed_mix_ea2_u32,groundtruth	5	2cc1d4604c1d
+u32	ext_tigress_u32	tig_ed_mix_ea2_u32,groundtruth	29	ecfb8b97af1f
+u32	ext_tigress_u32	tig_ed_mix_ea2_u32,groundtruth	41	1a1cc36641c5
+u32	ext_tigress_u32	tig_ed_mix_ea2_u32,groundtruth	96	aff4ed43ff9c
+u32	ext_tigress_u32	tig_ed_mix_u32,groundtruth	44	dba2e4949526
+u32	ext_tigress_u32	tig_ed_mix_u32,groundtruth	64	c33601709e24
+u32	ext_tigress_u32	tig_ed_mix_u32,groundtruth	100	8e9c78317448
+u32	ext_tigress_u32	tig_ed_mix_u32,groundtruth	134	b8fce1ec3614
+u32	ext_tigress_u32	tig_ed_poly1_u32,groundtruth	6	ac24ec090b72
+u32	ext_tigress_u32	tig_ed_poly1_u32,groundtruth	64	aba6169fb202
+u32	ext_tigress_u32	tig_ed_poly1_u32,groundtruth	93	1ec971205946
+u32	ext_tigress_u32	tig_ed_poly1_u32,groundtruth	97	41c1c86af67c
+u32	ext_tigress_u32	tig_ed_xor_u32,groundtruth	0	90d1ead49df7
+u32	ext_tigress_u32	tig_ed_xor_u32,groundtruth	27	7ff50daf3a31
+u32	ext_tigress_u32	tig_ed_xor_u32,groundtruth	81	5e12a6cc35f1
+u32	ext_tigress_u32	tig_ed_xor_u32,groundtruth	114	68d33aaae583
+u32	ext_xyntia_u32	b1,groundtruth	27	c6b025da3990
+u32	ext_xyntia_u32	b1,groundtruth	149	fc0841dd408f
+u32	ext_xyntia_u32	b1,groundtruth	226	922a657de16e
+u32	ext_xyntia_u32	b1,groundtruth	432	a02e6dd9ea8f
+u32	ext_xyntia_u32	b2,groundtruth	238	c2a5780d8015
+u32	ext_xyntia_u32	b2,groundtruth	282	443dde6cd042
+u32	ext_xyntia_u32	b2,groundtruth	424	6635f0d870c9
+u32	ext_xyntia_u32	b2,groundtruth	807	dfd6b14aa8aa
+u32	ext_xyntia_u32	b2_combined,groundtruth	328	c8a0bb3ee12b
+u32	ext_xyntia_u32	b2_combined,groundtruth	458	94ae376b07f2
+u32	ext_xyntia_u32	b2_combined,groundtruth	698	67e05c1d6e4f
+u32	ext_xyntia_u32	b2_combined,groundtruth	869	630fd504aeea
+u32	ext_xyntia_u32	handlers_bp1,groundtruth	0	c8388642a68a
+u32	ext_xyntia_u32	handlers_bp1,groundtruth	1	ceb5d6af29bc
+u32	ext_xyntia_u32	handlers_bp1,groundtruth	2	e10154d54555
+u32	ext_xyntia_u32	handlers_bp2,groundtruth	0	ff213bad528a
+u32	ext_xyntia_u32	handlers_bp3,groundtruth	0	1ae201987e2a
+u32	ext_xyntia_u32	handlers_bp3,groundtruth	3	daedc626a591
+u32	ops_u32	disjoint known bits,groundtruth	32	10726c35f6f2
+u32	ops_u32	disjoint known bits,groundtruth	62	875a23b49d75
+u32	ops_u32	disjoint known bits,groundtruth	63	6e653d509b54
+u32	ops_u32	disjoint known bits,groundtruth	72	123bd8a03796
+u32	ops_u32	linear MBA inside shift/div/mod/mulhi,groundtruth	1	3a7a12469b63
+u32	ops_u32	linear MBA inside shift/div/mod/mulhi,groundtruth	52	12b6da391e58
+u32	ops_u32	linear MBA inside shift/div/mod/mulhi,groundtruth	74	f79e20adc7cc
+u32	ops_u32	linear MBA inside shift/div/mod/mulhi,groundtruth	91	03fde6b0c52a
+u32	ops_u32	magic-number division,groundtruth	23	c009f76d1a4e
+u32	ops_u32	magic-number division,groundtruth	39	4287f5e36bea
+u32	ops_u32	magic-number division,groundtruth	56	7e136382d8ac
+u32	ops_u32	magic-number division,groundtruth	88	99bf37dd6c2c
+u32	ops_u32	shift identities,groundtruth	0	c5b069150fbc
+u32	ops_u32	shift identities,groundtruth	28	37dc6aaf1a97
+u32	ops_u32	shift identities,groundtruth	43	2d0d09d6ee1a
+u32	ops_u32	shift identities,groundtruth	98	cc9319672090
+u32	ops_u32	variable shift amounts,groundtruth	11	11d3a307d6c9
+u32	ops_u32	variable shift amounts,groundtruth	28	08806cf11993
+u32	ops_u32	variable shift amounts,groundtruth	77	20167abdc97c
+u32	ops_u32	variable shift amounts,groundtruth	93	9afb8bab2799
+u64	ext_hard3_ensia_u64	h3_ensia_fact_mba3x2_u64,groundtruth	7	797c09265663
+u64	ext_hard3_ensia_u64	h3_ensia_fact_mba3x2_u64,groundtruth	14	101a4e637692
+u64	ext_hard3_ensia_u64	h3_ensia_fact_mba3x2_u64,groundtruth	34	9f476fdebc5c
+u64	ext_hard3_ensia_u64	h3_ensia_fact_mba3x2_u64,groundtruth	46	8910624bdeb1
+u64	ext_hard3_ensia_u64	h3_ensia_mask_mba3x2_u64,groundtruth	13	ed4d8d19aa67
+u64	ext_hard3_ensia_u64	h3_ensia_mask_mba3x2_u64,groundtruth	21	c98a9e03b997
+u64	ext_hard3_ensia_u64	h3_ensia_mask_mba3x2_u64,groundtruth	46	7fa763a5f244
+u64	ext_hard3_ensia_u64	h3_ensia_mask_mba3x2_u64,groundtruth	56	a7d8b9100aa9
+u64	ext_hard3_ensia_u64	h3_ensia_nonpoly_mba3x2_u64,groundtruth	4	eddad5d6e3f3
+u64	ext_hard3_ensia_u64	h3_ensia_nonpoly_mba3x2_u64,groundtruth	16	b5ec94f9af4f
+u64	ext_hard3_ensia_u64	h3_ensia_nonpoly_mba3x2_u64,groundtruth	35	756dca4495e2
+u64	ext_hard3_ensia_u64	h3_ensia_nonpoly_mba3x2_u64,groundtruth	46	d984648a833b
+u64	ext_hard3_ensia_u64	h3_ensia_ops_mba3x2_u64,groundtruth	16	290dfa8a4467
+u64	ext_hard3_ensia_u64	h3_ensia_ops_mba3x2_u64,groundtruth	78	158f627d173a
+u64	ext_hard3_ensia_u64	h3_ensia_ops_mba3x2_u64,groundtruth	89	01b74bdba5e4
+u64	ext_hard3_ensia_u64	h3_ensia_ops_mba3x2_u64,groundtruth	91	5051304561e1
+u64	ext_hard3_ensia_u64	h3_ensia_wide_mba1_u64,groundtruth	2	260ff1554c0f
+u64	ext_hard3_ensia_u64	h3_ensia_wide_mba1_u64,groundtruth	14	41ef09abad4c
+u64	ext_hard3_ensia_u64	h3_ensia_wide_mba1_u64,groundtruth	17	cc49675b1ce3
+u64	ext_hard3_ensia_u64	h3_ensia_wide_mba1_u64,groundtruth	19	9bc7f6c61c50
+u64	ext_hard3_ensia_u64	h3_ensia_wide_p40_mba2_u64,groundtruth	31	1d14846c9311
+u64	ext_hard3_ensia_u64	h3_ensia_wide_p40_mba2_u64,groundtruth	32	e17b7422e60b
+u64	ext_hard3_ensia_u64	h3_ensia_wide_p40_mba2_u64,groundtruth	46	c9798b12dc37
+u64	ext_hard3_ensia_u64	h3_ensia_wide_p40_mba2_u64,groundtruth	65	5d685880fe98
+u64	ext_hard3_ensia_u64	h3_ensia_wsemi_mba1_u64,groundtruth	6	6bc87ea2d17d
+u64	ext_hard3_ensia_u64	h3_ensia_wsemi_mba1_u64,groundtruth	14	9546172dfbb7
+u64	ext_hard3_ensia_u64	h3_ensia_wsemi_mba1_u64,groundtruth	18	cb0a6805e66e
+u64	ext_hard3_ensia_u64	h3_ensia_wsemi_mba1_u64,groundtruth	28	c06dc41cf141
+u64	ext_hard3_ensia_u64	h3_ensia_wsemi_p40_mba2_u64,groundtruth	10	20f8a762fd13
+u64	ext_hard3_ensia_u64	h3_ensia_wsemi_p40_mba2_u64,groundtruth	28	b86a91103d2a
+u64	ext_hard3_ensia_u64	h3_ensia_wsemi_p40_mba2_u64,groundtruth	52	5bc67601105b
+u64	ext_hard3_ensia_u64	h3_ensia_wsemi_p40_mba2_u64,groundtruth	57	a7f2cca9cd27
+u64	ext_hard3_ensia_u64	h3_ensia_wsemi_p40_mba2_u64,groundtruth	62	18310f77d1a9
+u64	ext_hard3_llvm_u64	h3_llvm_fact_pluto_mba2_u64,groundtruth	13	9a41dee38b7e
+u64	ext_hard3_llvm_u64	h3_llvm_fact_pluto_mba2_u64,groundtruth	21	270b34fb0d46
+u64	ext_hard3_llvm_u64	h3_llvm_fact_pluto_mba2_u64,groundtruth	29	f0f484ea6367
+u64	ext_hard3_llvm_u64	h3_llvm_fact_pluto_mba2_u64,groundtruth	35	44b0b797996b
+u64	ext_hard3_llvm_u64	h3_llvm_mask_pluto_mba2_u64,groundtruth	2	a36c020bb5e7
+u64	ext_hard3_llvm_u64	h3_llvm_mask_pluto_mba2_u64,groundtruth	40	6e7f65839432
+u64	ext_hard3_llvm_u64	h3_llvm_mask_pluto_mba2_u64,groundtruth	43	8bb91d572b0a
+u64	ext_hard3_llvm_u64	h3_llvm_mask_pluto_mba2_u64,groundtruth	66	a5097bf05390
+u64	ext_hard3_llvm_u64	h3_llvm_nonpoly_pluto_mba2_u64,groundtruth	6	e3ae574f983c
+u64	ext_hard3_llvm_u64	h3_llvm_nonpoly_pluto_mba2_u64,groundtruth	25	393807422d6f
+u64	ext_hard3_llvm_u64	h3_llvm_nonpoly_pluto_mba2_u64,groundtruth	38	b5d7d531d1dc
+u64	ext_hard3_llvm_u64	h3_llvm_nonpoly_pluto_mba2_u64,groundtruth	51	4ab11724ca96
+u64	ext_hard3_llvm_u64	h3_llvm_ops_ollvm_pluto_u64,groundtruth	5	df700cc37e62
+u64	ext_hard3_llvm_u64	h3_llvm_ops_ollvm_pluto_u64,groundtruth	25	b8289c2b7f26
+u64	ext_hard3_llvm_u64	h3_llvm_ops_ollvm_pluto_u64,groundtruth	32	63514c6b8a9e
+u64	ext_hard3_llvm_u64	h3_llvm_ops_ollvm_pluto_u64,groundtruth	38	902980a4a5b3
+u64	ext_hard3_llvm_u64	h3_llvm_wide_pluto_mba_u64,groundtruth	22	158783bc909d
+u64	ext_hard3_llvm_u64	h3_llvm_wide_pluto_mba_u64,groundtruth	38	ac52ba583c39
+u64	ext_hard3_llvm_u64	h3_llvm_wide_pluto_mba_u64,groundtruth	57	3ed1934b69a0
+u64	ext_hard3_llvm_u64	h3_llvm_wide_pluto_mba_u64,groundtruth	61	17cfeafafcf9
+u64	ext_hard3_llvm_u64	h3_llvm_wide_pluto_mba_u64,groundtruth	78	3d321c484c30
+u64	ext_hard3_llvm_u64	h3_llvm_wsemi_pluto_mba_u64,groundtruth	2	adc72b1ec0b0
+u64	ext_hard3_llvm_u64	h3_llvm_wsemi_pluto_mba_u64,groundtruth	8	0b89bcf083c3
+u64	ext_hard3_llvm_u64	h3_llvm_wsemi_pluto_mba_u64,groundtruth	32	5e41eebc4eaf
+u64	ext_hard3_llvm_u64	h3_llvm_wsemi_pluto_mba_u64,groundtruth	54	c11aa6d5928c
+u64	ext_hard3_llvm_u64	h3_llvm_wsemi_pluto_mba_u64,groundtruth	84	7e6512c423bc
+u64	ext_hard3_stack_u64	h3_stack_ensia_mba2_tig_ea2_u64,groundtruth	0	a69adb28cc03
+u64	ext_hard3_stack_u64	h3_stack_ensia_mba2_tig_ea2_u64,groundtruth	31	2313f256c7e3
+u64	ext_hard3_stack_u64	h3_stack_ensia_mba2_tig_ea2_u64,groundtruth	36	7b9e3e844cdf
+u64	ext_hard3_stack_u64	h3_stack_ensia_mba2_tig_ea2_u64,groundtruth	61	4d756ea62759
+u64	ext_hard3_stack_u64	h3_stack_pluto_mba_ensia_mba1_u64,groundtruth	3	c42b68b743ef
+u64	ext_hard3_stack_u64	h3_stack_pluto_mba_ensia_mba1_u64,groundtruth	8	b3823ada2437
+u64	ext_hard3_stack_u64	h3_stack_pluto_mba_ensia_mba1_u64,groundtruth	9	946764008980
+u64	ext_hard3_stack_u64	h3_stack_pluto_mba_ensia_mba1_u64,groundtruth	17	a0b241543fcb
+u64	ext_hard3_stack_u64	h3_stack_pluto_mba_tig_ea2_u64,groundtruth	12	9b679ea5d959
+u64	ext_hard3_stack_u64	h3_stack_pluto_mba_tig_ea2_u64,groundtruth	13	174c58f1038c
+u64	ext_hard3_stack_u64	h3_stack_pluto_mba_tig_ea2_u64,groundtruth	24	1ea2755a7f5b
+u64	ext_hard3_stack_u64	h3_stack_pluto_mba_tig_ea2_u64,groundtruth	39	b0eee893a14d
+u64	ext_hard3_stack_u64	h3_stack_pluto_mba_tig_ea2_u64,groundtruth	69	d41067f83d2c
+u64	ext_hard3_stack_u64	h3_stack_tig_ea1_ensia_mba1_tig_ea1_u64,groundtruth	11	2645719d3ff4
+u64	ext_hard3_stack_u64	h3_stack_tig_ea1_ensia_mba1_tig_ea1_u64,groundtruth	13	1f5cac1740f2
+u64	ext_hard3_stack_u64	h3_stack_tig_ea1_ensia_mba1_tig_ea1_u64,groundtruth	16	8d9023782af9
+u64	ext_hard3_stack_u64	h3_stack_tig_ea1_ensia_mba1_tig_ea1_u64,groundtruth	28	5971d84510b8
+u64	ext_hard3_stack_u64	h3_stack_tig_ea1_ensia_mba2_u64,groundtruth	0	593ef108a88e
+u64	ext_hard3_stack_u64	h3_stack_tig_ea1_ensia_mba2_u64,groundtruth	3	3ac66ccb408b
+u64	ext_hard3_stack_u64	h3_stack_tig_ea1_ensia_mba2_u64,groundtruth	8	9008cfde91d5
+u64	ext_hard3_stack_u64	h3_stack_tig_ea1_ensia_mba2_u64,groundtruth	25	9d0cc1d24d95
+u64	ext_hard3_stack_u64	h3_stack_tig_ea2_pluto_mba_u64,groundtruth	9	3911acaa2b68
+u64	ext_hard3_stack_u64	h3_stack_tig_ea2_pluto_mba_u64,groundtruth	30	7b6722b22091
+u64	ext_hard3_stack_u64	h3_stack_tig_ea2_pluto_mba_u64,groundtruth	48	27238dc764f5
+u64	ext_hard3_stack_u64	h3_stack_tig_ea2_pluto_mba_u64,groundtruth	69	c4fb1869629b
+u64	ext_hard3_tigress_u64	h3_tig_fact_ea6_u64,groundtruth	54	0079b0088141
+u64	ext_hard3_tigress_u64	h3_tig_fact_ea6_u64,groundtruth	61	3964940dd09b
+u64	ext_hard3_tigress_u64	h3_tig_fact_ea6_u64,groundtruth	73	464eb0a75198
+u64	ext_hard3_tigress_u64	h3_tig_fact_ea6_u64,groundtruth	94	f844f414ecc7
+u64	ext_hard3_tigress_u64	h3_tig_fact_ed_ea2_u64,groundtruth	29	5d16d6e131f9
+u64	ext_hard3_tigress_u64	h3_tig_fact_ed_ea2_u64,groundtruth	31	17bb3462df1d
+u64	ext_hard3_tigress_u64	h3_tig_fact_ed_ea2_u64,groundtruth	60	db740f8c1f58
+u64	ext_hard3_tigress_u64	h3_tig_fact_ed_ea2_u64,groundtruth	61	7f8dcd06ac86
+u64	ext_hard3_tigress_u64	h3_tig_fact_ed_ea4_u64,groundtruth	13	96016315a426
+u64	ext_hard3_tigress_u64	h3_tig_fact_ed_ea4_u64,groundtruth	18	9b292325bc2f
+u64	ext_hard3_tigress_u64	h3_tig_fact_ed_ea4_u64,groundtruth	23	f11eadf4f95a
+u64	ext_hard3_tigress_u64	h3_tig_fact_ed_ea4_u64,groundtruth	46	d41cf46b39c1
+u64	ext_hard3_tigress_u64	h3_tig_mask_ea6_u64,groundtruth	29	9f841e678e31
+u64	ext_hard3_tigress_u64	h3_tig_mask_ea6_u64,groundtruth	37	942a98a749e8
+u64	ext_hard3_tigress_u64	h3_tig_mask_ea6_u64,groundtruth	58	9b5d77b4f38c
+u64	ext_hard3_tigress_u64	h3_tig_mask_ea6_u64,groundtruth	95	e6b55b51aa80
+u64	ext_hard3_tigress_u64	h3_tig_mask_ed_ea2_u64,groundtruth	0	335618946e01
+u64	ext_hard3_tigress_u64	h3_tig_mask_ed_ea2_u64,groundtruth	2	57d08777d52d
+u64	ext_hard3_tigress_u64	h3_tig_mask_ed_ea2_u64,groundtruth	58	f937c4e913b7
+u64	ext_hard3_tigress_u64	h3_tig_mask_ed_ea2_u64,groundtruth	98	f027eecfb967
+u64	ext_hard3_tigress_u64	h3_tig_nonpoly_ea6_u64,groundtruth	36	21e0e049d398
+u64	ext_hard3_tigress_u64	h3_tig_nonpoly_ea6_u64,groundtruth	42	e2d8cc181619
+u64	ext_hard3_tigress_u64	h3_tig_nonpoly_ea6_u64,groundtruth	65	37b871038fd8
+u64	ext_hard3_tigress_u64	h3_tig_nonpoly_ea6_u64,groundtruth	78	395b0b0a6d59
+u64	ext_hard3_tigress_u64	h3_tig_nonpoly_ed_ea4_u64,groundtruth	1	92d64341ec37
+u64	ext_hard3_tigress_u64	h3_tig_nonpoly_ed_ea4_u64,groundtruth	5	82b7f0747018
+u64	ext_hard3_tigress_u64	h3_tig_nonpoly_ed_ea4_u64,groundtruth	34	b0f65aa4d468
+u64	ext_hard3_tigress_u64	h3_tig_nonpoly_ed_ea4_u64,groundtruth	52	606264f4b98b
+u64	ext_hard3_tigress_u64	h3_tig_ops_ea6_u64,groundtruth	10	6bb667562bb0
+u64	ext_hard3_tigress_u64	h3_tig_ops_ea6_u64,groundtruth	17	e151bbc807e2
+u64	ext_hard3_tigress_u64	h3_tig_ops_ea6_u64,groundtruth	44	aa2b5255c1fb
+u64	ext_hard3_tigress_u64	h3_tig_ops_ea6_u64,groundtruth	55	4c0c6735946a
+u64	ext_hard3_tigress_u64	h3_tig_wide_ea3_u64,groundtruth	7	318148d4c431
+u64	ext_hard3_tigress_u64	h3_tig_wide_ea3_u64,groundtruth	49	221cc1b0f24a
+u64	ext_hard3_tigress_u64	h3_tig_wide_ea3_u64,groundtruth	63	611a77bbea55
+u64	ext_hard3_tigress_u64	h3_tig_wide_ea3_u64,groundtruth	95	0884ed8389c5
+u64	ext_hard3_tigress_u64	h3_tig_wide_ea5_u64,groundtruth	6	67e00684e299
+u64	ext_hard3_tigress_u64	h3_tig_wide_ea5_u64,groundtruth	24	63c3eeeaff6d
+u64	ext_hard3_tigress_u64	h3_tig_wide_ea5_u64,groundtruth	61	5a179758d6a3
+u64	ext_hard3_tigress_u64	h3_tig_wide_ea5_u64,groundtruth	95	15fc4e7b07dc
+u64	ext_hard3_tigress_u64	h3_tig_wsemi_ea5_u64,groundtruth	13	81fa46499e22
+u64	ext_hard3_tigress_u64	h3_tig_wsemi_ea5_u64,groundtruth	31	4308503e5685
+u64	ext_hard3_tigress_u64	h3_tig_wsemi_ea5_u64,groundtruth	53	b591642c895d
+u64	ext_hard3_tigress_u64	h3_tig_wsemi_ea5_u64,groundtruth	55	8d3c8ab78613
+u64	ext_obfx_u64	obfuscatorx,groundtruth	1	850fe9e0731b
+u64	ext_obfx_u64	obfuscatorx,groundtruth	2	3f4160578ebf
+u64	ext_obfx_u64	obfuscatorx,groundtruth	5	2f92e43676bd
+u64	ext_obfx_u64	obfuscatorx,groundtruth	6	bc5000a7ec3d
+u64	ops_u64	disjoint known bits,groundtruth	11	46a7c05d3611
+u64	ops_u64	disjoint known bits,groundtruth	75	e1f39c0627a7
+u64	ops_u64	disjoint known bits,groundtruth	78	f442076e23a4
+u64	ops_u64	disjoint known bits,groundtruth	86	0a800d9df0e3
+u64	ops_u64	linear MBA inside shift/div/mod/mulhi,groundtruth	30	c2a505303b56
+u64	ops_u64	linear MBA inside shift/div/mod/mulhi,groundtruth	37	52ca315e987c
+u64	ops_u64	linear MBA inside shift/div/mod/mulhi,groundtruth	39	933e6d8490aa
+u64	ops_u64	linear MBA inside shift/div/mod/mulhi,groundtruth	73	b0d2107c71f5
+u64	ops_u64	magic-number division,groundtruth	27	b692daa16f2d
+u64	ops_u64	magic-number division,groundtruth	39	cd13c0151a7c
+u64	ops_u64	magic-number division,groundtruth	43	db9fa4e109ac
+u64	ops_u64	magic-number division,groundtruth	86	c1d8ed17c4b3
+u64	ops_u64	shift identities,groundtruth	18	f3cf919bd09e
+u64	ops_u64	shift identities,groundtruth	36	dcc27a580a12
+u64	ops_u64	shift identities,groundtruth	58	808bcb4990fe
+u64	ops_u64	shift identities,groundtruth	97	16b96d78d187
+u64	ops_u64	variable shift amounts,groundtruth	6	4d1a7085dd21
+u64	ops_u64	variable shift amounts,groundtruth	49	36fb9774147f
+u64	ops_u64	variable shift amounts,groundtruth	69	aaf589b6bbd8
+u64	ops_u64	variable shift amounts,groundtruth	90	317086d27508
+u8	ext_oses_u8	oses,groundtruth	20	25699049ea9f
+u8	ext_oses_u8	oses,groundtruth	22	1a397973d98f
+u8	ext_oses_u8	oses,groundtruth	33	d0a2466f637d
+u8	ext_oses_u8	oses,groundtruth	41	e8d651a14776
+u8	hard	4-variable arithmetic leaves,groundtruth	21	35f31bc6b06c
+u8	hard	4-variable arithmetic leaves,groundtruth	22	c91147905ef9
+u8	hard	4-variable arithmetic leaves,groundtruth	36	7e683c2ca90b
+u8	hard	4-variable arithmetic leaves,groundtruth	85	693729ac544f
+u8	hard	8 variables in one chained group,groundtruth	16	dcf04bc9b30c
+u8	hard	8 variables in one chained group,groundtruth	48	77ee0441936b
+u8	hard	8 variables in one chained group,groundtruth	57	9569218a9744
+u8	hard	8 variables in one chained group,groundtruth	79	52fa9de572f1
+u8	hard	8-variable linear MBA,groundtruth	11	a64ba21ded19
+u8	hard	8-variable linear MBA,groundtruth	56	738557f29ece
+u8	hard	8-variable linear MBA,groundtruth	74	df2ed4178d24
+u8	hard	8-variable linear MBA,groundtruth	78	4c3d7c25e195
+u8	hard	arithmetic leaves (v + zero MBA),groundtruth	3	231ff395c4d1
+u8	hard	arithmetic leaves (v + zero MBA),groundtruth	6	796da692d352
+u8	hard	arithmetic leaves (v + zero MBA),groundtruth	81	f717c2bc188e
+u8	hard	arithmetic leaves (v + zero MBA),groundtruth	93	b5a43bebb0e7
+u8	hard	depth-3 bitwise over 4 variables,groundtruth	5	32aefb02d211
+u8	hard	depth-3 bitwise over 4 variables,groundtruth	37	d117d17bc7bb
+u8	hard	depth-3 bitwise over 4 variables,groundtruth	51	c78e19d8a20d
+u8	hard	depth-3 bitwise over 4 variables,groundtruth	79	d0bd99536b02
+u8	hard	depth-3 semi-linear over 3 variables,groundtruth	4	92c0d9f6fa42
+u8	hard	depth-3 semi-linear over 3 variables,groundtruth	6	1877ac824f58
+u8	hard	depth-3 semi-linear over 3 variables,groundtruth	57	773ca4549415
+u8	hard	depth-3 semi-linear over 3 variables,groundtruth	72	7da47be1da64
+u8	hard	product identity x*y,groundtruth	21	e3dc2fe7fb68
+u8	hard	product identity x*y,groundtruth	26	7fad9f5fb007
+u8	hard	product identity x*y,groundtruth	66	a852b6bbea01
+u8	hard	product identity x*y,groundtruth	69	342a910b2c7c
+u8	hard	product with noisy operands,groundtruth	14	0630271dfd05
+u8	hard	product with noisy operands,groundtruth	50	4518cdcbe2c8
+u8	hard	repeated obfuscated subterm,groundtruth	10	d819a883ac36
+u8	hard	repeated obfuscated subterm,groundtruth	15	9552b298f8cd
+u8	hard	repeated obfuscated subterm,groundtruth	58	cac7d9b9d30b
+u8	hard	repeated obfuscated subterm,groundtruth	83	95ef59390235
+u8	hard	semi-linear arithmetic leaves,groundtruth	4	5b87b1c162ec
+u8	hard	semi-linear arithmetic leaves,groundtruth	26	eebeaf62a56f
+u8	hard	semi-linear arithmetic leaves,groundtruth	73	be0d4d83311b
+u8	hard	semi-linear arithmetic leaves,groundtruth	92	c62d6c30a25e
+u8	hard	semi-linear over 4 variables,groundtruth	5	0d0ca87b0c0a
+u8	hard	semi-linear over 4 variables,groundtruth	33	e97a2f50559a
+u8	hard	semi-linear over 4 variables,groundtruth	81	74967ae4624b
+u8	hard	semi-linear over 4 variables,groundtruth	88	7cb606e2f182
+u8	hard	semi-linear with 64-bit constants,groundtruth	35	3256a51b92f1
+u8	hard	semi-linear with 64-bit constants,groundtruth	52	93040e5de669
+u8	hard	semi-linear with 64-bit constants,groundtruth	58	f95e0be10c89
+u8	hard	semi-linear with 64-bit constants,groundtruth	68	8be2d30a419f
+u8	hard	semi-linear with a constant offset,groundtruth	23	4c6a03555dae
+u8	hard	semi-linear with a constant offset,groundtruth	26	1886ab4a1988
+u8	hard	semi-linear with a constant offset,groundtruth	33	b7a6bd571667
+u8	hard	semi-linear with a constant offset,groundtruth	76	27be942d19c0
+u8	hard	sum of products of linear MBA,groundtruth	15	181010a6ec9c
+u8	hard	sum of products of linear MBA,groundtruth	75	52e4724b6c2a
+u8	hard	sum of products of linear MBA,groundtruth	99	4e26682ec5b6
+u8	hard	two-level zero MBA substitution,groundtruth	21	c4d659b3e7bc
+u8	hard	two-level zero MBA substitution,groundtruth	75	722b01a5f51a
+u8	hard	two-level zero MBA substitution,groundtruth	76	7c5d1b200306
+u8	harder	12 variables in chained pairs,groundtruth	11	4f90dcdc6487
+u8	harder	12 variables in chained pairs,groundtruth	14	9f91f924696c
+u8	harder	12 variables in chained pairs,groundtruth	26	d1f029a1ddaf
+u8	harder	12 variables in chained pairs,groundtruth	81	28198fffac7b
+u8	harder	7 variables with 3-variable terms,groundtruth	1	5a2f4e288543
+u8	harder	7 variables with 3-variable terms,groundtruth	24	139ba689dd68
+u8	harder	7 variables with 3-variable terms,groundtruth	78	03fbf3485d0c
+u8	harder	7 variables with 3-variable terms,groundtruth	85	9091fe435e65
+u8	harder	bitwise operation of arithmetic terms,groundtruth	27	a80bdedaa5ff
+u8	harder	bitwise operation of arithmetic terms,groundtruth	51	12dec628280f
+u8	harder	bitwise operation of arithmetic terms,groundtruth	58	332834f319e2
+u8	harder	bitwise operation of arithmetic terms,groundtruth	99	bcbc66b31d85
+u8	harder	depth-3 semi-linear over 4 variables,groundtruth	37	f0dc33b1f9f2
+u8	harder	depth-3 semi-linear over 4 variables,groundtruth	53	fe02d0d84096
+u8	harder	depth-3 semi-linear over 4 variables,groundtruth	60	bd9597d8019b
+u8	harder	depth-3 semi-linear over 4 variables,groundtruth	69	b43253d79bd3
+u8	harder	depth-4 bitwise over 3 variables,groundtruth	34	877fc5cac3f4
+u8	harder	depth-4 bitwise over 3 variables,groundtruth	80	c371f5bb61b0
+u8	harder	depth-4 bitwise over 3 variables,groundtruth	86	a1017feb86b8
+u8	harder	depth-4 bitwise over 3 variables,groundtruth	91	97988a317047
+u8	harder	product of semi-linear factors,groundtruth	29	fb721aff630c
+u8	harder	product of semi-linear factors,groundtruth	38	20bc31ee935a
+u8	harder	product of semi-linear factors,groundtruth	94	8c0617c43d62
+u8	harder	product of semi-linear factors,groundtruth	97	fd190f1b525d
+u8	harder	product of three linear MBAs,groundtruth	44	17e7e1e7d43c
+u8	harder	product of three linear MBAs,groundtruth	67	b4fd8107df59
+u8	harder	product of three linear MBAs,groundtruth	73	c299bbc8d27b
+u8	harder	product of three linear MBAs,groundtruth	79	0a412e8d1fef
+u8	harder	three-level zero MBA substitution,groundtruth	11	2295fad90649
+u8	harder	three-level zero MBA substitution,groundtruth	56	32fcbc6a83f2
+u8	harder	three-level zero MBA substitution,groundtruth	99	83d9df3f9a51
+u8	ops_u8	disjoint known bits,groundtruth	15	a5e2e58d86e6
+u8	ops_u8	disjoint known bits,groundtruth	57	d815d5aac092
+u8	ops_u8	disjoint known bits,groundtruth	60	7b9624494cd9
+u8	ops_u8	disjoint known bits,groundtruth	95	98f7b997d70e
+u8	ops_u8	linear MBA inside shift/div/mod/mulhi,groundtruth	10	2a1e7a5b79a3
+u8	ops_u8	linear MBA inside shift/div/mod/mulhi,groundtruth	54	77d5136fdcfb
+u8	ops_u8	linear MBA inside shift/div/mod/mulhi,groundtruth	73	23b25af66d96
+u8	ops_u8	linear MBA inside shift/div/mod/mulhi,groundtruth	82	a7ec1aac9026
+u8	ops_u8	magic-number division,groundtruth	44	ba402c67febe
+u8	ops_u8	magic-number division,groundtruth	52	c5eb0f9e1ec3
+u8	ops_u8	magic-number division,groundtruth	78	04b9dc1d9754
+u8	ops_u8	magic-number division,groundtruth	82	f86fb73593b3
+u8	ops_u8	shift identities,groundtruth	37	e6f75612980c
+u8	ops_u8	shift identities,groundtruth	43	72d77a0e9439
+u8	ops_u8	shift identities,groundtruth	80	d8381544640c
+u8	ops_u8	shift identities,groundtruth	89	36636a4fda2a
+u8	ops_u8	variable shift amounts,groundtruth	10	ac204329f4af
+u8	ops_u8	variable shift amounts,groundtruth	42	8683ed249701
+u8	ops_u8	variable shift amounts,groundtruth	46	38cddd999dc3
+u8	ops_u8	variable shift amounts,groundtruth	94	b5a22665e2b1
+u8	semi_linear	1-variable semi-linear MBA,groundtruth	15	7d737f41d8c4
+u8	semi_linear	1-variable semi-linear MBA,groundtruth	22	06c5e5688c8e
+u8	semi_linear	1-variable semi-linear MBA,groundtruth	84	4bcca647afe7
+u8	semi_linear	1-variable semi-linear MBA,groundtruth	97	9fc6ec9a387a
+u8	semi_linear	2-variable semi-linear MBA,groundtruth	1	1006d694c07c
+u8	semi_linear	2-variable semi-linear MBA,groundtruth	4	db7c564f8611
+u8	semi_linear	2-variable semi-linear MBA,groundtruth	33	a52474757714
+u8	semi_linear	2-variable semi-linear MBA,groundtruth	47	4027da176ea7
+u8	semi_linear	3-variable semi-linear MBA,groundtruth	29	6b6feeb8b773
+u8	semi_linear	3-variable semi-linear MBA,groundtruth	36	cc40963e54ec
+u8	semi_linear	3-variable semi-linear MBA,groundtruth	57	9464f272ce49
+u8	semi_linear	3-variable semi-linear MBA,groundtruth	67	aefa4653ca65

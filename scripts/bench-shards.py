@@ -6,7 +6,11 @@ directory in its command line. Results are merged into one table in the bench fo
 
     python -I scripts/bench-shards.py -j 26 -o out/run1 bench-data/a.txt bench-data/b_u32.txt@u32
 
-A file may end in @TYPE to bench it with that numeric type (default: -n).
+A file may end in @TYPE to bench it with that numeric type (default: -n). With --cases LIST
+(written by scripts/pick-quick.py) only the listed cases run, with their indices in the whole
+section, so the results compare with a full run in bench-diff.py:
+
+    python -I scripts/bench-shards.py -j 26 -o out/quick --cases scripts/quick-cases.tsv
 
 Timeouts are timing-sensitive under load, so after the main pass every timed-out case is run
 again on its own, --retry-jobs at a time, and the table counts the retry's result; the first
@@ -321,11 +325,13 @@ def table(rows):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("files", nargs="+", help="dataset files, optionally FILE@TYPE")
+    ap.add_argument("files", nargs="*", help="dataset files, optionally FILE@TYPE")
     ap.add_argument("-n", "--num-type", default="i64")
     ap.add_argument("-j", "--jobs", type=int, default=os.cpu_count())
     ap.add_argument("-t", "--timeout", type=float, default=10.0, help="seconds per case")
     ap.add_argument("-l", "--limit", type=int, help="at most this many cases per section, evenly spaced")
+    ap.add_argument("--cases", help="only these cases (scripts/pick-quick.py output); files default to its datasets")
+    ap.add_argument("--data", default="bench-data", help="dataset directory for --cases without files")
     ap.add_argument("-o", "--out", required=True, help="output directory (table.txt, fails.txt, progress.txt)")
     ap.add_argument("--target", type=float, default=45.0, help="estimated seconds per shard")
     ap.add_argument("--max-cases", type=int, default=400, help="at most this many cases per shard")
@@ -346,7 +352,15 @@ def main():
         shutil.rmtree(out / "shards")
     out.mkdir(parents=True, exist_ok=True)
 
-    cases = [c for spec in args.files for c in load(spec, args.num_type, args.limit)]
+    if args.cases:
+        keep = set()
+        for line in Path(args.cases).read_text(encoding="utf-8").splitlines()[1:]:
+            ty, stem, section, index, _ = line.split("	")
+            keep.add((ty, stem, section, int(index)))
+        specs = args.files or sorted({f"{Path(args.data) / stem}.txt@{ty}" for ty, stem, _, _ in keep})
+        cases = [c for spec in specs for c in load(spec, args.num_type, None) if (c[0], c[1], c[2], c[4]) in keep]
+    else:
+        cases = [c for spec in args.files for c in load(spec, args.num_type, args.limit)]
     runner = Runner(args, cases)
     print(f"{len(cases)} cases, {args.jobs} shards at a time", file=sys.stderr, flush=True)
     threads = [threading.Thread(target=runner.worker, daemon=True) for _ in range(args.jobs)]
