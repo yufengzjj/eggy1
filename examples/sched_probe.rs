@@ -86,11 +86,21 @@ fn main() {
         let _ = eggy1::linear_mba::simplify_linear_with(&egg, bits(&args.num_type), &opts);
         let total = start.elapsed().as_secs_f64();
         match eggy1::sched::take_stats() {
-            Some(s) => println!(
-                "{}\t{}\t{}\t{:.3}\t{:.3}\t{}\t{}",
-                s.legacy, s.best, s.from, s.secs, total, s.nodes, s.instances
-            ),
-            None => println!("-\t-\tskipped\t0\t{total:.3}\t0\t0"),
+            Some(s) => {
+                let passes: Vec<String> = s.passes.iter().map(|(n, r, c, t)| format!("{n}:{r}:{c}:{t:.3}")).collect();
+                println!(
+                    "{}\t{}\t{}\t{:.3}\t{:.3}\t{}\t{}\t{}",
+                    s.legacy,
+                    s.best,
+                    s.from,
+                    s.secs,
+                    total,
+                    s.nodes,
+                    s.instances,
+                    passes.join(",")
+                )
+            }
+            None => println!("-\t-\tskipped\t0\t{total:.3}\t0\t0\t"),
         }
         return;
     }
@@ -112,7 +122,7 @@ fn main() {
         })
         .collect();
     workers.into_iter().for_each(|w| w.join().unwrap());
-    println!("case\tlegacy\tbest\tfrom\tsched_secs\ttotal_secs\tnodes\tinstances");
+    println!("case\tlegacy\tbest\tfrom\tsched_secs\ttotal_secs\tnodes\tinstances\tpasses");
     for l in results.lock().unwrap().iter() {
         println!("{l}");
     }

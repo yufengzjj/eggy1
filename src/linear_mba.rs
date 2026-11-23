@@ -33,6 +33,14 @@ impl Ctx {
     pub(crate) fn new(w: u32) -> Ctx {
         Ctx { w, mask: if w == 64 { u64::MAX } else { (1u64 << w) - 1 }, st: Default::default() }
     }
+    /// Lets `rewrite` make at most `n` more uncached calls in this run.
+    pub(crate) fn limit_rewrites(&self, n: usize) {
+        self.st.rewrites_left.store(n, Relaxed);
+    }
+    /// Most leaves of a semi-linear region rebuilt from now on in this run.
+    pub(crate) fn limit_semi_leaves(&self, n: usize) {
+        self.st.semi_leaves.store(n, Relaxed);
+    }
     /// The same run at width `w`, sharing its state.
     pub(crate) fn narrow(&self, w: u32) -> Ctx {
         Ctx { st: self.st.clone(), ..Ctx::new(w) }
@@ -3826,6 +3834,19 @@ fn split_bits(t: T, depth: usize, budget: &std::cell::Cell<usize>, w: &Ctx, run:
         }
     }
     t
+}
+
+/// `split_in` with the rebuild the first rebuild of `simplify_linear` uses, for terms of at
+/// most `MAX_SPLIT_SIZE` nodes.
+pub(crate) fn split_rebuilt(t: &T, w: &Ctx) -> T {
+    if size(t) > MAX_SPLIT_SIZE {
+        return t.clone();
+    }
+    let run = |t: &T| {
+        let t = unshift(&crate::lowbits::simplify(t, w), w);
+        crate::tfunc::replacement(&t, w).unwrap_or_else(|| crate::tfunc::simplify(&cluster_regions(&rewrite(&t, w), w, false), w))
+    };
+    split_in(t, w, &run)
 }
 
 /// `split_bits` on `t`, then on the operands of `t` when it is a bitwise operation, since

@@ -37,7 +37,18 @@ enum Scope {
     Root,
     /// Every new node.
     Node,
+    /// New parents, rebuilt with a better child, of a subterm of a best root form and of at
+    /// most `MAX_INSTANCE_SIZE` nodes.
+    Instance,
 }
+
+/// Largest instance an `Instance` pass runs on.
+const MAX_INSTANCE_SIZE: u64 = 256;
+/// Uncached `rewrite` calls all passes of one call may make together.
+const MAX_REWRITES: usize = 2000;
+/// Most leaves of a semi-linear region `rebuild_node` rebuilds: wide ones take seconds to
+/// search, as in the legacy halved rebuilds, and instances are many.
+const NODE_SEMI_LEAVES: usize = 2;
 
 struct Pass {
     name: &'static str,
@@ -81,6 +92,18 @@ const PASSES: &[Pass] = &[
         run: |t, w| changed(t, crate::linear_mba::unshift(&crate::lowbits::simplify(t, w), w)),
     },
     Pass { name: "halve", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::linear_mba::halve(t, w)) },
+    Pass { name: "split_bits", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::linear_mba::split_rebuilt(t, w)) },
+    Pass {
+        name: "rebuild_node",
+        scope: Scope::Instance,
+        budget: 256,
+        run: |t, w| {
+            w.limit_semi_leaves(NODE_SEMI_LEAVES);
+            let r = crate::linear_mba::rewrite(t, w);
+            w.limit_semi_leaves(crate::linear_mba::MAX_LEAVES);
+            changed(t, r)
+        },
+    },
 ];
 
 /// How a node entered the table, for the trace.
@@ -119,9 +142,29 @@ struct Sched<'a> {
     stats: Vec<PassStats>,
     instances: usize,
     timed_out: bool,
+    /// Subterms of the root class forms `live_of`.
+    live: HashSet<NodeId>,
+    live_of: Vec<NodeId>,
 }
 
 impl Sched<'_> {
+    fn is_live(&mut self, n: NodeId) -> bool {
+        let root = self.find(self.root);
+        if self.alts[&root] != self.live_of {
+            self.live_of = self.alts[&root].clone();
+            self.live.clear();
+            let mut stack = self.live_of.clone();
+            while let Some(m) = stack.pop() {
+                if self.live.insert(m) {
+                    if let Node::Op(_, kids) = self.table.node(m) {
+                        stack.extend(kids);
+                    }
+                }
+            }
+        }
+        self.live.contains(&n)
+    }
+
     fn find(&mut self, mut c: NodeId) -> NodeId {
         while self.uf[c as usize] != c {
             let up = self.uf[self.uf[c as usize] as usize];
@@ -273,8 +316,14 @@ impl Sched<'_> {
     fn run(&mut self) {
         while !self.out_of_time() {
             if let Some(n) = self.node_queue.pop_front() {
-                for i in (0..PASSES.len()).filter(|&i| PASSES[i].scope == Scope::Node) {
-                    self.try_pass(i, n);
+                let instance = match self.origin[n as usize] {
+                    Origin::Instance(p) => self.table.size(n) <= MAX_INSTANCE_SIZE && self.is_live(p),
+                    _ => false,
+                };
+                for i in 0..PASSES.len() {
+                    if PASSES[i].scope == Scope::Node || instance && PASSES[i].scope == Scope::Instance {
+                        self.try_pass(i, n);
+                    }
                 }
                 continue;
             }
@@ -351,6 +400,8 @@ fn check(a: &T, b: &T, w: &Ctx, name: &str) {
 /// Statistics of the last `schedule` call on this thread, for `examples/sched_probe.rs`.
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
+    /// Per pass: name, runs, changes, seconds.
+    pub passes: Vec<(&'static str, usize, usize, f64)>,
     pub legacy: usize,
     pub best: usize,
     pub from: String,
@@ -403,7 +454,10 @@ pub(crate) fn schedule(input: &T, seeds: &[T], w: &Ctx, opts: &Options) -> Vec<T
         stats: vec![PassStats::default(); PASSES.len()],
         instances: 0,
         timed_out: false,
+        live: HashSet::new(),
+        live_of: Vec::new(),
     };
+    w.limit_rewrites(MAX_REWRITES);
     if size(input) <= MAX_SEED_SIZE {
         s.root = s.intern(input, Origin::Seed(usize::MAX));
         s.origin[s.root as usize] = Origin::Seed(usize::MAX);
@@ -418,10 +472,12 @@ pub(crate) fn schedule(input: &T, seeds: &[T], w: &Ctx, opts: &Options) -> Vec<T
     let root = s.find(s.root);
     s.root_queue.extend(s.alts[&root].clone());
     s.run();
+    w.limit_rewrites(usize::MAX);
     let root = s.find(s.root);
     let alts = s.alts[&root].clone();
     let b = alts[0];
     let stats = Stats {
+        passes: PASSES.iter().zip(&s.stats).map(|(p, st)| (p.name, st.runs, st.changed, st.secs)).collect(),
         legacy: seeds.iter().map(size).min().unwrap_or_else(|| size(input)),
         best: s.table.size(b) as usize,
         from: s.chain(b),
