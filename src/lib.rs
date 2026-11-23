@@ -1057,9 +1057,22 @@ pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
 /// The restart rounds of `simplify`; returns the last extraction.
 fn drive(egg: &str, s: &str, cli: &Cli, opts: &sched::Options) -> Result<String, Error> {
     let mut seed = s.to_string();
+    // Extraction prefers fewer non-constant nodes, but results are compared by node count,
+    // so the forms the pre-pass and the rules give along the way are kept by node count.
+    let size_of = |e: &str| eval::size(&eval::parse(e));
+    let mut smallest: Option<(usize, String)> = None;
+    let mut offer = |e: &str| {
+        let n = size_of(e);
+        if smallest.as_ref().is_none_or(|(m, _)| n < *m) {
+            smallest = Some((n, e.to_string()));
+        }
+    };
     let (mut rounds, mut extra, mut first) = (cli.max_restarts.max(1), 2, true);
     while rounds > 0 {
         rounds -= 1;
+        let (alt, other) = linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), opts);
+        offer(&alt);
+        other.iter().for_each(|o| offer(o));
         // Saturating a large input is most of the run time and rarely beats its
         // rebuild; it is kept only where rules do better from the input: results
         // that still mix arithmetic or constants into bitwise operations, and
@@ -1073,6 +1086,7 @@ fn drive(egg: &str, s: &str, cli: &Cli, opts: &sched::Options) -> Result<String,
                 extracted = full;
             }
         }
+        offer(&extracted);
         first = false;
         if extracted == seed || opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             seed = extracted;
@@ -1085,7 +1099,10 @@ fn drive(egg: &str, s: &str, cli: &Cli, opts: &sched::Options) -> Result<String,
             extra -= 1;
         }
     }
-    Ok(seed)
+    match smallest {
+        Some((n, e)) if n < size_of(&seed) => Ok(e),
+        _ => Ok(seed),
+    }
 }
 
 /// Whether `t` has an arithmetic operation or a constant directly under a bitwise one.

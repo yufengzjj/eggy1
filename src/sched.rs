@@ -440,6 +440,9 @@ pub(crate) fn schedule(input: &T, seeds: &[T], w: &Ctx, opts: &Options) -> Vec<T
             stats.secs,
             if s.timed_out { " (time limit)" } else { "" }
         );
+        if stats.best <= 64 {
+            eprintln!("  best {}", crate::expr_convert::egglog_to_infix(&crate::eval::show(&s.table.term(b)), &|n| n));
+        }
         for (p, st) in PASSES.iter().zip(&s.stats).filter(|(_, st)| st.runs > 0) {
             eprintln!("  {:16} runs {:5} changed {:5} {:.3}s", p.name, st.runs, st.changed, st.secs);
         }
