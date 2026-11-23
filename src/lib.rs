@@ -1041,6 +1041,21 @@ fn simplify_round_with(egg: &str, s: &str, cli: &Cli, keep_input: bool, opts: &s
 pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
     let egg = make_egg(&cli.num_type);
     let opts = sched_options(cli);
+    sched::take_used();
+    let mut seed = drive(&egg, s, cli, &opts)?;
+    // The rules can finish a smaller pre-pass result worse, so a run whose pre-pass the
+    // scheduler changed is compared with the run without it.
+    if opts.on && sched::take_used() {
+        let legacy = drive(&egg, s, cli, &sched::Options { on: false, ..opts.clone() })?;
+        if eval::size(&eval::parse(&legacy)) <= eval::size(&eval::parse(&seed)) {
+            seed = legacy;
+        }
+    }
+    Ok(egglog_to_infix(&seed, &|n| norm_const(n, &cli.num_type)))
+}
+
+/// The restart rounds of `simplify`; returns the last extraction.
+fn drive(egg: &str, s: &str, cli: &Cli, opts: &sched::Options) -> Result<String, Error> {
     let mut seed = s.to_string();
     let (mut rounds, mut extra, mut first) = (cli.max_restarts.max(1), 2, true);
     while rounds > 0 {
@@ -1070,7 +1085,7 @@ pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
             extra -= 1;
         }
     }
-    Ok(egglog_to_infix(&seed, &|n| norm_const(n, &cli.num_type)))
+    Ok(seed)
 }
 
 /// Whether `t` has an arithmetic operation or a constant directly under a bitwise one.

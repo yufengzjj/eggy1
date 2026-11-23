@@ -361,6 +361,17 @@ pub struct Stats {
 
 thread_local! {
     static LAST: std::cell::RefCell<Option<Stats>> = const { std::cell::RefCell::new(None) };
+    static USED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Records that a scheduled form replaced the legacy pre-pass result.
+pub(crate) fn mark_used() {
+    USED.with(|c| c.set(true));
+}
+
+/// Whether a scheduled form replaced a legacy result since the last call.
+pub(crate) fn take_used() -> bool {
+    USED.with(|c| c.replace(false))
 }
 
 /// Takes the statistics of the last `schedule` call on this thread.

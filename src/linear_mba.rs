@@ -3865,17 +3865,24 @@ pub fn simplify_linear_both(egg: &str, w: u32) -> (String, Vec<String>) {
 
 /// `simplify_linear_both` with the scheduler settings `opts`.
 pub fn simplify_linear_with(egg: &str, w: u32, opts: &crate::sched::Options) -> (String, Vec<String>) {
-    type Last = Option<(String, u32, crate::sched::Options, (String, Vec<String>))>;
+    type Result = (String, Vec<String>, bool);
+    type Last = Option<(String, u32, crate::sched::Options, Result)>;
     thread_local! {
         static LAST: std::cell::RefCell<Last> = const { std::cell::RefCell::new(None) };
     }
-    let hit = |(e, bits, o, _): &&(String, u32, crate::sched::Options, (String, Vec<String>))| e == egg && *bits == w && o == opts;
-    if let Some(r) = LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.3.clone())) {
-        return r;
+    let hit = |(e, bits, o, _): &&(String, u32, crate::sched::Options, Result)| e == egg && *bits == w && o == opts;
+    let r = match LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.3.clone())) {
+        Some(r) => r,
+        None => {
+            let r = simplify_linear_uncached(egg, w, opts);
+            LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, opts.clone(), r.clone())));
+            r
+        }
+    };
+    if r.2 {
+        crate::sched::mark_used();
     }
-    let r = simplify_linear_uncached(egg, w, opts);
-    LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, opts.clone(), r.clone())));
-    r
+    (r.0, r.1)
 }
 
 /// Rewrites of a rebuilt candidate that would break subterms the rebuild relates if done
@@ -3902,7 +3909,9 @@ fn drop_identities(t: &T, w: &Ctx) -> T {
     }
 }
 
-fn simplify_linear_uncached(egg: &str, w: u32, opts: &crate::sched::Options) -> (String, Vec<String>) {
+/// The legacy pre-pass result and the forms to union with it, and whether the scheduler
+/// replaced the first one.
+fn simplify_linear_uncached(egg: &str, w: u32, opts: &crate::sched::Options) -> (String, Vec<String>, bool) {
     let w = Ctx::new(w);
     let t = parse(egg);
     let t0 = t.clone();
@@ -3967,13 +3976,14 @@ fn simplify_linear_uncached(egg: &str, w: u32, opts: &crate::sched::Options) -> 
         Some(u) if size(&u) > size(&rebuilt[0]) && size(&u) < size(&t0) && !rebuilt.contains(&u) => rebuilt.push(u),
         _ => {}
     }
-    if let Some(b) = scheduled.first().filter(|b| size(b) < size(&rebuilt[0])) {
-        rebuilt.insert(0, b.clone());
+    let used = scheduled.first().is_some_and(|b| size(b) < size(&rebuilt[0]));
+    if used {
+        rebuilt.insert(0, scheduled[0].clone());
     }
     let others = rebuilt.split_off(1);
     let r = rebuilt.swap_remove(0);
     let r = if r == t0 { egg.to_string() } else { show(&r) };
-    (r, others.iter().map(show).collect())
+    (r, others.iter().map(show).collect(), used)
 }
 
 #[cfg(test)]
