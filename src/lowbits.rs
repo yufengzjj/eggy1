@@ -274,6 +274,7 @@ impl Pass<'_> {
         if let Some(r) = known_bitwise(*op, &node, &infos, w) {
             return (r, i);
         }
+        let node = masked_add_as_or(node, w);
         if i.det && (i.shift || i.full <= MAX_PRODUCT_BITS && has_product(&node)) && size(&node) <= MAX_TRY {
             let m = i.full;
             if let Some((values, prog)) = self.values(&node, m) {
@@ -526,6 +527,26 @@ fn known_bitwise(op: Op, node: &T, infos: &[Info], w: &Width) -> Option<T> {
         _ => (touched & k1).wrapping_neg(),
     } & w.mask;
     Some(if d == 0 { a[j].clone() } else { T::Op(Op::Add, vec![a[j].clone(), T::Num(w.signed(d))]) })
+}
+
+/// The bitwise operation `node` with each operand `(a & M) + K` (`M & K = 0`) written as
+/// `(a & M) | K`, so that the operand joins the bitwise region instead of being a leaf.
+fn masked_add_as_or(node: T, w: &Width) -> T {
+    let T::Op(op, a) = node else { return node };
+    if !matches!(op, Op::And | Op::Or | Op::Xor) {
+        return T::Op(op, a);
+    }
+    let or = |x: T| match &x {
+        T::Op(Op::Add, b) => match (&b[0], &b[1]) {
+            (m @ T::Op(Op::And, c), T::Num(k)) | (T::Num(k), m @ T::Op(Op::And, c)) => match (&c[0], &c[1]) {
+                (_, T::Num(mm)) | (T::Num(mm), _) if *mm as u64 & *k as u64 & w.mask == 0 => T::Op(Op::Or, vec![m.clone(), T::Num(*k)]),
+                _ => x,
+            },
+            _ => x,
+        },
+        _ => x,
+    };
+    T::Op(op, a.into_iter().map(or).collect())
 }
 
 /// `t` with each `2^k·(a ^ K) + c` (`0 < c < 2^k`) written as `(2^k·a) ^ (2^k·K + c)`:

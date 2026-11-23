@@ -21,6 +21,9 @@ const FACTOR_TRIES: usize = 3;
 /// Most products `build` tries with every choice before it keeps to the first.
 const MAX_BUILDS: usize = 512;
 const MAX_FACTOR_MONOS: usize = 64;
+/// Expansions with more monomials than this keep to the first choice at each level from
+/// the start, as after `MAX_BUILDS` products.
+const MAX_BRANCH_MONOS: usize = 128;
 const MAX_FACTOR_VARS: usize = 12;
 const MAX_PIVOTS: usize = 4;
 const MAX_ROOTS: usize = 16;
@@ -624,6 +627,9 @@ pub(crate) fn simplify_poly(t: &T, w: &Width) -> Option<T> {
     // rarely rebuild smaller, and building them is slow.
     if p.len().min(q.len()) > 4 * size(t) {
         return None;
+    }
+    if p.len().min(q.len()) > MAX_BRANCH_MONOS {
+        ctx.builds.set(MAX_BUILDS);
     }
     let r = ctx.build(if q.len() < p.len() { &q } else { &p }, FACTOR_TRIES);
     (size(&r) < size(t)).then_some(r)

@@ -530,7 +530,10 @@ pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
     leaves(t, w, &mut lv);
     let n = lv.len();
     if n > MAX_LEAVES {
-        return drop_unused(t, &lv, w);
+        return match (drop_unused(t, &lv, w), clustered(t, w)) {
+            (Some(d), Some(c)) => Some(if size(&c) < size(&d) { c } else { d }),
+            (d, c) => d.or(c),
+        };
     }
     if n == 0 {
         return None;
@@ -3198,6 +3201,181 @@ fn rewrite_linear(t: &T, w: &Width) -> T {
     T::Op(*op, args.iter().map(|a| rewrite(a, w)).collect())
 }
 
+/// The terms `(c, t)` and the constant of the linear region `t`, scaled by `c`, with
+/// `~a` and `a << k` of arithmetic `a` expanded and like terms merged.
+fn region_terms(t: &T, w: &Width) -> (Vec<(u64, T)>, u64) {
+    fn go(t: &T, c: u64, w: &Width, out: &mut Vec<(u64, T)>, konst: &mut u64) {
+        let m = w.mask;
+        match t {
+            T::Num(v) => *konst = konst.wrapping_add(c.wrapping_mul(*v as u64)) & m,
+            T::Op(Op::Add, a) => a.iter().for_each(|x| go(x, c, w, out, konst)),
+            T::Op(Op::Sub, a) => {
+                go(&a[0], c, w, out, konst);
+                go(&a[1], c.wrapping_neg() & m, w, out, konst);
+            }
+            T::Op(Op::Neg, a) => go(&a[0], c.wrapping_neg() & m, w, out, konst),
+            T::Op(Op::Not, a) if kind(&a[0], w) == Kind::Lin => {
+                *konst = konst.wrapping_sub(c) & m;
+                go(&a[0], c.wrapping_neg() & m, w, out, konst);
+            }
+            T::Op(Op::Mul, a) if matches!((&a[0], &a[1]), (T::Num(_), _) | (_, T::Num(_))) => {
+                let ((T::Num(k), x) | (x, T::Num(k))) = (&a[0], &a[1]) else { unreachable!() };
+                go(x, c.wrapping_mul(*k as u64) & m, w, out, konst);
+            }
+            T::Op(Op::Shl, a) if const_shift(&a[1], w).is_some() => {
+                let k = const_shift(&a[1], w).unwrap();
+                go(&a[0], c.wrapping_shl(k) & m, w, out, konst);
+            }
+            _ if c == 0 => {}
+            _ => match out.iter_mut().find(|(_, x)| x == t) {
+                Some(e) => e.0 = e.0.wrapping_add(c) & m,
+                None => out.push((c, t.clone())),
+            },
+        }
+    }
+    let (mut terms, mut konst) = (Vec::new(), 0);
+    go(t, 1, w, &mut terms, &mut konst);
+    terms.retain(|(c, _)| *c != 0);
+    (terms, konst)
+}
+
+/// `t` with `clustered` applied to each linear region of more than `MAX_LEAVES` leaves,
+/// innermost first.
+fn cluster_regions(t: &T, w: &Width, in_lin: bool) -> T {
+    let T::Op(op, a) = t else { return t.clone() };
+    let lin = kind(t, w) == Kind::Lin;
+    let node = T::Op(*op, a.iter().map(|x| cluster_regions(x, w, lin)).collect());
+    if !lin || in_lin {
+        return node;
+    }
+    let mut lv = Vec::new();
+    leaves(&node, w, &mut lv);
+    if lv.len() <= MAX_LEAVES {
+        return node;
+    }
+    clustered(&node, w).unwrap_or(node)
+}
+
+/// Most `clustered` calls nested inside each other.
+const MAX_CLUSTER_DEPTH: usize = 2;
+
+thread_local! {
+    static CLUSTERING: std::cell::RefCell<Vec<T>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A region with more than `MAX_LEAVES` leaves rebuilt in parts: its terms grouped by the
+/// leaves they use, a group whose leaves are a subset of another's joining the smallest
+/// such, and each group of at most `MAX_LEAVES` leaves rewritten on its own, which is
+/// exact since the parts add up to the region. Splits such as `7·(a & 0xffff) +
+/// 7·(a & -0x10000)` and constants spread over the region then come together.
+fn clustered(t: &T, w: &Width) -> Option<T> {
+    // Rewriting a group can reach regions whose groups lead back to new forms of the
+    // enclosing ones.
+    if CLUSTERING.with(|c| c.borrow().len() >= MAX_CLUSTER_DEPTH || c.borrow().contains(t)) {
+        return None;
+    }
+    CLUSTERING.with(|c| c.borrow_mut().push(t.clone()));
+    let r = clustered_in(t, w);
+    CLUSTERING.with(|c| c.borrow_mut().pop());
+    r
+}
+
+fn clustered_in(t: &T, w: &Width) -> Option<T> {
+    // Regions with products are left to `poly_mba`, which expands them across terms.
+    let mut lv = Vec::new();
+    leaves(t, w, &mut lv);
+    if lv.iter().any(|l| matches!(l, T::Op(Op::Mul, a) if !matches!(a[0], T::Num(_)) && !matches!(a[1], T::Num(_)))) {
+        return None;
+    }
+    let (terms, konst) = region_terms(t, w);
+    if terms.len() < 2 {
+        return None;
+    }
+    let mut groups: Vec<(Vec<u64>, Vec<(u64, T)>)> = Vec::new();
+    for (c, x) in terms {
+        let mut lv = Vec::new();
+        leaves(&x, w, &mut lv);
+        let mut key: Vec<u64> = lv.iter().map(term_hash).collect();
+        key.sort_unstable();
+        key.dedup();
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some(g) => g.1.push((c, x)),
+            None => groups.push((key, vec![(c, x)])),
+        }
+    }
+    groups.sort_by_key(|(k, _)| k.len());
+    let mut i = 0;
+    while i < groups.len() {
+        let sup = (i + 1..groups.len())
+            .filter(|&j| groups[j].0.len() > groups[i].0.len() && groups[j].0.len() <= MAX_LEAVES && groups[i].0.iter().all(|h| groups[j].0.contains(h)))
+            .min_by_key(|&j| groups[j].0.len());
+        match sup {
+            Some(j) => {
+                let (_, g) = groups.remove(i);
+                groups[j - 1].1.extend(g);
+            }
+            None => i += 1,
+        }
+    }
+    if groups.len() < 2 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for (key, g) in &groups {
+        let sum = build_sum(g, 0, w);
+        let r = if key.len() <= MAX_LEAVES && g.len() > 1 { rewrite(&sum, w) } else { sum.clone() };
+        if size(&r) < size(&sum) {
+            parts.push((1, r));
+        } else {
+            parts.extend(g.iter().map(|(c, x)| (*c, rewrite(x, w))));
+        }
+    }
+    let (mut whole, mut k0) = (Vec::new(), konst);
+    for (c, x) in &parts {
+        match x {
+            T::Num(v) => k0 = k0.wrapping_add(c.wrapping_mul(*v as u64)) & w.mask,
+            x => whole.push((*c, x.clone())),
+        }
+    }
+    let whole = build_sum(&whole, k0, w);
+    let (mut terms, mut k): (Vec<(u64, T)>, u64) = (Vec::new(), konst);
+    for (c, x) in parts {
+        let (ts, xk) = region_terms(&x, w);
+        k = k.wrapping_add(c.wrapping_mul(xk)) & w.mask;
+        for (d, y) in ts {
+            let d = c.wrapping_mul(d) & w.mask;
+            match terms.iter_mut().find(|(_, z)| *z == y) {
+                Some(e) => e.0 = e.0.wrapping_add(d) & w.mask,
+                None => terms.push((d, y)),
+            }
+        }
+    }
+    for (c, y) in terms.iter_mut() {
+        *c = low_multiplier(*c, y, w);
+    }
+    terms.retain(|(c, _)| *c != 0);
+    let flat = build_sum(&terms, k, w);
+    Some(if size(&flat) <= size(&whole) { flat } else { whole }).filter(|r| size(r) < size(t))
+}
+
+/// The multiplier `c` of `y` cut to the bits that matter when `y` is `a & M` with `M` a
+/// multiple of `2^k`: `c` modulo `2^(w-k)`, as the value of least magnitude.
+fn low_multiplier(c: u64, y: &T, w: &Width) -> u64 {
+    let tz = match y {
+        T::Op(Op::And, a) => match (&a[0], &a[1]) {
+            (T::Num(m), _) | (_, T::Num(m)) if *m as u64 & w.mask != 0 => (*m as u64 & w.mask).trailing_zeros(),
+            _ => 0,
+        },
+        _ => 0,
+    };
+    if tz == 0 {
+        return c;
+    }
+    let low = c & (w.mask >> tz);
+    let high = low.wrapping_sub(1u64 << (w.w - tz)) & w.mask;
+    if w.signed(low).unsigned_abs() <= w.signed(high).unsigned_abs() { low } else { high }
+}
+
 /// Rewrite inside the atom leaves of a rebuilt region.
 fn substitute_atoms(t: &T, w: &Width) -> T {
     match t {
@@ -3563,7 +3741,7 @@ fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Option<String>) {
     let run = |t: &T, related: bool| match crate::tfunc::replacement(t, &w) {
         Some(r) => r,
         None => {
-            let r = rewrite(t, &w);
+            let r = cluster_regions(&rewrite(t, &w), &w, false);
             crate::tfunc::simplify(&if related { relate(&r, &w) } else { r }, &w)
         }
     };
