@@ -994,7 +994,7 @@ fn conj_measure(vals: &[u64], n: usize, w: &Width) -> (u32, usize) {
 /// `rewrite` then expands, so products and constant masks cancel too, unlike in
 /// `related_leaves`: with `L = y*z - (z ^ y)`, `(z ^ y) - B + 2*(L | B) - y*z` is
 /// `L ^ B`. Other leaves equal to `L` or `~L` become `v` or `~v`.
-fn relate(t: &T, w: &Width) -> T {
+pub(crate) fn relate(t: &T, w: &Width) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     if kind(t, w) == Kind::Atom {
         return T::Op(*op, a.iter().map(|x| relate(x, w)).collect());
@@ -3195,7 +3195,7 @@ fn sum_terms(t: &T, c: u64, w: &Width, out: &mut Vec<(u64, T)>, konst: &mut u64)
 
 /// `t` with `recombine_products` applied to each linear region, innermost first, and the
 /// changed regions rewritten again (`11·L` then joins the rest of its region).
-fn recombine_regions(t: &T, w: &Width, in_lin: bool) -> T {
+pub(crate) fn recombine_regions(t: &T, w: &Width, in_lin: bool) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     let lin = kind(t, w) == Kind::Lin;
     let node = T::Op(*op, a.iter().map(|x| recombine_regions(x, w, lin)).collect());
@@ -3317,7 +3317,7 @@ fn region_terms(t: &T, w: &Width) -> (Vec<(u64, T)>, u64) {
 
 /// `t` with `clustered` applied to each linear region of more than `MAX_LEAVES` leaves,
 /// innermost first.
-fn cluster_regions(t: &T, w: &Width, in_lin: bool) -> T {
+pub(crate) fn cluster_regions(t: &T, w: &Width, in_lin: bool) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     let lin = kind(t, w) == Kind::Lin;
     let node = T::Op(*op, a.iter().map(|x| cluster_regions(x, w, lin)).collect());
@@ -3528,7 +3528,7 @@ fn substitute_atoms(t: &T, w: &Width) -> T {
 /// rebuild sees `a`: `7·(x & 0xffffffff) + 0x700000000·(x >> 32)` is `7·x`. Only for
 /// `a` built of T-function operations, so `(mulhi(x, M) >> 1)·12` keeps the shape the
 /// magic-number division rules match.
-fn unshift(t: &T, w: &Width) -> T {
+pub(crate) fn unshift(t: &T, w: &Width) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     let a: Vec<T> = a.iter().map(|x| unshift(x, w)).collect();
     // `(a >> s) << s` for both shifts: the bits filled in by `>>` are shifted out.
@@ -3655,7 +3655,7 @@ pub(crate) fn low_consts(t: &T, r: u32) -> T {
 /// operation only sees the bits of `a` that `2^k·a` keeps, so the rebuild can
 /// treat `x - ((2·x) | ~(2·K)) - K - 1` as the semi-linear `x - 2·(x | ~K) - K - 2`,
 /// which is `x ^ K`.
-fn halve(t: &T, w: &Width) -> T {
+pub(crate) fn halve(t: &T, w: &Width) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     let a: Vec<T> = a.iter().map(|x| halve(x, w)).collect();
     let node = T::Op(*op, a);
@@ -3732,7 +3732,7 @@ fn split_points(t: &T, w: &Width) -> Vec<(T, u32)> {
 }
 
 /// `(v, k)` for each variable `v` of a product factor that is 0 or `2^k` by known bits.
-fn selectors(t: &T, w: &Width) -> Vec<(String, u32)> {
+pub(crate) fn selectors(t: &T, w: &Width) -> Vec<(String, u32)> {
     fn go(t: &T, w: &Width, out: &mut Vec<(String, u32)>) {
         let T::Op(op, a) = t else { return };
         if *op == Op::Mul && !a.iter().any(|x| matches!(x, T::Num(_))) {
@@ -3936,6 +3936,12 @@ fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Vec<String>) {
     } else {
         None
     };
+    let scheduled = if crate::sched::enabled() {
+        let seeds: Vec<T> = rebuilt.iter().chain(&unclustered).cloned().collect();
+        crate::sched::schedule(&t0, &seeds, &w)
+    } else {
+        Vec::new()
+    };
     REWRITTEN.with(|c| c.borrow_mut().clear());
     REBUILT.with(|c| c.borrow_mut().clear());
     SIMBA_MEMO.with(|c| c.borrow_mut().clear());
@@ -3948,6 +3954,9 @@ fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Vec<String>) {
         Some(u) if size(&u) < size(&rebuilt[0]) => rebuilt.insert(0, u),
         Some(u) if size(&u) > size(&rebuilt[0]) && size(&u) < size(&t0) && !rebuilt.contains(&u) => rebuilt.push(u),
         _ => {}
+    }
+    if let Some(b) = scheduled.first().filter(|b| size(b) < size(&rebuilt[0])) {
+        rebuilt.insert(0, b.clone());
     }
     let others = rebuilt.split_off(1);
     let r = rebuilt.swap_remove(0);

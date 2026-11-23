@@ -4,6 +4,7 @@ pub mod linear_mba;
 mod poly_mba;
 mod lowbits;
 mod tfunc;
+pub mod sched;
 
 use crate::expr_convert::{egglog_to_infix, infix_to_egglog};
 use clap::Parser;
