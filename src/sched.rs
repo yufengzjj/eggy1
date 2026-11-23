@@ -92,6 +92,7 @@ const PASSES: &[Pass] = &[
         run: |t, w| changed(t, crate::linear_mba::unshift(&crate::lowbits::simplify(t, w), w)),
     },
     Pass { name: "halve", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::linear_mba::halve(t, w)) },
+    Pass { name: "join_constants", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::linear_mba::join_constants(t, w, false)) },
     Pass { name: "over_products", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::lowbits::over_products(t, w, |a| crate::linear_mba::rebuild_once(a, w))) },
     Pass { name: "split_bits", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::linear_mba::split_rebuilt(t, w)) },
     Pass {

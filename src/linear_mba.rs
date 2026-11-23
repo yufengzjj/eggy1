@@ -3443,32 +3443,7 @@ fn clustered_in(t: &T, w: &Ctx) -> Option<T> {
     if terms.len() < 2 {
         return None;
     }
-    let mut groups: Vec<(Vec<u64>, Vec<(u64, T)>)> = Vec::new();
-    for (c, x) in terms {
-        let mut lv = Vec::new();
-        leaves(&x, w, &mut lv);
-        let mut key: Vec<u64> = lv.iter().map(term_hash).collect();
-        key.sort_unstable();
-        key.dedup();
-        match groups.iter_mut().find(|(k, _)| *k == key) {
-            Some(g) => g.1.push((c, x)),
-            None => groups.push((key, vec![(c, x)])),
-        }
-    }
-    groups.sort_by_key(|(k, _)| k.len());
-    let mut i = 0;
-    while i < groups.len() {
-        let sup = (i + 1..groups.len())
-            .filter(|&j| groups[j].0.len() > groups[i].0.len() && groups[j].0.len() <= MAX_LEAVES && groups[i].0.iter().all(|h| groups[j].0.contains(h)))
-            .min_by_key(|&j| groups[j].0.len());
-        match sup {
-            Some(j) => {
-                let (_, g) = groups.remove(i);
-                groups[j - 1].1.extend(g);
-            }
-            None => i += 1,
-        }
-    }
+    let groups = leaf_groups(terms, w);
     if groups.len() < 2 {
         return None;
     }
@@ -3509,6 +3484,97 @@ fn clustered_in(t: &T, w: &Ctx) -> Option<T> {
     let (terms, k) = absorb_constant(terms, k, w);
     let flat = build_sum(&terms, k, w);
     Some(if size(&flat) <= size(&whole) { flat } else { whole }).filter(|r| size(r) < size(t))
+}
+
+/// The terms of a region grouped by the leaves they use, a group whose leaves are a subset
+/// of another's (of at most `MAX_LEAVES` leaves) joining the smallest such; each group with
+/// the hashes of its leaves, fewest leaves first.
+fn leaf_groups(terms: Vec<(u64, T)>, w: &Ctx) -> Vec<(Vec<u64>, Vec<(u64, T)>)> {
+    let mut groups: Vec<(Vec<u64>, Vec<(u64, T)>)> = Vec::new();
+    for (c, x) in terms {
+        let mut lv = Vec::new();
+        leaves(&x, w, &mut lv);
+        let mut key: Vec<u64> = lv.iter().map(term_hash).collect();
+        key.sort_unstable();
+        key.dedup();
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some(g) => g.1.push((c, x)),
+            None => groups.push((key, vec![(c, x)])),
+        }
+    }
+    groups.sort_by_key(|(k, _)| k.len());
+    let mut i = 0;
+    while i < groups.len() {
+        let sup = (i + 1..groups.len())
+            .filter(|&j| groups[j].0.len() > groups[i].0.len() && groups[j].0.len() <= MAX_LEAVES && groups[i].0.iter().all(|h| groups[j].0.contains(h)))
+            .min_by_key(|&j| groups[j].0.len());
+        match sup {
+            Some(j) => {
+                let (_, g) = groups.remove(i);
+                groups[j - 1].1.extend(g);
+            }
+            None => i += 1,
+        }
+    }
+    groups
+}
+
+/// Most leaves of two groups together that `join_constant` rebuilds with the region's
+/// constant (one group: `MAX_LEAVES`), and most such rebuilds per region.
+const MAX_JOINED_LEAVES: usize = 3;
+const MAX_JOINED_SETS: usize = 10;
+
+/// `t` with the constant of each linear region rebuilt together with one leaf group, or two
+/// groups of at most `MAX_JOINED_LEAVES` leaves, where that is smaller: the rebuild of a
+/// whole region (or of its groups, `clustered`) keeps the constant apart, but
+/// `3·((r | 0x7fffffff) ^ u)` is `-3·u + (r & 2^31) + 0x7ffffffd`, one term only when
+/// rebuilt with its constant.
+pub(crate) fn join_constants(t: &T, w: &Ctx, in_lin: bool) -> T {
+    let T::Op(op, a) = t else { return t.clone() };
+    let lin = kind(t, w) == Kind::Lin;
+    let node = T::Op(*op, a.iter().map(|x| join_constants(x, w, lin)).collect());
+    if !lin || in_lin {
+        return node;
+    }
+    join_constant(&node, w).unwrap_or(node)
+}
+
+fn join_constant(t: &T, w: &Ctx) -> Option<T> {
+    let (mut terms, mut konst) = region_terms(t, w);
+    // Constants also hide in complemented terms: `c·~B` is `-c·B - c`.
+    for (c, y) in terms.iter_mut() {
+        if let T::Op(Op::Not, a) = y {
+            konst = konst.wrapping_sub(*c) & w.mask;
+            *c = c.wrapping_neg() & w.mask;
+            *y = a[0].clone();
+        }
+    }
+    if konst == 0 || terms.len() < 2 {
+        return None;
+    }
+    let groups = leaf_groups(terms, w);
+    let n = groups.len();
+    let joined = |s: &[usize]| {
+        let mut leaves: Vec<u64> = s.iter().flat_map(|&i| groups[i].0.clone()).collect();
+        leaves.sort_unstable();
+        leaves.dedup();
+        leaves.len()
+    };
+    let mut sets: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).chain((0..n).flat_map(|i| (i + 1..n).map(move |j| vec![i, j]))).collect();
+    sets.retain(|s| joined(s) <= if s.len() == 1 { MAX_LEAVES } else { MAX_JOINED_LEAVES });
+    // Each rebuild searches a semi-linear region with a constant, which is slow.
+    sets.sort_by_key(|s| joined(s));
+    sets.truncate(MAX_JOINED_SETS);
+    let mut best = t.clone();
+    for set in sets {
+        let g: Vec<(u64, T)> = set.iter().flat_map(|&i| groups[i].1.clone()).collect();
+        let others: Vec<(u64, T)> = (0..n).filter(|j| !set.contains(j)).flat_map(|j| groups[j].1.clone()).collect();
+        let alt = T::Op(Op::Add, vec![build_sum(&others, 0, w), rewrite(&build_sum(&g, konst, w), w)]);
+        if size(&alt) < size(&best) {
+            best = alt;
+        }
+    }
+    (best != *t).then_some(best)
 }
 
 /// `terms` plus `k` with `k` moved into one term, `a·B + a` as `-a·~B`, where some term has
