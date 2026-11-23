@@ -3979,6 +3979,10 @@ fn simplify_linear_uncached(egg: &str, w: u32, opts: &crate::sched::Options) -> 
     if hr != r {
         rebuilt.push(run(&hr, false));
     }
+    let pr = crate::lowbits::over_products(&r, &w, |t| rebuild_once(t, &w));
+    if pr != r {
+        rebuilt.push(pr);
+    }
     // Halving the whole input can give semi-linear regions that are slow to search,
     // so only small ones are rebuilt there, also inside `halve`.
     w.st.semi_leaves.store(2, Relaxed);
