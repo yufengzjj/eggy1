@@ -48,6 +48,9 @@ struct Args {
     /// Scheduler passes not to run, comma-separated.
     #[arg(long, default_value = "")]
     disable: String,
+    /// Print pre-pass and scheduler statistics to stderr (child mode).
+    #[arg(long)]
+    trace: bool,
     /// Child mode: read input and ground truth from stdin, print one result line.
     #[arg(long, hide = true)]
     one: bool,
@@ -301,6 +304,7 @@ fn run_one(args: &Args) {
         iter_limit: args.iter_limit,
         max_restarts: args.max_restarts,
         sched: args.sched,
+        trace: args.trace,
         disable: args.disable.split(',').filter(|d| !d.is_empty()).map(String::from).collect(),
         expr: input.clone(),
         ..Default::default()

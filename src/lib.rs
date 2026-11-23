@@ -1087,6 +1087,9 @@ fn drive(egg: &str, s: &str, cli: &Cli, opts: &sched::Options) -> Result<String,
             }
         }
         offer(&extracted);
+        if opts.trace {
+            eprintln!("round: seed {} extracted {}", eval::size(&eval::parse(&seed)), eval::size(&eval::parse(&extracted)));
+        }
         first = false;
         if extracted == seed || opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             seed = extracted;

@@ -3946,6 +3946,10 @@ pub(crate) fn split_rebuilt(t: &T, w: &Ctx) -> T {
     split_in(t, w, &|t| rebuild_once(t, w))
 }
 
+/// Candidates of `simplify_linear_uncached` rebuilt with subterms abstracted to variables,
+/// kept only when at most 3/4 the size of the first rebuild.
+const ABSTRACTED: [&str; 2] = ["over_const_bitwise", "over_shared_bitwise"];
+
 /// The rebuild `simplify_linear` applies to its input, without `relate`.
 pub(crate) fn rebuild_once(t: &T, w: &Ctx) -> T {
     let t = unshift(&crate::lowbits::simplify(t, w), w);
@@ -4111,30 +4115,40 @@ fn simplify_linear_uncached(egg: &str, w: u32, opts: &crate::sched::Options) -> 
         }
     };
     let r = run(&t, true);
-    let mut rebuilt = vec![r.clone()];
+    let mut rebuilt: Vec<(&str, T)> = vec![("first", r.clone())];
     if size(&r) <= MAX_SPLIT_SIZE {
         let s = split_in(&r, &w, &|t| run(&unshift(&crate::lowbits::simplify(t, &w), &w), false));
         if s != r {
-            rebuilt.push(s);
+            rebuilt.push(("split_bits", s));
         }
     }
     let hr = halve(&r, &w);
     if hr != r {
-        rebuilt.push(run(&hr, false));
+        rebuilt.push(("halve_first", run(&hr, false)));
     }
     let pr = crate::lowbits::over_products(&r, &w, |t| rebuild_once(t, &w));
     if pr != r {
-        rebuilt.push(pr);
+        rebuilt.push(("over_products", pr));
+    }
+    for (name, o) in [("over_const_bitwise", over_const_bitwise(&r, &w)), ("over_shared_bitwise", over_shared_bitwise(&r, &w))] {
+        if o != r {
+            rebuilt.push((name, o));
+        }
     }
     // Halving the whole input can give semi-linear regions that are slow to search,
     // so only small ones are rebuilt there, also inside `halve`.
     w.st.semi_leaves.store(2, Relaxed);
     let ht = if size(&r) <= TINY { t.clone() } else { halve(&t, &w) };
     if ht != t {
-        rebuilt.push(run(&ht, false));
+        rebuilt.push(("halve_input", run(&ht, false)));
     }
     w.st.semi_leaves.store(MAX_LEAVES, Relaxed);
-    let mut rebuilt: Vec<T> = rebuilt.iter().map(|t| finish(t, &w)).collect();
+    let mut rebuilt: Vec<(&str, T)> = rebuilt.into_iter().map(|(n, t)| (n, finish(&t, &w))).collect();
+    // A form from abstracted subterms only a little smaller than the first rebuild, or
+    // larger, made the rules finish worse at least as often as better (Ensia, LLVM Pluto);
+    // much smaller ones mostly win.
+    let first = size(&rebuilt[0].1);
+    rebuilt.retain(|(n, t)| !ABSTRACTED.contains(n) || 4 * size(t) <= 3 * first);
     // A region rebuilt in clusters is smaller there but can leave the rules a worse
     // start than rebuilding it whole, so the rebuild without clusters is kept too.
     let made = usize::MAX - w.st.rewrites_left.load(Relaxed);
@@ -4154,23 +4168,31 @@ fn simplify_linear_uncached(egg: &str, w: u32, opts: &crate::sched::Options) -> 
     } else {
         None
     };
-    let seeds: Vec<T> = rebuilt.iter().chain(&unclustered).cloned().collect();
+    let seeds: Vec<T> = rebuilt.iter().map(|(_, t)| t).chain(&unclustered).cloned().collect();
     let scheduled = crate::sched::schedule(&t0, &seeds, &w, opts);
-    rebuilt.sort_by_key(size);
-    rebuilt.dedup();
+    if opts.trace {
+        let all: Vec<String> = rebuilt.iter().map(|(n, t)| format!("{n} {}", size(t))).chain(unclustered.iter().map(|u| format!("unclustered {}", size(u)))).collect();
+        eprintln!("prepass: input {} candidates: {}", size(&t0), all.join(", "));
+    }
+    rebuilt.sort_by_key(|(_, t)| size(t));
+    rebuilt.dedup_by(|a, b| a.1 == b.1);
     rebuilt.truncate(2);
     // An equal-size one can take the extraction from the first rebuild with nothing gained.
     match unclustered {
-        Some(u) if size(&u) < size(&rebuilt[0]) => rebuilt.insert(0, u),
-        Some(u) if size(&u) > size(&rebuilt[0]) && size(&u) < size(&t0) && !rebuilt.contains(&u) => rebuilt.push(u),
+        Some(u) if size(&u) < size(&rebuilt[0].1) => rebuilt.insert(0, ("unclustered", u)),
+        Some(u) if size(&u) > size(&rebuilt[0].1) && size(&u) < size(&t0) && !rebuilt.iter().any(|(_, t)| *t == u) => rebuilt.push(("unclustered", u)),
         _ => {}
     }
-    let used = scheduled.first().is_some_and(|b| size(b) < size(&rebuilt[0]));
+    let used = scheduled.first().is_some_and(|b| size(b) < size(&rebuilt[0].1));
     if used {
-        rebuilt.insert(0, scheduled[0].clone());
+        rebuilt.insert(0, ("sched", scheduled[0].clone()));
     }
-    let others = rebuilt.split_off(1);
-    let r = rebuilt.swap_remove(0);
+    if opts.trace {
+        let kept: Vec<String> = rebuilt.iter().map(|(n, t)| format!("{n} {}", size(t))).collect();
+        eprintln!("prepass: chosen {}", kept.join(", then "));
+    }
+    let others: Vec<T> = rebuilt.split_off(1).into_iter().map(|(_, t)| t).collect();
+    let r = rebuilt.swap_remove(0).1;
     let r = if r == t0 { egg.to_string() } else { show(&r) };
     (r, others.iter().map(show).collect(), used)
 }
