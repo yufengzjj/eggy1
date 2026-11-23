@@ -10,7 +10,8 @@ A file may end in @TYPE to bench it with that numeric type (default: -n).
 
 Timeouts are timing-sensitive under load, so after the main pass every timed-out case is run
 again on its own, --retry-jobs at a time, and the table counts the retry's result; the first
-pass's table is kept in table-first.txt.
+pass's table is kept in table-first.txt. results.tsv has one line per case (bench -r format, the
+index counted in the whole dataset section), with the retry's line for retried cases.
 """
 
 import argparse
@@ -25,6 +26,16 @@ import time
 from pathlib import Path
 
 STATUSES = ["solved", "partial", "unchanged", "timeout", "error", "wrong", "badgt", "total"]
+RESULT_COLUMNS = ["type", "file", "section", "index", "hash", "status", "size_in", "size_gt", "size_out", "secs",
+                  "output"]
+
+
+def case_hash(text):
+    """Same as case_hash in examples/bench.rs."""
+    h = 0xcbf29ce484222325
+    for b in text.encode("utf-8"):
+        h = ((h ^ b) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+    return f"{h >> 16:012x}"
 
 
 def split_cols(line):
@@ -61,7 +72,7 @@ def load(spec, default_type, limit):
         n = len(lines)
         keep = min(limit or n, n)
         for k in range(keep):
-            cases.append((ty, stem, header, lines[k * n // keep]))
+            cases.append((ty, stem, header, lines[k * n // keep], k * n // keep))
     return cases
 
 
@@ -77,6 +88,7 @@ class Runner:
         self.running = {}
         self.rows = {}
         self.fails = []
+        self.results = {}
         self.shard_id = 0
         self.failed_shards = []
         self.start = time.time()
@@ -114,8 +126,8 @@ class Runner:
         d = Path(self.args.out) / "shards" / (f"{sid:05d}" if isinstance(sid, int) else sid)
         d.mkdir(parents=True, exist_ok=True)
         by_file = {}
-        for _, stem, header, line in cases:
-            by_file.setdefault(stem, []).append((header, line))
+        for c in cases:
+            by_file.setdefault(c[1], []).append((c[2], c[3]))
         files = []
         for stem, items in by_file.items():
             p = d / f"{stem}.txt"
@@ -128,7 +140,7 @@ class Runner:
             p.write_text("\n".join(out) + "\n", encoding="utf-8")
             files.append(str(p))
         cmd = [self.args.bench, "-j", "1", "-n", ty, "-t", str(self.args.timeout),
-               "-f", str(d / "fails.txt")] + self.args.extra + files
+               "-f", str(d / "fails.txt"), "-r", str(d / "results.tsv")] + self.args.extra + files
         with self.lock:
             self.running[sid] = (time.time(), len(cases))
         t0 = time.time()
@@ -144,6 +156,9 @@ class Runner:
                 key = (ty,) + key
                 old = self.rows.setdefault(key, ([0] * len(STATUSES), 0.0))
                 self.rows[key] = ([x + y for x, y in zip(old[0], counts)], old[1] + s)
+            rp = d / "results.tsv"
+            if rp.exists():
+                self.add_results(cases, rp.read_text(encoding="utf-8"))
             fp = d / "fails.txt"
             if fp.exists():
                 for entry in split_fails(fp.read_text(encoding="utf-8")):
@@ -153,6 +168,20 @@ class Runner:
             self.done_bytes += sum(len(c[3]) for c in cases)
             if not self.args.keep:
                 shutil.rmtree(d, ignore_errors=True)
+
+    def add_results(self, cases, text):
+        slots = {}
+        for c in cases:
+            slots.setdefault((c[1], c[2], case_hash(split_cols(c[3])[0])), []).append(c)
+        for line in text.splitlines()[1:]:
+            cols = line.split("\t")
+            if len(cols) != len(RESULT_COLUMNS):
+                continue
+            queue = slots.get((cols[1], cols[2], cols[4]))
+            if queue:
+                c = queue.pop(0)
+                cols[3] = str(c[4])
+                self.results[c] = cols
 
     def worker(self):
         while True:
@@ -201,11 +230,16 @@ def timeout_case(ty, entry):
 def retry_timeouts(runner):
     """Run each timed-out case again on its own and replace its count and fail entry."""
     a = runner.args
+    timed_out = {}
+    for c, cols in runner.results.items():
+        if cols[5] == "timeout":
+            timed_out.setdefault((c[0], c[1], c[2], cols[4]), []).append(c)
     todo = []
     for i, (sid, ty, entry) in enumerate(runner.fails):
         case = timeout_case(ty, entry)
         if case:
-            todo.append((i, case))
+            same = timed_out.get(case[:3] + (case_hash(split_cols(case[3])[0]),))
+            todo.append((i, same.pop(0) if same else case + (-1,)))
     if not todo or a.retry_jobs <= 0:
         return None
     ra = argparse.Namespace(**vars(a))
@@ -248,6 +282,7 @@ def retry_timeouts(runner):
     for k, (i, _) in enumerate(todo):
         kept += [(runner.fails[i][0], ty, e) for _, ty, e in new_fails.get(f"retry{k:05d}", [])]
     runner.fails = kept
+    runner.results.update(retry.results)
     runner.failed_shards += retry.failed_shards
     still = sum(c[ti] for c, _ in retry.rows.values())
     return f"retried {len(todo)} timeouts on their own, {a.retry_jobs} at a time: {still} still time out\n"
@@ -333,6 +368,8 @@ def main():
         text += f"\nshards without a result (see shards/*/out.txt with --keep): {runner.failed_shards}\n"
     (out / "table.txt").write_text(text, encoding="utf-8")
     (out / "fails.txt").write_text("".join(e for _, _, e in runner.fails), encoding="utf-8")
+    rows = ["\t".join(RESULT_COLUMNS)] + ["\t".join(runner.results[c]) for c in cases if c in runner.results]
+    (out / "results.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
     (out / "progress.txt").write_text(runner.progress() + "\nDONE\n", encoding="utf-8")
     print(text, end="")
 

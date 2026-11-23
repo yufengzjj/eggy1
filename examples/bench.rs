@@ -38,16 +38,22 @@ struct Args {
     /// Write every case that is not `solved` to this file.
     #[arg(short, long)]
     fails: Option<String>,
+    /// Write one tab-separated line per case to this file (columns in `RESULT_COLUMNS`).
+    #[arg(short, long)]
+    results: Option<String>,
     /// Child mode: read input and ground truth from stdin, print one result line.
     #[arg(long, hide = true)]
     one: bool,
 }
+
+const RESULT_COLUMNS: &str = "type\tfile\tsection\tindex\thash\tstatus\tsize_in\tsize_gt\tsize_out\tsecs\toutput";
 
 const STATUSES: [&str; 8] = ["solved", "partial", "unchanged", "timeout", "error", "wrong", "badgt", "total"];
 
 struct Case {
     file: String,
     section: String,
+    index: usize,
     input: String,
     truth: String,
 }
@@ -95,9 +101,11 @@ fn load(args: &Args) -> Vec<Case> {
                 continue;
             };
             let section = header.clone();
-            sections.last_mut().unwrap().1.push(Case {
+            let sec = &mut sections.last_mut().unwrap().1;
+            sec.push(Case {
                 file: name.clone(),
                 section,
+                index: sec.len(),
                 input: input.trim().to_string(),
                 truth: truth.trim().to_string(),
             });
@@ -149,6 +157,50 @@ fn run_all(args: &Args) {
         }
         std::fs::write(path, out).unwrap_or_else(|e| panic!("{path}: {e}"));
     }
+    if let Some(path) = &args.results {
+        let mut out = format!("{RESULT_COLUMNS}\n");
+        for (c, o) in cases.iter().zip(&results) {
+            out += &result_line(&args.num_type, c, o);
+        }
+        std::fs::write(path, out).unwrap_or_else(|e| panic!("{path}: {e}"));
+    }
+}
+
+/// FNV-1a of the input, the case key within its file and section.
+fn case_hash(input: &str) -> String {
+    let h = input.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    format!("{:012x}", h >> 16)
+}
+
+fn result_line(ty: &str, c: &Case, o: &Outcome) -> String {
+    let clean = |s: &str| s.replace(['\t', '\n', '\r'], " ");
+    let (sizes, output) = match o.detail.strip_prefix("size in/gt/out ").and_then(|d| d.split_once(": ")) {
+        Some((s, out)) => (s.split('/').map(str::to_string).collect::<Vec<_>>(), out),
+        None => (vec![String::new(); 3], ""),
+    };
+    let (s_in, s_gt) = if sizes[0].is_empty() { term_sizes(c) } else { (sizes[0].clone(), sizes[1].clone()) };
+    format!(
+        "{ty}\t{}\t{}\t{}\t{}\t{}\t{s_in}\t{s_gt}\t{}\t{:.3}\t{}\n",
+        clean(&c.file),
+        clean(&c.section),
+        c.index,
+        case_hash(&c.input),
+        o.status,
+        sizes[2],
+        o.secs,
+        clean(output)
+    )
+}
+
+fn term_sizes(c: &Case) -> (String, String) {
+    let size = |s: &str| {
+        std::panic::catch_unwind(|| {
+            let egg = infix_to_egglog(s, true);
+            if egg.is_empty() { String::new() } else { eval::size(&eval::parse(&egg)).to_string() }
+        })
+        .unwrap_or_default()
+    };
+    (size(&c.input), size(&c.truth))
 }
 
 fn report(cases: &[Case], results: &[Outcome]) {
