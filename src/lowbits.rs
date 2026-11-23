@@ -24,6 +24,10 @@ const BUDGET: u64 = 1 << 26;
 const WIDE_BUDGET: u64 = 1 << 23;
 /// Largest product factor `shorter_low` rebuilds after cutting its constants.
 const MAX_LOW_REBUILD: usize = 64;
+/// Low bits `refine_low` enumerates past the known ones, at most `MAX_REFINE_BITS` leaf bits in all.
+const REFINE_BITS: u32 = 2;
+const MAX_REFINE_BITS: u32 = 12;
+const REFINE_BUDGET: u64 = 1 << 22;
 
 #[derive(Clone, Copy)]
 struct Info {
@@ -234,6 +238,10 @@ struct Pass<'a> {
     cands: HashMap<T, Cand>,
     budget: u64,
     wide: u64,
+    refine: u64,
+    /// Whether constant multipliers are cut (`cut_multiplier`): on the input that breaks
+    /// constants shared with equal subterms elsewhere.
+    cut: bool,
 }
 
 impl Pass<'_> {
@@ -265,11 +273,23 @@ impl Pass<'_> {
         let T::Op(op, a) = t else { return (t.clone(), info(t, w)) };
         let (args, infos): (Vec<T>, Vec<Info>) = a.iter().map(|x| self.fold(x)).unzip();
         let node = T::Op(*op, args);
+        let mut infos = infos;
+        let konst = |v: u64| (T::Num(w.signed(v)), info(&T::Num(w.signed(v)), w));
+        if let Some(j) = const_operand(*op, &node) {
+            infos[j] = self.refine_low(&a_of(&node)[j], infos[j]);
+        }
+        if self.cut && let Some(r) = self.cut_multiplier(*op, &node, &mut infos) {
+            let i = info(&r, w);
+            return (r, i);
+        }
         let i = combine(*op, &infos, is_square(&node), w);
         let node = if *op == Op::Mul { low_factor(node, &infos, w) } else { node };
-        let konst = |v: u64| (T::Num(w.signed(v)), info(&T::Num(w.signed(v)), w));
         if (i.k0 | i.k1) & w.mask == w.mask {
             return konst(i.k1);
+        }
+        if let Some(r) = neg_xor(&node, &infos, w) {
+            let i = info(&r, w);
+            return (r, i);
         }
         if let Some(r) = known_bitwise(*op, &node, &infos, w) {
             return (r, i);
@@ -287,6 +307,72 @@ impl Pass<'_> {
             }
         }
         (node, i)
+    }
+
+    /// `i` with the lowest unknown bits of the `det` term `t` made known where every
+    /// assignment of the leaves' low bits gives one value (`(x*y) & (x + y)` has bit 0 clear).
+    fn refine_low(&mut self, t: &T, i: Info) -> Info {
+        let w = self.w;
+        let b = (i.k0 | i.k1).trailing_ones();
+        if !i.det || b >= w.w || !small(t, MAX_TRY) || !has_product(t) {
+            return i;
+        }
+        let prog = Prog::new(t, w);
+        let n = prog.leaves.len() as u32;
+        let m = (b + REFINE_BITS).min(w.w).min(MAX_REFINE_BITS / n.max(1));
+        if m <= b || m < i.need {
+            return i;
+        }
+        let Some(budget) = self.refine.checked_sub((1u64 << (n * m)) * prog.ops.len() as u64) else { return i };
+        self.refine = budget;
+        let (mut all, mut any) = (lowmask(m), 0);
+        let mut stack = Vec::new();
+        for low in assignments(n as usize, m) {
+            let v = prog.run(&low, &mut stack) & lowmask(m);
+            (all, any) = (all & v, any | v);
+        }
+        Info { k0: i.k0 | !any & lowmask(m), k1: i.k1 | all, ..i }
+    }
+
+    /// A product `c*a` (`a` possibly several factors) with `c` cut to its low `w - k` bits,
+    /// sign-extended, when `a` has `k` known trailing zeros and that leaves `0` or `±1`
+    /// (`0x80000001*a` with `a` even is `a`).
+    fn cut_multiplier(&mut self, op: Op, node: &T, infos: &mut [Info]) -> Option<T> {
+        let w = self.w;
+        let a = a_of(node);
+        if op != Op::Mul || a.len() != 2 || !small(node, MAX_TRY) {
+            return None;
+        }
+        let mut fs = Vec::new();
+        factors(node, &mut fs);
+        let mut consts = fs.iter().filter_map(|f| if let T::Num(c) = f { Some(*c) } else { None });
+        let (Some(c), None) = (consts.next(), consts.next()) else { return None };
+        let rest = fs.iter().filter(|f| !matches!(f, T::Num(_))).map(|f| (*f).clone()).reduce(|x, y| T::Op(Op::Mul, vec![x, y]))?;
+        let direct = a.iter().position(|x| matches!(x, T::Num(_)));
+        let ri = match direct {
+            Some(j) => {
+                infos[1 - j] = self.refine_low(&a[1 - j], infos[1 - j]);
+                infos[1 - j]
+            }
+            None => self.refine_low(&rest, info(&rest, w)),
+        };
+        let k = ri.k0.trailing_ones().min(w.w);
+        if k == 0 {
+            return None;
+        }
+        let r = w.w - k;
+        let low = c as u64 & lowmask(r);
+        let d = [low, low.wrapping_sub(1u64 << r.min(63))].into_iter().map(|v| w.signed(v & w.mask)).min_by_key(|v| v.unsigned_abs())?;
+        // Only cuts that drop the multiplier: others break constants shared with other
+        // products (`(a | K)·(c·(a & K)) + (a & ~K)·(c·(~a & K))` for `split_bits`).
+        if d.unsigned_abs() > 1 || d.unsigned_abs() >= w.signed(c as u64 & w.mask).unsigned_abs() {
+            return None;
+        }
+        Some(match d {
+            0 => T::Num(0),
+            1 => rest,
+            _ => replace_factor(node, &T::Num(d)),
+        })
     }
 
     fn collect(&self, t: &T, out: &mut Vec<T>) {
@@ -351,6 +437,59 @@ impl Pass<'_> {
             return t.clone();
         }
         T::Op(*op, a.iter().map(|x| self.context(x)).collect())
+    }
+}
+
+/// `size(t) <= limit`, without walking past `limit` nodes.
+fn small(t: &T, limit: usize) -> bool {
+    fn go(t: &T, left: &mut usize) -> bool {
+        if *left == 0 {
+            return false;
+        }
+        *left -= 1;
+        match t {
+            T::Op(_, a) => a.iter().all(|x| go(x, left)),
+            _ => true,
+        }
+    }
+    let mut left = limit;
+    go(t, &mut left)
+}
+
+fn factors<'t>(t: &'t T, out: &mut Vec<&'t T>) {
+    match t {
+        T::Op(Op::Mul, a) => a.iter().for_each(|x| factors(x, out)),
+        _ => out.push(t),
+    }
+}
+
+/// `t` with its constant factor (reached through products only) replaced by `d`.
+fn replace_factor(t: &T, d: &T) -> T {
+    match t {
+        T::Op(Op::Mul, a) => T::Op(Op::Mul, a.iter().map(|x| replace_factor(x, d)).collect()),
+        T::Num(_) => d.clone(),
+        _ => t.clone(),
+    }
+}
+
+fn a_of(t: &T) -> &[T] {
+    match t {
+        T::Op(_, a) => a,
+        _ => &[],
+    }
+}
+
+/// The non-constant operand of a bitwise operation with a constant.
+fn const_operand(op: Op, t: &T) -> Option<usize> {
+    let a = a_of(t);
+    if !matches!(op, Op::And | Op::Or | Op::Xor) || a.len() != 2 {
+        return None;
+    }
+    match (&a[0], &a[1]) {
+        (T::Num(_), T::Num(_)) => None,
+        (_, T::Num(_)) => Some(0),
+        (T::Num(_), _) => Some(1),
+        _ => None,
     }
 }
 
@@ -435,6 +574,17 @@ pub(crate) fn cut_products(t: &T, w: &Width) -> T {
                 }
             }
         }
+        // A constant factor with `k` trailing zeros also only sees the low `w - k` bits of
+        // the other, cut only where that drops an operand (`-2*(a & (0x80000001*b))`).
+        if let (Op::Mul, [T::Num(c), q] | [q, T::Num(c)]) = (*op, args.as_slice()) {
+            let k = (*c as u64 & w.mask).trailing_zeros();
+            if k > 0 && k < w.w && !matches!(q, T::Num(_)) {
+                let folded = drop_identities(&crate::linear_mba::low_consts(q, w.w - k), w);
+                if size(&folded) < size(q) {
+                    return (T::Op(Op::Mul, vec![T::Num(*c), folded]), i);
+                }
+            }
+        }
         (T::Op(*op, args), i)
     }
     go(t, w).0
@@ -498,6 +648,23 @@ fn has_product(t: &T) -> bool {
         T::Op(_, a) => a.iter().any(has_product),
         _ => false,
     }
+}
+
+/// `-(a ^ K)` as `a ^ -K` when `a` has `t` known trailing zeros and `K mod 2^t` is not 0:
+/// negating `2^t·(a' ^ Kh) + Kl` gives `2^t·(a' ^ ~Kh) + (2^t - Kl)` without a carry.
+fn neg_xor(node: &T, infos: &[Info], w: &Width) -> Option<T> {
+    let T::Op(Op::Neg, a) = node else { return None };
+    let T::Op(Op::Xor, b) = &a[0] else { return None };
+    let (x, k) = match (&b[0], &b[1]) {
+        (x, T::Num(k)) | (T::Num(k), x) if !matches!(x, T::Num(_)) => (x, *k as u64 & w.mask),
+        _ => return None,
+    };
+    // The low bits of `a` known from those of `a ^ K`.
+    let i = infos[0];
+    let kn = (i.k0 | i.k1).trailing_ones().min(w.w);
+    let low = (i.k1 ^ k) & lowmask(kn);
+    let t = if low == 0 { kn } else { low.trailing_zeros() };
+    (t > 0 && k & lowmask(t) != 0).then(|| T::Op(Op::Xor, vec![x.clone(), T::Num(w.signed(k.wrapping_neg() & w.mask))]))
 }
 
 /// An arithmetic operand `a` and a constant `c` whose bitwise operation only touches
@@ -594,7 +761,16 @@ pub(crate) fn replace(t: &T, from: &[T], to: &[T]) -> T {
 /// `t` with subterms determined by the low bits of their leaves folded, where that
 /// needs a variable left shift or a product (or is a constant by known bits).
 pub(crate) fn simplify(t: &T, w: &Width) -> T {
-    let mut p = Pass { w, cands: HashMap::new(), budget: BUDGET, wide: WIDE_BUDGET };
+    simplify_with(t, w, false)
+}
+
+/// `simplify` for a rebuilt term, also cutting constant multipliers.
+pub(crate) fn simplify_rebuilt(t: &T, w: &Width) -> T {
+    simplify_with(t, w, true)
+}
+
+fn simplify_with(t: &T, w: &Width, cut: bool) -> T {
+    let mut p = Pass { w, cands: HashMap::new(), budget: BUDGET, wide: WIDE_BUDGET, refine: REFINE_BUDGET, cut };
     let (r, _) = p.fold(t);
     if p.cands.is_empty() { r } else { p.context(&r) }
 }
@@ -671,7 +847,7 @@ mod tests {
         for k in 0..500 {
             let ty = NumType { bits: 8, signed: k % 2 == 1 };
             let t = if k < 200 { random_term(&mut h, 4) } else { context_term(&mut h) };
-            let mut p = Pass { w: &w, cands: HashMap::new(), budget: BUDGET, wide: WIDE_BUDGET };
+            let mut p = Pass { w: &w, cands: HashMap::new(), budget: BUDGET, wide: WIDE_BUDGET, refine: REFINE_BUDGET, cut: true };
             let folded = p.fold(&t).0;
             let r = p.context(&folded);
             if r == t {
@@ -782,5 +958,49 @@ mod tests {
             }
         }
         assert!(changed > 300, "changed {changed}");
+    }
+
+    /// Products whose low bits are fixed only by evaluation, under constant masks,
+    /// constant multipliers and negated xors, at 8 bits on every input.
+    #[test]
+    fn evaluated_low_bits_match_exhaustive_check() {
+        let w = Width::new(8);
+        let op = |o: Op, a: T, b: T| T::Op(o, vec![a, b]);
+        let mut h = 0x5851_f42d_4c95_7f2du64;
+        let mut changed = 0;
+        for k in 0..600 {
+            let mut next = || {
+                h ^= h << 13;
+                h ^= h >> 7;
+                h ^= h << 17;
+                h
+            };
+            let r = next();
+            let var = |r: u64| T::Var(if r & 1 == 0 { "x" } else { "y" }.into());
+            let lin = |r: u64| op([Op::Add, Op::Sub, Op::Xor, Op::And][(r >> 3) as usize % 4], var(r), op(Op::Mul, T::Num((r >> 8) as i64 % 5 - 2), var(r >> 1)));
+            let p = op(Op::Mul, lin(next()), lin(next()));
+            let p = if r >> 4 & 1 == 0 { p } else { op(Op::And, p, lin(next())) };
+            let c = T::Num((next() >> 20) as i64 % 256 - 128);
+            let t = match r >> 6 & 7 {
+                0 => op(Op::And, T::Op(Op::Neg, vec![p]), T::Num(-2)),
+                1 => op(Op::Xor, op(Op::Add, p, T::Num(1)), T::Num(1)),
+                2 => op(Op::Mul, c, p),
+                3 => op(Op::Mul, op(Op::Mul, c, lin(next())), p),
+                4 => T::Op(Op::Neg, vec![op(Op::Xor, op(Op::Mul, T::Num(1 << (r >> 9) % 4), p), c)]),
+                5 => op(Op::Or, p, T::Num(1)),
+                _ => op(Op::Add, var(r >> 12), op(Op::Mul, c, op(Op::And, p, T::Num(-2)))),
+            };
+            let ty = NumType { bits: 8, signed: k % 2 == 1 };
+            let s = simplify_rebuilt(&t, &w);
+            if s == t {
+                continue;
+            }
+            changed += 1;
+            for q in 0..1u64 << 16 {
+                let env = |v: &str| if v == "x" { q & 0xff } else { q >> 8 };
+                assert_eq!(eval(&t, ty, &env), eval(&s, ty, &env), "{t:?}\n{s:?}");
+            }
+        }
+        assert!(changed > 100, "changed {changed}");
     }
 }

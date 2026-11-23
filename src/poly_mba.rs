@@ -29,17 +29,42 @@ const MAX_PIVOTS: usize = 4;
 const MAX_ROOTS: usize = 16;
 const MAX_FACTOR_STEPS: usize = 4096;
 const MAX_SOLUTIONS: usize = 8;
+/// Constants `build` shifts the factors of a product by, for at most `MAX_SHIFTED` factorings
+/// with factors of at most `MAX_SHIFTED_MONOS` monomials and a rest of at most twice that.
+const SHIFTS: [i64; 3] = [-1, 0, 1];
+const MAX_SHIFTED: usize = 4;
+const MAX_SHIFTED_MONOS: usize = 4;
+/// Most bit sets `masked_poly` splits the width into, and most monomials it builds
+/// (or twice those of the plain expansion).
+const MAX_ATOMS: usize = 4;
+const MAX_MASKED_MONOS: usize = 16;
+/// Largest term `masked_poly` rebuilds for a single product with constants in both factors.
+const MAX_MASKED_SIZE: usize = 20;
 
 struct Ctx<'a> {
     w: &'a Width,
     leaves: Vec<T>,
     built: std::cell::RefCell<std::collections::HashMap<(Poly, usize), T>>,
     builds: std::cell::Cell<usize>,
+    linear: std::cell::RefCell<std::collections::HashMap<Poly, T>>,
+    /// When not empty, the bit sets on which every constant of a bitwise operation is
+    /// constant; bitwise terms with constants then expand per set (`masked`).
+    atoms: Vec<u64>,
+    /// Per leaf, the leaves it is built from (itself, or the conjunction a masked leaf masks).
+    base: Vec<Conj>,
 }
 
-impl Ctx<'_> {
+impl<'a> Ctx<'a> {
+    fn new(w: &'a Width, atoms: Vec<u64>) -> Self {
+        Ctx { w, leaves: Vec::new(), built: Default::default(), builds: Default::default(), linear: Default::default(), atoms, base: Vec::new() }
+    }
+
     fn leaf(&mut self, t: &T) -> Option<usize> {
         let t = rewrite(t, self.w);
+        self.push_leaf(t, None)
+    }
+
+    fn push_leaf(&mut self, t: T, base: Option<Conj>) -> Option<usize> {
         if let Some(i) = self.leaves.iter().position(|l| *l == t) {
             return Some(i);
         }
@@ -47,7 +72,52 @@ impl Ctx<'_> {
             return None;
         }
         self.leaves.push(t);
-        Some(self.leaves.len() - 1)
+        let i = self.leaves.len() - 1;
+        self.base.push(base.unwrap_or(1 << i));
+        Some(i)
+    }
+
+    fn base_of(&self, c: Conj) -> Conj {
+        (0..Conj::BITS as usize).filter(|i| c >> i & 1 == 1).fold(0, |acc, i| acc | self.base[i])
+    }
+
+    /// A bitwise term with constants as `Σ_M Σ_S a_S·(AND_S & M)` over the atoms `M`, from
+    /// its truth table on each (`AND_∅ & M` is the constant `M`); exact at every width.
+    fn masked(&mut self, t: &T) -> Option<Poly> {
+        let mut lv = Vec::new();
+        leaves(t, self.w, &mut lv);
+        let n = lv.len();
+        if n > MAX_LEAVES {
+            return self.leaf_poly(t);
+        }
+        let prog = Prog::new(t, &lv, self.w);
+        let mask = self.w.mask;
+        let vals: Vec<u64> = (0..1usize << n).map(|p| prog.run(|i| if p >> i & 1 == 1 { mask } else { 0 }, self.w)).collect();
+        let ids: Vec<usize> = lv.iter().map(|l| self.leaf(l)).collect::<Option<_>>()?;
+        let mut r = Poly::new();
+        for m in self.atoms.clone() {
+            let j = m.trailing_zeros();
+            let mut a: Vec<u64> = vals.iter().map(|v| v >> j & 1).collect();
+            for i in 0..n {
+                for p in 0..1usize << n {
+                    if p >> i & 1 == 1 {
+                        a[p] = a[p].wrapping_sub(a[p ^ 1 << i]);
+                    }
+                }
+            }
+            for (s, &c) in a.iter().enumerate().filter(|(_, c)| **c != 0) {
+                if s == 0 {
+                    self.add_to(&mut r, vec![], c.wrapping_mul(m));
+                    continue;
+                }
+                let conj = (0..n).filter(|i| s >> i & 1 == 1).fold(0, |acc, i| acc | 1 << ids[i]);
+                let term = T::Op(Op::And, vec![self.conj_term(conj), T::Num(self.w.signed(m))]);
+                let base = self.base_of(conj);
+                let k = self.push_leaf(term, Some(base))?;
+                self.add_to(&mut r, vec![1 << k], c);
+            }
+        }
+        Some(r)
     }
 
     fn add_to(&self, p: &mut Poly, m: Mono, c: u64) {
@@ -127,6 +197,10 @@ impl Ctx<'_> {
                 let x = self.poly(&a[0])?;
                 self.sum(self.scale(x, neg1), self.constant(neg1))
             }
+            Op::Mul if !self.atoms.is_empty() => {
+                let (x, y) = (self.poly(&a[0])?, self.poly(&a[1])?);
+                self.product(&x, &y)?
+            }
             // Semi-linear factors expand into many independent leaves (`x | K`, ...);
             // rebuilt first, `(x + K) - (x | K)` is the single leaf `x & K`. Other factors
             // stay as they are: rebuilt, `~(y - 1)` becomes `-y`, a leaf unrelated to `y - 1`.
@@ -141,6 +215,7 @@ impl Ctx<'_> {
                 self.scale(x, 1 << k)
             }
             Op::And | Op::Or | Op::Xor if kind(t, self.w) == Kind::Bit => self.bitwise(t)?,
+            Op::And | Op::Or | Op::Xor if !self.atoms.is_empty() && kind(t, self.w) == Kind::ConstBit => self.masked(t)?,
             _ => self.leaf_poly(t)?,
         })
     }
@@ -233,10 +308,10 @@ impl Ctx<'_> {
 
     /// Rebuilds each part of the linear `p` whose conjunctions share leaves on
     /// its own, so that `simba` sees few leaves even when `p` has many.
-    fn build_linear(&self, p: &Poly) -> T {
+    fn build_parts(&self, p: &Poly) -> T {
         let mut parts: Vec<(Conj, Vec<(u64, Conj)>)> = Vec::new();
         for (m, &c) in p.iter().filter(|(m, _)| m.len() == 1) {
-            let mut part = (m[0], vec![(c, m[0])]);
+            let mut part = (self.base_of(m[0]), vec![(c, m[0])]);
             parts.retain(|q| {
                 let joined = q.0 & part.0 != 0;
                 if joined {
@@ -256,6 +331,16 @@ impl Ctx<'_> {
             built.push(simba_memo(&t, self.w).unwrap_or(t));
         }
         built.into_iter().reduce(|a, b| T::Op(Op::Add, vec![a, b])).unwrap_or_else(|| build_sum(&[], konst, self.w))
+    }
+
+    /// `build_parts`, memoized.
+    fn build_linear(&self, p: &Poly) -> T {
+        if let Some(t) = self.linear.borrow().get(p) {
+            return t.clone();
+        }
+        let b = self.build_parts(p);
+        self.linear.borrow_mut().insert(p.clone(), b.clone());
+        b
     }
 
     /// `p` of degree 2 as `(v + r)·(a·v + s)` with `r`, `s` affine in the other conjunctions,
@@ -368,7 +453,74 @@ impl Ctx<'_> {
                 pick[..j].iter_mut().for_each(|i| *i = 0);
             }
         }
+        if out.is_empty() {
+            self.factor3_by_coefficient(p, &vars, &mut out);
+        }
         out
+    }
+
+    /// Factorings `L·Q` of a cubic `p` found from a conjunction `u` of degree 1 in every
+    /// monomial: `L` divides `∂p/∂u`, so it is among the factors `factor2` finds there
+    /// (`(x + z)·(z·y + z + y)`, which has no cube term).
+    fn factor3_by_coefficient(&self, p: &Poly, vars: &[Conj], out: &mut Vec<(Poly, Poly)>) {
+        let mut tried: Vec<Poly> = Vec::new();
+        let once = |u: Conj| p.keys().all(|m| m.iter().filter(|&&x| x == u).count() <= 1) && p.keys().any(|m| m.len() == 3 && m.contains(&u));
+        for &u in vars.iter().filter(|&&u| once(u)).take(MAX_PIVOTS) {
+            let mut pu = Poly::new();
+            for (m, &c) in p.iter().filter(|(m, _)| m.contains(&u)) {
+                let mut rest = m.clone();
+                rest.retain(|&x| x != u);
+                self.add_to(&mut pu, rest, c);
+            }
+            for (l1, l2) in self.factor2(&pu).into_iter().take(MAX_PIVOTS) {
+                for l in [l1, l2] {
+                    let Some((&v, &c)) = l.iter().find_map(|(m, c)| (m.len() == 1 && c & 1 == 1).then(|| (&m[0], c))) else { continue };
+                    let mut inv = c;
+                    for _ in 0..6 {
+                        inv = inv.wrapping_mul(2u64.wrapping_sub(c.wrapping_mul(inv)));
+                    }
+                    let l = self.scale(l, inv);
+                    if tried.contains(&l) {
+                        continue;
+                    }
+                    tried.push(l.clone());
+                    if let Some(q) = self.divide(p, &l, v) {
+                        out.push((l, q));
+                        if out.len() >= MAX_SOLUTIONS {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `Q` with `p = l·Q`, for `l` linear with coefficient 1 on `v` and `p` of degree at most 3 in `v`.
+    fn divide(&self, p: &Poly, l: &Poly, v: Conj) -> Option<Poly> {
+        let neg1 = self.w.mask;
+        let mut parts = vec![Poly::new(); 4];
+        for (m, &c) in p {
+            let k = m.iter().filter(|&&x| x == v).count();
+            self.add_to(parts.get_mut(k)?, m.iter().copied().filter(|&x| x != v).collect(), c);
+        }
+        let mut rp = l.clone();
+        rp.remove(&vec![v]);
+        let div = |acc: &Poly, part: &Poly| self.product(&rp, acc).map(|x| self.sum(part.clone(), self.scale(x, neg1)));
+        let q2 = parts[3].clone();
+        let q1 = div(&q2, &parts[2])?;
+        let q0 = div(&q1, &parts[1])?;
+        if !div(&q0, &parts[0])?.is_empty() {
+            return None;
+        }
+        let mut q = q0;
+        for (k, qk) in [(1, q1), (2, q2)] {
+            for (mut m, c) in qk {
+                m.extend(std::iter::repeat_n(v, k));
+                m.sort_unstable();
+                self.add_to(&mut q, m, c);
+            }
+        }
+        Some(q)
     }
 
     /// `(v + r, Q)` when `v + r` divides `Σ v^k·parts[k]` exactly (synthetic division), `Q` the quotient.
@@ -574,6 +726,44 @@ impl Ctx<'_> {
                     let rest = self.build_linear(&low);
                     keep(&mut best, cands.into_iter().map(|c| T::Op(Op::Add, vec![c, rest.clone()])).collect());
                 }
+                // `(A + d)·(B + e)` with `e·A + d·B + d·e` moved into the linear rest
+                // (`(z + 1)·(z + 1) + (z | x)` for `z·z + 3z + 1 + (x & ~z)`); the quotient of a
+                // cubic factoring is shifted alone and rebuilt, as shifting its linear factor
+                // would leave a rest of degree 2.
+                let plus = |l: &Poly, c: u64| self.sum(l.clone(), self.constant(c));
+                let with_rest = |prod: T, rest: Poly| if rest.is_empty() { prod } else { T::Op(Op::Add, vec![prod, self.build_linear(&rest)]) };
+                let mut shifted = Vec::new();
+                let small = |l: &Poly| l.len() <= MAX_SHIFTED_MONOS;
+                let tries = if low.len() > 2 * MAX_SHIFTED_MONOS { 0 } else { MAX_SHIFTED };
+                for (l1, l2) in self.factor2(&high).into_iter().filter(|(a, b)| small(a) && small(b)).take(tries) {
+                    // Only shifts that leave the rest fewer monomials are built.
+                    let mut cache: Vec<Option<[T; 2]>> = vec![None; 2 * SHIFTS.len()];
+                    let mut side_of = |k: usize, l: &Poly, d: i64| cache[k].get_or_insert_with(|| [false, true].map(|n| side(&plus(l, d as u64 & neg1), n))).clone();
+                    for (i, &d) in SHIFTS.iter().enumerate() {
+                        for (j, &e) in SHIFTS.iter().enumerate().filter(|&(_, &e)| d != 0 || e != 0) {
+                            let (du, eu) = (d as u64 & neg1, e as u64 & neg1);
+                            let moved = self.sum(self.sum(self.scale(l1.clone(), eu), self.scale(l2.clone(), du)), self.constant(du.wrapping_mul(eu)));
+                            let rest = self.sum(low.clone(), self.scale(moved, neg1));
+                            if rest.len() >= low.len() {
+                                continue;
+                            }
+                            let (a, b) = (side_of(i, &l1, d), side_of(SHIFTS.len() + j, &l2, e));
+                            for n in 0..2 {
+                                shifted.push(with_rest(mul(a[n].clone(), b[n].clone()), rest.clone()));
+                            }
+                        }
+                    }
+                }
+                for (l0, q) in self.factor3(&high).into_iter().filter(|(a, _)| small(a)).take(tries) {
+                    for e in SHIFTS.iter().filter(|&&e| e != 0) {
+                        let e = *e as u64 & neg1;
+                        let rest = self.sum(low.clone(), self.scale(l0.clone(), e.wrapping_neg()));
+                        let q = plus(&q, e);
+                        shifted.push(with_rest(mul(side(&l0, false), self.build(&q, 1)), rest.clone()));
+                        shifted.push(with_rest(mul(side(&l0, true), self.build(&self.scale(q, neg1), 1)), rest));
+                    }
+                }
+                keep(&mut best, shifted);
             }
         }
         best.unwrap()
@@ -605,7 +795,7 @@ fn has_product(t: &T, w: &Width) -> bool {
 /// Number of monomials in the expansion of `t`, after the null polynomials are reduced
 /// if that leaves fewer.
 pub(crate) fn monomials(t: &T, w: &Width) -> Option<usize> {
-    let mut ctx = Ctx { w, leaves: Vec::new(), built: Default::default(), builds: Default::default() };
+    let mut ctx = Ctx::new(w, Vec::new());
     let p = ctx.poly(t)?;
     Some(p.len().min(ctx.reduce_null(&p).len()))
 }
@@ -620,7 +810,7 @@ pub(crate) fn simplify_poly(t: &T, w: &Width) -> Option<T> {
     if !wide && !has_product(t, w) {
         return None;
     }
-    let mut ctx = Ctx { w, leaves: Vec::new(), built: Default::default(), builds: Default::default() };
+    let mut ctx = Ctx::new(w, Vec::new());
     let p = ctx.poly(t)?;
     let q = ctx.reduce_null(&p);
     // Far more monomials than nodes (products of bitwise terms over many leaves)
@@ -632,7 +822,86 @@ pub(crate) fn simplify_poly(t: &T, w: &Width) -> Option<T> {
         ctx.builds.set(MAX_BUILDS);
     }
     let r = ctx.build(if q.len() < p.len() { &q } else { &p }, FACTOR_TRIES);
+    // As many monomials, but a null polynomial can have made coefficients huge (`2^63·y` beside
+    // a factor that keeps the rest even).
+    let huge = |p: &Poly| p.values().any(|&c| w.signed(c).unsigned_abs() >= 1 << (w.w - 2));
+    let r = if q.len() == p.len() && p.len() <= MAX_FACTOR_MONOS && huge(&p) && !huge(&q) {
+        let s = ctx.build(&q, FACTOR_TRIES);
+        if size(&s) < size(&r) { s } else { r }
+    } else {
+        r
+    };
+    let r = match masked_poly(t, p.len().min(q.len()), w) {
+        Some(m) if size(&m) < size(&r) => m,
+        _ => r,
+    };
     (size(&r) < size(t)).then_some(r)
+}
+
+/// `t` rebuilt with its bitwise terms with constants expanded per atom, so that products
+/// selecting bits cancel (`(a | 2)·(a & 2) + (a & ~2)·(~a & 2)` is `2a`, `a = q | t`).
+fn masked_poly(t: &T, monos: usize, w: &Width) -> Option<T> {
+    // One product is enough in a small term; in large ones that is most regions of
+    // semi-linear inputs, at several times the run time.
+    let (any, both) = masked_products(t, w);
+    if any < 2 && (both == 0 || size(t) > MAX_MASKED_SIZE) {
+        return None;
+    }
+    let mut consts = Vec::new();
+    collect_masks(t, &mut consts);
+    let mut atoms: Vec<u64> = Vec::new();
+    let mut sigs: Vec<Vec<bool>> = Vec::new();
+    for j in 0..w.w {
+        let sig: Vec<bool> = consts.iter().map(|c| c >> j & 1 == 1).collect();
+        match sigs.iter().position(|s| *s == sig) {
+            Some(k) => atoms[k] |= 1 << j,
+            None => {
+                if atoms.len() == MAX_ATOMS {
+                    return None;
+                }
+                sigs.push(sig);
+                atoms.push(1 << j);
+            }
+        }
+    }
+    if atoms.len() < 2 {
+        return None;
+    }
+    let mut ctx = Ctx::new(w, atoms);
+    let p = ctx.poly(t)?;
+    if p.len() > MAX_MASKED_MONOS.max(2 * monos) {
+        return None;
+    }
+    let q = ctx.reduce_null(&p);
+    Some(ctx.build(if q.len() < p.len() { &q } else { &p }, FACTOR_TRIES))
+}
+
+/// Products of non-constant factors where `poly` expands `t` structurally, with a bitwise
+/// operation with a constant in one factor, and in both.
+fn masked_products(t: &T, w: &Width) -> (usize, usize) {
+    let T::Op(op, a) = t else { return (0, 0) };
+    let inner = || a.iter().map(|x| masked_products(x, w)).fold((0, 0), |s, x| (s.0 + x.0, s.1 + x.1));
+    match op {
+        Op::Mul if !matches!(a[0], T::Num(_)) && !matches!(a[1], T::Num(_)) => {
+            let (any, both) = inner();
+            (any + usize::from(a.iter().any(|x| has_const_bit(x, w))), both + usize::from(a.iter().all(|x| has_const_bit(x, w))))
+        }
+        Op::Add | Op::Sub | Op::Neg | Op::Not | Op::Mul => inner(),
+        _ => (0, 0),
+    }
+}
+
+/// Constant operands of bitwise operations in `t`.
+fn collect_masks(t: &T, out: &mut Vec<u64>) {
+    let T::Op(op, a) = t else { return };
+    for x in a {
+        if let (Op::And | Op::Or | Op::Xor, T::Num(c)) = (op, x) {
+            if !out.contains(&(*c as u64)) {
+                out.push(*c as u64);
+            }
+        }
+        collect_masks(x, out);
+    }
 }
 
 #[cfg(test)]
@@ -718,7 +987,7 @@ mod tests {
                 let (a, b) = (linear(&mut r), linear(&mut r));
                 let c = if k % 2 == 0 { a.clone() } else { linear(&mut r) };
                 let t = op(Op::Mul, vec![op(Op::Mul, vec![a.clone(), b]), c]);
-                let mut ctx = Ctx { w: &w, leaves: Vec::new(), built: Default::default(), builds: Default::default() };
+                let mut ctx = Ctx::new(&w, Vec::new());
                 let Some(p) = ctx.poly(&t) else { continue };
                 let built = ctx.build(&p, FACTOR_TRIES);
                 factored += (size(&built) <= size(&t)) as u32;
@@ -734,5 +1003,41 @@ mod tests {
             }
         }
         assert!(factored > 50, "factored {factored}");
+    }
+
+    /// Products of bitwise terms with constants over one or two leaves, rebuilt with the
+    /// masked expansion, keep their value.
+    #[test]
+    fn masked_products_keep_value() {
+        let mut r = Rng(0x94d0_49bb_1331_11eb);
+        let mut built = 0;
+        for bits in [8u32, 64] {
+            let w = Width::new(bits);
+            let ty = NumType { bits, signed: false };
+            let masks = [1i64, 2, 3, -3, -4, 0x30];
+            for _ in 0..300 {
+                let factor = |r: &mut Rng| {
+                    let v = bitwise(r, 1);
+                    let k = T::Num(masks[(r.next() % masks.len() as u64) as usize]);
+                    let f = op([Op::And, Op::Or, Op::Xor][(r.next() % 3) as usize], vec![v, k]);
+                    if r.next() % 3 == 0 { op(Op::Not, vec![f]) } else { f }
+                };
+                let p1 = op(Op::Mul, vec![factor(&mut r), factor(&mut r)]);
+                let p2 = op(Op::Mul, vec![factor(&mut r), factor(&mut r)]);
+                let t = op(Op::Add, vec![p1, p2]);
+                let Some(m) = masked_poly(&t, 0, &w) else { continue };
+                built += 1;
+                for _ in 0..32 {
+                    let (x, y, z) = (r.next(), r.next(), r.next());
+                    let env = |v: &str| match v {
+                        "x" => x,
+                        "y" => y,
+                        _ => z,
+                    };
+                    assert_eq!(eval(&t, ty, &env), eval(&m, ty, &env), "w={bits}\n  {t:?}\n  {m:?}");
+                }
+            }
+        }
+        assert!(built > 100, "built {built}");
     }
 }

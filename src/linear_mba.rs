@@ -548,6 +548,10 @@ pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
         let prog = Prog::new(t, &lv, w);
         let vals: Vec<u64> = (0..1usize << n).map(|p| prog.at(p, w)).collect();
         let rebuilt = rebuild_values(&vals, &lv, w);
+        let rebuilt = match common_multiple(&vals, &lv, w) {
+            Some(r) if size(&r) < size(&rebuilt) => r,
+            _ => rebuilt,
+        };
         match related_leaves(t, &lv, w) {
             Some(r) if size(&r) < size(&rebuilt) => r,
             _ => rebuilt,
@@ -556,6 +560,42 @@ pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
     Some(rebuilt).filter(|b| size(b) < size(t))
 }
 
+
+/// `c·(v_1 + ... + v_k) + L` for leaves whose own coefficients are within 1 of `c = ±2^k`
+/// (a shifted sum), `L` rebuilt from the rest (`8*(y + z) + ((z ^ x) - x)` for `8*y + 9*z - 2*(z & x)`).
+fn common_multiple(vals: &[u64], lv: &[T], w: &Width) -> Option<T> {
+    let n = lv.len();
+    let a: Vec<u64> = (0..n).map(|i| vals[1 << i].wrapping_sub(vals[0]) & w.mask).collect();
+    let near = |x: u64, c: u64| w.signed(x.wrapping_sub(c) & w.mask).unsigned_abs() <= 1;
+    let mut tried = Vec::new();
+    let mut best: Option<T> = None;
+    for c in a.iter().flat_map(|&x| [x, x.wrapping_add(1), x.wrapping_sub(1)].map(|c| c & w.mask)) {
+        if w.signed(c).unsigned_abs() < MIN_COMMON || !w.signed(c).unsigned_abs().is_power_of_two() || tried.contains(&c) || tried.len() == MAX_COMMON_TRIES {
+            continue;
+        }
+        let s: Vec<usize> = (0..n).filter(|&j| near(a[j], c)).collect();
+        if s.len() < 2 {
+            continue;
+        }
+        tried.push(c);
+        let smask = s.iter().fold(0usize, |m, &j| m | 1 << j);
+        let rest: Vec<u64> = (0..vals.len()).map(|p| vals[p].wrapping_sub(c.wrapping_mul((p & smask).count_ones() as u64)) & w.mask).collect();
+        let sum = s.iter().map(|&j| lv[j].clone()).reduce(|x, y| T::Op(Op::Add, vec![x, y])).unwrap();
+        let prod = T::Op(Op::Mul, vec![T::Num(w.signed(c)), sum]);
+        let cand = match rebuild_values(&rest, lv, w) {
+            T::Num(0) => prod,
+            r => T::Op(Op::Add, vec![prod, r]),
+        };
+        if best.as_ref().is_none_or(|b| size(&cand) < size(b)) {
+            best = Some(cand);
+        }
+    }
+    best
+}
+
+/// Smallest `|c|` `common_multiple` pulls out, and how many `c` it tries.
+const MIN_COMMON: u64 = 4;
+const MAX_COMMON_TRIES: usize = 2;
 
 /// Most leaves `drop_unused` evaluates a region on.
 const MAX_WIDE_LEAVES: usize = 16;
@@ -1144,13 +1184,20 @@ fn relate_region(t: &T, w: &Width) -> Option<T> {
         let back: Vec<T> = combo.iter().map(|&(k, _)| lv[arith[k]].clone()).collect();
         let used: Vec<T> = combo.iter().map(|&(k, _)| ph[k].clone()).collect();
         let r = crate::lowbits::replace(&r, &used, &back);
-        let fewer = || {
-            let mut rlv = Vec::new();
-            leaves(&r, w, &mut rlv);
-            rlv.len() < lv.len()
+        let mut rlv = Vec::new();
+        leaves(&r, w, &mut rlv);
+        // Arithmetic leaves that cancelled join the enclosing region, which is then rebuilt whole.
+        let opaque = |lv: &[T]| lv.iter().filter(|l| matches!(l, T::Op(..)) && kind(l, w) != Kind::Bit).count();
+        let (fewer, r) = if rlv.len() < lv.len() {
+            (true, r)
+        } else if wide && opaque(&rlv) < opaque(&lv) {
+            let again = rewrite(&r, w);
+            (size(&again) < size(t), again)
+        } else {
+            (false, r)
         };
         // In a wide region only results where leaves cancelled: others shift extraction for little gain.
-        if (!wide || fewer()) && best.as_ref().is_none_or(|b| size(&r) < size(b)) {
+        if (!wide || fewer) && best.as_ref().is_none_or(|b| size(&r) < size(b)) {
             best = Some(r);
         }
     }
@@ -3415,8 +3462,33 @@ fn clustered_in(t: &T, w: &Width) -> Option<T> {
         *c = low_multiplier(*c, y, w);
     }
     terms.retain(|(c, _)| *c != 0);
+    let (terms, k) = absorb_constant(terms, k, w);
     let flat = build_sum(&terms, k, w);
     Some(if size(&flat) <= size(&whole) { flat } else { whole }).filter(|r| size(r) < size(t))
+}
+
+/// `terms` plus `k` with `k` moved into one term, `a·B + a` as `-a·~B`, where some term has
+/// coefficient `k`, also after writing each `a·~B` as `-a·B - a` (`7·~(u ^ v)` for
+/// `-7·(u ^ v) - 7`).
+fn absorb_constant(terms: Vec<(u64, T)>, k: u64, w: &Width) -> (Vec<(u64, T)>, u64) {
+    let not = |y: &T| match y {
+        T::Op(Op::Not, a) => a[0].clone(),
+        y => T::Op(Op::Not, vec![y.clone()]),
+    };
+    let absorb = |mut terms: Vec<(u64, T)>, k: u64| {
+        let e = terms.iter_mut().find(|(c, y)| k != 0 && *c == k && !matches!(y, T::Num(_)))?;
+        *e = (e.0.wrapping_neg() & w.mask, not(&e.1));
+        Some((terms, 0))
+    };
+    let (mut plain, mut k2) = (terms.clone(), k);
+    for (c, y) in plain.iter_mut() {
+        if let T::Op(Op::Not, a) = y {
+            k2 = k2.wrapping_sub(*c) & w.mask;
+            *c = c.wrapping_neg() & w.mask;
+            *y = a[0].clone();
+        }
+    }
+    absorb(plain, k2).or_else(|| absorb(terms.clone(), k)).unwrap_or((terms, k))
 }
 
 /// The multiplier `c` of `y` cut to the bits that matter when `y` is `a & M` with `M` a
@@ -3789,7 +3861,10 @@ pub fn simplify_linear_both(egg: &str, w: u32) -> (String, Vec<String>) {
 fn finish(t: &T, w: &Width) -> T {
     // Products selected by a bit are left whole for `split_bits` in the next round (Hikari).
     let t = if selectors(t, w).is_empty() { recombine_regions(t, w, false) } else { t.clone() };
-    crate::lowbits::shifted_xor(&crate::lowbits::cut_products(&t, w), w)
+    let t = crate::lowbits::shifted_xor(&crate::lowbits::cut_products(&t, w), w);
+    // Rebuilds can leave bits known by evaluation only (`-(A & B) & 1` with `A & B` even).
+    let low = crate::lowbits::simplify_rebuilt(&t, w);
+    if size(&low) < size(&t) { low } else { t }
 }
 
 /// `t` without additions of 0 and multiplications by 1.
