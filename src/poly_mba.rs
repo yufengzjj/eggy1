@@ -6,7 +6,7 @@
 //! reverse.
 
 use crate::eval::{Op, Term as T, size};
-use crate::linear_mba::{Kind, MAX_LEAVES, Width, build_sum, Prog, const_shift, kind, leaves, rewrite, simba_memo};
+use crate::linear_mba::{Kind, MAX_LEAVES, Ctx, build_sum, Prog, const_shift, kind, leaves, rewrite, simba_memo};
 use std::collections::BTreeMap;
 
 /// Conjunction of leaves, as a set of leaf indices.
@@ -41,8 +41,8 @@ const MAX_MASKED_MONOS: usize = 16;
 /// Largest term `masked_poly` rebuilds for a single product with constants in both factors.
 const MAX_MASKED_SIZE: usize = 20;
 
-struct Ctx<'a> {
-    w: &'a Width,
+struct Expansion<'a> {
+    w: &'a Ctx,
     leaves: Vec<T>,
     built: std::cell::RefCell<std::collections::HashMap<(Poly, usize), T>>,
     builds: std::cell::Cell<usize>,
@@ -54,9 +54,9 @@ struct Ctx<'a> {
     base: Vec<Conj>,
 }
 
-impl<'a> Ctx<'a> {
-    fn new(w: &'a Width, atoms: Vec<u64>) -> Self {
-        Ctx { w, leaves: Vec::new(), built: Default::default(), builds: Default::default(), linear: Default::default(), atoms, base: Vec::new() }
+impl<'a> Expansion<'a> {
+    fn new(w: &'a Ctx, atoms: Vec<u64>) -> Self {
+        Expansion { w, leaves: Vec::new(), built: Default::default(), builds: Default::default(), linear: Default::default(), atoms, base: Vec::new() }
     }
 
     fn leaf(&mut self, t: &T) -> Option<usize> {
@@ -770,7 +770,7 @@ impl<'a> Ctx<'a> {
     }
 }
 
-fn has_const_bit(t: &T, w: &Width) -> bool {
+fn has_const_bit(t: &T, w: &Ctx) -> bool {
     match t {
         T::Op(_, a) => kind(t, w) == Kind::ConstBit || a.iter().any(|x| has_const_bit(x, w)),
         _ => false,
@@ -779,7 +779,7 @@ fn has_const_bit(t: &T, w: &Width) -> bool {
 
 /// Must only descend where `poly` expands structurally: `poly` turns other nodes
 /// into leaves via `rewrite`, which would recurse back here on the same term.
-fn has_product(t: &T, w: &Width) -> bool {
+fn has_product(t: &T, w: &Ctx) -> bool {
     let T::Op(op, a) = t else { return false };
     match op {
         Op::Mul if !matches!(a[0], T::Num(_)) && !matches!(a[1], T::Num(_)) => true,
@@ -794,13 +794,13 @@ fn has_product(t: &T, w: &Width) -> bool {
 /// and the rebuilt form is smaller.
 /// Number of monomials in the expansion of `t`, after the null polynomials are reduced
 /// if that leaves fewer.
-pub(crate) fn monomials(t: &T, w: &Width) -> Option<usize> {
-    let mut ctx = Ctx::new(w, Vec::new());
+pub(crate) fn monomials(t: &T, w: &Ctx) -> Option<usize> {
+    let mut ctx = Expansion::new(w, Vec::new());
     let p = ctx.poly(t)?;
     Some(p.len().min(ctx.reduce_null(&p).len()))
 }
 
-pub(crate) fn simplify_poly(t: &T, w: &Width) -> Option<T> {
+pub(crate) fn simplify_poly(t: &T, w: &Ctx) -> Option<T> {
     // A bitwise root would be its own leaf, and `leaf` rewrites leaves.
     let wide = kind(t, w) == Kind::Lin && {
         let mut lv = Vec::new();
@@ -810,7 +810,7 @@ pub(crate) fn simplify_poly(t: &T, w: &Width) -> Option<T> {
     if !wide && !has_product(t, w) {
         return None;
     }
-    let mut ctx = Ctx::new(w, Vec::new());
+    let mut ctx = Expansion::new(w, Vec::new());
     let p = ctx.poly(t)?;
     let q = ctx.reduce_null(&p);
     // Far more monomials than nodes (products of bitwise terms over many leaves)
@@ -840,7 +840,7 @@ pub(crate) fn simplify_poly(t: &T, w: &Width) -> Option<T> {
 
 /// `t` rebuilt with its bitwise terms with constants expanded per atom, so that products
 /// selecting bits cancel (`(a | 2)·(a & 2) + (a & ~2)·(~a & 2)` is `2a`, `a = q | t`).
-fn masked_poly(t: &T, monos: usize, w: &Width) -> Option<T> {
+fn masked_poly(t: &T, monos: usize, w: &Ctx) -> Option<T> {
     // One product is enough in a small term; in large ones that is most regions of
     // semi-linear inputs, at several times the run time.
     let (any, both) = masked_products(t, w);
@@ -867,7 +867,7 @@ fn masked_poly(t: &T, monos: usize, w: &Width) -> Option<T> {
     if atoms.len() < 2 {
         return None;
     }
-    let mut ctx = Ctx::new(w, atoms);
+    let mut ctx = Expansion::new(w, atoms);
     let p = ctx.poly(t)?;
     if p.len() > MAX_MASKED_MONOS.max(2 * monos) {
         return None;
@@ -878,7 +878,7 @@ fn masked_poly(t: &T, monos: usize, w: &Width) -> Option<T> {
 
 /// Products of non-constant factors where `poly` expands `t` structurally, with a bitwise
 /// operation with a constant in one factor, and in both.
-fn masked_products(t: &T, w: &Width) -> (usize, usize) {
+fn masked_products(t: &T, w: &Ctx) -> (usize, usize) {
     let T::Op(op, a) = t else { return (0, 0) };
     let inner = || a.iter().map(|x| masked_products(x, w)).fold((0, 0), |s, x| (s.0 + x.0, s.1 + x.1));
     match op {
@@ -956,7 +956,7 @@ mod tests {
     fn products_of_linear_mbas() {
         let mut r = Rng(0x7f4a7c15_9e3779b9);
         for bits in [8u32, 64] {
-            let w = Width::new(bits);
+            let w = Ctx::new(bits);
             let ty = NumType { bits, signed: false };
             for _ in 0..300 {
                 let t = op(Op::Add, vec![op(Op::Mul, vec![linear(&mut r), linear(&mut r)]), linear(&mut r)]);
@@ -981,13 +981,13 @@ mod tests {
         let mut r = Rng(0x2545_f491_4f6c_dd1d);
         let mut factored = 0;
         for bits in [8u32, 64] {
-            let w = Width::new(bits);
+            let w = Ctx::new(bits);
             let ty = NumType { bits, signed: false };
             for k in 0..200 {
                 let (a, b) = (linear(&mut r), linear(&mut r));
                 let c = if k % 2 == 0 { a.clone() } else { linear(&mut r) };
                 let t = op(Op::Mul, vec![op(Op::Mul, vec![a.clone(), b]), c]);
-                let mut ctx = Ctx::new(&w, Vec::new());
+                let mut ctx = Expansion::new(&w, Vec::new());
                 let Some(p) = ctx.poly(&t) else { continue };
                 let built = ctx.build(&p, FACTOR_TRIES);
                 factored += (size(&built) <= size(&t)) as u32;
@@ -1012,7 +1012,7 @@ mod tests {
         let mut r = Rng(0x94d0_49bb_1331_11eb);
         let mut built = 0;
         for bits in [8u32, 64] {
-            let w = Width::new(bits);
+            let w = Ctx::new(bits);
             let ty = NumType { bits, signed: false };
             let masks = [1i64, 2, 3, -3, -4, 0x30];
             for _ in 0..300 {

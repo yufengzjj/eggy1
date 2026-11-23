@@ -8,6 +8,7 @@
 
 use crate::eval::{Op, Term as T, parse, show, size};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Kind {
@@ -21,14 +22,20 @@ pub(crate) enum Kind {
     Atom,
 }
 
-pub(crate) struct Width {
+/// The width of the arithmetic, and the memos and limits shared by one pre-pass run.
+pub(crate) struct Ctx {
     pub(crate) w: u32,
     pub(crate) mask: u64,
+    st: std::sync::Arc<State>,
 }
 
-impl Width {
-    pub(crate) fn new(w: u32) -> Width {
-        Width { w, mask: if w == 64 { u64::MAX } else { (1u64 << w) - 1 } }
+impl Ctx {
+    pub(crate) fn new(w: u32) -> Ctx {
+        Ctx { w, mask: if w == 64 { u64::MAX } else { (1u64 << w) - 1 }, st: Default::default() }
+    }
+    /// The same run at width `w`, sharing its state.
+    pub(crate) fn narrow(&self, w: u32) -> Ctx {
+        Ctx { st: self.st.clone(), ..Ctx::new(w) }
     }
     pub(crate) fn signed(&self, v: u64) -> i64 {
         let sh = 64 - self.w;
@@ -36,14 +43,62 @@ impl Width {
     }
 }
 
-pub(crate) fn const_shift(t: &T, w: &Width) -> Option<u32> {
+type Memo<K, V> = std::sync::Mutex<std::collections::HashMap<K, (V, bool)>>;
+type RebuiltKey = (Vec<u64>, Vec<(usize, bool)>, u64, u32);
+type GroupedKey = (Vec<(Vec<u64>, u64)>, Vec<T>, u64, u32);
+
+struct State {
+    simba_memo: Memo<(u32, usize, T), Option<T>>,
+    rewritten: Memo<(u32, T), T>,
+    rebuilt: std::sync::Mutex<std::collections::HashMap<RebuiltKey, (Vec<(u64, T)>, u64)>>,
+    grouped: std::sync::Mutex<std::collections::HashMap<GroupedKey, T>>,
+    /// Most leaves of a region `relate_region` tries.
+    relate_leaves: AtomicUsize,
+    /// `rewrite` calls left before it returns its input unchanged.
+    rewrites_left: AtomicUsize,
+    /// Most leaves a semi-linear region may have to be rebuilt.
+    semi_leaves: AtomicUsize,
+    bit_splits: AtomicUsize,
+    clustering: std::sync::Mutex<Vec<T>>,
+    /// Turns `clustered` off, for the rebuild without it.
+    no_cluster: AtomicBool,
+    /// Whether a form from `clustered` was kept since the last reset.
+    clustered: AtomicBool,
+}
+
+impl Default for State {
+    fn default() -> State {
+        State {
+            simba_memo: Default::default(),
+            rewritten: Default::default(),
+            rebuilt: Default::default(),
+            grouped: Default::default(),
+            relate_leaves: AtomicUsize::new(MAX_WIDE_LEAVES),
+            rewrites_left: AtomicUsize::new(usize::MAX),
+            semi_leaves: AtomicUsize::new(MAX_LEAVES),
+            bit_splits: AtomicUsize::new(BIT_SPLIT_BUDGET),
+            clustering: Default::default(),
+            no_cluster: AtomicBool::new(false),
+            clustered: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Decrements `a` down to 0 and returns its old value.
+fn take_one(a: &AtomicUsize) -> usize {
+    let left = a.load(Relaxed);
+    a.store(left.saturating_sub(1), Relaxed);
+    left
+}
+
+pub(crate) fn const_shift(t: &T, w: &Ctx) -> Option<u32> {
     match t {
         T::Num(k) if (0..w.w as i64).contains(k) => Some(*k as u32),
         _ => None,
     }
 }
 
-pub(crate) fn kind(t: &T, w: &Width) -> Kind {
+pub(crate) fn kind(t: &T, w: &Ctx) -> Kind {
     let bit = |k: Kind| if k == Kind::Atom { Kind::Bit } else { k };
     match t {
         T::Var(_) => Kind::Bit,
@@ -68,7 +123,7 @@ pub(crate) fn kind(t: &T, w: &Width) -> Kind {
 /// Kind of `t` as an operand of a bitwise operation (`Bit` or `ConstBit`).
 /// Arithmetic operands (`x + y`, `-(x | y)`) are opaque leaves there, but `~`
 /// stays visible so that `~a` and `a` share the leaf `a`; see `leaves`.
-fn bit_operand(t: &T, w: &Width) -> Kind {
+fn bit_operand(t: &T, w: &Ctx) -> Kind {
     match t {
         T::Num(_) if kind(t, w) == Kind::Lin => Kind::ConstBit,
         T::Op(op, a) if *op == Op::Not => bit_operand(&a[0], w),
@@ -79,7 +134,7 @@ fn bit_operand(t: &T, w: &Width) -> Kind {
 
 /// Leaves of the linear region rooted at `t`: variables, atom subterms, and
 /// arithmetic operands of bitwise operations.
-pub(crate) fn leaves(t: &T, w: &Width, out: &mut Vec<T>) {
+pub(crate) fn leaves(t: &T, w: &Ctx, out: &mut Vec<T>) {
     let mut seen = out.iter().map(term_hash).collect();
     leaves_in(t, w, out, &mut seen, false);
 }
@@ -92,7 +147,7 @@ fn term_hash(t: &T) -> u64 {
 }
 
 /// `seen` holds the hashes of `out`, so that only a hash match is compared in full.
-fn leaves_in(t: &T, w: &Width, out: &mut Vec<T>, seen: &mut std::collections::HashSet<u64>, in_bitwise: bool) {
+fn leaves_in(t: &T, w: &Ctx, out: &mut Vec<T>, seen: &mut std::collections::HashSet<u64>, in_bitwise: bool) {
     let mut add = |t: &T| {
         if seen.insert(term_hash(t)) || !out.contains(t) {
             out.push(t.clone());
@@ -113,7 +168,7 @@ fn leaves_in(t: &T, w: &Width, out: &mut Vec<T>, seen: &mut std::collections::Ha
     }
 }
 
-pub(crate) fn eval(t: &T, w: &Width, leaf_vals: &[(T, u64)]) -> u64 {
+pub(crate) fn eval(t: &T, w: &Ctx, leaf_vals: &[(T, u64)]) -> u64 {
     if let Some((_, v)) = leaf_vals.iter().find(|(l, _)| l == t) {
         return *v;
     }
@@ -154,13 +209,13 @@ enum Ins {
 }
 
 impl Prog {
-    pub(crate) fn new(t: &T, lv: &[T], w: &Width) -> Prog {
+    pub(crate) fn new(t: &T, lv: &[T], w: &Ctx) -> Prog {
         let mut p = Prog(Vec::new());
         p.push(t, lv, w);
         p
     }
 
-    fn push(&mut self, t: &T, lv: &[T], w: &Width) -> usize {
+    fn push(&mut self, t: &T, lv: &[T], w: &Ctx) -> usize {
         let ins = match (lv.iter().position(|l| l == t), t) {
             (Some(i), _) => Ins::Leaf(i),
             (_, T::Num(c)) => Ins::Num(*c as u64),
@@ -188,7 +243,7 @@ impl Prog {
         self.0.len() - 1
     }
 
-    pub(crate) fn run(&self, leaf: impl Fn(usize) -> u64, w: &Width) -> u64 {
+    pub(crate) fn run(&self, leaf: impl Fn(usize) -> u64, w: &Ctx) -> u64 {
         let mut v: Vec<u64> = Vec::with_capacity(self.0.len());
         for ins in &self.0 {
             let r = match *ins {
@@ -205,7 +260,7 @@ impl Prog {
     }
 
     /// Value with leaf `i` set to bit `i` of `p`.
-    pub(crate) fn at(&self, p: usize, w: &Width) -> u64 {
+    pub(crate) fn at(&self, p: usize, w: &Ctx) -> u64 {
         self.run(|i| (p >> i & 1) as u64, w)
     }
 }
@@ -434,7 +489,7 @@ fn b_to_t(b: &B, leaves: &[T]) -> T {
 }
 
 /// `Σ coef·term + konst`, using Sub/Neg for negative coefficients.
-pub(crate) fn build_sum(terms: &[(u64, T)], konst: u64, w: &Width) -> T {
+pub(crate) fn build_sum(terms: &[(u64, T)], konst: u64, w: &Ctx) -> T {
     // c·t + c = -c·~t saves the constant term; for c = 1 only inside a longer sum,
     // where `a - ~t` is shorter than `a + t + 1`.
     if konst != 0 && (konst != 1 || terms.len() > 1) {
@@ -470,13 +525,13 @@ pub(crate) fn build_sum(terms: &[(u64, T)], konst: u64, w: &Width) -> T {
 }
 
 /// `size(&build_sum(terms, konst, w))` without building it.
-fn sum_size(terms: &[(u64, T)], konst: u64, w: &Width) -> usize {
+fn sum_size(terms: &[(u64, T)], konst: u64, w: &Ctx) -> usize {
     let terms: Vec<(u64, usize, bool)> = terms.iter().map(|(c, t)| (*c, size(t), matches!(t, T::Op(op, _) if *op == Op::Not))).collect();
     folded_sum_size(&terms, konst, w)
 }
 
 /// `sum_size` from each term's coefficient, size and whether it is a `Not`.
-fn folded_sum_size(terms: &[(u64, usize, bool)], konst: u64, w: &Width) -> usize {
+fn folded_sum_size(terms: &[(u64, usize, bool)], konst: u64, w: &Ctx) -> usize {
     if konst != 0 && (konst != 1 || terms.len() > 1) {
         if let Some(i) = terms.iter().position(|t| t.0 == konst) {
             let not_size = if terms[i].2 { terms[i].1 - 1 } else { terms[i].1 + 1 };
@@ -488,7 +543,7 @@ fn folded_sum_size(terms: &[(u64, usize, bool)], konst: u64, w: &Width) -> usize
     sized_sum(terms.iter().map(|t| (t.0, t.1)), konst, w)
 }
 
-fn sized_sum(terms: impl Iterator<Item = (u64, usize)>, konst: u64, w: &Width) -> usize {
+fn sized_sum(terms: impl Iterator<Item = (u64, usize)>, konst: u64, w: &Ctx) -> usize {
     let scaled = |c: u64, s: usize| if c == 1 { s } else { s + 2 };
     let mut acc: Option<usize> = None;
     for (c, s) in terms {
@@ -507,25 +562,20 @@ fn sized_sum(terms: impl Iterator<Item = (u64, usize)>, konst: u64, w: &Width) -
     }
 }
 
-thread_local! {
-    #[allow(clippy::type_complexity)]
-    static SIMBA_MEMO: std::cell::RefCell<std::collections::HashMap<(u32, usize, T), (Option<T>, bool)>> = Default::default();
-}
-
 /// `simba` memoized per thread, for the linear cofactors `poly_mba` rebuilds: the same
 /// ones come back across its factoring choices and across regions.
-pub(crate) fn simba_memo(t: &T, w: &Width) -> Option<T> {
-    let key = (w.w, SEMI_LEAVES.with(|c| c.get()), t.clone());
-    if let Some(r) = memo_get(&SIMBA_MEMO, &key) {
+pub(crate) fn simba_memo(t: &T, w: &Ctx) -> Option<T> {
+    let key = (w.w, w.st.semi_leaves.load(Relaxed), t.clone());
+    if let Some(r) = memo_get(&w.st.simba_memo, &key, w) {
         return r;
     }
-    let (r, used) = tracking_clusters(|| simba(t, w));
-    SIMBA_MEMO.with(|c| c.borrow_mut().insert(key, (r.clone(), used)));
+    let (r, used) = tracking_clusters(w, || simba(t, w));
+    w.st.simba_memo.lock().unwrap().insert(key, (r.clone(), used));
     r
 }
 
 /// Smallest rebuilt form of the linear region `t`, if it has 1..=MAX_LEAVES leaves.
-pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
+pub(crate) fn simba(t: &T, w: &Ctx) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
     let n = lv.len();
@@ -534,7 +584,7 @@ pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
             (Some(d), Some(c)) if size(&c) >= size(&d) => Some(d),
             (d, None) => d,
             (_, c) => {
-                CLUSTERED.with(|f| f.set(true));
+                w.st.clustered.store(true, Relaxed);
                 c
             }
         };
@@ -563,7 +613,7 @@ pub(crate) fn simba(t: &T, w: &Width) -> Option<T> {
 
 /// `c·(v_1 + ... + v_k) + L` for leaves whose own coefficients are within 1 of `c = ±2^k`
 /// (a shifted sum), `L` rebuilt from the rest (`8*(y + z) + ((z ^ x) - x)` for `8*y + 9*z - 2*(z & x)`).
-fn common_multiple(vals: &[u64], lv: &[T], w: &Width) -> Option<T> {
+fn common_multiple(vals: &[u64], lv: &[T], w: &Ctx) -> Option<T> {
     let n = lv.len();
     let a: Vec<u64> = (0..n).map(|i| vals[1 << i].wrapping_sub(vals[0]) & w.mask).collect();
     let near = |x: u64, c: u64| w.signed(x.wrapping_sub(c) & w.mask).unsigned_abs() <= 1;
@@ -604,7 +654,7 @@ const WIDE_BUDGET: usize = 1 << 25;
 
 /// A region with more than `MAX_LEAVES` leaves, rewritten with the leaves its values on
 /// {0,1}^n do not depend on set to 0, as in opaque predicates over many variables.
-fn drop_unused(t: &T, lv: &[T], w: &Width) -> Option<T> {
+fn drop_unused(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
     if has_const_bitwise(t, w) {
         return None;
     }
@@ -613,7 +663,7 @@ fn drop_unused(t: &T, lv: &[T], w: &Width) -> Option<T> {
 
 /// `drop_unused` for any region; with constant masks only where `relate` has cancelled leaves,
 /// since elsewhere the rebuilds of the operands do better.
-fn drop_leaves(t: &T, lv: &[T], w: &Width) -> Option<T> {
+fn drop_leaves(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
     let n = lv.len();
     let (e0, used) = used_leaves(t, lv, w)?;
     let unused: Vec<T> = (0..n).filter(|&i| !used[i]).map(|i| lv[i].clone()).collect();
@@ -642,7 +692,7 @@ fn drop_leaves(t: &T, lv: &[T], w: &Width) -> Option<T> {
 /// `e(0)` and the leaves the region's value depends on, from its values on {0,1}^n,
 /// or per bit position for a semi-linear region (see `semi_linear`); `None` past
 /// `MAX_WIDE_LEAVES` leaves or `WIDE_BUDGET`.
-fn used_leaves(t: &T, lv: &[T], w: &Width) -> Option<(u64, Vec<bool>)> {
+fn used_leaves(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<bool>)> {
     let n = lv.len();
     if n > MAX_WIDE_LEAVES {
         return None;
@@ -694,7 +744,7 @@ fn used_leaves(t: &T, lv: &[T], w: &Width) -> Option<(u64, Vec<bool>)> {
 /// The linear MBA over `lv` with values `vals` on {0,1}^n. When every value is a
 /// multiple of `2^k`, `±2^k·L` with `L` rebuilt from `±vals / 2^k` is also tried, as in
 /// `2*x - 4*(x & y) = 2*((x ^ y) - y)`; `L` only matters modulo `2^(w-k)`.
-fn rebuild_values(vals: &[u64], lv: &[T], w: &Width) -> T {
+fn rebuild_values(vals: &[u64], lv: &[T], w: &Ctx) -> T {
     let plain = rebuild_values_plain(vals, lv, w);
     let k = vals.iter().map(|v| v.trailing_zeros()).min().unwrap_or(64);
     if k == 0 || k >= w.w {
@@ -708,7 +758,7 @@ fn rebuild_values(vals: &[u64], lv: &[T], w: &Width) -> T {
         .fold(plain, |best, t| if size(&t) < size(&best) { t } else { best })
 }
 
-fn rebuild_values_plain(vals: &[u64], lv: &[T], w: &Width) -> T {
+fn rebuild_values_plain(vals: &[u64], lv: &[T], w: &Ctx) -> T {
     let m = w.mask;
     // e(x) = Σ_j 2^j g(bit j of x), with g(p) = e(p) - 2e(0); k = g(0).
     let g: Vec<u64> = vals.iter().map(|v| v.wrapping_sub(vals[0].wrapping_mul(2)) & m).collect();
@@ -723,7 +773,7 @@ const MAX_BLOCK_LEAVES: usize = 12;
 
 /// Upper bound on the degree of `t`'s conjunction-basis expansion: the most leaves
 /// any bitwise subterm of the linear region has.
-fn bit_degree(t: &T, w: &Width) -> usize {
+fn bit_degree(t: &T, w: &Ctx) -> usize {
     match t {
         T::Num(_) => 0,
         T::Op(_, a) if kind(t, w) == Kind::Lin => {
@@ -747,7 +797,7 @@ const MAX_BLOCK_COMBOS: usize = 1 << 15;
 /// over. The choice per block that gives the smallest sum wins, so `c·(x & y)` may
 /// come back as `x + y - (x | y)` or `-(x ^ y)` when the single terms absorb the rest.
 /// Not limited to `MAX_LEAVES`.
-fn small_blocks(t: &T, w: &Width) -> Option<T> {
+fn small_blocks(t: &T, w: &Ctx) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
     let n = lv.len();
@@ -906,7 +956,7 @@ fn small_blocks(t: &T, w: &Width) -> Option<T> {
 /// add `μ·(L - ℓ)` for any `μ`: in `(P & ~b) - (Q & (b | P)) + (b ^ d)` with
 /// `Q = (b ^ d) - b`, `μ = 1` removes `d` and leaves `b | P | Q`. Tries up to two
 /// such leaves with small `μ`.
-fn related_leaves(t: &T, lv: &[T], w: &Width) -> Option<T> {
+fn related_leaves(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
     let own = |l: &T| {
         let mut sub = Vec::new();
         leaves(l, w, &mut sub);
@@ -976,7 +1026,7 @@ fn related_leaves(t: &T, lv: &[T], w: &Width) -> Option<T> {
 const MAX_RELATED_REBUILDS: usize = 8;
 
 /// Leaves used and non-zero coefficients of `vals` (on {0,1}^n) in the conjunction basis.
-fn conj_measure(vals: &[u64], n: usize, w: &Width) -> (u32, usize) {
+fn conj_measure(vals: &[u64], n: usize, w: &Ctx) -> (u32, usize) {
     let mut a = vals.to_vec();
     for i in 0..n {
         for p in 0..a.len() {
@@ -994,7 +1044,7 @@ fn conj_measure(vals: &[u64], n: usize, w: &Width) -> (u32, usize) {
 /// `rewrite` then expands, so products and constant masks cancel too, unlike in
 /// `related_leaves`: with `L = y*z - (z ^ y)`, `(z ^ y) - B + 2*(L | B) - y*z` is
 /// `L ^ B`. Other leaves equal to `L` or `~L` become `v` or `~v`.
-pub(crate) fn relate(t: &T, w: &Width) -> T {
+pub(crate) fn relate(t: &T, w: &Ctx) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     if kind(t, w) == Kind::Atom {
         return T::Op(*op, a.iter().map(|x| relate(x, w)).collect());
@@ -1006,11 +1056,7 @@ pub(crate) fn relate(t: &T, w: &Width) -> T {
     relate_region(&t, w).filter(|r| size(r) < size(&t)).unwrap_or(t)
 }
 
-thread_local! {
-    /// Most leaves of a region `relate_region` tries.
-    static RELATE_LEAVES: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_WIDE_LEAVES) };
-}
-/// `RELATE_LEAVES` in the rebuild without `clustered`, where wider regions take seconds.
+/// `relate_leaves` in the rebuild without `clustered`, where wider regions take seconds.
 const UNCLUSTERED_RELATE_LEAVES: usize = 10;
 /// Most `rewrite` calls the rebuild without `clustered` makes; past them it is dropped.
 const UNCLUSTERED_REWRITES: usize = 256;
@@ -1018,23 +1064,18 @@ const UNCLUSTERED_REWRITES: usize = 256;
 /// still tried: inputs that need more are slow to rebuild without it.
 const UNCLUSTERED_AFTER: usize = 1024;
 
-thread_local! {
-    /// `rewrite` calls left before it returns its input unchanged.
-    static REWRITES_LEFT: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
-}
-
 /// Most arithmetic leaves `relate_region` tries.
 const MAX_RELATED: usize = 4;
 /// Largest product leaf `relate_region` tries when it is not an operand of a bitwise operation.
 const MAX_FREE_PRODUCT: usize = 20;
 
-fn relate_region(t: &T, w: &Width) -> Option<T> {
+fn relate_region(t: &T, w: &Ctx) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
-    if lv.len() > RELATE_LEAVES.with(|c| c.get()) {
+    if lv.len() > w.st.relate_leaves.load(Relaxed) {
         return None;
     }
-    fn bit_operands(t: &T, w: &Width, out: &mut Vec<T>) {
+    fn bit_operands(t: &T, w: &Ctx, out: &mut Vec<T>) {
         let T::Op(op, a) = t else { return };
         if kind(t, w) == Kind::Atom {
             return;
@@ -1205,7 +1246,7 @@ fn relate_region(t: &T, w: &Width) -> Option<T> {
 }
 
 /// Whether `t` is 0 at a few fixed points, a quick check before a proof.
-fn maybe_zero(t: &T, w: &Width) -> bool {
+fn maybe_zero(t: &T, w: &Ctx) -> bool {
     let ty = crate::eval::NumType { bits: w.w, signed: false };
     (1..=3u64).all(|k| {
         let env = |v: &str| v.bytes().fold(k.wrapping_mul(0x9e37_79b9_7f4a_7c15), |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3).rotate_left(29));
@@ -1241,7 +1282,7 @@ fn signed_products(t: &T) -> T {
 }
 
 /// Whether the linear region `t` has a bitwise operation with a constant operand.
-fn has_const_bitwise(t: &T, w: &Width) -> bool {
+fn has_const_bitwise(t: &T, w: &Ctx) -> bool {
     match (t, kind(t, w)) {
         (_, Kind::ConstBit) => true,
         (T::Op(_, a), Kind::Lin) => a.iter().any(|x| has_const_bitwise(x, w)),
@@ -1251,7 +1292,7 @@ fn has_const_bitwise(t: &T, w: &Width) -> bool {
 
 /// Shortest `(terms, konst')` with `konst + Σ_j 2^j gp(bit j of x) = Σ terms + konst'`,
 /// where `gp(0) = 0` and table point `p` sets leaf `i` to bit `i` of `p`.
-fn rebuild_gp(gp: &[u64], lv: &[T], mut konst: u64, w: &Width) -> (Vec<(u64, T)>, u64) {
+fn rebuild_gp(gp: &[u64], lv: &[T], mut konst: u64, w: &Ctx) -> (Vec<(u64, T)>, u64) {
     let mut terms = Vec::new();
     for group in independent_groups(gp, lv.len(), w) {
         let sub: Vec<u64> = (0..1usize << group.len())
@@ -1265,11 +1306,6 @@ fn rebuild_gp(gp: &[u64], lv: &[T], mut konst: u64, w: &Width) -> (Vec<(u64, T)>
     (terms, konst)
 }
 
-thread_local! {
-    /// Most leaves a semi-linear region may have to be rebuilt.
-    static SEMI_LEAVES: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_LEAVES) };
-}
-
 /// Semi-linear region: `e(x) = e(0) + Σ_j D_j(bit j of x)` with
 /// `D_j(q) = e(q << j) - e(0)`, a multiple of `2^j`. `g_j = D_j >> j` only
 /// matters modulo `2^(w-j)`, so bit `j` joins a group (found from the low bits
@@ -1280,8 +1316,8 @@ thread_local! {
 /// that leave no more groups and the smallest table values: in
 /// `((x ^ K) | C) + x` the bits of the bitwise term have tables 0, ±1, but the
 /// `+ x` makes them 0, 1, 2.
-fn semi_linear(t: &T, lv: &[T], w: &Width) -> Option<T> {
-    if lv.len() > SEMI_LEAVES.with(|c| c.get()) {
+fn semi_linear(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
+    if lv.len() > w.st.semi_leaves.load(Relaxed) {
         return None;
     }
     let m = w.mask;
@@ -1371,20 +1407,16 @@ const MAX_BIT_SPLITS: usize = 4;
 /// Most `P op Q` pairs `bit_split` rebuilds per `simplify_linear` call.
 const BIT_SPLIT_BUDGET: usize = 8;
 
-thread_local! {
-    static BIT_SPLITS: std::cell::Cell<usize> = const { std::cell::Cell::new(BIT_SPLIT_BUDGET) };
-}
-
 /// A purely bitwise semi-linear region of 4 to 6 leaves as `P op Q`, `P` over the
 /// leaves `A` and `Q` over `B` (they may share leaves, neither holds the other),
 /// each rebuilt on its own: `(x0 ^ x3 ^ K1) & (x3 | K2 | (x5 & x6))`. Bits are grouped
 /// by their Boolean function `f`; `P` and `Q` take its projections onto `A` and `B`
 /// (`f(x & !onlyB)` and the rest for `^`), and bits with a constant `f` try each
 /// pair of constants that gives it.
-fn bit_split(groups: &[(Vec<u64>, u64)], lv: &[T], arith: bool, e0: u64, w: &Width, mut limit: usize) -> Vec<T> {
+fn bit_split(groups: &[(Vec<u64>, u64)], lv: &[T], arith: bool, e0: u64, w: &Ctx, mut limit: usize) -> Vec<T> {
     let n = lv.len();
     // Arithmetic leaves are left to `relate`, which needs the rebuilt region's shape.
-    if !(4..=6).contains(&n) || BIT_SPLITS.with(|c| c.get()) == 0 || arith {
+    if !(4..=6).contains(&n) || w.st.bit_splits.load(Relaxed) == 0 || arith {
         return Vec::new();
     }
     let pts = 1usize << n;
@@ -1564,7 +1596,7 @@ fn bit_split(groups: &[(Vec<u64>, u64)], lv: &[T], arith: bool, e0: u64, w: &Wid
     // splits are ruled out by size before they are rebuilt.
     for &(low, op, a, b, ..) in found.iter().take(MAX_BIT_SPLITS) {
         for (ps, qs) in (0..5).filter_map(|v| pick(op, a, b, v)) {
-            if low as usize + 1 >= limit || BIT_SPLITS.with(|c| c.replace(c.get().saturating_sub(1))) == 0 {
+            if low as usize + 1 >= limit || take_one(&w.st.bit_splits) == 0 {
                 return out;
             }
             let t = T::Op(op, vec![rewrite(&side(&ps, a), w), rewrite(&side(&qs, b), w)]);
@@ -1579,7 +1611,7 @@ fn bit_split(groups: &[(Vec<u64>, u64)], lv: &[T], arith: bool, e0: u64, w: &Wid
 /// `L` only matters modulo `2^(w-k)`, so it is rebuilt in that width, where bit
 /// `j` has the table `g_j / 2^k` and bits `j ≥ w-k` are free:
 /// `(-((z | y) | (x & 0xff00)) - z) << 5`.
-fn scaled(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, limit: usize) -> Option<T> {
+fn scaled(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, limit: usize) -> Option<T> {
     let low_bits = |r: u32| if r == 64 { u64::MAX } else { (1u64 << r) - 1 };
     let mut k = if e0 == 0 { w.w } else { e0.trailing_zeros() };
     for (g, mask) in groups {
@@ -1589,7 +1621,7 @@ fn scaled(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, limit: usize
     if k == 0 || k >= w.w || limit <= 3 {
         return None;
     }
-    let nw = Width::new(w.w - k);
+    let nw = w.narrow(w.w - k);
     let gs: Vec<(Vec<u64>, u64)> = groups
         .iter()
         .filter(|(_, mask)| mask.trailing_zeros() < nw.w)
@@ -1613,7 +1645,7 @@ fn scaled(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, limit: usize
 /// `t` with each constant replaced by the shortest sign- or zero-extension of its
 /// low bits that leaves the function unchanged (`-0x7fffffffffffff6e` → `0x92`):
 /// semi-linear terms are equal exactly when `e(0)` and every bit's table agree.
-fn short_consts(t: T, lv: &[T], w: &Width) -> T {
+fn short_consts(t: T, lv: &[T], w: &Ctx) -> T {
     // `Prog` finds leaves by their context, which a rebuilt term may change, so
     // the leaves are replaced by placeholder variables first.
     let ph: Vec<T> = (0..lv.len()).map(|i| T::Var(format!("\u{4}{i}"))).collect();
@@ -1652,7 +1684,7 @@ fn short_consts(t: T, lv: &[T], w: &Width) -> T {
     show_leaves(&r, lv)
 }
 
-fn short_consts_over(t: T, lv: &[T], w: &Width) -> Option<T> {
+fn short_consts_over(t: T, lv: &[T], w: &Ctx) -> Option<T> {
     let reference = bit_groups(&t, lv, w)?;
     // Equal tables mean equal functions, so values at a few points rule out most
     // candidates before their tables are computed.
@@ -1747,7 +1779,7 @@ fn short_consts_over(t: T, lv: &[T], w: &Width) -> Option<T> {
 }
 
 /// Smallest of the grouped and shape candidates for a semi-linear table.
-fn semi_from_groups(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, limit: usize) -> Option<T> {
+fn semi_from_groups(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, limit: usize) -> Option<T> {
     let mut cands = Vec::new();
     semi_linear_candidates(groups, lv, e0, w, &mut cands);
     let limit = cands.iter().map(size).min().unwrap_or(limit).min(limit);
@@ -1761,7 +1793,7 @@ fn semi_from_groups(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, li
 /// `e(0)` so its shape can absorb it; each is tried in that role. The others take
 /// either a constant their single term would have (`own_consts`) or the one their
 /// own rebuild leaves.
-fn semi_split(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, limit: usize) -> Option<T> {
+fn semi_split(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, limit: usize) -> Option<T> {
     let n = lv.len();
     let mut root: Vec<usize> = (0..n).collect();
     fn find(root: &mut [usize], i: usize) -> usize {
@@ -1880,7 +1912,7 @@ fn semi_split(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, limit: u
 /// set where bit `j`'s table takes `-c`, and bits with a zero table, or one that
 /// is both `c` and `-c` in its width, may go either way; `-c·~B` gives the same
 /// table with `c` more.
-fn own_consts(groups: &[(Vec<u64>, u64)], w: &Width) -> Vec<u64> {
+fn own_consts(groups: &[(Vec<u64>, u64)], w: &Ctx) -> Vec<u64> {
     let m = w.mask;
     let Some(c) = groups.iter().flat_map(|(g, _)| g.iter().copied()).find(|&v| v != 0) else { return Vec::new() };
     let neg_c = c.wrapping_neg() & m;
@@ -1916,7 +1948,7 @@ fn own_consts(groups: &[(Vec<u64>, u64)], w: &Width) -> Vec<u64> {
 
 /// `(x, k)` with `t = x + k` for a trailing constant `k` of `t`, else `(t, 0)`; a leaf
 /// `t` is kept whole.
-fn split_const(t: &T, lv: &[T], w: &Width) -> (T, u64) {
+fn split_const(t: &T, lv: &[T], w: &Ctx) -> (T, u64) {
     match t {
         _ if lv.contains(t) => (t.clone(), 0),
         T::Op(op, a) if *op == Op::Add => match (&a[0], &a[1]) {
@@ -1932,7 +1964,7 @@ fn split_const(t: &T, lv: &[T], w: &Width) -> (T, u64) {
 }
 
 /// Largest table value in magnitude, then the sum of each group's largest.
-fn spread(groups: &[(Vec<u64>, u64)], w: &Width) -> (u64, u64) {
+fn spread(groups: &[(Vec<u64>, u64)], w: &Ctx) -> (u64, u64) {
     let per_group = groups.iter().map(|(g, _)| g.iter().map(|&v| w.signed(v).unsigned_abs()).max().unwrap_or(0));
     (per_group.clone().max().unwrap_or(0), per_group.fold(0, u64::saturating_add))
 }
@@ -2089,7 +2121,7 @@ impl Shapes {
         matches!(self.how[i], Shape::Not(_))
     }
 
-    fn build(&self, i: usize, lv: &[T], consts: &[u64], slot: &mut usize, w: &Width) -> T {
+    fn build(&self, i: usize, lv: &[T], consts: &[u64], slot: &mut usize, w: &Ctx) -> T {
         match self.how[i] {
             Shape::Leaf(k) => lv[k as usize].clone(),
             Shape::Const => {
@@ -2114,7 +2146,7 @@ fn shapes(n: usize) -> &'static std::sync::Mutex<Shapes> {
 /// 2 or 3 leaves and constants. Bit `j` of `B` has a table `f_j`, and the region
 /// needs `c·(f_j(q) - f_j(0)) = g_j(q)` modulo `2^(w-j)`; the smallest `B` whose
 /// table set meets each bit's acceptable tables is found in `Shapes`.
-fn shape_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, mut limit: usize, cands: &mut Vec<T>) {
+fn shape_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, mut limit: usize, cands: &mut Vec<T>) {
     let n = lv.len();
     if !(2..=3).contains(&n) {
         return;
@@ -2216,7 +2248,7 @@ fn meets(a: &[u64; 4], b: &[u64; 4]) -> bool {
 /// the tables `f2` that complete it are found as in `shape_candidates`; shape pairs
 /// are tried by total size, and each group's `(f1(0), f2(0))` is chosen so that
 /// `r = 0` when possible.
-fn pair_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, limit: usize, cands: &mut Vec<T>) {
+fn pair_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, limit: usize, cands: &mut Vec<T>) {
     let n = lv.len();
     // One group is a linear table, which `overlapping_terms` covers.
     if !(1..=3).contains(&n) || !(2..=MAX_PAIR_GROUPS).contains(&groups.len()) {
@@ -2401,7 +2433,7 @@ fn pair_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, lim
 /// Per bit, an index into its group's options so that `Σ_j (c1·a_j + c2·b_j)·2^j = e0`,
 /// with `(a_j, b_j)` the option's tables at 0; found from the low bit up with the
 /// carry as state. All zeros when there is no such choice.
-fn pick_bits(group_of: &[usize], options: &[Vec<(u8, u8)>], c: (u64, u64), e0: u64, w: &Width) -> Vec<usize> {
+fn pick_bits(group_of: &[usize], options: &[Vec<(u8, u8)>], c: (u64, u64), e0: u64, w: &Ctx) -> Vec<usize> {
     let bits = w.w as usize;
     let Ok(layers) = carry_layers(group_of, options, c, e0, w) else {
         return vec![0; bits];
@@ -2419,7 +2451,7 @@ fn pick_bits(group_of: &[usize], options: &[Vec<(u8, u8)>], c: (u64, u64), e0: u
 /// The carry DP of `pick_bits`; `Err(true)` when it gives up past 4096 carries,
 /// `Err(false)` when no choice exists.
 #[allow(clippy::type_complexity)]
-fn carry_layers(group_of: &[usize], options: &[Vec<(u8, u8)>], (c1, c2): (u64, u64), e0: u64, w: &Width) -> Result<Vec<std::collections::HashMap<i128, (i128, usize)>>, bool> {
+fn carry_layers(group_of: &[usize], options: &[Vec<(u8, u8)>], (c1, c2): (u64, u64), e0: u64, w: &Ctx) -> Result<Vec<std::collections::HashMap<i128, (i128, usize)>>, bool> {
     let bits = w.w as usize;
     let val = |o: (u8, u8)| (w.signed(c1) as i128) * (o.0 & 1) as i128 + (w.signed(c2) as i128) * (o.1 & 1) as i128;
     // layers[j]: carry into bit j -> (carry into bit j-1, option at bit j-1).
@@ -2462,7 +2494,7 @@ fn zero_classes(sh: &Shapes, (i, k): (usize, usize), p1: &[u64; 4], comp: &[[u64
 /// `c1·B1 + c2·B2 + r` for the shapes `(i, k)`, with per bit a table pair whose
 /// values at 0 make `r = 0` if there is one.
 #[allow(clippy::too_many_arguments)]
-fn build_pair(sh: &Shapes, (i, k): (usize, usize), (c1, c2): (u64, u64), groups: &[(Vec<u64>, u64)], comp: &[Vec<[u64; 4]>], lv: &[T], e0: u64, w: &Width) -> T {
+fn build_pair(sh: &Shapes, (i, k): (usize, usize), (c1, c2): (u64, u64), groups: &[(Vec<u64>, u64)], comp: &[Vec<[u64; 4]>], lv: &[T], e0: u64, w: &Ctx) -> T {
     let m = w.mask;
     let has = |s: &[u64; 4], f: u8| s[(f >> 6) as usize] >> (f & 63) & 1 == 1;
     // For each group, one table pair per choice of (f1(0), f2(0)).
@@ -2495,7 +2527,7 @@ fn build_pair(sh: &Shapes, (i, k): (usize, usize), (c1, c2): (u64, u64), groups:
 
 /// The smallest expression in `Shapes` of size at most `top` whose table set meets
 /// `acc[j]` for every bit `j`, with its constants solved bit by bit.
-fn smallest_shape(acc: &[[u64; 4]], n: usize, top: usize, lv: &[T], w: &Width) -> Option<T> {
+fn smallest_shape(acc: &[[u64; 4]], n: usize, top: usize, lv: &[T], w: &Ctx) -> Option<T> {
     let mut distinct = acc.to_vec();
     distinct.sort_unstable();
     distinct.dedup();
@@ -2524,13 +2556,13 @@ fn smallest_shape(acc: &[[u64; 4]], n: usize, top: usize, lv: &[T], w: &Width) -
 
 /// `e(0)` and the bits of the semi-linear region `t` grouped by table, as
 /// `(table, mask)`; `None` if `t` is not semi-linear.
-fn bit_groups(t: &T, lv: &[T], w: &Width) -> Option<(u64, Vec<(Vec<u64>, u64)>)> {
+fn bit_groups(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<(Vec<u64>, u64)>)> {
     let prog = Prog::new(t, lv, w);
     groups_from(&|j, q| prog.run(|i| ((q >> i & 1) as u64) << j, w), lv.len(), w)
 }
 
 /// `bit_groups` from `at(j, q)`, the value with leaf `i` set to bit `j` of `q >> i & 1`.
-fn groups_from(at: &dyn Fn(u32, usize) -> u64, n: usize, w: &Width) -> Option<(u64, Vec<(Vec<u64>, u64)>)> {
+fn groups_from(at: &dyn Fn(u32, usize) -> u64, n: usize, w: &Ctx) -> Option<(u64, Vec<(Vec<u64>, u64)>)> {
     let m = w.mask;
     let e0 = at(0, 0);
     let mut groups: Vec<(Vec<u64>, u64)> = Vec::new();
@@ -2558,7 +2590,7 @@ fn groups_from(at: &dyn Fn(u32, usize) -> u64, n: usize, w: &Width) -> Option<(u
     Some((e0, groups))
 }
 
-fn semi_linear_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, cands: &mut Vec<T>) {
+fn semi_linear_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, cands: &mut Vec<T>) {
     let mut seen = std::collections::HashSet::new();
     for groups in half_flips(groups, w) {
         for gs in high_merges(&groups, w) {
@@ -2582,7 +2614,7 @@ fn const_bits(t: &T) -> u32 {
 /// The groups, plus variants with `-2^(r-1)` entries read as `+2^(r-1)`, for the
 /// first two groups that have such entries (`r = w - j` for the group's lowest bit
 /// `j`; both are the same value modulo `2^r`).
-fn half_flips(groups: &[(Vec<u64>, u64)], w: &Width) -> Vec<Vec<(Vec<u64>, u64)>> {
+fn half_flips(groups: &[(Vec<u64>, u64)], w: &Ctx) -> Vec<Vec<(Vec<u64>, u64)>> {
     let mut out = vec![groups.to_vec()];
     let flippable = groups.iter().enumerate().filter_map(|(i, (g, mask))| {
         let rest = w.w - mask.trailing_zeros();
@@ -2601,27 +2633,23 @@ fn half_flips(groups: &[(Vec<u64>, u64)], w: &Width) -> Vec<Vec<(Vec<u64>, u64)>
     out
 }
 
-type GroupedKey = (Vec<(Vec<u64>, u64)>, Vec<T>, u64, u32);
-thread_local! {
-    static GROUPED: std::cell::RefCell<std::collections::HashMap<GroupedKey, T>> = Default::default();
-}
-
 /// The first smallest of `grouped_candidates_all`, memoized: callers only keep the first
 /// smallest candidate, and semi-linear searches repeat the same groups.
-fn grouped_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, cands: &mut Vec<T>) {
+fn grouped_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, cands: &mut Vec<T>) {
     let key = (groups.to_vec(), lv.to_vec(), e0, w.w);
-    if let Some(t) = GROUPED.with(|c| c.borrow().get(&key).cloned()) {
+    let known = w.st.grouped.lock().unwrap().get(&key).cloned();
+    if let Some(t) = known {
         cands.push(t);
         return;
     }
     let mut all = Vec::new();
     grouped_candidates_all(groups, lv, e0, w, &mut all);
     let Some(best) = all.into_iter().min_by_key(|c| (size(c), const_bits(c))) else { return };
-    GROUPED.with(|c| c.borrow_mut().insert(key, best.clone()));
+    w.st.grouped.lock().unwrap().insert(key, best.clone());
     cands.push(best);
 }
 
-fn grouped_candidates_all(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, cands: &mut Vec<T>) {
+fn grouped_candidates_all(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, cands: &mut Vec<T>) {
     let m = w.mask;
     let r = groups.len();
     cands.push(masked_groups(groups, lv, e0, w));
@@ -2659,7 +2687,7 @@ fn grouped_candidates_all(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Wid
 /// When every table depends on one leaf `y` only and takes the values 0 and ±c,
 /// the region is `e0 + c·(y & P) - c·(y & N)`, which is `c·((y & M) ^ K) + r`
 /// with `M = P | N`, `K = N | Z` for any `Z` outside `M`, and `r = e0 - c·K`.
-fn single_leaf(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, cands: &mut Vec<T>) {
+fn single_leaf(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, cands: &mut Vec<T>) {
     let m = w.mask;
     let Some(i) = (0..lv.len()).find(|&i| groups.iter().all(|(g, _)| g.iter().enumerate().all(|(q, &v)| v == g[q & 1 << i]))) else {
         return;
@@ -2701,7 +2729,7 @@ fn single_leaf(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width, cands: 
 /// one of them. A group whose lowest bit is `j` only matters modulo `2^(w-j)`, so
 /// it can take the table of any such group; which one lets the constant fold in
 /// depends on the constant, as for bit 7 of `3*(y ^ 0x61)` in u8.
-fn high_merges(groups: &[(Vec<u64>, u64)], w: &Width) -> Vec<Vec<(Vec<u64>, u64)>> {
+fn high_merges(groups: &[(Vec<u64>, u64)], w: &Ctx) -> Vec<Vec<(Vec<u64>, u64)>> {
     let r = groups.len();
     let low = |i: usize| groups[i].1.trailing_zeros();
     let options: Vec<Vec<usize>> = (0..r)
@@ -2770,7 +2798,7 @@ fn high_merges(groups: &[(Vec<u64>, u64)], w: &Width) -> Vec<Vec<(Vec<u64>, u64)
 }
 
 /// `e0 + Σ_group L_group(x & M)`, with `L_group` the linear MBA of the group's table.
-fn masked_groups(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width) -> T {
+fn masked_groups(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx) -> T {
     let m = w.mask;
     let mut terms = Vec::new();
     let mut konst = e0;
@@ -2800,7 +2828,7 @@ fn masked_groups(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Width) -> T 
 /// `e0` can also move into the table: adding `shifts[i]` to group `i`'s table
 /// adds `shifts[i]·M_i` to the region, so `-2*(x & ~K) - 2*K` can come back as
 /// `-2*(x | K)`.
-fn const_leaf_groups(groups: &[(Vec<u64>, u64)], shifts: &[Vec<u64>], lv: &[T], e0: u64, w: &Width) -> Vec<T> {
+fn const_leaf_groups(groups: &[(Vec<u64>, u64)], shifts: &[Vec<u64>], lv: &[T], e0: u64, w: &Ctx) -> Vec<T> {
     let (n, r) = (lv.len(), groups.len());
     let p = (usize::BITS - (r - 1).leading_zeros()) as usize;
     if r < 2 || r > 4 || n + p > MAX_LEAVES {
@@ -2839,7 +2867,7 @@ fn const_leaf_groups(groups: &[(Vec<u64>, u64)], shifts: &[Vec<u64>], lv: &[T], 
 }
 
 /// The `h` of smallest magnitude with `h·mask = e0` in the word, if any.
-fn solve_mul(mask: u64, e0: u64, w: &Width) -> Option<u64> {
+fn solve_mul(mask: u64, e0: u64, w: &Ctx) -> Option<u64> {
     let tz = mask.trailing_zeros();
     if e0 == 0 || tz >= w.w || e0 & ((1u64 << tz) - 1) != 0 {
         return None;
@@ -2874,7 +2902,7 @@ fn permutations(r: usize) -> Vec<Vec<usize>> {
 }
 
 /// Evaluate bitwise and additive operations whose operands are all constants.
-fn fold_consts(t: &T, w: &Width) -> T {
+fn fold_consts(t: &T, w: &Ctx) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     if !matches!(op, Op::And | Op::Or | Op::Xor | Op::Not | Op::Add | Op::Sub | Op::Neg) {
         return t.clone();
@@ -2890,7 +2918,7 @@ fn fold_consts(t: &T, w: &Width) -> T {
 /// Split the variables into groups with no interaction in `gp`, so that
 /// `gp(p) = Σ_group gp(p ∩ group)`: a mixed difference
 /// `gp(p+i+j) - gp(p+i) - gp(p+j) + gp(p)` that is non-zero anywhere joins `i` and `j`.
-fn independent_groups(gp: &[u64], n: usize, w: &Width) -> Vec<Vec<usize>> {
+fn independent_groups(gp: &[u64], n: usize, w: &Ctx) -> Vec<Vec<usize>> {
     let mut root: Vec<usize> = (0..n).collect();
     fn find(root: &mut [usize], i: usize) -> usize {
         if root[i] != i {
@@ -2922,7 +2950,7 @@ fn independent_groups(gp: &[u64], n: usize, w: &Width) -> Vec<Vec<usize>> {
 }
 
 /// Shortest `(terms, konst')` with `konst + Σ_j 2^j gp(bit j of x) = Σ terms + konst'`.
-fn rebuild_table(gp: &[u64], lv: &[T], konst: u64, w: &Width) -> (Vec<(u64, T)>, u64) {
+fn rebuild_table(gp: &[u64], lv: &[T], konst: u64, w: &Ctx) -> (Vec<(u64, T)>, u64) {
     // The result depends on a leaf only through its size and whether it is a `~`
     // (`build_sum` strips one), so the cache is keyed on those and the leaves become
     // one-node placeholders (`Op::LeafOperand` for the operand of a `~` leaf) whose sizes
@@ -2941,7 +2969,8 @@ fn rebuild_table(gp: &[u64], lv: &[T], konst: u64, w: &Width) -> (Vec<(u64, T)>,
         }
     }
     let filled = |r: &(Vec<(u64, T)>, u64)| (r.0.iter().map(|(c, t)| (*c, fill(t, lv))).collect(), r.1);
-    if let Some(r) = REBUILT.with(|c| c.borrow().get(&key).map(filled)) {
+    let known = w.st.rebuilt.lock().unwrap().get(&key).map(filled);
+    if let Some(r) = known {
         return r;
     }
     let ph: Vec<T> = key
@@ -2955,11 +2984,11 @@ fn rebuild_table(gp: &[u64], lv: &[T], konst: u64, w: &Width) -> (Vec<(u64, T)>,
         .collect();
     let r = rebuild_table_uncached(gp, &ph, &key.1, konst, w);
     let out = filled(&r);
-    REBUILT.with(|c| c.borrow_mut().insert(key, r));
+    w.st.rebuilt.lock().unwrap().insert(key, r);
     out
 }
 
-fn rebuild_table_uncached(gp: &[u64], lv: &[T], shape: &[(usize, bool)], konst: u64, w: &Width) -> (Vec<(u64, T)>, u64) {
+fn rebuild_table_uncached(gp: &[u64], lv: &[T], shape: &[(usize, bool)], konst: u64, w: &Ctx) -> (Vec<(u64, T)>, u64) {
     fn ph_size(t: &T, shape: &[(usize, bool)]) -> usize {
         match t {
             T::Op(Op::Leaf(i), _) => shape[*i].0,
@@ -2968,7 +2997,7 @@ fn rebuild_table_uncached(gp: &[u64], lv: &[T], shape: &[(usize, bool)], konst: 
             _ => 1,
         }
     }
-    let sum_size = |ts: &[(u64, T)], k: u64, w: &Width| {
+    let sum_size = |ts: &[(u64, T)], k: u64, w: &Ctx| {
         let terms: Vec<(u64, usize, bool)> = ts.iter().map(|(c, t)| (*c, ph_size(t, shape), matches!(t, T::Op(op, _) if *op == Op::Not))).collect();
         folded_sum_size(&terms, k, w)
     };
@@ -3018,7 +3047,7 @@ const OVERLAP_MAX_VALUES: usize = 4;
 /// `h = gp + d = Σ c_j·b_j` per bit, and then `e = Σ c_j·b_j(x) + konst + d`,
 /// since a per-bit constant `d` is the word `-d`. `d` is tried as 0 or `-v`
 /// for a value `v` of `gp`, i.e. `h` is zero where `gp` is `v`.
-fn overlapping_terms(gp: &[u64], lv: &[T], konst: u64, w: &Width) -> Vec<(Vec<(u64, T)>, u64)> {
+fn overlapping_terms(gp: &[u64], lv: &[T], konst: u64, w: &Ctx) -> Vec<(Vec<(u64, T)>, u64)> {
     let m = w.mask;
     let all_vars: Vec<usize> = (0..lv.len()).collect();
     let distinct = |t: &[u64]| {
@@ -3081,7 +3110,7 @@ const MAX_SUBSET_CHOICES: usize = 16;
 /// be ambiguous when `c1 + c2 = 0` (as in `(y ^ k) - k`); such points are
 /// resolved in up to `MAX_SUBSET_CHOICES` ways and the shortest result wins.
 /// With three terms ambiguity is common and too costly to resolve, so it fails.
-fn split_by_sums(h: &[u64], h_vals: &[u64], coefs: &[u64], vars: &[usize], lv: &[T], konst: u64, w: &Width) -> Option<(Vec<(u64, T)>, u64)> {
+fn split_by_sums(h: &[u64], h_vals: &[u64], coefs: &[u64], vars: &[usize], lv: &[T], konst: u64, w: &Ctx) -> Option<(Vec<(u64, T)>, u64)> {
     let m = w.mask;
     let k = coefs.len();
     let sums: Vec<u64> = (0..1usize << k)
@@ -3131,31 +3160,25 @@ fn split_by_sums(h: &[u64], h_vals: &[u64], coefs: &[u64], vars: &[usize], lv: &
     best
 }
 
-thread_local! {
-    static REWRITTEN: std::cell::RefCell<std::collections::HashMap<(u32, T), (T, bool)>> = Default::default();
-    #[allow(clippy::type_complexity)]
-    static REBUILT: std::cell::RefCell<std::collections::HashMap<(Vec<u64>, Vec<(usize, bool)>, u64, u32), (Vec<(u64, T)>, u64)>> = Default::default();
-}
-
 /// Replace every linear or polynomial region (and, recursively, regions inside
 /// atoms) by its rebuilt form when that is smaller. Memoized per thread.
-pub(crate) fn rewrite(t: &T, w: &Width) -> T {
+pub(crate) fn rewrite(t: &T, w: &Ctx) -> T {
     if !matches!(t, T::Op(..)) {
         return t.clone();
     }
     let key = (w.w, t.clone());
-    if let Some(r) = memo_get(&REWRITTEN, &key) {
+    if let Some(r) = memo_get(&w.st.rewritten, &key, w) {
         return r;
     }
-    if REWRITES_LEFT.with(|c| c.replace(c.get().saturating_sub(1))) == 0 {
+    if take_one(&w.st.rewrites_left) == 0 {
         return t.clone();
     }
-    let (r, used) = tracking_clusters(|| rewrite_uncached(t, w));
-    REWRITTEN.with(|c| c.borrow_mut().insert(key, (r.clone(), used)));
+    let (r, used) = tracking_clusters(w, || rewrite_uncached(t, w));
+    w.st.rewritten.lock().unwrap().insert(key, (r.clone(), used));
     r
 }
 
-fn rewrite_uncached(t: &T, w: &Width) -> T {
+fn rewrite_uncached(t: &T, w: &Ctx) -> T {
     let lin = rewrite_linear(t, w);
     let mut r = match crate::poly_mba::simplify_poly(t, w) {
         Some(p) if size(&p) < size(&lin) => p,
@@ -3176,7 +3199,7 @@ fn rewrite_uncached(t: &T, w: &Width) -> T {
 }
 
 /// The terms `(c, t)` and the constant of the sum `t`, scaled by `c`.
-fn sum_terms(t: &T, c: u64, w: &Width, out: &mut Vec<(u64, T)>, konst: &mut u64) {
+fn sum_terms(t: &T, c: u64, w: &Ctx, out: &mut Vec<(u64, T)>, konst: &mut u64) {
     match t {
         T::Num(v) => *konst = konst.wrapping_add(c.wrapping_mul(*v as u64)) & w.mask,
         T::Op(Op::Add, a) => a.iter().for_each(|x| sum_terms(x, c, w, out, konst)),
@@ -3195,7 +3218,7 @@ fn sum_terms(t: &T, c: u64, w: &Width, out: &mut Vec<(u64, T)>, konst: &mut u64)
 
 /// `t` with `recombine_products` applied to each linear region, innermost first, and the
 /// changed regions rewritten again (`11·L` then joins the rest of its region).
-pub(crate) fn recombine_regions(t: &T, w: &Width, in_lin: bool) -> T {
+pub(crate) fn recombine_regions(t: &T, w: &Ctx, in_lin: bool) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     let lin = kind(t, w) == Kind::Lin;
     let node = T::Op(*op, a.iter().map(|x| recombine_regions(x, w, lin)).collect());
@@ -3214,7 +3237,7 @@ pub(crate) fn recombine_regions(t: &T, w: &Width, in_lin: bool) -> T {
 /// The sum `t` with two products `c·P1·Q1 + c·P2·Q2` where `P1 = Q1 + P2 + Q2` written as
 /// `c·(Q1 + P2)·(Q1 + Q2)`, which expands to the same: the product identity
 /// `a·b = (a | b)·(a & b) + (a & ~b)·(~a & b)` with its factors rebuilt.
-fn recombine_products(t: &T, w: &Width) -> Option<T> {
+fn recombine_products(t: &T, w: &Ctx) -> Option<T> {
     if kind(t, w) != Kind::Lin {
         return None;
     }
@@ -3263,7 +3286,7 @@ fn recombine_products(t: &T, w: &Width) -> Option<T> {
     (changed && size(&r) < size(t)).then_some(r)
 }
 
-fn rewrite_linear(t: &T, w: &Width) -> T {
+fn rewrite_linear(t: &T, w: &Ctx) -> T {
     let T::Op(op, args) = t else { return t.clone() };
     if kind(t, w) != Kind::Atom {
         let best = match (simba(t, w), small_blocks(t, w)) {
@@ -3279,8 +3302,8 @@ fn rewrite_linear(t: &T, w: &Width) -> T {
 
 /// The terms `(c, t)` and the constant of the linear region `t`, scaled by `c`, with
 /// `~a` and `a << k` of arithmetic `a` expanded and like terms merged.
-fn region_terms(t: &T, w: &Width) -> (Vec<(u64, T)>, u64) {
-    fn go(t: &T, c: u64, w: &Width, out: &mut Vec<(u64, T)>, konst: &mut u64) {
+fn region_terms(t: &T, w: &Ctx) -> (Vec<(u64, T)>, u64) {
+    fn go(t: &T, c: u64, w: &Ctx, out: &mut Vec<(u64, T)>, konst: &mut u64) {
         let m = w.mask;
         match t {
             T::Num(v) => *konst = konst.wrapping_add(c.wrapping_mul(*v as u64)) & m,
@@ -3317,7 +3340,7 @@ fn region_terms(t: &T, w: &Width) -> (Vec<(u64, T)>, u64) {
 
 /// `t` with `clustered` applied to each linear region of more than `MAX_LEAVES` leaves,
 /// innermost first.
-pub(crate) fn cluster_regions(t: &T, w: &Width, in_lin: bool) -> T {
+pub(crate) fn cluster_regions(t: &T, w: &Ctx, in_lin: bool) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     let lin = kind(t, w) == Kind::Lin;
     let node = T::Op(*op, a.iter().map(|x| cluster_regions(x, w, lin)).collect());
@@ -3331,7 +3354,7 @@ pub(crate) fn cluster_regions(t: &T, w: &Width, in_lin: bool) -> T {
     }
     match clustered(&node, w) {
         Some(c) => {
-            CLUSTERED.with(|f| f.set(true));
+            w.st.clustered.store(true, Relaxed);
             c
         }
         None => node,
@@ -3340,55 +3363,49 @@ pub(crate) fn cluster_regions(t: &T, w: &Width, in_lin: bool) -> T {
 
 /// `f()`, and whether a form from `clustered` was kept during it (which then also counts
 /// for the enclosing call).
-fn tracking_clusters<R>(f: impl FnOnce() -> R) -> (R, bool) {
-    let outer = CLUSTERED.with(|c| c.replace(false));
+fn tracking_clusters<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, bool) {
+    let outer = w.st.clustered.swap(false, Relaxed);
     let r = f();
-    let used = CLUSTERED.with(|c| c.get());
-    CLUSTERED.with(|c| c.set(outer || used));
+    let used = w.st.clustered.load(Relaxed);
+    w.st.clustered.store(outer || used, Relaxed);
     (r, used)
 }
 
-type Memo<K, V> = std::thread::LocalKey<std::cell::RefCell<std::collections::HashMap<K, (V, bool)>>>;
-
 /// A memoized result, unless it came from `clustered` while that is off.
-fn memo_get<K: std::hash::Hash + Eq, V: Clone>(memo: &'static Memo<K, V>, key: &K) -> Option<V> {
-    let (r, used) = memo.with(|c| c.borrow().get(key).cloned())?;
-    if used && NO_CLUSTER.with(|c| c.get()) {
+fn memo_get<K: std::hash::Hash + Eq, V: Clone>(memo: &Memo<K, V>, key: &K, w: &Ctx) -> Option<V> {
+    let (r, used) = memo.lock().unwrap().get(key).cloned()?;
+    if used && w.st.no_cluster.load(Relaxed) {
         return None;
     }
-    CLUSTERED.with(|c| c.set(c.get() || used));
+    w.st.clustered.fetch_or(used, Relaxed);
     Some(r)
 }
 
 /// Most `clustered` calls nested inside each other.
 const MAX_CLUSTER_DEPTH: usize = 2;
 
-thread_local! {
-    static CLUSTERING: std::cell::RefCell<Vec<T>> = const { std::cell::RefCell::new(Vec::new()) };
-    /// Turns `clustered` off, for the rebuild without it.
-    static NO_CLUSTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Whether a form from `clustered` was kept since the last reset.
-    static CLUSTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 /// A region with more than `MAX_LEAVES` leaves rebuilt in parts: its terms grouped by the
 /// leaves they use, a group whose leaves are a subset of another's joining the smallest
 /// such, and each group of at most `MAX_LEAVES` leaves rewritten on its own, which is
 /// exact since the parts add up to the region. Splits such as `7·(a & 0xffff) +
 /// 7·(a & -0x10000)` and constants spread over the region then come together.
-fn clustered(t: &T, w: &Width) -> Option<T> {
+fn clustered(t: &T, w: &Ctx) -> Option<T> {
     // Rewriting a group can reach regions whose groups lead back to new forms of the
     // enclosing ones.
-    if NO_CLUSTER.with(|c| c.get()) || CLUSTERING.with(|c| c.borrow().len() >= MAX_CLUSTER_DEPTH || c.borrow().contains(t)) {
+    let nested = {
+        let c = w.st.clustering.lock().unwrap();
+        c.len() >= MAX_CLUSTER_DEPTH || c.contains(t)
+    };
+    if w.st.no_cluster.load(Relaxed) || nested {
         return None;
     }
-    CLUSTERING.with(|c| c.borrow_mut().push(t.clone()));
+    w.st.clustering.lock().unwrap().push(t.clone());
     let r = clustered_in(t, w);
-    CLUSTERING.with(|c| c.borrow_mut().pop());
+    w.st.clustering.lock().unwrap().pop();
     r
 }
 
-fn clustered_in(t: &T, w: &Width) -> Option<T> {
+fn clustered_in(t: &T, w: &Ctx) -> Option<T> {
     // Regions with products are left to `poly_mba`, which expands them across terms.
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
@@ -3470,7 +3487,7 @@ fn clustered_in(t: &T, w: &Width) -> Option<T> {
 /// `terms` plus `k` with `k` moved into one term, `a·B + a` as `-a·~B`, where some term has
 /// coefficient `k`, also after writing each `a·~B` as `-a·B - a` (`7·~(u ^ v)` for
 /// `-7·(u ^ v) - 7`).
-fn absorb_constant(terms: Vec<(u64, T)>, k: u64, w: &Width) -> (Vec<(u64, T)>, u64) {
+fn absorb_constant(terms: Vec<(u64, T)>, k: u64, w: &Ctx) -> (Vec<(u64, T)>, u64) {
     let not = |y: &T| match y {
         T::Op(Op::Not, a) => a[0].clone(),
         y => T::Op(Op::Not, vec![y.clone()]),
@@ -3493,7 +3510,7 @@ fn absorb_constant(terms: Vec<(u64, T)>, k: u64, w: &Width) -> (Vec<(u64, T)>, u
 
 /// The multiplier `c` of `y` cut to the bits that matter when `y` is `a & M` with `M` a
 /// multiple of `2^k`: `c` modulo `2^(w-k)`, as the value of least magnitude.
-fn low_multiplier(c: u64, y: &T, w: &Width) -> u64 {
+fn low_multiplier(c: u64, y: &T, w: &Ctx) -> u64 {
     let tz = match y {
         T::Op(Op::And, a) => match (&a[0], &a[1]) {
             (T::Num(m), _) | (_, T::Num(m)) if *m as u64 & w.mask != 0 => (*m as u64 & w.mask).trailing_zeros(),
@@ -3510,7 +3527,7 @@ fn low_multiplier(c: u64, y: &T, w: &Width) -> u64 {
 }
 
 /// Rewrite inside the atom leaves of a rebuilt region.
-fn substitute_atoms(t: &T, w: &Width) -> T {
+fn substitute_atoms(t: &T, w: &Ctx) -> T {
     match t {
         T::Op(op, args) => {
             if kind(t, w) == Kind::Atom {
@@ -3528,14 +3545,14 @@ fn substitute_atoms(t: &T, w: &Width) -> T {
 /// rebuild sees `a`: `7·(x & 0xffffffff) + 0x700000000·(x >> 32)` is `7·x`. Only for
 /// `a` built of T-function operations, so `(mulhi(x, M) >> 1)·12` keeps the shape the
 /// magic-number division rules match.
-pub(crate) fn unshift(t: &T, w: &Width) -> T {
+pub(crate) fn unshift(t: &T, w: &Ctx) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     let a: Vec<T> = a.iter().map(|x| unshift(x, w)).collect();
     // `(a >> s) << s` for both shifts: the bits filled in by `>>` are shifted out.
     let low_cleared = |x: &T, k: u32| -> Option<(T, u32)> {
         let num = |v: u64| T::Num(w.signed(v & w.mask));
         let bin = |o: Op, p: T, q: T| T::Op(o, vec![p, q]);
-        fn tfunc_ops(t: &T, w: &Width) -> bool {
+        fn tfunc_ops(t: &T, w: &Ctx) -> bool {
             match t {
                 T::Op(o, a) if *o == Op::Shl => const_shift(&a[1], w).is_some() && tfunc_ops(&a[0], w),
                 T::Op(o, a) => matches!(o, Op::Add | Op::Sub | Op::Mul | Op::Neg | Op::Not | Op::And | Op::Or | Op::Xor) && a.iter().all(|x| tfunc_ops(x, w)),
@@ -3582,7 +3599,7 @@ pub(crate) fn unshift(t: &T, w: &Width) -> T {
 }
 
 /// `(a, c)` with `t = 2^k·a + c` and `0 ≤ c < 2^k`, if `t` is built so.
-fn split_low(t: &T, k: u32, w: &Width) -> Option<(T, u64)> {
+fn split_low(t: &T, k: u32, w: &Ctx) -> Option<(T, u64)> {
     let lk = (1u64 << k) - 1;
     let op = |o: Op, a: Vec<T>| T::Op(o, a);
     let num = |v: u64| T::Num(w.signed(v & w.mask));
@@ -3655,7 +3672,7 @@ pub(crate) fn low_consts(t: &T, r: u32) -> T {
 /// operation only sees the bits of `a` that `2^k·a` keeps, so the rebuild can
 /// treat `x - ((2·x) | ~(2·K)) - K - 1` as the semi-linear `x - 2·(x | ~K) - K - 2`,
 /// which is `x ^ K`.
-pub(crate) fn halve(t: &T, w: &Width) -> T {
+pub(crate) fn halve(t: &T, w: &Ctx) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     let a: Vec<T> = a.iter().map(|x| halve(x, w)).collect();
     let node = T::Op(*op, a);
@@ -3693,7 +3710,7 @@ const SPLIT_RUNS: usize = 16;
 /// `(s, k)` for a product factor with one or two bits not known, `k` the lowest of them:
 /// first the subterm `s` it is built from with constants alone, as `z + x` in
 /// `3 & ((z + x) + 5)`, then each variable `s` of it.
-fn split_points(t: &T, w: &Width) -> Vec<(T, u32)> {
+fn split_points(t: &T, w: &Ctx) -> Vec<(T, u32)> {
     fn is_const(t: &T) -> bool {
         match t {
             T::Var(_) => false,
@@ -3707,7 +3724,7 @@ fn split_points(t: &T, w: &Width) -> Vec<(T, u32)> {
             _ => t,
         }
     }
-    fn go(t: &T, w: &Width, out: &mut Vec<(T, u32)>) {
+    fn go(t: &T, w: &Ctx, out: &mut Vec<(T, u32)>) {
         let T::Op(op, a) = t else { return };
         if *op == Op::Mul && !a.iter().any(|x| matches!(x, T::Num(_))) {
             for f in a {
@@ -3732,8 +3749,8 @@ fn split_points(t: &T, w: &Width) -> Vec<(T, u32)> {
 }
 
 /// `(v, k)` for each variable `v` of a product factor that is 0 or `2^k` by known bits.
-pub(crate) fn selectors(t: &T, w: &Width) -> Vec<(String, u32)> {
-    fn go(t: &T, w: &Width, out: &mut Vec<(String, u32)>) {
+pub(crate) fn selectors(t: &T, w: &Ctx) -> Vec<(String, u32)> {
+    fn go(t: &T, w: &Ctx, out: &mut Vec<(String, u32)>) {
         let T::Op(op, a) = t else { return };
         if *op == Op::Mul && !a.iter().any(|x| matches!(x, T::Num(_))) {
             for f in a {
@@ -3761,7 +3778,7 @@ pub(crate) fn selectors(t: &T, w: &Width) -> Vec<(String, u32)> {
 /// and so for `v = s`. The halves are split again, up to `depth` times.
 /// Returns `t` when nothing smaller without selecting products is found or `budget`
 /// (rebuilds left) runs out.
-fn split_bits(t: T, depth: usize, budget: &std::cell::Cell<usize>, w: &Width, run: &dyn Fn(&T) -> T) -> T {
+fn split_bits(t: T, depth: usize, budget: &std::cell::Cell<usize>, w: &Ctx, run: &dyn Fn(&T) -> T) -> T {
     if depth == 0 {
         return t;
     }
@@ -3813,7 +3830,7 @@ fn split_bits(t: T, depth: usize, budget: &std::cell::Cell<usize>, w: &Width, ru
 
 /// `split_bits` on `t`, then on the operands of `t` when it is a bitwise operation, since
 /// a case split rarely gives a constant difference through one; each with its own budget.
-fn split_in(t: &T, w: &Width, run: &dyn Fn(&T) -> T) -> T {
+fn split_in(t: &T, w: &Ctx, run: &dyn Fn(&T) -> T) -> T {
     let s = split_bits(t.clone(), SPLIT_DEPTH, &std::cell::Cell::new(SPLIT_RUNS), w, run);
     if s != *t {
         return s;
@@ -3858,7 +3875,7 @@ pub fn simplify_linear_both(egg: &str, w: u32) -> (String, Vec<String>) {
 /// Rewrites of a rebuilt candidate that would break subterms the rebuild relates if done
 /// earlier: recombined products, product factors with constants cut below trailing zeros,
 /// and `shifted_xor`.
-fn finish(t: &T, w: &Width) -> T {
+fn finish(t: &T, w: &Ctx) -> T {
     // Products selected by a bit are left whole for `split_bits` in the next round (Hikari).
     let t = if selectors(t, w).is_empty() { recombine_regions(t, w, false) } else { t.clone() };
     let t = crate::lowbits::shifted_xor(&crate::lowbits::cut_products(&t, w), w);
@@ -3868,7 +3885,7 @@ fn finish(t: &T, w: &Width) -> T {
 }
 
 /// `t` without additions of 0 and multiplications by 1.
-fn drop_identities(t: &T, w: &Width) -> T {
+fn drop_identities(t: &T, w: &Ctx) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     let a: Vec<T> = a.iter().map(|x| drop_identities(x, w)).collect();
     let is = |x: &T, k: u64| matches!(x, T::Num(v) if *v as u64 & w.mask == k);
@@ -3880,12 +3897,9 @@ fn drop_identities(t: &T, w: &Width) -> T {
 }
 
 fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Vec<String>) {
-    let w = Width::new(w);
+    let w = Ctx::new(w);
     let t = parse(egg);
     let t0 = t.clone();
-    BIT_SPLITS.with(|c| c.set(BIT_SPLIT_BUDGET));
-    CLUSTERED.with(|c| c.set(false));
-    REWRITES_LEFT.with(|c| c.set(usize::MAX));
     let t = unshift(&crate::lowbits::simplify(&t, &w), &w);
     // Subterms are replaced only after the rebuild: earlier, `~(y - 1)` would become
     // `-y`, a leaf the rebuild no longer relates to `y - 1`.
@@ -3910,28 +3924,28 @@ fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Vec<String>) {
     }
     // Halving the whole input can give semi-linear regions that are slow to search,
     // so only small ones are rebuilt there, also inside `halve`.
-    SEMI_LEAVES.with(|c| c.set(2));
+    w.st.semi_leaves.store(2, Relaxed);
     let ht = if size(&r) <= TINY { t.clone() } else { halve(&t, &w) };
     if ht != t {
         rebuilt.push(run(&ht, false));
     }
-    SEMI_LEAVES.with(|c| c.set(MAX_LEAVES));
+    w.st.semi_leaves.store(MAX_LEAVES, Relaxed);
     let mut rebuilt: Vec<T> = rebuilt.iter().map(|t| finish(t, &w)).collect();
     // A region rebuilt in clusters is smaller there but can leave the rules a worse
     // start than rebuilding it whole, so the rebuild without clusters is kept too.
-    let made = usize::MAX - REWRITES_LEFT.with(|c| c.get());
-    let unclustered = if CLUSTERED.with(|c| c.get()) && made <= UNCLUSTERED_AFTER && crate::tfunc::replacement(&t, &w).is_none() {
-        BIT_SPLITS.with(|c| c.set(BIT_SPLIT_BUDGET));
-        NO_CLUSTER.with(|c| c.set(true));
-        RELATE_LEAVES.with(|c| c.set(UNCLUSTERED_RELATE_LEAVES));
-        REWRITES_LEFT.with(|c| c.set(UNCLUSTERED_REWRITES));
-        let within = || REWRITES_LEFT.with(|c| c.get()) > 0;
+    let made = usize::MAX - w.st.rewrites_left.load(Relaxed);
+    let unclustered = if w.st.clustered.load(Relaxed) && made <= UNCLUSTERED_AFTER && crate::tfunc::replacement(&t, &w).is_none() {
+        w.st.bit_splits.store(BIT_SPLIT_BUDGET, Relaxed);
+        w.st.no_cluster.store(true, Relaxed);
+        w.st.relate_leaves.store(UNCLUSTERED_RELATE_LEAVES, Relaxed);
+        w.st.rewrites_left.store(UNCLUSTERED_REWRITES, Relaxed);
+        let within = || w.st.rewrites_left.load(Relaxed) > 0;
         let r = Some(rewrite(&t, &w)).filter(|_| within());
         let r = r.map(|r| relate(&r, &w)).filter(|_| within());
         let u = r.map(|r| drop_identities(&finish(&crate::tfunc::simplify(&r, &w), &w), &w));
-        REWRITES_LEFT.with(|c| c.set(usize::MAX));
-        RELATE_LEAVES.with(|c| c.set(MAX_WIDE_LEAVES));
-        NO_CLUSTER.with(|c| c.set(false));
+        w.st.rewrites_left.store(usize::MAX, Relaxed);
+        w.st.relate_leaves.store(MAX_WIDE_LEAVES, Relaxed);
+        w.st.no_cluster.store(false, Relaxed);
         u
     } else {
         None
@@ -3942,10 +3956,6 @@ fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Vec<String>) {
     } else {
         Vec::new()
     };
-    REWRITTEN.with(|c| c.borrow_mut().clear());
-    REBUILT.with(|c| c.borrow_mut().clear());
-    SIMBA_MEMO.with(|c| c.borrow_mut().clear());
-    GROUPED.with(|c| c.borrow_mut().clear());
     rebuilt.sort_by_key(size);
     rebuilt.dedup();
     rebuilt.truncate(2);
@@ -3970,7 +3980,7 @@ mod tests {
     use crate::eval::{NumType, eval};
     use std::collections::HashMap;
 
-    fn full_eval(t: &T, w: &Width, env: &HashMap<String, u64>) -> u64 {
+    fn full_eval(t: &T, w: &Ctx, env: &HashMap<String, u64>) -> u64 {
         let ty = NumType { bits: w.w, signed: false };
         eval(t, ty, &|v: &str| env[v]).expect("no division in generated terms")
     }
@@ -4056,7 +4066,7 @@ mod tests {
             let depth = 1 + (r.next() % 3) as u32;
             let t = shifted_term(&mut r, depth);
             for (bits, signed) in [(8, false), (8, true), (64, false), (64, true)] {
-                let (w, ty) = (Width::new(bits), NumType { bits, signed });
+                let (w, ty) = (Ctx::new(bits), NumType { bits, signed });
                 let (u, h) = (unshift(&t, &w), halve(&t, &w));
                 unshifted += (u != t) as u32;
                 halved += (h != t) as u32;
@@ -4109,7 +4119,7 @@ mod tests {
             }
             let t = mba_op(&mut r, &l, &l_lin, &b);
             for (bits, signed) in [(8, false), (64, true)] {
-                let (wd, ty) = (Width::new(bits), NumType { bits, signed });
+                let (wd, ty) = (Ctx::new(bits), NumType { bits, signed });
                 let base = rewrite(&t, &wd);
                 let alt = relate(&base, &wd);
                 changed += (alt != base) as u32;
@@ -4133,7 +4143,7 @@ mod tests {
     fn sum_size_matches_build_sum() {
         let mut r = Rng(0x9e3779b97f4a7c15);
         for w in [8u32, 64] {
-            let wd = Width::new(w);
+            let wd = Ctx::new(w);
             let coef = |r: &mut Rng| [1, wd.mask, 2, wd.mask - 1, 1 << (w - 1), r.next() & wd.mask][(r.next() % 6) as usize];
             for _ in 0..3000 {
                 let mut terms = Vec::new();
@@ -4202,7 +4212,7 @@ mod tests {
         let mut changed = 0;
         for k in 0..300 {
             let bits = if k % 2 == 0 { 8 } else { 64 };
-            let w = Width::new(bits);
+            let w = Ctx::new(bits);
             let op = |o: Op, a: Vec<T>| T::Op(o, a);
             let (a, b) = (random_term_in(&mut r, 2, &["x", "y", "z"]), random_term_in(&mut r, 2, &["x", "y", "z"]));
             let b = if k % 3 == 0 { op(Op::And, vec![b, T::Num((r.next() % 64) as i64)]) } else { b };
@@ -4229,7 +4239,7 @@ mod tests {
         let mut r = Rng(0x2545f4914f6cdd1d);
         let mut changed = 0;
         for w in [8u32, 16, 32, 64] {
-            let wd = Width::new(w);
+            let wd = Ctx::new(w);
             for _ in 0..3000 {
                 let depth = 1 + (r.next() % 4) as u32;
                 let t = random_term(&mut r, depth);

@@ -6,7 +6,7 @@
 //! values when the enclosing expression is proved not to change (`tfunc::equal_low`).
 
 use crate::eval::{Op, Term as T, size};
-use crate::linear_mba::Width;
+use crate::linear_mba::Ctx;
 use std::collections::HashMap;
 
 /// Most leaf bits enumerated for one subterm, and for a proof in context.
@@ -47,19 +47,19 @@ fn lowmask(k: u32) -> u64 {
     if k >= 64 { u64::MAX } else { (1u64 << k) - 1 }
 }
 
-fn leaf_info(k0: u64, k1: u64, w: &Width) -> Info {
+fn leaf_info(k0: u64, k1: u64, w: &Ctx) -> Info {
     let mut i = Info { k0, k1, need: 0, full: 0, det: true, shift: false };
     i.full = high(&i, w);
     i
 }
 
 /// Bits from which on every bit is known.
-fn high(i: &Info, w: &Width) -> u32 {
+fn high(i: &Info, w: &Ctx) -> u32 {
     64 - (!(i.k0 | i.k1) & w.mask).leading_zeros()
 }
 
 /// Known bits of `a + b + cin`, bit by bit with the carry known where two of the three inputs agree.
-fn known_add(a: (u64, u64), b: (u64, u64), cin: u64, w: &Width) -> (u64, u64) {
+fn known_add(a: (u64, u64), b: (u64, u64), cin: u64, w: &Ctx) -> (u64, u64) {
     let (mut k0, mut k1) = (0, 0);
     let (mut c0, mut c1) = (cin ^ 1, cin);
     for i in 0..w.w {
@@ -75,14 +75,14 @@ fn known_add(a: (u64, u64), b: (u64, u64), cin: u64, w: &Width) -> (u64, u64) {
     (k0, k1)
 }
 
-fn known_low(a: &Info, b: &Info, f: impl Fn(u64, u64) -> u64, w: &Width) -> (u64, u64) {
+fn known_low(a: &Info, b: &Info, f: impl Fn(u64, u64) -> u64, w: &Ctx) -> (u64, u64) {
     let l = (a.k0 | a.k1).trailing_ones().min((b.k0 | b.k1).trailing_ones()).min(w.w);
     let r = f(a.k1, b.k1) & lowmask(l);
     (!r & lowmask(l), r)
 }
 
 /// `square`: the operands of a product are the same term, so bit 1 is 0 (`a² mod 4` is 0 or 1).
-fn combine(op: Op, args: &[Info], square: bool, w: &Width) -> Info {
+fn combine(op: Op, args: &[Info], square: bool, w: &Ctx) -> Info {
     let m = w.mask;
     let a: Vec<Info> = args.iter().map(|i| if i.det { *i } else { leaf_info(i.k0, i.k1, w) }).collect();
     let tz = |i: &Info| lowmask(i.k0.trailing_ones().min(w.w));
@@ -135,7 +135,7 @@ fn combine(op: Op, args: &[Info], square: bool, w: &Width) -> Info {
     i
 }
 
-fn info(t: &T, w: &Width) -> Info {
+fn info(t: &T, w: &Ctx) -> Info {
     match t {
         T::Var(_) => leaf_info(0, 0, w),
         T::Num(c) => leaf_info(!(*c as u64) & w.mask, *c as u64 & w.mask, w),
@@ -159,7 +159,7 @@ struct Prog {
 }
 
 impl Prog {
-    fn new(t: &T, w: &Width) -> Prog {
+    fn new(t: &T, w: &Ctx) -> Prog {
         let mut p = Prog { ops: Vec::new(), leaves: Vec::new(), mask: w.mask, w: w.w };
         p.compile(t, w);
         p
@@ -173,7 +173,7 @@ impl Prog {
         self.ops.push(Ins::Leaf(i));
     }
 
-    fn compile(&mut self, t: &T, w: &Width) -> Info {
+    fn compile(&mut self, t: &T, w: &Ctx) -> Info {
         let T::Op(op, a) = t else {
             if let T::Num(c) = t {
                 self.ops.push(Ins::Const(*c as u64 & w.mask));
@@ -234,7 +234,7 @@ struct Cand {
 }
 
 struct Pass<'a> {
-    w: &'a Width,
+    w: &'a Ctx,
     cands: HashMap<T, Cand>,
     budget: u64,
     wide: u64,
@@ -512,7 +512,7 @@ fn split_add(t: &T) -> Option<(&T, i64)> {
 /// with it there (`(A & -2^32)*(q + c)` with `A = q + K` is `(A & -2^32)*A`), or else
 /// has a constant operand cut to `w - t` bits where that gives a constant of the first
 /// factor (`(a & -8)*(K ^ s)` with `K = 2^63 + 7` is `(a & -8)*(7 ^ s)`).
-fn low_factor(node: T, infos: &[Info], w: &Width) -> T {
+fn low_factor(node: T, infos: &[Info], w: &Ctx) -> T {
     let T::Op(op, a) = &node else { return node };
     for j in 0..2 {
         let t = infos[j].k0.trailing_ones().min(w.w);
@@ -558,8 +558,8 @@ fn low_factor(node: T, infos: &[Info], w: &Width) -> T {
 /// `t` with the factor of each product beside a factor with `k` known trailing zeros
 /// shortened by `shorter_low`. Run on rebuilt terms: on the input, the cut factor no
 /// longer shares its constants with equal subterms elsewhere.
-pub(crate) fn cut_products(t: &T, w: &Width) -> T {
-    fn go(t: &T, w: &Width) -> (T, Info) {
+pub(crate) fn cut_products(t: &T, w: &Ctx) -> T {
+    fn go(t: &T, w: &Ctx) -> (T, Info) {
         let T::Op(op, a) = t else { return (t.clone(), info(t, w)) };
         let (mut args, infos): (Vec<T>, Vec<Info>) = a.iter().map(|x| go(x, w)).unzip();
         let i = combine(*op, &infos, is_square(&T::Op(*op, args.clone())), w);
@@ -592,7 +592,7 @@ pub(crate) fn cut_products(t: &T, w: &Width) -> T {
 
 /// `q` with every constant cut to its low `r` bits, when that drops an operand
 /// (`(x + z)*0x10000001` with `r = 24` is `x + z`) or a small `q` then rebuilds smaller.
-fn shorter_low(q: &T, r: u32, w: &Width) -> Option<T> {
+fn shorter_low(q: &T, r: u32, w: &Ctx) -> Option<T> {
     let cut = crate::linear_mba::low_consts(q, r);
     if cut == *q {
         return None;
@@ -609,7 +609,7 @@ fn shorter_low(q: &T, r: u32, w: &Width) -> Option<T> {
 }
 
 /// `t` without operations whose constant operand leaves the other unchanged (`a*1`, `a + 0`, `a & -1`, ...).
-fn drop_identities(t: &T, w: &Width) -> T {
+fn drop_identities(t: &T, w: &Ctx) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     let a: Vec<T> = a.iter().map(|x| drop_identities(x, w)).collect();
     if a.len() == 2 {
@@ -652,7 +652,7 @@ fn has_product(t: &T) -> bool {
 
 /// `-(a ^ K)` as `a ^ -K` when `a` has `t` known trailing zeros and `K mod 2^t` is not 0:
 /// negating `2^t·(a' ^ Kh) + Kl` gives `2^t·(a' ^ ~Kh) + (2^t - Kl)` without a carry.
-fn neg_xor(node: &T, infos: &[Info], w: &Width) -> Option<T> {
+fn neg_xor(node: &T, infos: &[Info], w: &Ctx) -> Option<T> {
     let T::Op(Op::Neg, a) = node else { return None };
     let T::Op(Op::Xor, b) = &a[0] else { return None };
     let (x, k) = match (&b[0], &b[1]) {
@@ -670,7 +670,7 @@ fn neg_xor(node: &T, infos: &[Info], w: &Width) -> Option<T> {
 /// An arithmetic operand `a` and a constant `c` whose bitwise operation only touches
 /// known bits of `a`, written as `a + d`: `(2*x + 4) ^ 1` is `(2*x + 4) + 1`, which
 /// joins the enclosing linear region (Tigress EncodeData).
-fn known_bitwise(op: Op, node: &T, infos: &[Info], w: &Width) -> Option<T> {
+fn known_bitwise(op: Op, node: &T, infos: &[Info], w: &Ctx) -> Option<T> {
     let T::Op(_, a) = node else { return None };
     if !matches!(op, Op::And | Op::Or | Op::Xor) {
         return None;
@@ -698,7 +698,7 @@ fn known_bitwise(op: Op, node: &T, infos: &[Info], w: &Width) -> Option<T> {
 
 /// The bitwise operation `node` with each operand `(a & M) + K` (`M & K = 0`) written as
 /// `(a & M) | K`, so that the operand joins the bitwise region instead of being a leaf.
-fn masked_add_as_or(node: T, w: &Width) -> T {
+fn masked_add_as_or(node: T, w: &Ctx) -> T {
     let T::Op(op, a) = node else { return node };
     if !matches!(op, Op::And | Op::Or | Op::Xor) {
         return T::Op(op, a);
@@ -718,7 +718,7 @@ fn masked_add_as_or(node: T, w: &Width) -> T {
 
 /// `t` with each `2^k·(a ^ K) + c` (`0 < c < 2^k`) written as `(2^k·a) ^ (2^k·K + c)`:
 /// the low `k` bits of `2^k·(a ^ K)` are 0, so adding `c` sets them.
-pub(crate) fn shifted_xor(t: &T, w: &Width) -> T {
+pub(crate) fn shifted_xor(t: &T, w: &Ctx) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     let a: Vec<T> = a.iter().map(|x| shifted_xor(x, w)).collect();
     if *op == Op::Add {
@@ -738,12 +738,12 @@ pub(crate) fn shifted_xor(t: &T, w: &Width) -> T {
 }
 
 /// Bits of `t` not known to be 0.
-pub(crate) fn possible_bits(t: &T, w: &Width) -> u64 {
+pub(crate) fn possible_bits(t: &T, w: &Ctx) -> u64 {
     !info(t, w).k0 & w.mask
 }
 
 /// Bits of `t` known neither 0 nor 1.
-pub(crate) fn unknown_bits(t: &T, w: &Width) -> u64 {
+pub(crate) fn unknown_bits(t: &T, w: &Ctx) -> u64 {
     let i = info(t, w);
     !(i.k0 | i.k1) & w.mask
 }
@@ -760,16 +760,16 @@ pub(crate) fn replace(t: &T, from: &[T], to: &[T]) -> T {
 
 /// `t` with subterms determined by the low bits of their leaves folded, where that
 /// needs a variable left shift or a product (or is a constant by known bits).
-pub(crate) fn simplify(t: &T, w: &Width) -> T {
+pub(crate) fn simplify(t: &T, w: &Ctx) -> T {
     simplify_with(t, w, false)
 }
 
 /// `simplify` for a rebuilt term, also cutting constant multipliers.
-pub(crate) fn simplify_rebuilt(t: &T, w: &Width) -> T {
+pub(crate) fn simplify_rebuilt(t: &T, w: &Ctx) -> T {
     simplify_with(t, w, true)
 }
 
-fn simplify_with(t: &T, w: &Width, cut: bool) -> T {
+fn simplify_with(t: &T, w: &Ctx, cut: bool) -> T {
     let mut p = Pass { w, cands: HashMap::new(), budget: BUDGET, wide: WIDE_BUDGET, refine: REFINE_BUDGET, cut };
     let (r, _) = p.fold(t);
     if p.cands.is_empty() { r } else { p.context(&r) }
@@ -826,7 +826,7 @@ mod tests {
 
     #[test]
     fn known_bits_match_evaluation() {
-        let w = Width::new(8);
+        let w = Ctx::new(8);
         let ty = NumType { bits: 8, signed: false };
         let mut h = 0x2545_f491_4f6c_dd1du64;
         for _ in 0..300 {
@@ -841,7 +841,7 @@ mod tests {
 
     #[test]
     fn matches_exhaustive_check_at_8_bits() {
-        let w = Width::new(8);
+        let w = Ctx::new(8);
         let mut h = 0x9e37_79b9_7f4a_7c15u64;
         let (mut changed, mut in_context) = (0, 0);
         for k in 0..500 {
@@ -894,7 +894,7 @@ mod tests {
         for k in 0..400 {
             let t = noise_term(&mut h);
             for (bits, signed) in [(8, k % 2 == 1), (64, k % 2 == 1)] {
-                let (w, ty) = (Width::new(bits), NumType { bits, signed });
+                let (w, ty) = (Ctx::new(bits), NumType { bits, signed });
                 let r = simplify(&t, &w);
                 changed += (r != t) as u32;
                 let check = |x: u64, y: u64| {
@@ -941,7 +941,7 @@ mod tests {
 
     #[test]
     fn nested_candidates_match_exhaustive_check_at_8_bits() {
-        let w = Width::new(8);
+        let w = Ctx::new(8);
         let mut h = 0x6a09_e667_f3bc_c908u64;
         let mut changed = 0;
         for k in 0..3000 {
@@ -964,7 +964,7 @@ mod tests {
     /// constant multipliers and negated xors, at 8 bits on every input.
     #[test]
     fn evaluated_low_bits_match_exhaustive_check() {
-        let w = Width::new(8);
+        let w = Ctx::new(8);
         let op = |o: Op, a: T, b: T| T::Op(o, vec![a, b]);
         let mut h = 0x5851_f42d_4c95_7f2du64;
         let mut changed = 0;

@@ -4,7 +4,7 @@
 //! `EGGY_SCHED_TRACE` prints one line per call to stderr.
 
 use crate::eval::{Op, Term as T, size};
-use crate::linear_mba::Width;
+use crate::linear_mba::Ctx;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Forms kept per class.
@@ -61,15 +61,15 @@ struct Node {
     hash: u64,
 }
 
-type PassFn = fn(&T, &Width) -> T;
+type PassFn = fn(&T, &Ctx) -> T;
 
-fn rebuild(t: &T, w: &Width) -> T {
+fn rebuild(t: &T, w: &Ctx) -> T {
     crate::linear_mba::cluster_regions(&crate::linear_mba::rewrite(t, w), w, false)
 }
-fn recombine(t: &T, w: &Width) -> T {
+fn recombine(t: &T, w: &Ctx) -> T {
     if crate::linear_mba::selectors(t, w).is_empty() { crate::linear_mba::recombine_regions(t, w, false) } else { t.clone() }
 }
-fn low(t: &T, w: &Width) -> T {
+fn low(t: &T, w: &Ctx) -> T {
     crate::linear_mba::unshift(&crate::lowbits::simplify(t, w), w)
 }
 
@@ -87,7 +87,7 @@ const ROOT_PASSES: [(&str, PassFn); 9] = [
 ];
 
 struct Sched<'a> {
-    w: &'a Width,
+    w: &'a Ctx,
     nodes: Vec<Node>,
     ids: HashMap<Key, usize>,
     parents: Vec<Vec<usize>>,
@@ -299,7 +299,7 @@ impl<'a> Sched<'a> {
 }
 
 /// Random-evaluation check of a pass result in debug builds.
-fn check(a: &T, b: &T, w: &Width, name: &str) {
+fn check(a: &T, b: &T, w: &Ctx, name: &str) {
     if !cfg!(debug_assertions) {
         return;
     }
@@ -334,7 +334,7 @@ fn collect_vars(t: &T, out: &mut Vec<String>) {
 }
 
 /// The root class forms, smallest first, starting from the input and the legacy rebuilds.
-pub(crate) fn schedule(input: &T, seeds: &[T], w: &Width) -> Vec<T> {
+pub(crate) fn schedule(input: &T, seeds: &[T], w: &Ctx) -> Vec<T> {
     let all: Vec<&T> = std::iter::once(input).chain(seeds).collect();
     if all.iter().any(|t| size(t) > MAX_SEED_SIZE) {
         return Vec::new();

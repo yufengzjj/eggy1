@@ -6,7 +6,7 @@
 //! bit over all input bits while tracking the reachable sets of carries.
 
 use crate::eval::{Op, Term as T, size};
-use crate::linear_mba::Width;
+use crate::linear_mba::Ctx;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
@@ -23,7 +23,7 @@ const MAX_FACTOR: u64 = 255;
 
 type Fp = [u64; POINTS];
 
-fn points(w: &Width) -> [[u64; MAX_VARS]; POINTS] {
+fn points(w: &Ctx) -> [[u64; MAX_VARS]; POINTS] {
     let mut h = 0x2545_f491_4f6c_dd1du64;
     let mut out = [[0; MAX_VARS]; POINTS];
     for (k, p) in out.iter_mut().enumerate() {
@@ -58,7 +58,7 @@ fn op_vals(op: Op, a: &Fp, b: &Fp, m: u64) -> Fp {
 
 /// Values of `t` at the points, with `vars[j]` read from coordinate `j`; `None` for
 /// operations the proof does not handle.
-fn values(t: &T, vars: &[String], pts: &[[u64; MAX_VARS]; POINTS], w: &Width) -> Option<Fp> {
+fn values(t: &T, vars: &[String], pts: &[[u64; MAX_VARS]; POINTS], w: &Ctx) -> Option<Fp> {
     let m = w.mask;
     Some(match t {
         T::Num(c) => [*c as u64 & m; POINTS],
@@ -82,7 +82,7 @@ struct Table {
     by_fp: HashMap<Fp, T>,
 }
 
-fn table(n: usize, w: &Width) -> &'static Table {
+fn table(n: usize, w: &Ctx) -> &'static Table {
     static TABLES: OnceLock<Mutex<HashMap<(usize, u32), &'static Table>>> = OnceLock::new();
     let mut tables = TABLES.get_or_init(Default::default).lock().unwrap();
     tables.entry((n, w.w)).or_insert_with(|| Box::leak(Box::new(build_table(n, w))))
@@ -90,7 +90,7 @@ fn table(n: usize, w: &Width) -> &'static Table {
 
 /// Smallest expression for each distinct value vector, enumerated by size over
 /// placeholder variables `"0"`, `"1"`, ... and the constants 1 and -1.
-fn build_table(n: usize, w: &Width) -> Table {
+fn build_table(n: usize, w: &Ctx) -> Table {
     let pts = points(w);
     let vars: Vec<String> = (0..n).map(|j| j.to_string()).collect();
     let mut by_fp: HashMap<Fp, T> = HashMap::new();
@@ -171,7 +171,7 @@ impl Circuit {
         self.adder(na, zero, true)
     }
 
-    fn times(&mut self, c: u64, e: usize, w: &Width) -> Option<usize> {
+    fn times(&mut self, c: u64, e: usize, w: &Ctx) -> Option<usize> {
         let (c, negate) = if c <= MAX_FACTOR { (c, false) } else { (c.wrapping_neg() & w.mask, true) };
         if c > MAX_FACTOR {
             return None;
@@ -186,7 +186,7 @@ impl Circuit {
         if negate { self.neg(acc) } else { Some(acc) }
     }
 
-    fn compile(&mut self, t: &T, vars: &[String], w: &Width) -> Option<usize> {
+    fn compile(&mut self, t: &T, vars: &[String], w: &Ctx) -> Option<usize> {
         Some(match t {
             T::Num(c) => self.gate(Gate::Const(*c as u64 & w.mask)),
             T::Var(v) => self.gate(Gate::In(vars.iter().position(|x| x == v)?)),
@@ -254,13 +254,13 @@ impl Circuit {
 
 /// Whether `f` and `g` agree on all inputs; `None` if a term has an unsupported
 /// operation or the carry states grow too many.
-fn equal(f: &T, g: &T, vars: &[String], w: &Width) -> Option<bool> {
+fn equal(f: &T, g: &T, vars: &[String], w: &Ctx) -> Option<bool> {
     equal_low(f, g, vars, vars.len(), 0, &|_| Vec::new(), w)
 }
 
 /// Like `equal`, where inputs `vars[n..]` are not free but `extra` of the low `m`
 /// bits of inputs `0..n`, with bits from `m` up the same for all of them.
-pub(crate) fn equal_low(f: &T, g: &T, vars: &[String], n: usize, m: u32, extra: &dyn Fn(&[u64]) -> Vec<u64>, w: &Width) -> Option<bool> {
+pub(crate) fn equal_low(f: &T, g: &T, vars: &[String], n: usize, m: u32, extra: &dyn Fn(&[u64]) -> Vec<u64>, w: &Ctx) -> Option<bool> {
     let mut c = Circuit::default();
     let (fo, go) = (c.compile(f, vars, w)?, c.compile(g, vars, w)?);
     let mut v = vec![false; c.gates.len()];
@@ -323,14 +323,14 @@ fn rename(t: &T, vars: &[String]) -> T {
 }
 
 /// The smallest proven-equal expression for `t`, if smaller than `t`.
-pub(crate) fn replacement(t: &T, w: &Width) -> Option<T> {
+pub(crate) fn replacement(t: &T, w: &Ctx) -> Option<T> {
     if !(2..=MAX_TRY).contains(&size(t)) {
         return None;
     }
     direct(t, w).or_else(|| over_atoms(t, w))
 }
 
-fn direct(t: &T, w: &Width) -> Option<T> {
+fn direct(t: &T, w: &Ctx) -> Option<T> {
     let mut vars = Vec::new();
     var_names(t, &mut vars);
     if vars.is_empty() || vars.len() > MAX_VARS {
@@ -351,7 +351,7 @@ fn bitwise_only(t: &T) -> bool {
 /// Purely bitwise subterms as atoms, so `(x ^ z) & -((x ^ z) & -((x ^ z) & (y ^ z)))`
 /// becomes `p & -(p & -(p & q))`. An atom that is a bitwise operation of other
 /// atoms is split, or `p & q` would hide its relation to `p`.
-fn over_atoms(t: &T, w: &Width) -> Option<T> {
+fn over_atoms(t: &T, w: &Ctx) -> Option<T> {
     fn collect(t: &T, out: &mut Vec<T>) {
         match t {
             T::Op(op, a) if *op == Op::Not => collect(&a[0], out),
@@ -417,7 +417,7 @@ fn over_atoms(t: &T, w: &Width) -> Option<T> {
 
 /// `t` with each outermost replaceable subterm replaced; a node whose operands
 /// changed is tried again, since nested identities only show from the inside out.
-pub(crate) fn simplify(t: &T, w: &Width) -> T {
+pub(crate) fn simplify(t: &T, w: &Ctx) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     if let Some(r) = replacement(t, w) {
         return r;
@@ -455,7 +455,7 @@ mod tests {
 
     #[test]
     fn proof_matches_exhaustive_check_at_8_bits() {
-        let w = Width::new(8);
+        let w = Ctx::new(8);
         let vars = vec!["x".to_string(), "y".to_string()];
         let ty = crate::eval::NumType { bits: 8, signed: false };
         let mut h = 0x1234_5678_9abc_def1u64;
