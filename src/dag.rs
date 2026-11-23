@@ -16,6 +16,8 @@ struct Entry {
     node: Node,
     /// Tree size, as `eval::size`.
     size: u64,
+    /// Structural hash, the same in every run.
+    hash: u64,
     /// Bit width of the value; 0 means the width of the whole run.
     #[allow(dead_code)]
     bits: u8,
@@ -48,16 +50,33 @@ impl NodeTable {
         self.entries[id as usize].size
     }
 
+    pub fn hash(&self, id: NodeId) -> u64 {
+        self.entries[id as usize].hash
+    }
+
     pub fn add(&mut self, node: Node) -> NodeId {
         if let Some(&id) = self.ids.get(&node) {
             return id;
         }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
         let size = match &node {
-            Node::Op(_, kids) => 1 + kids.iter().map(|&k| self.size(k)).sum::<u64>(),
-            _ => 1,
+            Node::Num(v) => {
+                (0u8, v).hash(&mut h);
+                1
+            }
+            Node::Var(v) => {
+                (1u8, v).hash(&mut h);
+                1
+            }
+            Node::Op(op, kids) => {
+                (2u8, op).hash(&mut h);
+                kids.iter().for_each(|&k| self.hash(k).hash(&mut h));
+                1 + kids.iter().map(|&k| self.size(k)).sum::<u64>()
+            }
         };
         let id = self.entries.len() as NodeId;
-        self.entries.push(Entry { node: node.clone(), size, bits: 0 });
+        self.entries.push(Entry { node: node.clone(), size, hash: h.finish(), bits: 0 });
         self.ids.insert(node, id);
         id
     }

@@ -3852,7 +3852,7 @@ fn split_in(t: &T, w: &Ctx, run: &dyn Fn(&T) -> T) -> T {
 /// MBA region, and every polynomial MBA region,
 /// rebuilt in a smaller form. Returns `egg` unchanged when nothing gets smaller.
 pub fn simplify_linear(egg: &str, w: u32) -> String {
-    simplify_linear_both(egg, w).0
+    simplify_linear_with(egg, w, &Default::default()).0
 }
 
 /// `simplify_linear`, and the other rebuilds worth unioning: the next smallest (`egg` and
@@ -3860,15 +3860,21 @@ pub fn simplify_linear(egg: &str, w: u32) -> String {
 /// `halve`, and which result the rules finish best is not known) and the first rebuild
 /// without `clustered`, when that was used.
 pub fn simplify_linear_both(egg: &str, w: u32) -> (String, Vec<String>) {
-    type Last = Option<(String, u32, (String, Vec<String>))>;
+    simplify_linear_with(egg, w, &Default::default())
+}
+
+/// `simplify_linear_both` with the scheduler settings `opts`.
+pub fn simplify_linear_with(egg: &str, w: u32, opts: &crate::sched::Options) -> (String, Vec<String>) {
+    type Last = Option<(String, u32, crate::sched::Options, (String, Vec<String>))>;
     thread_local! {
         static LAST: std::cell::RefCell<Last> = const { std::cell::RefCell::new(None) };
     }
-    if let Some(r) = LAST.with(|c| c.borrow().as_ref().filter(|(e, bits, _)| e == egg && *bits == w).map(|(_, _, r)| r.clone())) {
+    let hit = |(e, bits, o, _): &&(String, u32, crate::sched::Options, (String, Vec<String>))| e == egg && *bits == w && o == opts;
+    if let Some(r) = LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.3.clone())) {
         return r;
     }
-    let r = simplify_linear_uncached(egg, w);
-    LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, r.clone())));
+    let r = simplify_linear_uncached(egg, w, opts);
+    LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, opts.clone(), r.clone())));
     r
 }
 
@@ -3896,7 +3902,7 @@ fn drop_identities(t: &T, w: &Ctx) -> T {
     }
 }
 
-fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Vec<String>) {
+fn simplify_linear_uncached(egg: &str, w: u32, opts: &crate::sched::Options) -> (String, Vec<String>) {
     let w = Ctx::new(w);
     let t = parse(egg);
     let t0 = t.clone();
@@ -3950,12 +3956,8 @@ fn simplify_linear_uncached(egg: &str, w: u32) -> (String, Vec<String>) {
     } else {
         None
     };
-    let scheduled = if crate::sched::enabled() {
-        let seeds: Vec<T> = rebuilt.iter().chain(&unclustered).cloned().collect();
-        crate::sched::schedule(&t0, &seeds, &w)
-    } else {
-        Vec::new()
-    };
+    let seeds: Vec<T> = rebuilt.iter().chain(&unclustered).cloned().collect();
+    let scheduled = crate::sched::schedule(&t0, &seeds, &w, opts);
     rebuilt.sort_by_key(size);
     rebuilt.dedup();
     rebuilt.truncate(2);

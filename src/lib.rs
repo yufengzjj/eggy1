@@ -964,10 +964,23 @@ fn init_egg_function(eg: &mut EGraph) {
 /// One saturate-and-extract round on `s` together with its linear-MBA rebuild, or
 /// on the rebuild alone if `keep_input` is false and the pre-pass changed `s`.
 pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result<String, Error> {
+    simplify_round_with(egg, s, cli, keep_input, &sched_options(cli))
+}
+
+fn sched_options(cli: &Cli) -> sched::Options {
+    sched::Options {
+        on: cli.sched,
+        disable: cli.disable.clone(),
+        trace: cli.trace,
+        deadline: sched::deadline(cli.time_limit),
+    }
+}
+
+fn simplify_round_with(egg: &str, s: &str, cli: &Cli, keep_input: bool, opts: &sched::Options) -> Result<String, Error> {
     let mut egraph = new_experimental_egraph();
     init_egg_function(&mut egraph);
     egraph.parse_and_run_program(None, egg)?;
-    let (alt, other) = linear_mba::simplify_linear_both(s, width_of(&cli.num_type));
+    let (alt, other) = linear_mba::simplify_linear_with(s, width_of(&cli.num_type), opts);
     let mut roots: Vec<&str> = match alt != s {
         true if !keep_input => vec![&alt],
         true => vec![s, &alt],
@@ -1027,6 +1040,7 @@ pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result
 /// available again.
 pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
     let egg = make_egg(&cli.num_type);
+    let opts = sched_options(cli);
     let mut seed = s.to_string();
     let (mut rounds, mut extra, mut first) = (cli.max_restarts.max(1), 2, true);
     while rounds > 0 {
@@ -1036,21 +1050,22 @@ pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
         // that still mix arithmetic or constants into bitwise operations, and
         // inputs with shifts, division or mulhi, unless the rebuild is already tiny.
         let opaque = ["(Shl ", "(Shr ", "(Div ", "(Mod ", "(Mulhi "].iter().any(|o| seed.contains(o))
-            && !(first && eval::size(&eval::parse(&linear_mba::simplify_linear(&seed, width_of(&cli.num_type)))) <= linear_mba::TINY);
-        let mut extracted = simplify_round(&egg, &seed, cli, first && opaque)?;
+            && !(first && eval::size(&eval::parse(&linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), &opts).0)) <= linear_mba::TINY);
+        let mut extracted = simplify_round_with(&egg, &seed, cli, first && opaque, &opts)?;
         if first && !opaque && mixed(&eval::parse(&extracted)) {
-            let full = simplify_round(&egg, &seed, cli, true)?;
+            let full = simplify_round_with(&egg, &seed, cli, true, &opts)?;
             if eval::size(&eval::parse(&full)) <= eval::size(&eval::parse(&extracted)) {
                 extracted = full;
             }
         }
         first = false;
-        if extracted == seed {
+        if extracted == seed || opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            seed = extracted;
             break;
         }
         seed = extracted;
         // The last extraction can still hold a linear region the pre-pass rebuilds.
-        if rounds == 0 && extra > 0 && linear_mba::simplify_linear(&seed, width_of(&cli.num_type)) != seed {
+        if rounds == 0 && extra > 0 && linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), &opts).0 != seed {
             rounds = 1;
             extra -= 1;
         }
@@ -1121,6 +1136,31 @@ pub struct Cli {
         help = "Maximum number of extract-and-restart rounds (each round runs the full iteration schedule on a fresh e-graph seeded with the previous round's result)"
     )]
     pub max_restarts: usize,
+    #[arg(long, help = "Run the pass scheduler after the pre-pass")]
+    pub sched: bool,
+    #[arg(long, value_delimiter = ',', help = "Scheduler passes not to run, comma-separated")]
+    pub disable: Vec<String>,
+    #[arg(long, help = "Print scheduler statistics to stderr")]
+    pub trace: bool,
+    #[arg(long, help = "Stop scheduling and restarting after this many seconds and return the best result so far")]
+    pub time_limit: Option<f64>,
     #[arg(help = "The infix expression to simplify")]
     pub expr: String,
+}
+
+impl Default for Cli {
+    fn default() -> Cli {
+        Cli {
+            rule_compile: false,
+            expr_compile: false,
+            num_type: "i64".to_string(),
+            iter_limit: 10,
+            max_restarts: 2,
+            sched: false,
+            disable: Vec::new(),
+            trace: false,
+            time_limit: None,
+            expr: String::new(),
+        }
+    }
 }

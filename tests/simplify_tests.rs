@@ -27,6 +27,7 @@ fn check(num_type: &str, cases: &[(&str, &[&str], usize)]) {
         iter_limit: 10,
         max_restarts: 2,
         expr: String::new(),
+        ..Default::default()
     };
     for (case, expect, iter) in cases {
         cli.iter_limit = *iter;
@@ -60,6 +61,7 @@ fn check_exact(cases: &[(&str, &str, &str)]) {
         iter_limit: 12,
         max_restarts: 2,
         expr: String::new(),
+        ..Default::default()
     };
     for (nt, case, expected) in cases {
         cli.num_type = nt.to_string();
@@ -1491,6 +1493,7 @@ fn extract_restart() {
         iter_limit: 2,
         max_restarts: 2,
         expr: "".to_string(),
+        ..Default::default()
     };
     let case = "~(((x + y) + (~(((x + y) + x) + y))) + (-z))";
     let egg_expr = infix_to_egglog(case, true);

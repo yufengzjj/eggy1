@@ -81,17 +81,16 @@ fn main() {
     if args.one {
         let input = std::io::stdin().lock().lines().next().unwrap().unwrap();
         let egg = infix_to_egglog(&input, true);
-        // SAFETY: single-threaded child, set before any other code reads the environment.
-        unsafe { std::env::set_var("EGGY_SCHED", "1") };
+        let opts = eggy1::sched::Options { on: true, ..Default::default() };
         let start = Instant::now();
-        let _ = eggy1::linear_mba::simplify_linear_both(&egg, bits(&args.num_type));
+        let _ = eggy1::linear_mba::simplify_linear_with(&egg, bits(&args.num_type), &opts);
         let total = start.elapsed().as_secs_f64();
         match eggy1::sched::take_stats() {
             Some(s) => println!(
-                "{}\t{}\t{}\t{:.3}\t{:.3}\t{}\t{}\t{}\t{}",
-                s.legacy, s.best, s.from, s.secs, total, s.nodes, s.root_runs, s.node_runs, s.instances
+                "{}\t{}\t{}\t{:.3}\t{:.3}\t{}\t{}",
+                s.legacy, s.best, s.from, s.secs, total, s.nodes, s.instances
             ),
-            None => println!("-\t-\tskipped\t0\t{total:.3}\t0\t0\t0\t0"),
+            None => println!("-\t-\tskipped\t0\t{total:.3}\t0\t0"),
         }
         return;
     }
@@ -113,7 +112,7 @@ fn main() {
         })
         .collect();
     workers.into_iter().for_each(|w| w.join().unwrap());
-    println!("case\tlegacy\tbest\tfrom\tsched_secs\ttotal_secs\tnodes\troot_runs\tnode_runs\tinstances");
+    println!("case\tlegacy\tbest\tfrom\tsched_secs\ttotal_secs\tnodes\tinstances");
     for l in results.lock().unwrap().iter() {
         println!("{l}");
     }
@@ -149,8 +148,8 @@ fn run_child(args: &Args, input: &str) -> String {
     };
     let out = reader.join().unwrap();
     match status {
-        None => "-\t-\ttimeout\t0\t0\t0\t0\t0\t0".into(),
-        Some(s) if !s.success() => "-\t-\terror\t0\t0\t0\t0\t0\t0".into(),
+        None => "-\t-\ttimeout\t0\t0\t0\t0".into(),
+        Some(s) if !s.success() => "-\t-\terror\t0\t0\t0\t0".into(),
         Some(_) => out.trim().to_string(),
     }
 }

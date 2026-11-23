@@ -1,193 +1,183 @@
-//! Prototype scheduler for the pre-pass (step 0 of `docs/pass-framework-plan.md`): an
-//! equivalence table over hash-consed nodes, small passes run on new nodes, and ancestor
-//! instantiation when the best form of a class changes. Off unless `EGGY_SCHED` is set;
-//! `EGGY_SCHED_TRACE` prints one line per call to stderr.
+//! Pass scheduler for the pre-pass (`docs/pass-framework-plan.md`, step 3). Equivalent
+//! nodes of a hash-consed table are merged into classes that keep a few forms each.
+//! Registered passes run on new nodes: whole-form passes on forms of the root class,
+//! node passes on every node. When the best form of a class changes, its parents are
+//! rebuilt with the best form of each child class, so passes see the improvement
+//! inside larger terms. The legacy pre-pass results are the seeds.
 
-use crate::eval::{Op, Term as T, size};
+use crate::dag::{Node, NodeId, NodeTable};
+use crate::eval::{Term as T, size};
 use crate::linear_mba::Ctx;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::{Duration, Instant};
+
+/// Scheduler settings from the command line.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Options {
+    /// Run the scheduler after the legacy pre-pass.
+    pub on: bool,
+    /// Names of passes not to run.
+    pub disable: Vec<String>,
+    /// Print per-call statistics to stderr.
+    pub trace: bool,
+    /// Stop scheduling past this instant and return the best form so far.
+    pub deadline: Option<Instant>,
+}
 
 /// Forms kept per class.
 const ALTS: usize = 4;
 /// Ancestor nodes made per call.
 const MAX_INSTANCES: usize = 512;
-/// Runs of whole-term passes per call.
-const MAX_ROOT_RUNS: usize = 48;
-/// Runs of node passes per call.
-const MAX_NODE_RUNS: usize = 4096;
 /// Seeds larger than this are not scheduled.
 const MAX_SEED_SIZE: usize = 4000;
 
-/// Statistics of the last `schedule` call on this thread.
-#[derive(Clone, Debug, Default)]
-pub struct Stats {
-    pub legacy: usize,
-    pub best: usize,
-    pub from: String,
-    pub nodes: usize,
-    pub root_runs: usize,
-    pub node_runs: usize,
-    pub instances: usize,
-    pub secs: f64,
+#[derive(Clone, Copy, PartialEq)]
+enum Scope {
+    /// Forms of the root class not much larger than its best form.
+    Root,
+    /// Every new node.
+    Node,
 }
 
-thread_local! {
-    static LAST: std::cell::RefCell<Option<Stats>> = const { std::cell::RefCell::new(None) };
+struct Pass {
+    name: &'static str,
+    scope: Scope,
+    /// Most runs per call.
+    budget: usize,
+    run: fn(&T, &Ctx) -> Option<T>,
 }
 
-/// Takes the statistics of the last `schedule` call on this thread.
-pub fn take_stats() -> Option<Stats> {
-    LAST.with(|c| c.borrow_mut().take())
+fn changed(t: &T, r: T) -> Option<T> {
+    (r != *t).then_some(r)
 }
 
-pub(crate) fn enabled() -> bool {
-    std::env::var_os("EGGY_SCHED").is_some()
-}
-
-fn tracing() -> bool {
-    std::env::var_os("EGGY_SCHED_TRACE").is_some()
-}
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-enum Key {
-    Num(i64),
-    Var(String),
-    Op(Op, Vec<usize>),
-}
-
-struct Node {
-    key: Key,
-    size: usize,
-    hash: u64,
-}
-
-type PassFn = fn(&T, &Ctx) -> T;
-
-fn rebuild(t: &T, w: &Ctx) -> T {
-    crate::linear_mba::cluster_regions(&crate::linear_mba::rewrite(t, w), w, false)
-}
-fn recombine(t: &T, w: &Ctx) -> T {
-    if crate::linear_mba::selectors(t, w).is_empty() { crate::linear_mba::recombine_regions(t, w, false) } else { t.clone() }
-}
-fn low(t: &T, w: &Ctx) -> T {
-    crate::linear_mba::unshift(&crate::lowbits::simplify(t, w), w)
-}
-
-/// Passes on a whole candidate of the root class.
-const ROOT_PASSES: [(&str, PassFn); 9] = [
-    ("rebuild", rebuild),
-    ("relate", crate::linear_mba::relate),
-    ("tfunc", crate::tfunc::simplify),
-    ("recombine", recombine),
-    ("cut_products", crate::lowbits::cut_products),
-    ("shifted_xor", crate::lowbits::shifted_xor),
-    ("lowbits_rebuilt", crate::lowbits::simplify_rebuilt),
-    ("lowbits", low),
-    ("halve", crate::linear_mba::halve),
+/// Registered passes, in the order they are tried on a node.
+const PASSES: &[Pass] = &[
+    Pass { name: "tfunc_node", scope: Scope::Node, budget: 4096, run: |t, w| crate::tfunc::replacement(t, w) },
+    Pass {
+        name: "rebuild",
+        scope: Scope::Root,
+        budget: 8,
+        run: |t, w| changed(t, crate::linear_mba::cluster_regions(&crate::linear_mba::rewrite(t, w), w, false)),
+    },
+    Pass { name: "relate", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::linear_mba::relate(t, w)) },
+    Pass { name: "tfunc", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::tfunc::simplify(t, w)) },
+    Pass {
+        name: "recombine",
+        scope: Scope::Root,
+        budget: 8,
+        run: |t, w| {
+            let r = crate::linear_mba::selectors(t, w).is_empty().then(|| crate::linear_mba::recombine_regions(t, w, false))?;
+            changed(t, r)
+        },
+    },
+    Pass { name: "cut_products", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::lowbits::cut_products(t, w)) },
+    Pass { name: "shifted_xor", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::lowbits::shifted_xor(t, w)) },
+    Pass { name: "lowbits_rebuilt", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::lowbits::simplify_rebuilt(t, w)) },
+    Pass {
+        name: "lowbits",
+        scope: Scope::Root,
+        budget: 8,
+        run: |t, w| changed(t, crate::linear_mba::unshift(&crate::lowbits::simplify(t, w), w)),
+    },
+    Pass { name: "halve", scope: Scope::Root, budget: 8, run: |t, w| changed(t, crate::linear_mba::halve(t, w)) },
 ];
+
+/// How a node entered the table, for the trace.
+#[derive(Clone, Copy)]
+enum Origin {
+    Seed(usize),
+    /// Result of pass `PASSES[i]` on a node.
+    Pass(usize, NodeId),
+    /// A parent rebuilt with a better child.
+    Instance(NodeId),
+    /// Subterm of a node of another origin.
+    Inner,
+}
+
+#[derive(Default, Clone)]
+struct PassStats {
+    runs: usize,
+    changed: usize,
+    secs: f64,
+}
 
 struct Sched<'a> {
     w: &'a Ctx,
-    nodes: Vec<Node>,
-    ids: HashMap<Key, usize>,
-    parents: Vec<Vec<usize>>,
-    uf: Vec<usize>,
-    members: HashMap<usize, Vec<usize>>,
-    alts: HashMap<usize, Vec<usize>>,
-    /// The pass chain that made each node, for the trace.
-    from: Vec<String>,
-    root: usize,
-    memo: HashSet<(usize, usize)>,
-    root_queue: VecDeque<usize>,
-    node_queue: VecDeque<usize>,
-    events: VecDeque<usize>,
-    root_runs: usize,
-    node_runs: usize,
+    opts: &'a Options,
+    table: NodeTable,
+    parents: Vec<Vec<NodeId>>,
+    uf: Vec<NodeId>,
+    members: HashMap<NodeId, Vec<NodeId>>,
+    alts: HashMap<NodeId, Vec<NodeId>>,
+    origin: Vec<Origin>,
+    root: NodeId,
+    memo: HashSet<(usize, NodeId)>,
+    root_queue: VecDeque<NodeId>,
+    node_queue: VecDeque<NodeId>,
+    events: VecDeque<NodeId>,
+    stats: Vec<PassStats>,
     instances: usize,
+    timed_out: bool,
 }
 
-impl<'a> Sched<'a> {
-    fn find(&mut self, mut c: usize) -> usize {
-        while self.uf[c] != c {
-            self.uf[c] = self.uf[self.uf[c]];
-            c = self.uf[c];
+impl Sched<'_> {
+    fn find(&mut self, mut c: NodeId) -> NodeId {
+        while self.uf[c as usize] != c {
+            let up = self.uf[self.uf[c as usize] as usize];
+            self.uf[c as usize] = up;
+            c = up;
         }
         c
     }
 
-    fn rank(&self, n: usize) -> (usize, u64) {
-        (self.nodes[n].size, self.nodes[n].hash)
+    fn rank(&self, n: NodeId) -> (u64, u64) {
+        (self.table.size(n), self.table.hash(n))
     }
 
-    fn best(&mut self, n: usize) -> usize {
+    fn best(&mut self, n: NodeId) -> NodeId {
         let c = self.find(n);
         self.alts[&c][0]
     }
 
-    /// The node for `key`, and whether it is new.
-    fn node(&mut self, key: Key, from: &str) -> (usize, bool) {
-        if let Some(&id) = self.ids.get(&key) {
+    /// Adds `node`; a new node gets its own class and is queued for node passes.
+    fn add(&mut self, node: Node, origin: Origin) -> (NodeId, bool) {
+        let before = self.table.len();
+        let id = self.table.add(node);
+        if self.table.len() == before {
             return (id, false);
         }
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        let size = match &key {
-            Key::Num(v) => {
-                (0u8, v).hash(&mut h);
-                1
-            }
-            Key::Var(v) => {
-                (1u8, v).hash(&mut h);
-                1
-            }
-            Key::Op(op, kids) => {
-                (2u8, op).hash(&mut h);
-                kids.iter().for_each(|&k| self.nodes[k].hash.hash(&mut h));
-                1 + kids.iter().map(|&k| self.nodes[k].size).sum::<usize>()
-            }
-        };
-        let id = self.nodes.len();
-        if let Key::Op(_, kids) = &key {
-            for &k in kids {
-                self.parents[k].push(id);
+        if let Node::Op(_, kids) = self.table.node(id).clone() {
+            for k in kids {
+                self.parents[k as usize].push(id);
             }
         }
-        self.nodes.push(Node { key: key.clone(), size, hash: h.finish() });
-        self.ids.insert(key, id);
         self.parents.push(Vec::new());
         self.uf.push(id);
         self.members.insert(id, vec![id]);
         self.alts.insert(id, vec![id]);
-        self.from.push(from.to_string());
+        self.origin.push(origin);
         self.node_queue.push_back(id);
         (id, true)
     }
 
-    fn intern(&mut self, t: &T, from: &str) -> usize {
-        let key = match t {
-            T::Num(v) => Key::Num(*v),
-            T::Var(v) => Key::Var(v.clone()),
-            T::Op(op, a) => Key::Op(*op, a.iter().map(|x| self.intern(x, from)).collect()),
+    fn intern(&mut self, t: &T, origin: Origin) -> NodeId {
+        let node = match t {
+            T::Num(v) => Node::Num(*v),
+            T::Var(v) => Node::Var(v.clone()),
+            T::Op(op, a) => Node::Op(*op, a.iter().map(|x| self.intern(x, Origin::Inner)).collect()),
         };
-        self.node(key, from).0
+        self.add(node, origin).0
     }
 
-    fn term(&self, n: usize) -> T {
-        match &self.nodes[n].key {
-            Key::Num(v) => T::Num(*v),
-            Key::Var(v) => T::Var(v.clone()),
-            Key::Op(op, kids) => T::Op(*op, kids.iter().map(|&k| self.term(k)).collect()),
-        }
-    }
-
-    fn union(&mut self, a: usize, b: usize) {
+    fn union(&mut self, a: NodeId, b: NodeId) {
         let (ra, rb) = (self.find(a), self.find(b));
         if ra == rb {
             return;
         }
         let (old_a, old_b) = (self.alts[&ra][0], self.alts[&rb][0]);
         let (keep, gone) = if self.members[&ra].len() >= self.members[&rb].len() { (ra, rb) } else { (rb, ra) };
-        self.uf[gone] = keep;
+        self.uf[gone as usize] = keep;
         let m = self.members.remove(&gone).unwrap();
         self.members.get_mut(&keep).unwrap().extend(m);
         let mut alts = self.alts.remove(&gone).unwrap();
@@ -203,25 +193,20 @@ impl<'a> Sched<'a> {
     }
 
     /// Parents of the class of `c`, rebuilt with the best form of every child class.
-    fn instantiate(&mut self, c: usize) {
+    fn instantiate(&mut self, c: NodeId) {
         let c = self.find(c);
-        let members = self.members[&c].clone();
-        for m in members {
-            for p in self.parents[m].clone() {
+        for m in self.members[&c].clone() {
+            for p in self.parents[m as usize].clone() {
                 if self.instances >= MAX_INSTANCES {
                     return;
                 }
-                let Key::Op(op, kids) = self.nodes[p].key.clone() else { continue };
-                let best: Vec<usize> = kids.iter().map(|&k| self.best(k)).collect();
+                let Node::Op(op, kids) = self.table.node(p).clone() else { continue };
+                let best: Vec<NodeId> = kids.iter().map(|&k| self.best(k)).collect();
                 if best == kids {
                     continue;
                 }
-                let bc = self.best(c);
-                let from = format!("{}<{}", self.from[p], self.from[bc]);
-                let (q, new) = self.node(Key::Op(op, best), &from);
-                if new {
-                    self.instances += 1;
-                }
+                let (q, new) = self.add(Node::Op(op, best), Origin::Instance(p));
+                self.instances += new as usize;
                 let root = self.find(self.root);
                 let is_root = self.find(p) == root;
                 self.union(p, q);
@@ -238,63 +223,97 @@ impl<'a> Sched<'a> {
         }
     }
 
-    fn add_result(&mut self, src: usize, r: &T, name: &str) {
-        let from = if self.from[src].is_empty() { name.to_string() } else { format!("{}>{}", self.from[src], name) };
-        let before = self.nodes.len();
-        let id = self.intern(r, &from);
-        // Subterms of the result keep the chain of the result itself.
-        for n in before..self.nodes.len() {
-            self.from[n] = from.clone();
+    fn queue_root(&mut self, n: NodeId) {
+        let b = self.best(self.root);
+        if self.table.size(n) <= 2 * self.table.size(b) {
+            self.root_queue.push_back(n);
         }
+    }
+
+    fn add_result(&mut self, src: NodeId, r: &T, pass: usize) {
+        let before = self.table.len();
+        let id = self.intern(r, Origin::Pass(pass, src));
         let root = self.find(self.root);
         let is_root = self.find(src) == root;
-        if is_root && id < before && self.find(id) != root {
-            self.from[id] = from.clone();
+        // An existing node joining the root class takes this origin for the trace.
+        if (id as usize) < before && is_root && self.find(id) != root {
+            self.origin[id as usize] = Origin::Pass(pass, src);
         }
         self.union(src, id);
-        if is_root && id >= before {
+        if is_root && id as usize >= before {
             self.queue_root(id);
         }
         self.settle();
     }
 
-    /// Whole-term passes only for root forms not much larger than the best one.
-    fn queue_root(&mut self, n: usize) {
-        let b = self.best(self.root);
-        let best = self.nodes[b].size;
-        if self.nodes[n].size <= 2 * best {
-            self.root_queue.push_back(n);
+    fn out_of_time(&mut self) -> bool {
+        if self.opts.deadline.is_some_and(|d| Instant::now() >= d) {
+            self.timed_out = true;
+        }
+        self.timed_out
+    }
+
+    fn try_pass(&mut self, i: usize, n: NodeId) {
+        let p = &PASSES[i];
+        if self.stats[i].runs >= p.budget || self.opts.disable.iter().any(|d| d == p.name) || !self.memo.insert((i, n)) {
+            return;
+        }
+        let t = self.table.term(n);
+        let start = Instant::now();
+        let r = (p.run)(&t, self.w);
+        self.stats[i].runs += 1;
+        self.stats[i].secs += start.elapsed().as_secs_f64();
+        if let Some(r) = r {
+            check(&t, &r, self.w, p.name);
+            self.stats[i].changed += 1;
+            self.add_result(n, &r, i);
         }
     }
 
     fn run(&mut self) {
-        loop {
+        while !self.out_of_time() {
             if let Some(n) = self.node_queue.pop_front() {
-                if self.node_runs >= MAX_NODE_RUNS || self.nodes[n].size < 2 || self.nodes[n].size > 256 {
-                    continue;
-                }
-                self.node_runs += 1;
-                let t = self.term(n);
-                if let Some(r) = crate::tfunc::replacement(&t, self.w) {
-                    check(&t, &r, self.w, "tfunc_node");
-                    self.add_result(n, &r, "tfunc_node");
+                for i in (0..PASSES.len()).filter(|&i| PASSES[i].scope == Scope::Node) {
+                    self.try_pass(i, n);
                 }
                 continue;
             }
             let Some(n) = self.root_queue.pop_front() else { break };
-            for (i, (name, f)) in ROOT_PASSES.iter().enumerate() {
-                if self.root_runs >= MAX_ROOT_RUNS || !self.memo.insert((i, n)) {
-                    continue;
+            for i in (0..PASSES.len()).filter(|&i| PASSES[i].scope == Scope::Root) {
+                self.try_pass(i, n);
+            }
+        }
+    }
+
+    /// The passes that made `n`, oldest first.
+    fn chain(&self, mut n: NodeId) -> String {
+        let mut steps = Vec::new();
+        for _ in 0..64 {
+            match self.origin[n as usize] {
+                Origin::Seed(usize::MAX) => {
+                    steps.push("input".to_string());
+                    break;
                 }
-                self.root_runs += 1;
-                let t = self.term(n);
-                let r = f(&t, self.w);
-                if r != t {
-                    check(&t, &r, self.w, name);
-                    self.add_result(n, &r, name);
+                Origin::Seed(i) => {
+                    steps.push(format!("legacy{i}"));
+                    break;
+                }
+                Origin::Pass(p, src) => {
+                    steps.push(PASSES[p].name.to_string());
+                    n = src;
+                }
+                Origin::Instance(p) => {
+                    steps.push("instance".to_string());
+                    n = p;
+                }
+                Origin::Inner => {
+                    steps.push("inner".to_string());
+                    break;
                 }
             }
         }
+        steps.reverse();
+        steps.join(">")
     }
 }
 
@@ -303,69 +322,84 @@ fn check(a: &T, b: &T, w: &Ctx, name: &str) {
     if !cfg!(debug_assertions) {
         return;
     }
-    let mut vars = Vec::new();
-    collect_vars(a, &mut vars);
-    collect_vars(b, &mut vars);
+    let mut vars = crate::eval::vars(a);
+    for v in crate::eval::vars(b) {
+        if !vars.contains(&v) {
+            vars.push(v);
+        }
+    }
     let ty = crate::eval::NumType { bits: w.w, signed: false };
     let mut s = 0x9e3779b97f4a7c15u64;
     for _ in 0..16 {
-        let vals: HashMap<&str, u64> = vars
+        let vals: Vec<u64> = vars
             .iter()
-            .map(|v| {
+            .map(|_| {
                 s ^= s << 13;
                 s ^= s >> 7;
                 s ^= s << 17;
-                (v.as_str(), s)
+                s
             })
             .collect();
-        let (x, y) = (crate::eval::eval(a, ty, &|v| vals[v]), crate::eval::eval(b, ty, &|v| vals[v]));
+        let env = |v: &str| vals[vars.iter().position(|n| n == v).unwrap()];
+        let (x, y) = (crate::eval::eval(a, ty, &env), crate::eval::eval(b, ty, &env));
         if x.is_some() && y.is_some() {
             assert_eq!(x, y, "pass {name} changed the value of {}", crate::eval::show(a));
         }
     }
 }
 
-fn collect_vars(t: &T, out: &mut Vec<String>) {
-    match t {
-        T::Var(v) if !out.contains(v) => out.push(v.clone()),
-        T::Op(_, a) => a.iter().for_each(|x| collect_vars(x, out)),
-        _ => {}
-    }
+/// Statistics of the last `schedule` call on this thread, for `examples/sched_probe.rs`.
+#[derive(Clone, Debug, Default)]
+pub struct Stats {
+    pub legacy: usize,
+    pub best: usize,
+    pub from: String,
+    pub nodes: usize,
+    pub instances: usize,
+    pub secs: f64,
 }
 
-/// The root class forms, smallest first, starting from the input and the legacy rebuilds.
-pub(crate) fn schedule(input: &T, seeds: &[T], w: &Ctx) -> Vec<T> {
-    let all: Vec<&T> = std::iter::once(input).chain(seeds).collect();
-    if all.iter().any(|t| size(t) > MAX_SEED_SIZE) {
+thread_local! {
+    static LAST: std::cell::RefCell<Option<Stats>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Takes the statistics of the last `schedule` call on this thread.
+pub fn take_stats() -> Option<Stats> {
+    LAST.with(|c| c.borrow_mut().take())
+}
+
+/// Forms of the input equal to it, smallest first, found by the passes starting from the
+/// input and the legacy rebuilds `seeds`. Empty when the scheduler is off or skipped.
+pub(crate) fn schedule(input: &T, seeds: &[T], w: &Ctx, opts: &Options) -> Vec<T> {
+    if !opts.on || std::iter::once(input).chain(seeds).any(|t| size(t) > MAX_SEED_SIZE) {
         return Vec::new();
     }
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     let mut s = Sched {
         w,
-        nodes: Vec::new(),
-        ids: HashMap::new(),
+        opts,
+        table: NodeTable::new(),
         parents: Vec::new(),
         uf: Vec::new(),
         members: HashMap::new(),
         alts: HashMap::new(),
-        from: Vec::new(),
+        origin: Vec::new(),
         root: 0,
         memo: HashSet::new(),
         root_queue: VecDeque::new(),
         node_queue: VecDeque::new(),
         events: VecDeque::new(),
-        root_runs: 0,
-        node_runs: 0,
+        stats: vec![PassStats::default(); PASSES.len()],
         instances: 0,
+        timed_out: false,
     };
-    s.root = s.intern(input, "input");
+    s.root = s.intern(input, Origin::Seed(usize::MAX));
+    s.origin[s.root as usize] = Origin::Seed(usize::MAX);
     for (i, t) in seeds.iter().enumerate() {
-        let id = s.intern(t, &format!("legacy{i}"));
+        let id = s.intern(t, Origin::Seed(i));
         s.union(s.root, id);
     }
     s.settle();
-    let legacy_best = seeds.iter().map(size).min().unwrap_or(size(input));
-    // Seeds were already rebuilt; whole-term passes start from the smallest forms.
     let root = s.find(s.root);
     s.root_queue.extend(s.alts[&root].clone());
     s.run();
@@ -373,18 +407,33 @@ pub(crate) fn schedule(input: &T, seeds: &[T], w: &Ctx) -> Vec<T> {
     let alts = s.alts[&root].clone();
     let b = alts[0];
     let stats = Stats {
-        legacy: legacy_best,
-        best: s.nodes[b].size,
-        from: s.from[b].clone(),
-        nodes: s.nodes.len(),
-        root_runs: s.root_runs,
-        node_runs: s.node_runs,
+        legacy: seeds.iter().map(size).min().unwrap_or_else(|| size(input)),
+        best: s.table.size(b) as usize,
+        from: s.chain(b),
+        nodes: s.table.len(),
         instances: s.instances,
         secs: start.elapsed().as_secs_f64(),
     };
-    if tracing() {
-        eprintln!("sched: {stats:?}");
+    if opts.trace {
+        eprintln!(
+            "sched: legacy {} best {} from {} nodes {} instances {} {:.3}s{}",
+            stats.legacy,
+            stats.best,
+            stats.from,
+            stats.nodes,
+            stats.instances,
+            stats.secs,
+            if s.timed_out { " (time limit)" } else { "" }
+        );
+        for (p, st) in PASSES.iter().zip(&s.stats).filter(|(_, st)| st.runs > 0) {
+            eprintln!("  {:16} runs {:5} changed {:5} {:.3}s", p.name, st.runs, st.changed, st.secs);
+        }
     }
     LAST.with(|c| *c.borrow_mut() = Some(stats));
-    alts.iter().map(|&n| s.term(n)).collect()
+    alts.iter().map(|&n| s.table.term(n)).collect()
+}
+
+/// `secs` from now.
+pub fn deadline(secs: Option<f64>) -> Option<Instant> {
+    secs.map(|s| Instant::now() + Duration::from_secs_f64(s))
 }
