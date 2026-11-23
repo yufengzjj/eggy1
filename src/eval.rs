@@ -201,41 +201,46 @@ impl NumType {
 
 /// Value of `t` truncated to `ty.bits` bits, or `None` on division by zero.
 pub fn eval(t: &Term, ty: NumType, env: &impl Fn(&str) -> u64) -> Option<u64> {
-    let w = ty.bits as u64;
-    let r = match t {
-        Term::Num(c) => *c as u64,
-        Term::Var(v) => env(v),
+    match t {
+        Term::Num(c) => Some(*c as u64 & ty.mask()),
+        Term::Var(v) => Some(env(v) & ty.mask()),
         Term::Op(op, a) => {
             let x = eval(&a[0], ty, env)?;
             let y = match a.get(1) {
                 Some(b) => eval(b, ty, env)?,
                 None => 0,
             };
-            let (sx, sy) = (ty.sext(x), ty.sext(y));
-            match op {
-                Op::Add => x.wrapping_add(y),
-                Op::Sub => x.wrapping_sub(y),
-                Op::Mul => x.wrapping_mul(y),
-                Op::And => x & y,
-                Op::Or => x | y,
-                Op::Xor => x ^ y,
-                Op::Not => !x,
-                Op::Neg => x.wrapping_neg(),
-                Op::Shl if y >= w => 0,
-                Op::Shl => x << y,
-                Op::Shr if ty.signed => (sx >> y.min(w - 1)) as u64,
-                Op::Shr if y >= w => 0,
-                Op::Shr => x >> y,
-                Op::Div | Op::Mod if y == 0 => return None,
-                Op::Div if ty.signed => sx.wrapping_div(sy) as u64,
-                Op::Div => x / y,
-                Op::Mod if ty.signed => sx.wrapping_rem(sy) as u64,
-                Op::Mod => x % y,
-                Op::Mulhi if ty.signed => ((sx as i128 * sy as i128) >> w) as u64,
-                Op::Mulhi => ((x as u128 * y as u128) >> w) as u64,
-                Op::Leaf(_) | Op::LeafOperand(_) | Op::Slot(..) => panic!("unknown operator {op}"),
-            }
+            apply(*op, x, y, ty)
         }
+    }
+}
+
+/// `op` on the operand values `x` and `y` (0 for a unary `op`), or `None` on division by zero.
+pub fn apply(op: Op, x: u64, y: u64, ty: NumType) -> Option<u64> {
+    let w = ty.bits as u64;
+    let (sx, sy) = (ty.sext(x), ty.sext(y));
+    let r = match op {
+        Op::Add => x.wrapping_add(y),
+        Op::Sub => x.wrapping_sub(y),
+        Op::Mul => x.wrapping_mul(y),
+        Op::And => x & y,
+        Op::Or => x | y,
+        Op::Xor => x ^ y,
+        Op::Not => !x,
+        Op::Neg => x.wrapping_neg(),
+        Op::Shl if y >= w => 0,
+        Op::Shl => x << y,
+        Op::Shr if ty.signed => (sx >> y.min(w - 1)) as u64,
+        Op::Shr if y >= w => 0,
+        Op::Shr => x >> y,
+        Op::Div | Op::Mod if y == 0 => return None,
+        Op::Div if ty.signed => sx.wrapping_div(sy) as u64,
+        Op::Div => x / y,
+        Op::Mod if ty.signed => sx.wrapping_rem(sy) as u64,
+        Op::Mod => x % y,
+        Op::Mulhi if ty.signed => ((sx as i128 * sy as i128) >> w) as u64,
+        Op::Mulhi => ((x as u128 * y as u128) >> w) as u64,
+        Op::Leaf(_) | Op::LeafOperand(_) | Op::Slot(..) => panic!("unknown operator {op}"),
     };
     Some(r & ty.mask())
 }

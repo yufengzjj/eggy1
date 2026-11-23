@@ -6,6 +6,7 @@
 //! on timeout and a panic only fails that case.
 
 use clap::Parser;
+use eggy1::dag::{NodeId, NodeTable};
 use eggy1::eval::{self, NumType, Term};
 use eggy1::expr_convert::infix_to_egglog;
 use eggy1::{Cli, simplify};
@@ -302,9 +303,11 @@ fn run_one(args: &Args) {
     };
     let (t_in, t_gt, t_out) = (eval::parse(&in_egg), eval::parse(&gt_egg), eval::parse(&infix_to_egglog(&out, true)));
     let (s_in, s_gt, s_out) = (eval::size(&t_in), eval::size(&t_gt), eval::size(&t_out));
-    let status = if !same_value(&t_in, &t_out, ty) {
+    let mut table = NodeTable::new();
+    let (n_in, n_gt, n_out) = (table.intern(&t_in), table.intern(&t_gt), table.intern(&t_out));
+    let status = if !same_value(&table, (&t_in, n_in), (&t_out, n_out), ty) {
         "wrong"
-    } else if !same_value(&t_in, &t_gt, ty) {
+    } else if !same_value(&table, (&t_in, n_in), (&t_gt, n_gt), ty) {
         "badgt"
     } else if s_out <= s_gt {
         "solved"
@@ -317,7 +320,7 @@ fn run_one(args: &Args) {
 }
 
 /// Compare on random and boundary inputs; inputs that divide by zero are skipped.
-fn same_value(a: &Term, b: &Term, ty: NumType) -> bool {
+fn same_value(table: &NodeTable, (a, na): (&Term, NodeId), (b, nb): (&Term, NodeId), ty: NumType) -> bool {
     let mut names = eval::vars(a);
     for v in eval::vars(b) {
         if !names.contains(&v) {
@@ -338,8 +341,10 @@ fn same_value(a: &Term, b: &Term, ty: NumType) -> bool {
             .map(|_| if k < 64 { special[(rng() % special.len() as u64) as usize] } else { rng() })
             .map(|v| v & ty.mask())
             .collect();
-        let env = |v: &str| vals[names.iter().position(|n| n == v).unwrap()];
-        match (eval::eval(a, ty, &env), eval::eval(b, ty, &env)) {
+        // The table also holds the third term, whose other variables do not matter here.
+        let env = |v: &str| names.iter().position(|n| n == v).map_or(0, |i| vals[i]);
+        let vals = table.eval_all(ty, &env);
+        match (vals[na as usize], vals[nb as usize]) {
             (Some(x), Some(y)) => x == y,
             _ => true,
         }

@@ -1,3 +1,4 @@
+pub mod dag;
 pub mod eval;
 pub mod expr_convert;
 pub mod linear_mba;
@@ -967,16 +968,23 @@ pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result
     init_egg_function(&mut egraph);
     egraph.parse_and_run_program(None, egg)?;
     let (alt, other) = linear_mba::simplify_linear_both(s, width_of(&cli.num_type));
-    let other: String = other.iter().map(|o| format!("(union expr {o})")).collect();
-    let (s, union) = match alt != s {
-        true if !keep_input => (alt.as_str(), other),
-        true => (s, format!("(union expr {alt}) {other}")),
-        false => (s, other),
+    let mut roots: Vec<&str> = match alt != s {
+        true if !keep_input => vec![&alt],
+        true => vec![s, &alt],
+        false => vec![s],
     };
+    roots.extend(other.iter().map(String::as_str));
+    // Subterms repeat a lot in large inputs; egglog reads the text once per occurrence.
+    let mut table = dag::NodeTable::new();
+    let ids: Vec<dag::NodeId> = roots.iter().map(|r| table.intern(&eval::parse(r))).collect();
+    let (lets, roots) = table.show_shared(&ids, "shared-");
+    let s = &roots[0];
+    let union: String = roots[1..].iter().map(|o| format!("(union expr {o})")).collect();
     let result = egraph.parse_and_run_program(
         None,
         &format!(
             r#"
+{lets}
 (let expr {})
 {union}
 (run-schedule
