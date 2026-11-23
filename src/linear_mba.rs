@@ -1132,34 +1132,42 @@ fn relate_region(t: &T, w: &Ctx) -> Option<T> {
                 .collect()
         })
         .collect();
-    // Besides small `μ`, the most common one that cancels a leaf `ℓ` of `L` by itself: `ρ = μ·λ`
-    // for the coefficients of `ℓ` alone in the region and in `L`.
-    let region = Prog::new(t, &lv, w);
-    let r0 = region.at(0, w);
-    let derived: Vec<Option<i64>> = arith
-        .iter()
-        .map(|&i| {
-            let own = {
-                let mut own = Vec::new();
-                leaves(&lv[i], w, &mut own);
-                own
-            };
-            let prog = Prog::new(&lv[i], &own, w);
-            let l0 = prog.at(0, w);
-            let mut found: Vec<(i64, usize)> = Vec::new();
-            for (j, l) in own.iter().enumerate() {
-                let Some(r) = lv.iter().position(|x| x == l) else { continue };
-                let rho = region.at(1 << r, w).wrapping_sub(r0) & w.mask;
-                let lambda = prog.at(1 << j, w).wrapping_sub(l0) & w.mask;
-                let Some(mu) = solve_mul(lambda, rho, w).map(|m| w.signed(m)) else { continue };
-                match found.iter_mut().find(|f| f.0 == mu) {
-                    Some(f) => f.1 += 1,
-                    None => found.push((mu, 1)),
-                }
+    let ph: Vec<T> = (0..arith.len()).map(|k| T::Var(format!("\u{2}{k}"))).collect();
+    // `t` with leaf `k` replaced by its placeholder and `μ·(v - L)` added.
+    let relate_one = |t: &T, k: usize, mu: i64| {
+        let s = crate::lowbits::replace(t, std::slice::from_ref(&lv[arith[k]]), std::slice::from_ref(&ph[k]));
+        op(Op::Add, vec![s, op(Op::Mul, vec![T::Num(mu), op(Op::Sub, vec![ph[k].clone(), lv[arith[k]].clone()])])])
+    };
+    // Besides small `μ`, those that cancel a leaf `ℓ` of `L` by itself in the region `reg`:
+    // `ρ = μ·λ` for the coefficients of `ℓ` alone in `reg` and in `L`, with their counts.
+    let derive_all = |reg: &T, l: &T| -> Vec<(i64, usize)> {
+        let mut rl = Vec::new();
+        leaves(reg, w, &mut rl);
+        if rl.len() > MAX_WIDE_LEAVES {
+            return Vec::new();
+        }
+        let region = Prog::new(reg, &rl, w);
+        let r0 = region.at(0, w);
+        let mut own = Vec::new();
+        leaves(l, w, &mut own);
+        let prog = Prog::new(l, &own, w);
+        let l0 = prog.at(0, w);
+        let mut found: Vec<(i64, usize)> = Vec::new();
+        for (j, x) in own.iter().enumerate() {
+            let Some(r) = rl.iter().position(|y| y == x) else { continue };
+            let rho = region.at(1 << r, w).wrapping_sub(r0) & w.mask;
+            let lambda = prog.at(1 << j, w).wrapping_sub(l0) & w.mask;
+            let Some(mu) = solve_mul(lambda, rho, w).map(|m| w.signed(m)) else { continue };
+            match found.iter_mut().find(|f| f.0 == mu) {
+                Some(f) => f.1 += 1,
+                None => found.push((mu, 1)),
             }
-            found.into_iter().filter(|f| ![1, -1, 2, -2].contains(&f.0)).max_by_key(|f| f.1).map(|f| f.0)
-        })
-        .collect();
+        }
+        found.retain(|f| ![1, -1, 2, -2].contains(&f.0));
+        found
+    };
+    let derive = |reg: &T, l: &T| derive_all(reg, l).into_iter().max_by_key(|f| f.1).map(|f| f.0);
+    let derived: Vec<Option<i64>> = arith.iter().map(|&i| derive(t, &lv[i])).collect();
     let mut combos: Vec<Vec<(usize, i64)>> = Vec::new();
     for k in 0..arith.len() {
         if !same[k].is_empty() {
@@ -1175,8 +1183,19 @@ fn relate_region(t: &T, w: &Ctx) -> Option<T> {
                 combos.extend(seconds.iter().map(|&b| vec![(k, a), (k2, b)]));
             }
         }
+        // A second leaf's `μ` can exist only once the first is related: in
+        // `7·(z + x) - 14·((2·x) & (z - x))`, `z - x` takes 7, then `2·x` cancels `x` with 7.
+        for k2 in (0..arith.len()).filter(|&k2| k2 != k) {
+            for (a, _) in derive_all(t, &lv[arith[k]]) {
+                if let Some(b) = derive(&relate_one(t, k, a), &lv[arith[k2]]) {
+                    let combo = if k < k2 { vec![(k, a), (k2, b)] } else { vec![(k2, b), (k, a)] };
+                    if !combos.contains(&combo) {
+                        combos.push(combo);
+                    }
+                }
+            }
+        }
     }
-    let ph: Vec<T> = (0..arith.len()).map(|k| T::Var(format!("\u{2}{k}"))).collect();
     // Rebuilds can be slow, so only the combinations that leave a semi-linear region the
     // fewest leaves (fewer than before), or another the fewest monomials (no more than
     // before), are rebuilt.
