@@ -74,6 +74,8 @@ struct State {
     /// Most leaves a semi-linear region may have to be rebuilt.
     semi_leaves: AtomicUsize,
     bit_splits: AtomicUsize,
+    /// `peel` calls nested inside each other.
+    peel_depth: AtomicUsize,
     clustering: std::sync::Mutex<Vec<T>>,
     /// Turns `clustered` off, for the rebuild without it.
     no_cluster: AtomicBool,
@@ -95,6 +97,7 @@ impl Default for State {
             rewrites_left: AtomicUsize::new(usize::MAX),
             semi_leaves: AtomicUsize::new(MAX_LEAVES),
             bit_splits: AtomicUsize::new(BIT_SPLIT_BUDGET),
+            peel_depth: AtomicUsize::new(0),
             clustering: Default::default(),
             no_cluster: AtomicBool::new(false),
             clustered: AtomicBool::new(false),
@@ -777,15 +780,19 @@ fn bit_tables(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<usize>, Vec<Vec<u64>
     Some((e0, col, tables))
 }
 
+/// Least size per leaf of a region `peel` tries.
+const MIN_PEEL_SIZE: usize = 16;
+
 /// A region with more than `MAX_LEAVES` leaves whose value is a bitwise function of its
 /// leaves, with one leaf `v` that is not arithmetic peeled off: `v | r`, `~v & r` or `v ^ r`
 /// with `r` the region at `v = 0`, or `v & r`, `~v | r` with `r` at `v = -1`; `r` is
-/// rewritten, which peels again until few enough leaves are left.
+/// rebuilt by `simba`, which peels again until few enough leaves are left.
 fn peel(t: &T, w: &Ctx) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
     let n = lv.len();
-    if !(MAX_LEAVES + 1..=MAX_WIDE_LEAVES).contains(&n) {
+    // Small regions seldom rebuild smaller, but the rest costs a full semi-linear search.
+    if !(MAX_LEAVES + 1..=MAX_WIDE_LEAVES).contains(&n) || size(t) < MIN_PEEL_SIZE * n || w.st.peel_depth.load(Relaxed) >= MAX_WIDE_LEAVES - MAX_LEAVES {
         return None;
     }
     // Most regions fail; at points of 0s and 1s a bitwise value differs from e(0) in bit 0 only.
@@ -822,8 +829,9 @@ fn peel(t: &T, w: &Ctx) -> Option<T> {
     // `p(f at v = 0, f at v = 1)` for every point and table.
     let all = |i: usize, p: &dyn Fn(bool, bool) -> bool| fs.iter().all(|f| (0..1usize << n).filter(|q| q >> i & 1 == 0).all(|q| p(f[q], f[q | 1 << i])));
     let not = |x: T| T::Op(Op::Not, vec![x]);
-    // Arithmetic leaves are left to `relate`, which rebuilds them too.
-    for i in (0..n).filter(|&i| kind(&lv[i], w) != Kind::Lin) {
+    // Arithmetic leaves are left to `relate`, which rebuilds them too. A leaf the tables do
+    // not depend on can have no occurrence `Prog` sees (only inside an arithmetic leaf).
+    for i in (0..n).filter(|&i| kind(&lv[i], w) != Kind::Lin && !all(i, &|lo, hi| lo == hi)) {
         // (operation, complement v, value substituted for v)
         let how = if all(i, &|_, hi| hi) {
             (Op::Or, false, 0)
@@ -847,7 +855,10 @@ fn peel(t: &T, w: &Ctx) -> Option<T> {
                 _ => t.clone(),
             }
         }
-        let rest = rewrite(&put(t, &lv, &lv[i], how.2), w);
+        let rest = put(t, &lv, &lv[i], how.2);
+        w.st.peel_depth.fetch_add(1, Relaxed);
+        let rest = simba(&rest, w).unwrap_or(rest);
+        w.st.peel_depth.fetch_sub(1, Relaxed);
         let v = if how.1 { not(lv[i].clone()) } else { lv[i].clone() };
         return Some(T::Op(how.0, vec![v, rest])).filter(|r| size(r) < size(t));
     }
@@ -4916,7 +4927,7 @@ mod tests {
         let mut peeled = 0;
         for k in 0..200 {
             let w = Ctx::new(if k % 2 == 0 { 8 } else { 64 });
-            let mut f = bit_term(&mut r, 3, &lv[..6]);
+            let mut f = bit_term(&mut r, 4, &lv[..6]);
             for l in &lv[6..] {
                 let l = if r.next() % 3 == 0 { op(Op::Not, vec![l.clone()]) } else { l.clone() };
                 f = op([Op::And, Op::Or, Op::Xor][(r.next() % 3) as usize], vec![l, f]);
