@@ -3132,7 +3132,8 @@ fn overlapping_terms(gp: &[u64], lv: &[T], konst: u64, w: &Ctx) -> Vec<(Vec<(u64
         pool.sort_unstable();
         pool.dedup();
         for k in (1..=3usize).filter(|k| hv.len() < 1 << k) {
-            for coefs in combinations(&pool, k) {
+            // At k = 3 a repeated coefficient leaves ambiguous points (rejected) or two equal terms.
+            for coefs in combinations(&pool, k, k == 2) {
                 if let Some(c) = split_by_sums(&h, &hv, &coefs, &all_vars, lv, konst.wrapping_add(d) & m, w) {
                     out.push(c);
                 }
@@ -3142,13 +3143,14 @@ fn overlapping_terms(gp: &[u64], lv: &[T], konst: u64, w: &Ctx) -> Vec<(Vec<(u64
     out
 }
 
-fn combinations(pool: &[u64], k: usize) -> Vec<Vec<u64>> {
+/// The `k`-element multisets of `pool` (sets unless `repeat`), in pool order.
+fn combinations(pool: &[u64], k: usize, repeat: bool) -> Vec<Vec<u64>> {
     if k == 0 {
         return vec![Vec::new()];
     }
     (0..pool.len())
         .flat_map(|i| {
-            combinations(&pool[i + 1..], k - 1).into_iter().map(move |mut rest| {
+            combinations(&pool[i + usize::from(!repeat)..], k - 1, repeat).into_iter().map(move |mut rest| {
                 rest.insert(0, pool[i]);
                 rest
             })
