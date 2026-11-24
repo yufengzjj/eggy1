@@ -1005,16 +1005,7 @@ fn small_blocks(t: &T, w: &Ctx) -> Option<T> {
     // and measured with each placeholder counting as its leaf's size.
     let ph: Vec<T> = (0..n).map(|i| T::Var(format!("\u{1}{i}"))).collect();
     let leaf_size: Vec<usize> = lv.iter().map(size).collect();
-    let wsize = |t: &T| -> usize {
-        fn go(t: &T, ph: &[T], ls: &[usize]) -> usize {
-            match t {
-                T::Var(_) => ph.iter().position(|p| p == t).map_or(1, |i| ls[i]),
-                T::Num(_) => 1,
-                T::Op(_, a) => 1 + a.iter().map(|x| go(x, ph, ls)).sum::<usize>(),
-            }
-        }
-        go(t, &ph, &leaf_size)
-    };
+    let wsize = |t: &T| placeholder_size(t, &ph, &leaf_size);
     // Per block: (c, c·f, monomials f adds besides the block's own, c·f(0)).
     let candidates = |s: usize| {
         let vars: Vec<usize> = (0..n).filter(|i| s >> i & 1 == 1).collect();
@@ -1137,14 +1128,486 @@ fn small_blocks(t: &T, w: &Ctx) -> Option<T> {
     }
     let best = build(&best_choice);
     debug_assert_eq!(wsize(&best), best_size);
-    fn fill(t: &T, ph: &[T], lv: &[T]) -> T {
-        match t {
-            T::Var(_) => ph.iter().position(|p| p == t).map_or_else(|| t.clone(), |i| lv[i].clone()),
-            T::Num(_) => t.clone(),
-            T::Op(op, a) => T::Op(*op, a.iter().map(|x| fill(x, ph, lv)).collect()),
+    (best_size < size(t)).then(|| fill_placeholders(&best, &ph, &lv))
+}
+
+/// Most leaves of one term `wide_blocks` expands, and of one block it rebuilds as one term.
+const MAX_TERM_LEAVES: usize = 10;
+const MAX_WIDE_BLOCK: usize = 10;
+/// Search steps `wide_blocks` spends per block and multiplier, most tables it collects per
+/// block, and most of the smallest it keeps for the search over blocks.
+const BLOCK_STEPS: usize = 1 << 12;
+const MAX_BLOCK_TABLES: usize = 4096;
+const MAX_BLOCK_FUNCTIONS: usize = 64;
+/// Most tables of a block of more than 6 leaves `wide_blocks` tries.
+const MAX_WIDE_TABLES: usize = 16;
+/// Most regions `wide_blocks` remembers.
+const MAX_WIDE_CACHE: usize = 4096;
+
+/// One choice for a block of `wide_blocks`: `c·term`, its size, whether `term` is a `Not`,
+/// and what it adds at each leftover key.
+#[derive(Clone)]
+struct BlockTerm {
+    c: u64,
+    term: T,
+    size: usize,
+    not: bool,
+    adds: Vec<(usize, u64)>,
+}
+
+/// A linear region of more than `MAX_LEAVES` leaves rebuilt from its conjunction-basis
+/// expansion (summed over its terms, each expanded over its own leaves): one term `c·f` per
+/// block (maximal leaf set with a non-zero coefficient), with `f` matching the coefficient
+/// of every set of two or more leaves that no other block contains; what is left of the
+/// coefficients shared with other blocks, of single leaves and of the constant becomes
+/// conjunctions. The choice per block that gives the smallest sum wins, so blocks that
+/// overlap (`-2·(((h ^ g) & a) ^ f) - 2·((g | j) & (a ^ h))`) split their shared part as
+/// the smallest terms need. Memoized per thread, across runs: later rounds see the same regions.
+fn wide_blocks(t: &T, w: &Ctx) -> Option<T> {
+    if has_const_bitwise(t, w) {
+        return None;
+    }
+    let mut lv = Vec::new();
+    leaves(t, w, &mut lv);
+    if !(MAX_LEAVES + 1..=64).contains(&lv.len()) {
+        return None;
+    }
+    // Regions with products are left to `poly_mba`, which expands them across terms, and
+    // those with arithmetic leaves to `relate` and the rewrite of the shrunk region.
+    if lv.iter().any(|l| kind(l, w) == Kind::Lin || matches!(l, T::Op(Op::Mul, a) if !matches!(a[0], T::Num(_)) && !matches!(a[1], T::Num(_)))) {
+        return None;
+    }
+    thread_local! {
+        static CACHE: std::cell::RefCell<crate::eval::FastMap<(u32, T), Option<T>>> = Default::default();
+    }
+    let key = (w.w, t.clone());
+    if let Some(r) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return r;
+    }
+    let r = wide_blocks_uncached(t, lv, w);
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= MAX_WIDE_CACHE {
+            c.clear();
+        }
+        c.insert(key, r.clone());
+    });
+    r
+}
+
+fn wide_blocks_uncached(t: &T, lv: Vec<T>, w: &Ctx) -> Option<T> {
+    let n = lv.len();
+    let m = w.mask;
+    let (terms, konst) = region_terms(t, w);
+    let mut coef: crate::eval::FastMap<u64, u64> = Default::default();
+    coef.insert(0, konst);
+    for (c, x) in &terms {
+        let mut xl = Vec::new();
+        leaves(x, w, &mut xl);
+        let k = xl.len();
+        if k > MAX_TERM_LEAVES {
+            return None;
+        }
+        let idx: Vec<usize> = xl.iter().map(|l| lv.iter().position(|g| g == l)).collect::<Option<_>>()?;
+        let prog = Prog::new(x, &xl, w);
+        let mut a: Vec<u64> = (0..1usize << k).map(|p| prog.at(p, w)).collect();
+        for i in 0..k {
+            for p in 0..1usize << k {
+                if p >> i & 1 == 1 {
+                    a[p] = a[p].wrapping_sub(a[p ^ 1 << i]) & m;
+                }
+            }
+        }
+        for (q, v) in a.into_iter().enumerate().filter(|(_, v)| *v != 0) {
+            let g = (0..k).filter(|j| q >> j & 1 == 1).fold(0u64, |acc, j| acc | 1 << idx[j]);
+            let e = coef.entry(g).or_insert(0);
+            *e = e.wrapping_add(c.wrapping_mul(v)) & m;
         }
     }
-    (best_size < size(t)).then(|| fill(&best, &ph, &lv))
+    coef.retain(|_, v| *v != 0);
+    let mut support: Vec<u64> = coef.keys().copied().collect();
+    support.sort_unstable();
+    let blocks: Vec<u64> = support.iter().copied().filter(|&p| p.count_ones() >= 2 && !support.iter().any(|&q| q != p && q & p == p)).collect();
+    if blocks.is_empty() || blocks.iter().any(|b| b.count_ones() as usize > MAX_WIDE_BLOCK) {
+        return None;
+    }
+    let nb = blocks.len();
+    let ph: Vec<T> = (0..n).map(|i| T::Var(format!("\u{1}{i}"))).collect();
+    let leaf_size: Vec<usize> = lv.iter().map(size).collect();
+    // A term over a block uses each of its leaves; a region not much larger than that
+    // is mostly in block form already.
+    let least: usize = blocks.iter().map(|&b| (0..n).filter(|i| b >> i & 1 == 1).map(|i| leaf_size[i] + 1).sum::<usize>()).sum();
+    if 2 * size(t) < 4 * least {
+        return None;
+    }
+    let private = |g: u64| g.count_ones() >= 2 && blocks.iter().filter(|&&b| b & g == g).count() == 1;
+    // Per block: its leaves and the leaf set of each of its points.
+    let points: Vec<(Vec<usize>, Vec<u64>)> = blocks
+        .iter()
+        .map(|&s| {
+            let vars: Vec<usize> = (0..n).filter(|i| s >> i & 1 == 1).collect();
+            let g = (0..1usize << vars.len()).map(|q| (0..vars.len()).filter(|j| q >> j & 1 == 1).fold(0u64, |acc, j| acc | 1 << vars[j])).collect();
+            (vars, g)
+        })
+        .collect();
+    let mut keys: Vec<u64> = support.iter().copied().chain(points.iter().flat_map(|p| p.1.iter().copied())).filter(|&g| !private(g)).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let key = |g: u64| keys.binary_search(&g).unwrap();
+    let base: Vec<u64> = keys.iter().map(|g| coef.get(g).copied().unwrap_or(0)).collect();
+    let conj_size: Vec<usize> = keys.iter().map(|&g| (0..n).filter(|i| g >> i & 1 == 1).map(|i| leaf_size[i]).sum::<usize>() + (g.count_ones() as usize).saturating_sub(1)).collect();
+    // The coefficient of each point of a block that only that block contains.
+    let own: Vec<Vec<Option<u64>>> = points.iter().map(|(_, g)| g.iter().map(|&x| private(x).then(|| coef.get(&x).copied().unwrap_or(0))).collect()).collect();
+    let mut opts: Vec<Vec<BlockTerm>> = Vec::new();
+    for (e, (vars, g)) in points.iter().enumerate() {
+        let k = vars.len();
+        // Tables over more than 6 leaves are split by `wide_bool_expr`, which is slow.
+        let limit = if k > MAX_LEAVES { MAX_WIDE_TABLES } else { MAX_BLOCK_TABLES };
+        let mut found: Vec<(usize, u64, Vec<u64>, B)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        // The top coefficient of a read-once function is ±2^(number of `^`).
+        for mult in (0..k).flat_map(|j| [1i64 << j, -1 << j]).chain([3, -3]) {
+            let Some(c) = solve_mul(mult as u64 & m, coef[&blocks[e]], w) else { continue };
+            let mut fs = Vec::new();
+            let mut f = vec![0u64; (1usize << k).div_ceil(64)];
+            block_functions(0, &mut f, k, &own[e], c, w, &mut { BLOCK_STEPS }, limit.saturating_sub(seen.len()), &mut fs);
+            for f in fs {
+                if seen.insert((c, f.clone())) {
+                    if let Some(b) = wide_bool_expr(&f, k) {
+                        found.push((b_size(&b, vars, &leaf_size), c, f, b));
+                    }
+                }
+            }
+        }
+        found.sort_by_key(|x| x.0);
+        found.truncate(MAX_BLOCK_FUNCTIONS);
+        let mut out = Vec::new();
+        for (size, c, f, b) in found {
+            let term = b_to_t_at(&b, vars, &ph);
+            let mut mob: Vec<i64> = (0..1usize << k).map(|q| (f[q >> 6] >> (q & 63) & 1) as i64).collect();
+            for i in 0..k {
+                for q in 0..1usize << k {
+                    if q >> i & 1 == 1 {
+                        mob[q] -= mob[q ^ 1 << i];
+                    }
+                }
+            }
+            let adds = (0..1usize << k)
+                .filter(|&q| own[e][q].is_none())
+                .map(|q| (key(g[q]), (if q == 0 { c.wrapping_mul(f[0] & 1).wrapping_neg() } else { c.wrapping_mul(mob[q] as u64) }) & m))
+                .filter(|&(_, v)| v != 0)
+                .collect();
+            out.push(BlockTerm { c, not: matches!(term, T::Op(Op::Not, _)), term, size, adds });
+        }
+        if out.is_empty() {
+            return None;
+        }
+        opts.push(out);
+    }
+    let left = |chosen: &[&BlockTerm]| {
+        let mut vals = base.clone();
+        for o in chosen {
+            for &(q, v) in &o.adds {
+                vals[q] = vals[q].wrapping_sub(v) & m;
+            }
+        }
+        vals
+    };
+    let score = |chosen: &[&BlockTerm], vals: &[u64]| -> usize {
+        let mut terms: Vec<(u64, usize, bool)> = chosen.iter().map(|o| (o.c, o.size, o.not)).collect();
+        terms.extend(keys.iter().zip(vals).zip(&conj_size).filter(|((g, v), _)| **g != 0 && **v != 0).map(|((_, &v), &s)| (v, s, false)));
+        positive_first(&mut terms, |x| x.0, w);
+        // `factored_sum` saves a multiplication and its constant per extra term of a coefficient.
+        let mut cs: Vec<u64> = terms.iter().map(|x| if w.signed(x.0) < 0 { x.0.wrapping_neg() & m } else { x.0 }).filter(|&c| c != 1).collect();
+        cs.sort_unstable();
+        let shared = cs.len() - { cs.dedup(); cs.len() };
+        folded_sum_size(&terms, if keys[0] == 0 { vals[0] } else { 0 }, w) - 2 * shared
+    };
+    let pick = |choice: &[usize]| -> Vec<&BlockTerm> { opts.iter().zip(choice).map(|(o, &ci)| &o[ci]).collect() };
+    let mut best_choice = vec![0usize; nb];
+    let mut best_size = score(&pick(&best_choice), &left(&pick(&best_choice)));
+    for _ in 0..4 {
+        let mut improved = false;
+        for e in 0..nb {
+            for ci in 0..opts[e].len() {
+                let mut c = best_choice.clone();
+                c[e] = ci;
+                let cs = score(&pick(&c), &left(&pick(&c)));
+                if cs < best_size {
+                    (best_choice, best_size, improved) = (c, cs, true);
+                }
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+    // Each block's term costs at least its size and one `+`, a leftover conjunction its size
+    // and one `+` once no later block adds to it; a `~` absorbing the constant saves one node
+    // and the first term needs no `+`.
+    let mut rest_min = vec![0usize; nb + 1];
+    for e in (0..nb).rev() {
+        rest_min[e] = rest_min[e + 1] + opts[e].iter().map(|o| o.size).min().unwrap() + 1;
+    }
+    let mut done: Vec<Vec<usize>> = vec![Vec::new(); nb + 1];
+    for q in (0..keys.len()).filter(|&q| keys[q] != 0) {
+        let last = (0..nb).rev().find(|&e| opts[e].iter().any(|o| o.adds.iter().any(|a| a.0 == q)));
+        done[last.map_or(0, |e| e + 1)].push(q);
+    }
+    let mut search = Search { opts: &opts, rest_min, done, conj_size: &conj_size, score: &score, mask: m, best: (pick(&best_choice), best_size.min(size(t))), steps: MAX_BLOCK_COMBOS };
+    search.run(0, 0, &mut Vec::new(), &mut base.clone());
+    let (chosen, best_size) = search.best;
+    if best_size >= size(t) {
+        return None;
+    }
+    let vals = left(&chosen);
+    let mut terms: Vec<(u64, T)> = chosen.iter().map(|o| (o.c, o.term.clone())).collect();
+    for (&g, &v) in keys.iter().zip(&vals).filter(|(g, v)| **g != 0 && **v != 0) {
+        terms.push((v, (0..n).filter(|i| g >> i & 1 == 1).map(|i| ph[i].clone()).reduce(|a, b| T::Op(Op::And, vec![a, b])).unwrap()));
+    }
+    positive_first(&mut terms, |x| x.0, w);
+    let konst = if keys[0] == 0 { vals[0] } else { 0 };
+    let r = [build_sum(&terms, konst, w), factored_sum(&terms, konst, w)].into_iter().min_by_key(|r| placeholder_size(r, &ph, &leaf_size)).unwrap();
+    (placeholder_size(&r, &ph, &leaf_size) < size(t)).then(|| fill_placeholders(&r, &ph, &lv))
+}
+
+/// `build_sum` with the terms of each coefficient `±c` (`c` not 1) that has two or more
+/// summed first, `c·(a + b - d)` for `c·a + c·b - c·d`.
+fn factored_sum(terms: &[(u64, T)], konst: u64, w: &Ctx) -> T {
+    // `c·t + c` is `-c·~t` before grouping, as in `build_sum`.
+    let mut terms = terms.to_vec();
+    let mut konst = konst;
+    if konst != 0 && (konst != 1 || terms.len() > 1) {
+        if let Some(e) = terms.iter_mut().find(|(c, _)| *c == konst) {
+            let not = match &e.1 {
+                T::Op(Op::Not, a) => a[0].clone(),
+                t => T::Op(Op::Not, vec![t.clone()]),
+            };
+            *e = (konst.wrapping_neg() & w.mask, not);
+            konst = 0;
+        }
+    }
+    let pos = |c: u64| if w.signed(c) < 0 { c.wrapping_neg() & w.mask } else { c };
+    let mut outer: Vec<(u64, T)> = Vec::new();
+    let mut done = vec![false; terms.len()];
+    for i in 0..terms.len() {
+        let a = pos(terms[i].0);
+        if done[i] || a == 1 {
+            continue;
+        }
+        let same: Vec<usize> = (i..terms.len()).filter(|&j| !done[j] && pos(terms[j].0) == a).collect();
+        if same.len() < 2 {
+            continue;
+        }
+        // With every coefficient `-c`, `-c·(a + b)` needs no `Neg` inside.
+        let c = if same.iter().all(|&j| terms[j].0 != a) { a.wrapping_neg() & w.mask } else { a };
+        let mut inner: Vec<(u64, T)> = same.iter().map(|&j| (if terms[j].0 == c { 1 } else { w.mask }, terms[j].1.clone())).collect();
+        positive_first(&mut inner, |x| x.0, w);
+        same.iter().for_each(|&j| done[j] = true);
+        outer.push((c, build_sum(&inner, 0, w)));
+    }
+    outer.extend(terms.iter().zip(&done).filter(|(_, d)| !**d).map(|(t, _)| t.clone()));
+    positive_first(&mut outer, |x| x.0, w);
+    build_sum(&outer, konst, w)
+}
+
+type ScoreFn<'a> = &'a dyn Fn(&[&BlockTerm], &[u64]) -> usize;
+
+/// Branch and bound over the choice of one term per block in `wide_blocks`.
+struct Search<'a> {
+    opts: &'a [Vec<BlockTerm>],
+    rest_min: Vec<usize>,
+    /// Leftover keys no block from this one on adds to.
+    done: Vec<Vec<usize>>,
+    conj_size: &'a [usize],
+    score: ScoreFn<'a>,
+    mask: u64,
+    best: (Vec<&'a BlockTerm>, usize),
+    steps: usize,
+}
+
+impl<'a> Search<'a> {
+    fn run(&mut self, e: usize, mut partial: usize, chosen: &mut Vec<&'a BlockTerm>, vals: &mut [u64]) {
+        partial += self.done[e].iter().filter(|&&q| vals[q] != 0).map(|&q| self.conj_size[q] + 1).sum::<usize>();
+        if self.steps == 0 || (partial + self.rest_min[e]).saturating_sub(2) >= self.best.1 {
+            return;
+        }
+        self.steps -= 1;
+        if e == self.opts.len() {
+            let sc = (self.score)(chosen, vals);
+            if sc < self.best.1 {
+                self.best = (chosen.clone(), sc);
+            }
+            return;
+        }
+        let opts = self.opts;
+        for o in &opts[e] {
+            apply(&o.adds, vals, self.mask, false);
+            chosen.push(o);
+            self.run(e + 1, partial + o.size + 1, chosen, vals);
+            chosen.pop();
+            apply(&o.adds, vals, self.mask, true);
+        }
+    }
+}
+
+/// `vals` less (or, undoing, plus) `adds`.
+fn apply(adds: &[(usize, u64)], vals: &mut [u64], mask: u64, undo: bool) {
+    for &(q, v) in adds {
+        vals[q] = if undo { vals[q].wrapping_add(v) } else { vals[q].wrapping_sub(v) } & mask;
+    }
+}
+
+/// The tables `f` over `k` variables, from point `q` on with the points below fixed in `f`,
+/// whose conjunction-basis coefficient times `c` is `target` at every point where that is given.
+#[allow(clippy::too_many_arguments)]
+fn block_functions(q: usize, f: &mut Vec<u64>, k: usize, target: &[Option<u64>], c: u64, w: &Ctx, steps: &mut usize, limit: usize, out: &mut Vec<Vec<u64>>) {
+    if q == 1 << k {
+        out.push(f.clone());
+        return;
+    }
+    if *steps == 0 || out.len() >= limit {
+        return;
+    }
+    let mut rest = 0i64;
+    let mut p = q;
+    while p != 0 {
+        p = (p - 1) & q;
+        let v = (f[p >> 6] >> (p & 63) & 1) as i64;
+        rest += if (q.count_ones() - p.count_ones()) % 2 == 0 { v } else { -v };
+    }
+    let ok = |v: u64| target[q].is_none_or(|t| c.wrapping_mul(v.wrapping_add(rest as u64)) & w.mask == t);
+    let ok = [ok(0), ok(1)];
+    if ok[0] && ok[1] {
+        *steps -= 1;
+    }
+    for v in (0..2u64).filter(|&v| ok[v as usize]) {
+        f[q >> 6] |= v << (q & 63);
+        block_functions(q + 1, f, k, target, c, w, steps, limit, out);
+        f[q >> 6] &= !(1u64 << (q & 63));
+    }
+}
+
+/// A short bitwise expression for the table `f` over `k` variables (bit `q` of word
+/// `q / 64` is the value at point `q`): `bool_expr` up to 6 variables; above, the smallest
+/// `g(A) op h(B)` over disjoint variable sets, `g` and `h` split again, which finds every
+/// read-once function; `None` for other functions over more than 6 variables.
+fn wide_bool_expr(f: &[u64], k: usize) -> Option<B> {
+    let neg = if k > MAX_LEAVES {
+        let g: Vec<u64> = f.iter().map(|x| !x).collect();
+        wide_bool_cost(&g, k).map(|(c, b)| (c + 1, B::Not(Arc::new(b))))
+    } else {
+        None
+    };
+    [wide_bool_cost(f, k), neg].into_iter().flatten().min_by_key(|x| x.0).map(|x| x.1)
+}
+
+fn wide_bool_cost(f: &[u64], k: usize) -> Option<(usize, B)> {
+    if k <= MAX_LEAVES {
+        return match bool_expr_canon(f[0] & table_full(k), k) {
+            BE::E(c, b) => Some((c, b)),
+            _ => None,
+        };
+    }
+    thread_local! {
+        static CACHE: std::cell::RefCell<crate::eval::FastMap<(Vec<u64>, usize), Option<(usize, B)>>> = Default::default();
+    }
+    if let Some(r) = CACHE.with(|c| c.borrow().get(&(f.to_vec(), k)).cloned()) {
+        return r;
+    }
+    let bit = |q: usize| f[q >> 6] >> (q & 63) & 1 == 1;
+    let full = (1usize << k) - 1;
+    // Index of `q`'s bits in `set` among the variables of `set`.
+    let pext = |q: usize, set: usize| (0..k).filter(|i| set >> i & 1 == 1).enumerate().fold(0usize, |acc, (j, i)| acc | (q >> i & 1) << j);
+    let pack = |v: &[bool]| {
+        let mut t = vec![0u64; v.len().div_ceil(64)];
+        v.iter().enumerate().filter(|x| *x.1).for_each(|(q, _)| t[q >> 6] |= 1 << (q & 63));
+        t
+    };
+    let not = |b: B| B::Not(Arc::new(b));
+    let vars = |set: usize| -> Vec<usize> { (0..k).filter(|i| set >> i & 1 == 1).collect() };
+    // Cost of a side, negated or not, whichever is smaller.
+    let side = |v: &[bool], set: usize| -> Option<(usize, B)> {
+        let kk = set.count_ones() as usize;
+        let direct = wide_bool_cost(&pack(v), kk);
+        let neg: Vec<bool> = v.iter().map(|x| !x).collect();
+        let negated = if kk > MAX_LEAVES { wide_bool_cost(&pack(&neg), kk).map(|(c, b)| (c + 1, not(b))) } else { None };
+        let best = [direct, negated].into_iter().flatten().min_by_key(|x| x.0)?;
+        Some((best.0, remap(&best.1, &vars(set))))
+    };
+    let f0 = bit(0);
+    let mut best: Option<(usize, B)> = None;
+    for a in (1..full).filter(|a| a & 1 == 1) {
+        let b = full ^ a;
+        let (na, nb) = (1usize << a.count_ones(), 1usize << b.count_ones());
+        let (mut any_a, mut all_a, mut zero_a) = (vec![false; na], vec![true; na], vec![false; na]);
+        let (mut any_b, mut all_b, mut zero_b) = (vec![false; nb], vec![true; nb], vec![false; nb]);
+        let idx: Vec<(usize, usize)> = (0..=full).map(|q| (pext(q, a), pext(q, b))).collect();
+        for (q, &(qa, qb)) in idx.iter().enumerate() {
+            let v = bit(q);
+            any_a[qa] |= v;
+            all_a[qa] &= v;
+            any_b[qb] |= v;
+            all_b[qb] &= v;
+            if qb == 0 {
+                zero_a[qa] = v;
+            }
+            if qa == 0 {
+                zero_b[qb] = v ^ f0;
+            }
+        }
+        for (op, g, h) in [(Op::And, &any_a, &any_b), (Op::Or, &all_a, &all_b), (Op::Xor, &zero_a, &zero_b)] {
+            let join = |x: bool, y: bool| match op {
+                Op::And => x & y,
+                Op::Or => x | y,
+                _ => x ^ y,
+            };
+            if !idx.iter().enumerate().all(|(q, &(qa, qb))| join(g[qa], h[qb]) == bit(q)) {
+                continue;
+            }
+            let Some((cg, eg)) = side(g, a) else { continue };
+            let Some((ch, eh)) = side(h, b) else { continue };
+            if best.as_ref().is_none_or(|(c, _)| cg + ch + 1 < *c) {
+                best = Some((cg + ch + 1, B::Bin(op, Arc::new(eg), Arc::new(eh))));
+            }
+        }
+    }
+    CACHE.with(|c| c.borrow_mut().insert((f.to_vec(), k), best.clone()));
+    best
+}
+
+/// `terms` with the first term of positive coefficient moved to the front, where it costs no `Neg`.
+fn positive_first<X>(terms: &mut [X], coef: impl Fn(&X) -> u64, w: &Ctx) {
+    if let Some(p) = terms.iter().position(|x| w.signed(coef(x)) > 0) {
+        terms[..=p].rotate_right(1);
+    }
+}
+
+/// Size of `b` with variable `i` standing for a leaf of `ls[vars[i]]` nodes.
+fn b_size(b: &B, vars: &[usize], ls: &[usize]) -> usize {
+    match b {
+        B::V(i) => ls[vars[*i]],
+        B::Not(x) => 1 + b_size(x, vars, ls),
+        B::Bin(_, x, y) => 1 + b_size(x, vars, ls) + b_size(y, vars, ls),
+    }
+}
+
+/// Size of `t` with placeholder `ph[i]` counting as `ls[i]` nodes.
+fn placeholder_size(t: &T, ph: &[T], ls: &[usize]) -> usize {
+    match t {
+        T::Var(_) => ph.iter().position(|p| p == t).map_or(1, |i| ls[i]),
+        T::Num(_) => 1,
+        T::Op(_, a) => 1 + a.iter().map(|x| placeholder_size(x, ph, ls)).sum::<usize>(),
+    }
+}
+
+/// `t` with placeholder `ph[i]` replaced by `lv[i]`.
+fn fill_placeholders(t: &T, ph: &[T], lv: &[T]) -> T {
+    match t {
+        T::Var(_) => ph.iter().position(|p| p == t).map_or_else(|| t.clone(), |i| lv[i].clone()),
+        T::Num(_) => t.clone(),
+        T::Op(op, a) => T::Op(*op, a.iter().map(|x| fill_placeholders(x, ph, lv)).collect()),
+    }
 }
 
 /// An arithmetic leaf `L` that is itself a linear MBA `ℓ` of other leaves (`a - d`,
@@ -3573,10 +4036,7 @@ fn recombine_products(t: &T, w: &Ctx) -> Option<T> {
 fn rewrite_linear(t: &T, w: &Ctx) -> T {
     let T::Op(op, args) = t else { return t.clone() };
     if kind(t, w) != Kind::Atom {
-        let best = match (simba(t, w), small_blocks(t, w)) {
-            (Some(s), Some(p)) => Some(if size(&p) < size(&s) { p } else { s }),
-            (s, p) => s.or(p),
-        };
+        let best = [simba(t, w), small_blocks(t, w), wide_blocks(t, w)].into_iter().flatten().reduce(|b, x| if size(&x) < size(&b) { x } else { b });
         if let Some(best) = best {
             return substitute_atoms(&best, w);
         }
