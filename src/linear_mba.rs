@@ -4461,12 +4461,30 @@ fn shift_cases_in(t: &T, w: &Ctx, depth: usize) -> T {
                 continue;
             }
             tried.push(r.clone());
-            if (0..cases).all(|k| holds(&r, k)) {
+            if !(0..cases).any(|k| differs(&case(t, k), &case(&r, k), w)) && (0..cases).all(|k| holds(&r, k)) {
                 best = r;
             }
         }
     }
     best
+}
+
+/// Whether `x` and `y` take different values at some of a few fixed points, read both as
+/// unsigned and as signed, so that they differ in either type.
+fn differs(x: &T, y: &T, w: &Ctx) -> bool {
+    let value = |v: &str, p: u64| {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (v, p).hash(&mut h);
+        h.finish()
+    };
+    [false, true].into_iter().all(|signed| {
+        let ty = crate::eval::NumType { bits: w.w, signed };
+        (0..4).any(|p| {
+            let env = |v: &str| value(v, p);
+            matches!((crate::eval::eval(x, ty, &env), crate::eval::eval(y, ty, &env)), (Some(a), Some(b)) if a != b)
+        })
+    })
 }
 
 fn has_var_prefix(t: &T, p: &str) -> bool {
