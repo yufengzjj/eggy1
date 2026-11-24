@@ -993,7 +993,6 @@ fn rules_egraph(egg: &str) -> Result<EGraph, Error> {
 }
 
 fn simplify_round_with(egg: &str, s: &str, cli: &Cli, keep_input: bool, opts: &sched::Options) -> Result<String, Error> {
-    let mut egraph = rules_egraph(egg)?;
     let (alt, other) = linear_mba::simplify_linear_with(s, width_of(&cli.num_type), opts);
     let mut roots: Vec<&str> = match alt != s {
         true if !keep_input => vec![&alt],
@@ -1007,6 +1006,17 @@ fn simplify_round_with(egg: &str, s: &str, cli: &Cli, keep_input: bool, opts: &s
     let (lets, roots) = table.show_shared(&ids, "shared-");
     let s = &roots[0];
     let union: String = roots[1..].iter().map(|o| format!("(union expr {o})")).collect();
+    // The run is deterministic, so a round with the program of an earlier one (often the
+    // last round, which confirms the fixpoint) gives that round's extraction.
+    thread_local! {
+        static RUNS: std::cell::RefCell<Vec<(String, String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let key = format!("{}\n{lets}\n{s}\n{union}", cli.iter_limit);
+    let hit = |(e, k, _): &&(String, String, String)| e == egg && *k == key;
+    if let Some(r) = RUNS.with(|c| c.borrow().iter().find(hit).map(|(_, _, r)| r.clone())) {
+        return Ok(r);
+    }
+    let mut egraph = rules_egraph(egg)?;
     let result = egraph.parse_and_run_program(
         None,
         &format!(
@@ -1036,7 +1046,7 @@ fn simplify_round_with(egg: &str, s: &str, cli: &Cli, keep_input: bool, opts: &s
             s, cli.iter_limit
         ),
     )?;
-    Ok(result
+    let result = result
         .last()
         .ok_or(ParseError(ast::ParseError(
             Span::Panic,
@@ -1044,7 +1054,15 @@ fn simplify_round_with(egg: &str, s: &str, cli: &Cli, keep_input: bool, opts: &s
         )))?
         .to_string()
         .trim()
-        .to_string())
+        .to_string();
+    RUNS.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= 4 {
+            c.remove(0);
+        }
+        c.push((egg.to_string(), key, result.clone()));
+    });
+    Ok(result)
 }
 
 /// Extract-and-restart driver: repeatedly saturate on a fresh e-graph seeded
