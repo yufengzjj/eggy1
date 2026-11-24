@@ -4627,7 +4627,7 @@ pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
     loop {
         let before = used.len();
         for (name, run) in PASSES {
-            let r = run(&best, &w);
+            let r = drop_identities(&run(&best, &w), &w);
             if size(&r) < size(&best) {
                 best = r;
                 used.push(name);
@@ -4689,13 +4689,15 @@ fn finish(t: &T, w: &Ctx) -> T {
     if size(&low) < size(&t) { low } else { t }
 }
 
-/// `t` without additions of 0 and multiplications by 1.
+/// `t` without additions of 0, multiplications by 1 and bitwise operations with their
+/// identity.
 fn drop_identities(t: &T, w: &Ctx) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     let a: Vec<T> = a.iter().map(|x| drop_identities(x, w)).collect();
     let is = |x: &T, k: u64| matches!(x, T::Num(v) if *v as u64 & w.mask == k);
     match (op, a.as_slice()) {
-        (Op::Add, [x, z]) | (Op::Add, [z, x]) | (Op::Sub, [x, z]) if is(z, 0) => x.clone(),
+        (Op::Add | Op::Or | Op::Xor, [x, z]) | (Op::Add | Op::Or | Op::Xor, [z, x]) | (Op::Sub, [x, z]) if is(z, 0) => x.clone(),
+        (Op::And, [x, m]) | (Op::And, [m, x]) if is(m, w.mask) => x.clone(),
         (Op::Mul, [x, o]) | (Op::Mul, [o, x]) if is(o, 1) => x.clone(),
         _ => T::Op(*op, a),
     }

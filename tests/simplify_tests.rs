@@ -2119,3 +2119,16 @@ fn polish_join_linear_stays_fast() {
         assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
     }
 }
+
+/// A polish pass that rebuilds a sum can leave an addition of 0 behind.
+#[test]
+fn polish_drops_added_zero() {
+    check(
+        "u8",
+        &[(
+            "(((((((0x5 * ((c & f) | (f & c))) - (0x2 * ((h ^ h) & (b & h)))) + (0x2 * (((-(d) - 0x1) + ((((((~((((j | b) ^ g) | h)) | f) - (~((((j | b) ^ g) | h)) & f)) + ((e | i) - (e & i))) - ((~((((j | b) ^ g) | h)) ^ f) & (e ^ i))) + ((a + c) - (a | c))) - (((~((((j | b) ^ g) | h)) ^ f) | (e ^ i)) | (a & c)))) - (~(d) & (((~((((j | b) ^ g) | h)) ^ f) | (e ^ i)) & (a & c)))))) - (0x2 * ((((h + f) - (h & f)) + ((f + f) - (f | f))) - ((h | f) | (f & f))))) + (0x2 * ((((h | h) - (h & h)) + ((b + h) - (b | h))) - ((h ^ h) | (b & h))))) - (0x5 * ((((c + f) - (c | f)) + ((f + c) - (f | c))) - ((c & f) & (f & c))))) + (0x2 * ((h | f) & (f & f))))",
+            &["(2 * (~d | ((((((j | b) ^ g) | h) ^ ~f) | (e ^ i)) & (a & c))))"],
+            10,
+        )],
+    );
+}
