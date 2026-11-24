@@ -95,39 +95,39 @@ fn build_table(n: usize, w: &Ctx) -> Table {
     let vars: Vec<String> = (0..n).map(|j| j.to_string()).collect();
     let mut by_fp: HashMap<Fp, T> = HashMap::new();
     let mut levels: Vec<Vec<(T, Fp)>> = vec![Vec::new()];
-    let mut add = |t: T, levels: &mut Vec<Vec<(T, Fp)>>, s: usize| {
-        let fp = values(&t, &vars, &pts, w).unwrap();
+    let mut add = |fp: Fp, t: &dyn Fn() -> T, level: &mut Vec<(T, Fp)>| {
         if let std::collections::hash_map::Entry::Vacant(e) = by_fp.entry(fp) {
+            let t = t();
             e.insert(t.clone());
-            levels[s].push((t, fp));
+            level.push((t, fp));
         }
     };
-    levels.push(Vec::new());
+    let mut first = Vec::new();
     for j in 0..n {
-        add(T::Var(j.to_string()), &mut levels, 1);
+        let t = T::Var(j.to_string());
+        add(values(&t, &vars, &pts, w).unwrap(), &|| t.clone(), &mut first);
     }
-    add(T::Num(1), &mut levels, 1);
-    add(T::Num(w.signed(w.mask)), &mut levels, 1);
+    for k in [1, w.signed(w.mask)] {
+        add([k as u64 & w.mask; POINTS], &|| T::Num(k), &mut first);
+    }
+    levels.push(first);
+    let m = w.mask;
     for s in 2..=MAX_SIZE {
-        levels.push(Vec::new());
-        let mut new = Vec::new();
-        for (t, _) in &levels[s - 1] {
-            for op in [Op::Not, Op::Neg] {
-                new.push(T::Op(op, vec![t.clone()]));
-            }
+        let mut level = Vec::new();
+        for (t, fp) in &levels[s - 1] {
+            add(fp.map(|x| !x & m), &|| T::Op(Op::Not, vec![t.clone()]), &mut level);
+            add(fp.map(|x| x.wrapping_neg() & m), &|| T::Op(Op::Neg, vec![t.clone()]), &mut level);
         }
         for a in 1..s - 1 {
-            for (x, _) in &levels[a] {
-                for (y, _) in &levels[s - 1 - a] {
+            for (x, fx) in &levels[a] {
+                for (y, fy) in &levels[s - 1 - a] {
                     for op in [Op::Add, Op::Sub, Op::And, Op::Or, Op::Xor] {
-                        new.push(T::Op(op, vec![x.clone(), y.clone()]));
+                        add(op_vals(op, fx, fy, m), &|| T::Op(op, vec![x.clone(), y.clone()]), &mut level);
                     }
                 }
             }
         }
-        for t in new {
-            add(t, &mut levels, s);
-        }
+        levels.push(level);
     }
     Table { by_fp }
 }
