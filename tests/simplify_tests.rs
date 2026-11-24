@@ -1573,6 +1573,13 @@ fn leaf_group_rebuilt_alone() {
     );
 }
 
+/// Ensia's affine wrapper `A·(L ^ (y | M)) + D` with `L` linear in `y`: relating `L` with
+/// `μ = A` cancels it, although `y` has another coefficient on the top bit.
+#[test]
+fn affine_wrapper_relate() {
+    check("u32", &[("((0x7c58f033 * (((0xb5947505 * y) + 0x6274dc29) ^ (y | 0x7fffffff))) + 0xb21f3c5f)", &["((0x7fffffff & y) + 1)"], 10)]);
+}
+
 /// A bitwise function of 6 leaves split as `g(A) | h(B)`.
 #[test]
 fn six_leaf_decomposition() {

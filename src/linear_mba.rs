@@ -1183,12 +1183,24 @@ fn relate_region(t: &T, w: &Ctx) -> Option<T> {
     };
     let derive = |reg: &T, l: &T| derive_all(reg, l).into_iter().max_by_key(|f| f.1).map(|f| f.0);
     let derived: Vec<Option<i64>> = arith.iter().map(|&i| derive(t, &lv[i])).collect();
+    // The `μ` that cancels `v` at bit 0, where a mask leaves the leaves of `L` a different
+    // coefficient per bit: in `A·(L ^ (y | 0x7fffffff))`, `μ = A`.
+    let ty = crate::eval::NumType { bits: w.w, signed: false };
+    let cancel: Vec<Option<i64>> = (0..arith.len())
+        .map(|k| {
+            let s = crate::lowbits::replace(t, std::slice::from_ref(&lv[arith[k]]), std::slice::from_ref(&ph[k]));
+            let T::Var(name) = &ph[k] else { unreachable!("placeholders are variables") };
+            let at = |x: u64| crate::eval::eval(&s, ty, &|v: &str| if v == name { x } else { 0 });
+            let mu = w.signed(at(0)?.wrapping_sub(at(1)?) & w.mask);
+            (![0, 1, -1, 2, -2].contains(&mu) && Some(mu) != derived[k]).then_some(mu)
+        })
+        .collect();
     let mut combos: Vec<Vec<(usize, i64)>> = Vec::new();
     for k in 0..arith.len() {
         if !same[k].is_empty() {
             combos.push(vec![(k, 0)]);
         }
-        for mu in [1, -1, 2, -2].into_iter().chain(derived[k]) {
+        for mu in [1, -1, 2, -2].into_iter().chain(derived[k]).chain(cancel[k]) {
             combos.push(vec![(k, mu)]);
         }
         for k2 in k + 1..arith.len() {
