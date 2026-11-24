@@ -1,6 +1,50 @@
 //! Egglog `Expr` terms as a tree, with concrete evaluation that matches the
 //! `wrapping-<op>-<type>` primitives in `lib.rs`.
 
+/// Multiply-rotate hasher (as in rustc's FxHash) for the in-memory memo tables, which
+/// hash many large terms and never need resistance to chosen keys.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct FastHasher(u64);
+
+impl FastHasher {
+    fn add(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl std::hash::Hasher for FastHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            self.add(u64::from_le_bytes(c.try_into().unwrap()));
+        }
+        let rest = chunks.remainder();
+        if !rest.is_empty() {
+            let mut b = [0u8; 8];
+            b[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_le_bytes(b) ^ (rest.len() as u64) << 56);
+        }
+    }
+    fn write_u8(&mut self, v: u8) {
+        self.add(v as u64);
+    }
+    fn write_u32(&mut self, v: u32) {
+        self.add(v as u64);
+    }
+    fn write_u64(&mut self, v: u64) {
+        self.add(v);
+    }
+    fn write_usize(&mut self, v: usize) {
+        self.add(v as u64);
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+pub(crate) type FastMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<FastHasher>>;
+pub(crate) type FastSet<K> = std::collections::HashSet<K, std::hash::BuildHasherDefault<FastHasher>>;
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Term {
     Num(i64),

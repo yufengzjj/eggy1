@@ -54,7 +54,7 @@ impl Ctx {
     }
 }
 
-type Memo<K, V> = std::sync::Mutex<std::collections::HashMap<K, (V, bool)>>;
+type Memo<K, V> = std::sync::Mutex<crate::eval::FastMap<K, (V, bool)>>;
 type RebuiltKey = (Vec<u64>, Vec<(usize, bool)>, u64, u32);
 type GroupedKey = (Vec<(Vec<u64>, u64)>, Vec<T>, u64, u32);
 type PairKey = (u32, Vec<(Vec<u64>, u64)>, u64, Vec<T>, usize);
@@ -63,10 +63,10 @@ struct State {
     simba_memo: Memo<(u32, usize, T), Option<T>>,
     rewritten: Memo<(u32, T), T>,
     related: Memo<(u32, usize, usize, T), T>,
-    rebuilt: std::sync::Mutex<std::collections::HashMap<RebuiltKey, (Vec<(u64, T)>, u64)>>,
-    grouped: std::sync::Mutex<std::collections::HashMap<GroupedKey, T>>,
+    rebuilt: std::sync::Mutex<crate::eval::FastMap<RebuiltKey, (Vec<(u64, T)>, u64)>>,
+    grouped: std::sync::Mutex<crate::eval::FastMap<GroupedKey, T>>,
     low_values: crate::lowbits::ValuesMemo,
-    pairs: std::sync::Mutex<std::collections::HashMap<PairKey, Vec<T>>>,
+    pairs: std::sync::Mutex<crate::eval::FastMap<PairKey, Vec<T>>>,
     /// Most leaves of a region `relate_region` tries.
     relate_leaves: AtomicUsize,
     /// `rewrite` calls left before it returns its input unchanged.
@@ -373,7 +373,7 @@ fn table_full(n: usize) -> u64 {
 /// `bool_expr` over variables `0..n`, cached.
 fn bool_expr_canon(tt: u64, n: usize) -> BE {
     thread_local! {
-        static CACHE: std::cell::RefCell<std::collections::HashMap<(u64, usize), BE>> = Default::default();
+        static CACHE: std::cell::RefCell<crate::eval::FastMap<(u64, usize), BE>> = Default::default();
     }
     if let Some(r) = CACHE.with(|c| c.borrow().get(&(tt, n)).cloned()) {
         return r;
@@ -2077,7 +2077,7 @@ fn semi_split(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, limit: usi
         }
     };
     let own: Vec<Vec<u64>> = parts.iter().map(|(gs, _)| own_consts(gs, w)).collect();
-    let mut memo: std::collections::HashMap<(usize, u64), Option<T>> = Default::default();
+    let mut memo: crate::eval::FastMap<(usize, u64), Option<T>> = Default::default();
     for last in 0..parts.len() {
         let others: Vec<usize> = (0..parts.len()).filter(|&k| k != last).collect();
         if others.iter().any(|&k| own[k].is_empty()) || others.iter().map(|&k| own[k].len()).product::<usize>() > 64 {
@@ -2220,7 +2220,7 @@ struct Shapes {
     how: Vec<Shape>,
     /// `levels[s]`: the entries of size `s`.
     levels: Vec<std::ops::Range<usize>>,
-    seen: std::collections::HashSet<[u64; 4]>,
+    seen: crate::eval::FastSet<[u64; 4]>,
 }
 
 fn one(f: u8) -> [u64; 4] {
@@ -2400,7 +2400,7 @@ fn shape_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, mut 
         // Table `f` fits when `c·(f(q) - f(0)) = g(q)` at every point: with `f(0) = 0`
         // the points where `g = c` and not 0 need 1, those where `g = 0` and not `c`
         // need 0; with `f(0) = 1` the same with `-c` and the complement.
-        let mut memo = std::collections::HashMap::new();
+        let mut memo = crate::eval::FastMap::default();
         let mut accept = |&(g, rest_mask): &(&Vec<u64>, u64)| {
             let is = |q: usize, v: u64| (v ^ g[q]) & rest_mask == 0;
             let key: Vec<(usize, usize)> = [c, c.wrapping_neg()]
@@ -2515,7 +2515,7 @@ fn pair_candidates_uncached(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &C
     let group_of: Vec<usize> = (0..w.w).map(|j| groups.iter().position(|(_, mask)| mask >> j & 1 == 1).unwrap_or(0)).collect();
     // fits[id][s2]: the entries of size s2 that meet every group's acc2, with `fit_ids`
     // numbering the acc2; many shapes B1 and coefficient pairs give the same acc2.
-    let mut fit_ids: std::collections::HashMap<Vec<[u64; 4]>, usize> = Default::default();
+    let mut fit_ids: crate::eval::FastMap<Vec<[u64; 4]>, usize> = Default::default();
     let mut fits: Vec<(Vec<[u64; 4]>, Vec<Option<Vec<usize>>>)> = Vec::new();
     for (a, &c1) in scales.iter().enumerate() {
         for &c2 in &scales[a..] {
@@ -2592,7 +2592,7 @@ fn pair_candidates_uncached(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &C
             let other = (2..).map(|v: u64| v & m).find(|&v| v != c1 && v != c2).unwrap();
             // Whether some choice of tables at 0 makes r = 0, per group's set of
             // reachable (f1(0), f2(0)); None when pick_bits gives up.
-            let mut zero_r: std::collections::HashMap<Vec<u8>, Option<bool>> = Default::default();
+            let mut zero_r: crate::eval::FastMap<Vec<u8>, Option<bool>> = Default::default();
             // Per shape B1: its acc2's id in `fits`, None when it misses some group.
             let mut fit_of: Vec<Option<Option<usize>>> = Vec::new();
             'sizes: for s in 2..=top {
@@ -2847,7 +2847,7 @@ fn groups_from(at: &dyn Fn(u32, usize) -> u64, n: usize, w: &Ctx) -> Option<(u64
 }
 
 fn semi_linear_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, cands: &mut Vec<T>) {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::eval::FastSet::default();
     for groups in half_flips(groups, w) {
         for gs in high_merges(&groups, w) {
             let mut key: Vec<(Vec<u64>, u64)> = gs.clone();
@@ -4329,7 +4329,7 @@ pub(crate) fn over_const_bitwise(t: &T, w: &Ctx) -> T {
 /// few leaves rebuilds exactly, `6·(t & u & A & B) - 3·(A ^ (t & ~(B & u)))` is
 /// `3·((t & u & B) - (t ^ A))` with `A = y ^ (u + w)`, `B = y ^ w`.
 pub(crate) fn over_shared_bitwise(t: &T, w: &Ctx) -> T {
-    fn count(t: &T, seen: &mut std::collections::HashMap<T, usize>) {
+    fn count(t: &T, seen: &mut crate::eval::FastMap<T, usize>) {
         let T::Op(op, a) = t else { return };
         if matches!(op, Op::And | Op::Or | Op::Xor) && size(t) >= 3 {
             let n = seen.entry(t.clone()).or_insert(0);
@@ -4340,7 +4340,7 @@ pub(crate) fn over_shared_bitwise(t: &T, w: &Ctx) -> T {
         }
         a.iter().for_each(|x| count(x, seen));
     }
-    let mut seen = std::collections::HashMap::new();
+    let mut seen = crate::eval::FastMap::default();
     count(t, &mut seen);
     over_subterms(t, w, &|x| seen.get(x).is_some_and(|&n| n > 1))
 }

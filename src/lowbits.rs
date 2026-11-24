@@ -7,7 +7,6 @@
 
 use crate::eval::{Op, Term as T, size};
 use crate::linear_mba::Ctx;
-use std::collections::HashMap;
 
 /// Most leaf bits enumerated for one subterm, and for a proof in context.
 const MAX_BITS: u32 = 18;
@@ -231,7 +230,7 @@ fn assignments(n: usize, m: u32) -> impl Iterator<Item = Vec<u64>> {
 
 /// `Pass::values` results of one pre-pass run, with the budget each one cost.
 #[derive(Default)]
-pub(crate) struct ValuesMemo(std::sync::Mutex<HashMap<(u32, T, u32), (u64, Option<Vec<u64>>, Prog)>>);
+pub(crate) struct ValuesMemo(std::sync::Mutex<crate::eval::FastMap<(u32, T, u32), (u64, Option<Vec<u64>>, Prog)>>);
 
 fn distinct_values(prog: &Prog, n: usize, m: u32) -> Option<Vec<u64>> {
     let mut out = Vec::new();
@@ -256,7 +255,7 @@ struct Cand {
 
 struct Pass<'a> {
     w: &'a Ctx,
-    cands: HashMap<T, Cand>,
+    cands: crate::eval::FastMap<T, Cand>,
     budget: u64,
     wide: u64,
     refine: u64,
@@ -789,7 +788,7 @@ pub(crate) fn simplify_rebuilt(t: &T, w: &Ctx) -> T {
 }
 
 fn simplify_with(t: &T, w: &Ctx, cut: bool) -> T {
-    let mut p = Pass { w, cands: HashMap::new(), budget: BUDGET, wide: WIDE_BUDGET, refine: REFINE_BUDGET, cut };
+    let mut p = Pass { w, cands: Default::default(), budget: BUDGET, wide: WIDE_BUDGET, refine: REFINE_BUDGET, cut };
     let (r, _) = p.fold(t);
     if p.cands.is_empty() { r } else { p.context(&r) }
 }
@@ -942,7 +941,7 @@ mod tests {
         for k in 0..500 {
             let ty = NumType { bits: 8, signed: k % 2 == 1 };
             let t = if k < 200 { random_term(&mut h, 4) } else { context_term(&mut h) };
-            let mut p = Pass { w: &w, cands: HashMap::new(), budget: BUDGET, wide: WIDE_BUDGET, refine: REFINE_BUDGET, cut: true };
+            let mut p = Pass { w: &w, cands: Default::default(), budget: BUDGET, wide: WIDE_BUDGET, refine: REFINE_BUDGET, cut: true };
             let folded = p.fold(&t).0;
             let r = p.context(&folded);
             if r == t {

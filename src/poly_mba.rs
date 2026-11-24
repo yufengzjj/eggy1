@@ -44,9 +44,9 @@ const MAX_MASKED_SIZE: usize = 20;
 struct Expansion<'a> {
     w: &'a Ctx,
     leaves: Vec<T>,
-    built: std::cell::RefCell<std::collections::HashMap<(Poly, usize), T>>,
+    built: std::cell::RefCell<crate::eval::FastMap<(Poly, usize), T>>,
     builds: std::cell::Cell<usize>,
-    linear: std::cell::RefCell<std::collections::HashMap<Poly, T>>,
+    linear: std::cell::RefCell<crate::eval::FastMap<Poly, T>>,
     /// When not empty, the bit sets on which every constant of a bitwise operation is
     /// constant; bitwise terms with constants then expand per set (`masked`).
     atoms: Vec<u64>,

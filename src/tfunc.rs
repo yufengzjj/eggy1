@@ -7,7 +7,7 @@
 
 use crate::eval::{Op, Term as T, size};
 use crate::linear_mba::Ctx;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 const MAX_VARS: usize = 3;
@@ -79,7 +79,7 @@ fn values(t: &T, vars: &[String], pts: &[[u64; MAX_VARS]; POINTS], w: &Ctx) -> O
 }
 
 struct Table {
-    by_fp: HashMap<Fp, T>,
+    by_fp: crate::eval::FastMap<Fp, T>,
 }
 
 fn table(n: usize, w: &Ctx) -> &'static Table {
@@ -93,7 +93,7 @@ fn table(n: usize, w: &Ctx) -> &'static Table {
 fn build_table(n: usize, w: &Ctx) -> Table {
     let pts = points(w);
     let vars: Vec<String> = (0..n).map(|j| j.to_string()).collect();
-    let mut by_fp: HashMap<Fp, T> = HashMap::new();
+    let mut by_fp: crate::eval::FastMap<Fp, T> = Default::default();
     let mut levels: Vec<Vec<(T, Fp)>> = vec![Vec::new()];
     let mut add = |fp: Fp, t: &dyn Fn() -> T, level: &mut Vec<(T, Fp)>| {
         if let std::collections::hash_map::Entry::Vacant(e) = by_fp.entry(fp) {
@@ -265,7 +265,7 @@ pub(crate) fn equal_low(f: &T, g: &T, vars: &[String], n: usize, m: u32, extra: 
     let (fo, go) = (c.compile(f, vars, w)?, c.compile(g, vars, w)?);
     let mut v = vec![false; c.gates.len()];
     let lm = (1u64 << m) - 1;
-    let mut states: HashSet<u128> = HashSet::new();
+    let mut states: crate::eval::FastSet<u128> = Default::default();
     let mut high: Option<Vec<u64>> = None;
     for p in 0u64..1 << (n as u32 * m) {
         let low: Vec<u64> = (0..n).map(|j| p >> (j as u32 * m) & lm).collect();
@@ -288,7 +288,7 @@ pub(crate) fn equal_low(f: &T, g: &T, vars: &[String], n: usize, m: u32, extra: 
     }
     let high = high.unwrap_or_default();
     for i in m..w.w {
-        let mut next = HashSet::new();
+        let mut next = crate::eval::FastSet::default();
         for &s in &states {
             for inp in 0..1usize << n {
                 let ns = c.step(s, i, |j| if j < n { inp >> j & 1 == 1 } else { high[j - n] >> i & 1 == 1 }, &mut v);
