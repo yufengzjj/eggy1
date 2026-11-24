@@ -2132,3 +2132,13 @@ fn polish_drops_added_zero() {
         )],
     );
 }
+
+/// A `^` with an operand that has only the top bit is a `+`, so the obfuscated
+/// permutation polynomial joins the linear region (u8).
+#[test]
+fn xor_with_top_bit_product() {
+    check(
+        "u8",
+        &[("0xd * (((0x45*x) + (0xcf*y)) ^ (0x80*((y*y) ^ (x*x))))", &["(x + (3 * y))", "((3 * y) + x)"], 10)],
+    );
+}

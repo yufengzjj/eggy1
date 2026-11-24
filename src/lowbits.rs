@@ -312,6 +312,13 @@ impl Pass<'_> {
         if let Some(r) = known_bitwise(*op, &node, &infos, w) {
             return (r, i);
         }
+        // `a ^ b = a + b - 2·(a & b)`, and `2·(a & b) = 0` when `b` has only the top bit. Only
+        // for a product `b`: a shifted `b` (Loki) rebuilds better as it is.
+        if let T::Op(Op::Xor, a) = &node
+            && a.iter().zip(&infos).any(|(x, i)| matches!(x, T::Op(Op::Mul, _)) && i.k0 & w.mask >> 1 == w.mask >> 1)
+        {
+            return (T::Op(Op::Add, a.clone()), i);
+        }
         let node = masked_add_as_or(node, w);
         if i.det && (i.shift || i.full <= MAX_PRODUCT_BITS && has_product(&node)) && size(&node) <= MAX_TRY {
             let m = i.full;
