@@ -1276,6 +1276,8 @@ const UNCLUSTERED_AFTER: usize = 1024;
 
 /// Most arithmetic leaves `relate_region` tries.
 const MAX_RELATED: usize = 4;
+/// Most further arithmetic leaves `relate_region` tries that the region also has written out.
+const MAX_WRITTEN_OUT: usize = 2;
 /// Largest product leaf `relate_region` tries when it is not an operand of a bitwise operation.
 const MAX_FREE_PRODUCT: usize = 20;
 
@@ -1307,10 +1309,19 @@ fn relate_region(t: &T, w: &Ctx) -> Option<T> {
     let mut operands = Vec::new();
     bit_operands(t, w, &mut operands);
     let vars: Vec<Vec<String>> = lv.iter().map(crate::eval::vars).collect();
-    let arith: Vec<usize> = (0..lv.len())
+    let candidates: Vec<usize> = (0..lv.len())
         .filter(|&i| matches!(&lv[i], T::Op(..)) && kind(&lv[i], w) != Kind::Bit && (operands.contains(&lv[i]) || size(&lv[i]) <= MAX_FREE_PRODUCT) && (0..lv.len()).any(|j| j != i && vars[j].iter().any(|v| vars[i].contains(v))))
-        .take(MAX_RELATED)
         .collect();
+    let mut arith: Vec<usize> = candidates.iter().copied().take(MAX_RELATED).collect();
+    // Past those, leaves written out in the region as well, whose `μ·(v - L)` cancels terms.
+    if candidates.len() > MAX_RELATED {
+        let own = region_terms(t, w).0;
+        let written_out = |l: &T| {
+            let (lt, _) = region_terms(l, w);
+            lt.len() > 1 && lt.iter().all(|(_, x)| own.iter().any(|(_, y)| x == y))
+        };
+        arith.extend(candidates[MAX_RELATED..].iter().copied().filter(|&i| kind(&lv[i], w) == Kind::Lin && written_out(&lv[i])).take(MAX_WRITTEN_OUT));
+    }
     if arith.is_empty() {
         return None;
     }
@@ -1424,7 +1435,10 @@ fn relate_region(t: &T, w: &Ctx) -> Option<T> {
     let (semi, wide) = (has_const_bitwise(t, w), lv.len() > MAX_LEAVES);
     let base_used = if semi || wide { Some(semi_used(t).unwrap_or(lv.len())) } else { None };
     let base_monos = if semi { None } else { crate::poly_mba::monomials(t, w) };
-    let mut tried: Vec<(Option<usize>, Option<usize>, Vec<(usize, i64)>, T)> = Vec::new();
+    // In a wide region, also those where `μ·L` cancels terms of the region, as in
+    // `L + (~L & B)` with `L` written out there: no leaf goes, but the rebuild is smaller.
+    let base_terms = wide.then(|| region_terms(t, w).0.len());
+    let mut tried: Vec<(Option<usize>, Option<usize>, Option<usize>, Vec<(usize, i64)>, T)> = Vec::new();
     for combo in combos {
         let (mut from, mut to) = (Vec::new(), Vec::new());
         for &(k, _) in &combo {
@@ -1448,17 +1462,20 @@ fn relate_region(t: &T, w: &Ctx) -> Option<T> {
             Some(b) => crate::poly_mba::monomials(&s, w).filter(|&u| u <= b),
             None => (!wide).then_some(0),
         };
-        if by_used.is_some() || by_monos.is_some() {
-            tried.push((by_used, by_monos, combo, s));
+        let by_terms = base_terms.map(|_| region_terms(&s, w).0.len()).filter(|&n| base_terms.is_some_and(|b| n < b));
+        if by_used.is_some() || by_monos.is_some() || by_terms.is_some() {
+            tried.push((by_used, by_monos, by_terms, combo, s));
         }
     }
     let low_used = tried.iter().filter_map(|c| c.0).min();
     let low_monos = tried.iter().filter_map(|c| c.1).min();
-    if low_used.is_none() && low_monos.is_none() {
+    let low_terms = tried.iter().filter_map(|c| c.2).min();
+    if low_used.is_none() && low_monos.is_none() && low_terms.is_none() {
         return None;
     }
     let mut best: Option<T> = None;
-    for (_, _, combo, s) in tried.into_iter().filter(|c| (c.0.is_some() && c.0 == low_used) || (c.1.is_some() && c.1 == low_monos)) {
+    let lowest = |c: &(Option<usize>, Option<usize>, Option<usize>, Vec<(usize, i64)>, T)| (c.0.is_some() && c.0 == low_used) || (c.1.is_some() && c.1 == low_monos) || (c.2.is_some() && c.2 == low_terms);
+    for (_, _, by_terms, combo, s) in tried.into_iter().filter(lowest) {
         let mut slv = Vec::new();
         leaves(&s, w, &mut slv);
         let dropped = if wide && slv.len() > MAX_LEAVES { drop_leaves(&s, &slv, w) } else { None };
@@ -1478,8 +1495,8 @@ fn relate_region(t: &T, w: &Ctx) -> Option<T> {
         } else {
             (false, r)
         };
-        // In a wide region only results where leaves cancelled: others shift extraction for little gain.
-        if (!wide || fewer) && best.as_ref().is_none_or(|b| size(&r) < size(b)) {
+        // In a wide region only results where leaves or terms cancelled: others shift extraction for little gain.
+        if (!wide || fewer || (by_terms.is_some() && size(&r) < size(t))) && best.as_ref().is_none_or(|b| size(&r) < size(b)) {
             best = Some(r);
         }
     }
