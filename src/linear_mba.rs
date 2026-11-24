@@ -4016,6 +4016,8 @@ fn low_multiplier(c: u64, y: &T, w: &Ctx) -> u64 {
     if w.signed(low).unsigned_abs() <= w.signed(high).unsigned_abs() { low } else { high }
 }
 
+/// Most `rewrite` calls the rebuild of the input with unified operands makes; past them it is dropped.
+const UNIFIED_REWRITES: usize = 128;
 /// Most leaves of an arithmetic operand that `unify_operands` compares by its values.
 const MAX_UNIFY_LEAVES: usize = 8;
 
@@ -4033,7 +4035,11 @@ struct Unifier<'a> {
     best: Vec<(usize, T, bool)>,
     of: crate::eval::FastMap<T, (usize, bool)>,
     built: Vec<Option<T>>,
-    changed: bool,
+    /// The first member of each class in each region, regions of products joined.
+    first: crate::eval::FastMap<(usize, usize), (T, bool)>,
+    regions: usize,
+    /// Whether two members of a class written differently share a region.
+    shared: bool,
 }
 
 impl Unifier<'_> {
@@ -4050,11 +4056,19 @@ impl Unifier<'_> {
 
     /// `t` with each arithmetic operand of a bitwise operation replaced by `#c<class>`, or
     /// `~#c<class>` for the complement of the class key.
-    fn classify(&mut self, t: &T, in_bit: bool) -> T {
+    fn classify(&mut self, t: &T, in_bit: bool, region: usize) -> T {
         let T::Op(op, a) = t else { return t.clone() };
         let inner = self.inner(t, in_bit);
-        let abs = T::Op(*op, a.iter().map(|x| self.classify(x, inner && !self.is_operand(t, in_bit))).collect());
-        if !self.is_operand(t, in_bit) {
+        let operand = self.is_operand(t, in_bit);
+        let product = matches!(op, Op::Mul) && !a.iter().any(|x| matches!(x, T::Num(_)));
+        let sub = if operand || (kind(t, self.w) == Kind::Atom && !product) {
+            self.regions += 1;
+            self.regions
+        } else {
+            region
+        };
+        let abs = T::Op(*op, a.iter().map(|x| self.classify(x, inner && !operand, sub)).collect());
+        if !operand {
             return abs;
         }
         let w = self.w;
@@ -4077,11 +4091,14 @@ impl Unifier<'_> {
             self.built.push(None);
         } else {
             let b = &mut self.best[id];
-            if b.1 != *t || b.2 != flip {
-                self.changed = true;
-                if s < b.0 {
-                    *b = (s, t.clone(), flip);
-                }
+            if (b.1 != *t || b.2 != flip) && s < b.0 {
+                *b = (s, t.clone(), flip);
+            }
+        }
+        match self.first.entry((id, region)) {
+            std::collections::hash_map::Entry::Occupied(e) => self.shared |= *e.get() != (t.clone(), flip),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert((t.clone(), flip));
             }
         }
         self.of.insert(t.clone(), (id, flip));
@@ -4118,9 +4135,9 @@ impl Unifier<'_> {
 /// proves it) written as the smallest of them or its `~`, so that the regions around
 /// them share the leaf: `(a & (~x - z)) + ((~y - w) & (x + z))` with `a = y + w`.
 pub(crate) fn unify_operands(t: &T, w: &Ctx) -> T {
-    let mut u = Unifier { w, classes: Default::default(), best: Vec::new(), of: Default::default(), built: Vec::new(), changed: false };
-    u.classify(t, false);
-    if !u.changed {
+    let mut u = Unifier { w, classes: Default::default(), best: Vec::new(), of: Default::default(), built: Vec::new(), first: Default::default(), regions: 0, shared: false };
+    u.classify(t, false, 0);
+    if !u.shared {
         return t.clone();
     }
     u.replace(t, false)
@@ -4848,11 +4865,27 @@ fn simplify_linear_uncached(egg: &str, w: u32, opts: &crate::sched::Options) -> 
     };
     let r = run(&t, true);
     // Unified operands let the regions around them share leaves, but the rebuild of the
-    // input as written is sometimes smaller.
+    // input as written is sometimes smaller. The second rebuild redoes only the regions
+    // unification changed, and is dropped once it needs `UNIFIED_REWRITES` rewrites.
     let unified = unify_operands(&t, &w);
     let r = if unified != t {
-        let u = run(&unified, true);
-        if size(&u) < size(&r) { u } else { r }
+        let left = w.st.rewrites_left.load(Relaxed);
+        w.limit_rewrites(UNIFIED_REWRITES);
+        let within = || w.st.rewrites_left.load(Relaxed) > 0;
+        let u = match crate::tfunc::replacement(&unified, &w) {
+            Some(u) => Some(u),
+            None => Some(rewrite(&unified, &w))
+                .filter(|_| within())
+                .map(|u| relate(&cluster_regions(&u, &w, false), &w))
+                .filter(|_| within())
+                .map(|u| crate::tfunc::simplify(&u, &w)),
+        };
+        let used = UNIFIED_REWRITES - w.st.rewrites_left.load(Relaxed);
+        w.limit_rewrites(left.saturating_sub(used));
+        match u {
+            Some(u) if size(&u) < size(&r) => u,
+            _ => r,
+        }
     } else {
         r
     };
