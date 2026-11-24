@@ -789,7 +789,8 @@ fn bit_tables(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<usize>, Vec<Vec<u64>
     let mut ks = Vec::new();
     masks(t, lv, &mut ks);
     let mut bits: Vec<u32> = Vec::new();
-    let column = |j: u32| ks.iter().map(|k| k >> j & 1 == 1).collect::<Vec<_>>();
+    let columns: Vec<Vec<bool>> = (0..w.w).map(|j| ks.iter().map(|k| k >> j & 1 == 1).collect()).collect();
+    let column = |j: u32| &columns[j as usize];
     for j in 0..if ks.is_empty() { 1 } else { w.w } {
         if bits.iter().all(|&b| column(b) != column(j)) {
             bits.push(j);
