@@ -3837,7 +3837,11 @@ fn split_points(t: &T, w: &Ctx) -> Vec<(T, u32)> {
         let T::Op(op, a) = t else { return };
         if *op == Op::Mul && !a.iter().any(|x| matches!(x, T::Num(_))) {
             for f in a {
-                let bits = crate::lowbits::unknown_bits(f, w);
+                let g = match f {
+                    T::Op(Op::Neg, b) => &b[0],
+                    _ => f,
+                };
+                let bits = crate::lowbits::unknown_bits(g, w);
                 if bits != 0 && bits.count_ones() <= 2 {
                     let k = bits.trailing_zeros();
                     let s = core(f);
@@ -4017,6 +4021,109 @@ fn over_subterms(t: &T, w: &Ctx, pick: &dyn Fn(&T) -> bool) -> T {
     if size(&back) < size(t) { back } else { t.clone() }
 }
 
+/// Most variable shift amounts `shift_cases` splits on, nested.
+const SHIFT_CASE_DEPTH: usize = 2;
+
+/// `t` rebuilt by cases of a variable shift amount `s` of `a << s`, when smaller and equal
+/// to `t` in every case (the rebuild of their difference is 0). The candidates are the
+/// rebuild with each such shift a fresh `2^K·v` (`K` = 1, 2), checked for `s = k < K`; for
+/// `s = (b & (w-1))` or `~b`, also the rebuild of case `s = k` with `b` put back, checked
+/// for every `k`. Case `k` sets the low bits of each `b` there, so other uses of `b` see
+/// them: `(A | (~c & ((A << (c & 63)) & 1))) + y` is `A + y`.
+pub(crate) fn shift_cases(t: &T, w: &Ctx) -> T {
+    if size(t) > MAX_SHIFT_CASE_SIZE {
+        return t.clone();
+    }
+    shift_cases_in(t, w, SHIFT_CASE_DEPTH)
+}
+
+/// Largest term `shift_cases` runs on: it rebuilds up to `2w` cases per amount.
+const MAX_SHIFT_CASE_SIZE: usize = 64;
+
+fn shift_cases_in(t: &T, w: &Ctx, depth: usize) -> T {
+    fn amounts(t: &T, out: &mut Vec<T>) {
+        let T::Op(op, a) = t else { return };
+        if *op == Op::Shl && !matches!(a[1], T::Num(_)) && !out.contains(&a[1]) {
+            out.push(a[1].clone());
+        }
+        a.iter().for_each(|x| amounts(x, out));
+    }
+    fn wide(t: &T, s: &T, k: u32, tag: &str, fresh: &mut Vec<T>) -> T {
+        let T::Op(op, a) = t else { return t.clone() };
+        if *op == Op::Shl && a[1] == *s {
+            let i = fresh.iter().position(|f| *f == a[0]).unwrap_or_else(|| {
+                fresh.push(a[0].clone());
+                fresh.len() - 1
+            });
+            return T::Op(Op::Mul, vec![T::Num(1 << k), T::Var(format!("{tag}{i}"))]);
+        }
+        T::Op(*op, a.iter().map(|x| wide(x, s, k, tag, fresh)).collect())
+    }
+    let rebuild = |x: &T| if depth > 1 { shift_cases_in(&rebuild_once(x, w), w, depth - 1) } else { rebuild_once(x, w) };
+    let m = (w.w - 1) as i64;
+    let tag = format!("%s{depth}_");
+    let mut found = Vec::new();
+    amounts(t, &mut found);
+    let mut best = t.clone();
+    for s in found.iter().take(2) {
+        let var = match s {
+            T::Op(Op::And, a) if a.contains(&T::Num(m)) => match a.iter().find(|x| **x != T::Num(m)) {
+                Some(T::Op(Op::Not, b)) => Some((b[0].clone(), true)),
+                Some(b) => Some((b.clone(), false)),
+                None => None,
+            },
+            _ => None,
+        };
+        let set = |k: i64| {
+            let (b, not) = var.as_ref().unwrap();
+            let low = if *not { m - k } else { k };
+            (b.clone(), T::Op(Op::Or, vec![T::Op(Op::And, vec![b.clone(), T::Num(!m)]), T::Num(low)]))
+        };
+        let case = |x: &T, k: i64| match &var {
+            Some(_) => {
+                let (v, e) = set(k);
+                crate::lowbits::replace(x, &[v], &[e])
+            }
+            None => crate::lowbits::replace(x, std::slice::from_ref(s), &[T::Num(k)]),
+        };
+        let holds = |r: &T, k: i64| fold_consts(&rebuild_once(&T::Op(Op::Sub, vec![case(t, k), case(r, k)]), w), w) == T::Num(0);
+        let mut tried = Vec::new();
+        let mut candidates: Vec<(T, i64)> = Vec::new();
+        for k in 1..=2u32 {
+            let r = rebuild(&wide(t, s, k, &tag, &mut Vec::new()));
+            if !has_var_prefix(&r, &tag) {
+                candidates.push((r, k as i64));
+            }
+        }
+        if var.is_some() {
+            for k in [0, 1, m] {
+                let (v, e) = set(k);
+                let e2 = rebuild_once(&e, w);
+                let r = crate::lowbits::replace(&rebuild(&case(t, k)), &[e, e2], &[v.clone(), v]);
+                candidates.push((r, m + 1));
+            }
+        }
+        for (r, cases) in candidates {
+            if size(&r) >= size(&best) || tried.contains(&r) {
+                continue;
+            }
+            tried.push(r.clone());
+            if (0..cases).all(|k| holds(&r, k)) {
+                best = r;
+            }
+        }
+    }
+    best
+}
+
+fn has_var_prefix(t: &T, p: &str) -> bool {
+    match t {
+        T::Var(v) => v.starts_with(p),
+        T::Op(_, a) => a.iter().any(|x| has_var_prefix(x, p)),
+        _ => false,
+    }
+}
+
 /// `split_bits` on `t`, then on the operands of `t` when it is a bitwise operation, since
 /// a case split rarely gives a constant difference through one; each with its own budget.
 fn split_in(t: &T, w: &Ctx, run: &dyn Fn(&T) -> T) -> T {
@@ -4047,7 +4154,7 @@ const POLISH_REWRITES: usize = 2000;
 /// slightly smaller form changes how the rules finish.
 pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
     type Pass = (&'static str, fn(&T, &Ctx) -> T);
-    const PASSES: [Pass; 6] = [
+    const PASSES: [Pass; 8] = [
         ("join_constants", |t, w| join_constants(t, w, false)),
         ("relate", |t, w| {
             if size(t) > MAX_POLISH_RELATE {
@@ -4062,6 +4169,8 @@ pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
         ("over_shared_bitwise", over_shared_bitwise),
         ("over_products", |t, w| crate::lowbits::over_products(t, w, |a| rebuild_once(a, w))),
         ("recombine", |t, w| if selectors(t, w).is_empty() { recombine_regions(t, w, false) } else { t.clone() }),
+        ("shift_cases", shift_cases),
+        ("split_bits", split_rebuilt),
     ];
     let w = Ctx::new(w);
     w.limit_rewrites(POLISH_REWRITES);

@@ -1559,6 +1559,17 @@ fn variable_shift_low_bits() {
     check("i8", &[("x + ((y << (y & 7)) & 1)", &["x"], 10)]);
 }
 
+/// Loki: proved by cases of the shift amount, whose low bits of `c` or `y` also fix the
+/// other uses of it.
+#[test]
+fn shift_amount_cases() {
+    check("i64", &[("((x - 2*y - 3) | (~c & (((x - 2*y - 3) << (c & 63)) & 1))) + y + 3", &["(x - y)"], 10)]);
+    check(
+        "u32",
+        &[("x * ((((x + 1) << (~y & 31)) & 2) - (((x + 1) << (~y & 31)) ^ ((x + 1) << (~(((x + 1) << (~y & 31)) | y) & 31))) | y)", &["(x * y)"], 10)],
+    );
+}
+
 
 /// A split-off constant of a set that is a leaf keeps the leaf whole: `L + 0` with
 /// `L = x >> 32` is not cut to `x >> 32` outside the leaf.
