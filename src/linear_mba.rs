@@ -57,6 +57,7 @@ impl Ctx {
 type Memo<K, V> = std::sync::Mutex<std::collections::HashMap<K, (V, bool)>>;
 type RebuiltKey = (Vec<u64>, Vec<(usize, bool)>, u64, u32);
 type GroupedKey = (Vec<(Vec<u64>, u64)>, Vec<T>, u64, u32);
+type PairKey = (u32, Vec<(Vec<u64>, u64)>, u64, Vec<T>, usize);
 
 struct State {
     simba_memo: Memo<(u32, usize, T), Option<T>>,
@@ -65,6 +66,7 @@ struct State {
     rebuilt: std::sync::Mutex<std::collections::HashMap<RebuiltKey, (Vec<(u64, T)>, u64)>>,
     grouped: std::sync::Mutex<std::collections::HashMap<GroupedKey, T>>,
     low_values: crate::lowbits::ValuesMemo,
+    pairs: std::sync::Mutex<std::collections::HashMap<PairKey, Vec<T>>>,
     /// Most leaves of a region `relate_region` tries.
     relate_leaves: AtomicUsize,
     /// `rewrite` calls left before it returns its input unchanged.
@@ -88,6 +90,7 @@ impl Default for State {
             rebuilt: Default::default(),
             grouped: Default::default(),
             low_values: Default::default(),
+            pairs: Default::default(),
             relate_leaves: AtomicUsize::new(MAX_WIDE_LEAVES),
             rewrites_left: AtomicUsize::new(usize::MAX),
             semi_leaves: AtomicUsize::new(MAX_LEAVES),
@@ -2348,6 +2351,19 @@ fn pair_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, limit
     if !(1..=3).contains(&n) || !(2..=MAX_PAIR_GROUPS).contains(&groups.len()) {
         return;
     }
+    let key = (w.w, groups.to_vec(), e0, lv.to_vec(), limit);
+    if let Some(r) = w.st.pairs.lock().unwrap().get(&key) {
+        cands.extend(r.iter().cloned());
+        return;
+    }
+    let mut found = Vec::new();
+    pair_candidates_uncached(groups, lv, e0, w, limit, &mut found);
+    cands.extend(found.iter().cloned());
+    w.st.pairs.lock().unwrap().insert(key, found);
+}
+
+fn pair_candidates_uncached(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, limit: usize, cands: &mut Vec<T>) {
+    let n = lv.len();
     let m = w.mask;
     let pts = 1usize << n;
     let nf = 1usize << pts;
@@ -2366,9 +2382,10 @@ fn pair_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, limit
     let mut best = limit;
     let leaf_sizes: Vec<usize> = lv.iter().map(size).collect();
     let group_of: Vec<usize> = (0..w.w).map(|j| groups.iter().position(|(_, mask)| mask >> j & 1 == 1).unwrap_or(0)).collect();
-    // fits[acc2][s2]: the entries of size s2 that meet every group's acc2; many
-    // shapes B1 and coefficient pairs give the same acc2.
-    let mut fits: std::collections::HashMap<Vec<[u64; 4]>, Vec<Option<Vec<usize>>>> = Default::default();
+    // fits[id][s2]: the entries of size s2 that meet every group's acc2, with `fit_ids`
+    // numbering the acc2; many shapes B1 and coefficient pairs give the same acc2.
+    let mut fit_ids: std::collections::HashMap<Vec<[u64; 4]>, usize> = Default::default();
+    let mut fits: Vec<(Vec<[u64; 4]>, Vec<Option<Vec<usize>>>)> = Vec::new();
     for (a, &c1) in scales.iter().enumerate() {
         for &c2 in &scales[a..] {
             let overhead = coef(c1) + coef(c2) + 1;
@@ -2445,6 +2462,8 @@ fn pair_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, limit
             // Whether some choice of tables at 0 makes r = 0, per group's set of
             // reachable (f1(0), f2(0)); None when pick_bits gives up.
             let mut zero_r: std::collections::HashMap<Vec<u8>, Option<bool>> = Default::default();
+            // Per shape B1: its acc2's id in `fits`, None when it misses some group.
+            let mut fit_of: Vec<Option<Option<usize>>> = Vec::new();
             'sizes: for s in 2..=top {
                 if s + overhead >= best {
                     break;
@@ -2460,19 +2479,31 @@ fn pair_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, limit
                             return;
                         }
                         budget -= 1;
-                        if !p1.iter().all(|p| meets(p, &sh.sets[i])) {
-                            continue;
+                        if fit_of.len() <= i {
+                            fit_of.resize(i + 1, None);
                         }
-                        let acc2: Vec<[u64; 4]> = (0..groups.len())
-                            .map(|gi| {
-                                let mut acc = [0u64; 4];
-                                for &f1 in sh.elems[i].iter().filter(|&&f1| p1[gi][(f1 >> 6) as usize] >> (f1 & 63) & 1 == 1) {
-                                    acc.iter_mut().zip(&comp[gi][f1 as usize]).for_each(|(x, y)| *x |= y);
-                                }
-                                acc
-                            })
-                            .collect();
-                        let row = fits.entry(acc2.clone()).or_default();
+                        let id = *fit_of[i].get_or_insert_with(|| {
+                            if !p1.iter().all(|p| meets(p, &sh.sets[i])) {
+                                return None;
+                            }
+                            let acc2: Vec<[u64; 4]> = (0..groups.len())
+                                .map(|gi| {
+                                    let mut acc = [0u64; 4];
+                                    for &f1 in sh.elems[i].iter().filter(|&&f1| p1[gi][(f1 >> 6) as usize] >> (f1 & 63) & 1 == 1) {
+                                        acc.iter_mut().zip(&comp[gi][f1 as usize]).for_each(|(x, y)| *x |= y);
+                                    }
+                                    acc
+                                })
+                                .collect();
+                            let next = fits.len();
+                            let id = *fit_ids.entry(acc2.clone()).or_insert(next);
+                            if id == next {
+                                fits.push((acc2, Vec::new()));
+                            }
+                            Some(id)
+                        });
+                        let Some(id) = id else { continue };
+                        let (acc2, row) = &mut fits[id];
                         if row.len() <= s2 {
                             row.resize(s2 + 1, None);
                         }
