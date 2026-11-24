@@ -1573,6 +1573,15 @@ fn leaf_group_rebuilt_alone() {
     );
 }
 
+/// A bitwise function of 6 leaves split as `g(A) | h(B)`.
+#[test]
+fn six_leaf_decomposition() {
+    check(
+        "i64",
+        &[("((y * s) | ((u & w) | (2 * v))) ^ ((v + t) & (w ^ (s | (u & w))))", &["((u & w) | (((y * s) | (2 * v)) ^ ((v + t) & (w ^ s))))"], 10)],
+    );
+}
+
 /// Loki: proved by cases of the shift amount, whose low bits of `c` or `y` also fix the
 /// other uses of it.
 #[test]

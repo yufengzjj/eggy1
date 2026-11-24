@@ -420,14 +420,16 @@ fn bool_expr_uncached(tt: u64, n: usize) -> BE {
             best = Some(cand);
         }
     }
-    if let Some(cand) = decompose(tt, n).filter(|d| best.as_ref().is_none_or(|(c, _)| d.0 < *c)) {
+    let split = if n <= MAX_DECOMPOSE { decompose(tt, n) } else { None };
+    if let Some(cand) = split.filter(|d| best.as_ref().is_none_or(|(c, _)| d.0 < *c)) {
         best = Some(cand);
     }
     let (c, b) = best.unwrap();
     BE::E(c, b)
 }
 
-/// Most variables `decompose` splits; its cost grows with the pairs of subsets.
+/// Most variables `bool_expr` tries `decompose` on; its cost grows with the pairs of
+/// subsets (`decompose_regions` goes to 6 on the final result).
 const MAX_DECOMPOSE: usize = 5;
 
 /// Smallest `g(A) op h(B)` with `A ∪ B` all variables and both proper subsets, as in
@@ -435,9 +437,6 @@ const MAX_DECOMPOSE: usize = 5;
 /// variables outside their set; for `|`, ANDed; for `^`, `g = tt(B \ A = 0)` and
 /// `h = tt(A \ B = 0) ^ tt(A \ B = 0, B \ A = 0)`. Each is checked against `tt`.
 fn decompose(tt: u64, n: usize) -> Option<(usize, B)> {
-    if n > MAX_DECOMPOSE {
-        return None;
-    }
     let full_vars = (1usize << n) - 1;
     let full = table_full(n);
     // Table with variable `i` forced to `v`, still over all `n` variables.
@@ -3597,6 +3596,34 @@ fn join_constant(t: &T, w: &Ctx) -> Option<T> {
 /// ordered pair for every shared leaf and multiple.
 const MAX_MOVE_GROUPS: usize = 12;
 
+/// `t` with each bitwise region of 6 leaves written as its smallest `g(A) op h(B)`
+/// (`decompose`), where that is smaller; `bool_expr` only splits up to `MAX_DECOMPOSE`
+/// variables, since over 6 it takes milliseconds per table:
+/// `(((y·s) | (2·v)) ^ ((s ^ w) & (v + t))) | (u & w)`.
+pub(crate) fn decompose_regions(t: &T, w: &Ctx, in_bit: bool) -> T {
+    let T::Op(op, a) = t else { return t.clone() };
+    let bit = matches!(op, Op::And | Op::Or | Op::Xor | Op::Not) && kind(t, w) == Kind::Bit;
+    let node = T::Op(*op, a.iter().map(|x| decompose_regions(x, w, bit)).collect());
+    if !bit || in_bit {
+        return node;
+    }
+    let mut lv = Vec::new();
+    leaves(&node, w, &mut lv);
+    if lv.len() != 6 {
+        return node;
+    }
+    let vars: Vec<T> = (0..6).map(|i| T::Var(format!("%d{i}"))).collect();
+    let x = crate::lowbits::replace(&node, &lv, &vars);
+    let ty = crate::eval::NumType { bits: w.w, signed: false };
+    let tt = (0..64usize).fold(0u64, |acc, p| {
+        let env = |v: &str| if p >> v[2..].parse::<usize>().unwrap() & 1 == 1 { w.mask } else { 0 };
+        acc | (crate::eval::eval(&x, ty, &env).unwrap_or(0) & 1) << p
+    });
+    let Some((_, b)) = decompose(tt, 6) else { return node };
+    let r = b_to_t(&b, &lv);
+    if size(&r) < size(&node) { r } else { node }
+}
+
 /// Multiples of a shared leaf `join_linear` moves between two leaf groups; 0 rebuilds the
 /// two groups as they are.
 const MOVED_MULTIPLES: [i64; 7] = [0, 1, -1, 2, -2, 3, -3];
@@ -4231,7 +4258,7 @@ const POLISH_REWRITES: usize = 2000;
 /// slightly smaller form changes how the rules finish.
 pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
     type Pass = (&'static str, fn(&T, &Ctx) -> T);
-    const PASSES: [Pass; 9] = [
+    const PASSES: [Pass; 10] = [
         ("join_constants", |t, w| join_constants(t, w, false)),
         ("join_linear", |t, w| join_linear(t, w, false)),
         ("relate", |t, w| {
@@ -4249,6 +4276,7 @@ pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
         ("recombine", |t, w| if selectors(t, w).is_empty() { recombine_regions(t, w, false) } else { t.clone() }),
         ("shift_cases", shift_cases),
         ("split_bits", split_rebuilt),
+        ("decompose", |t, w| decompose_regions(t, w, false)),
     ];
     let w = Ctx::new(w);
     w.limit_rewrites(POLISH_REWRITES);
