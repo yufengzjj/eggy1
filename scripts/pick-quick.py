@@ -1,12 +1,12 @@
 """Pick a small bench set from full runs: a few cases of different form per section.
 
-    python -I scripts/pick-quick.py out/full out/h3 -o scripts/quick-cases.tsv [-k 3] [--keep scripts/quick-regressions.tsv]
+    python -I scripts/pick-quick.py out/full out/h3 -o scripts/quick-cases.tsv [-k 3] [--keep scripts/quick-regressions.tsv --keep scripts/quick-hard.tsv]
 
 Each argument is a bench-shards.py output directory (its results.tsv). Per dataset section,
 cases are grouped by form (operators used, number of variables, size to a factor of 2); the
 -k most common forms each give the case nearest their median time, and every case not solved
-in the run is added, as is every case listed in --keep (cases that once regressed). Run the
-set with `bench-shards.py --cases scripts/quick-cases.tsv`.
+in the run is added, as is every case listed in a --keep file (cases that once regressed or
+were unsolved). Run the set with `bench-shards.py --cases scripts/quick-cases.tsv`.
 """
 
 import argparse
@@ -63,11 +63,11 @@ def main():
     ap.add_argument("-o", "--out", required=True)
     ap.add_argument("-k", type=int, default=3, help="forms per section")
     ap.add_argument("--data", default="bench-data")
-    ap.add_argument("--keep", help="TSV of cases (type, file, section, index) always included")
+    ap.add_argument("--keep", action="append", default=[], help="TSV of cases (type, file, section, index) always included; repeatable")
     args = ap.parse_args()
     keep = set()
-    if args.keep:
-        for line in Path(args.keep).read_text(encoding="utf-8").splitlines()[1:]:
+    for path in args.keep:
+        for line in Path(path).read_text(encoding="utf-8").splitlines()[1:]:
             if line:
                 ty, f, sec, idx = line.split("	")[:4]
                 keep.add((ty, f, sec, int(idx)))
