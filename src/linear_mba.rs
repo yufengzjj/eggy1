@@ -7,7 +7,7 @@
 //! position then has its own bitwise function, see `semi_linear`.
 
 use crate::eval::{Op, Term as T, parse, show, size};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -289,8 +289,8 @@ impl Prog {
 #[derive(Clone)]
 enum B {
     V(usize),
-    Not(Box<B>),
-    Bin(Op, Box<B>, Box<B>),
+    Not(Arc<B>),
+    Bin(Op, Arc<B>, Arc<B>),
 }
 
 /// Smallest bitwise expression for every truth table over `n` variables.
@@ -307,27 +307,27 @@ fn bool_table(n: usize) -> &'static [Option<(usize, B)>] {
             best[tt] = Some((1, B::V(i)));
         }
         loop {
-            let known: Vec<(usize, usize, B)> = best
+            let known: Vec<(usize, usize, Arc<B>)> = best
                 .iter()
                 .enumerate()
-                .filter_map(|(tt, e)| e.as_ref().map(|(c, b)| (tt, *c, b.clone())))
+                .filter_map(|(tt, e)| e.as_ref().map(|(c, b)| (tt, *c, Arc::new(b.clone()))))
                 .collect();
             let mut changed = false;
-            let mut offer = |best: &mut Vec<Option<(usize, B)>>, tt: usize, c: usize, b: B| {
+            let mut offer = |best: &mut Vec<Option<(usize, B)>>, tt: usize, c: usize, b: &dyn Fn() -> B| {
                 if best[tt].as_ref().is_none_or(|(old, _)| c < *old) {
-                    best[tt] = Some((c, b));
+                    best[tt] = Some((c, b()));
                     changed = true;
                 }
             };
             for (ta, ca, ba) in &known {
-                offer(&mut best, !ta & full, ca + 1, B::Not(Box::new(ba.clone())));
+                offer(&mut best, !ta & full, ca + 1, &|| B::Not(ba.clone()));
                 for (tb, cb, bb) in &known {
                     if ta > tb {
                         continue;
                     }
                     let c = ca + cb + 1;
                     for (op, tt) in [(Op::And, ta & tb), (Op::Or, ta | tb), (Op::Xor, ta ^ tb)] {
-                        offer(&mut best, tt, c, B::Bin(op, Box::new(ba.clone()), Box::new(bb.clone())));
+                        offer(&mut best, tt, c, &|| B::Bin(op, ba.clone(), bb.clone()));
                     }
                 }
             }
@@ -351,8 +351,8 @@ pub(crate) const MAX_LEAVES: usize = 6;
 fn remap(b: &B, vars: &[usize]) -> B {
     match b {
         B::V(i) => B::V(vars[*i]),
-        B::Not(x) => B::Not(Box::new(remap(x, vars))),
-        B::Bin(op, x, y) => B::Bin(*op, Box::new(remap(x, vars)), Box::new(remap(y, vars))),
+        B::Not(x) => B::Not(Arc::new(remap(x, vars))),
+        B::Bin(op, x, y) => B::Bin(*op, Arc::new(remap(x, vars)), Arc::new(remap(y, vars))),
     }
 }
 
@@ -395,8 +395,8 @@ fn bool_expr_uncached(tt: u64, n: usize) -> BE {
         let (c, b) = bool_table(n)[tt as usize].as_ref().expect("non-constant table");
         return BE::E(*c, b.clone());
     }
-    let not = |b: B| B::Not(Box::new(b));
-    let bin = |op, x: B, y: B| B::Bin(op, Box::new(x), Box::new(y));
+    let not = |b: B| B::Not(Arc::new(b));
+    let bin = |op, x: B, y: B| B::Bin(op, Arc::new(x), Arc::new(y));
     let mut best: Option<(usize, B)> = None;
     for i in 0..n {
         let rest: Vec<usize> = (0..n).filter(|&j| j != i).collect();
@@ -409,6 +409,22 @@ fn bool_expr_uncached(tt: u64, n: usize) -> BE {
         }
         let x = B::V(i);
         let sub_full = table_full(n - 1);
+        let cost = match (bool_expr_canon(f0, n - 1), bool_expr_canon(f1, n - 1)) {
+            (BE::Zero, BE::Ones) => 1,
+            (BE::Ones, BE::Zero) => 2,
+            (BE::Zero, BE::E(c, _)) | (BE::E(c, _), BE::Ones) => c + 2,
+            (BE::E(c, _), BE::Zero) | (BE::Ones, BE::E(c, _)) => c + 3,
+            (BE::E(c, _), _) if f0 == f1 => c,
+            (BE::E(c, _), _) if f1 == !f0 & sub_full => c + 2,
+            (BE::E(c0, _), BE::E(c1, _)) => match bool_expr_canon(f0 ^ f1, n - 1) {
+                BE::E(cd, _) if c0 + cd + 3 < c0 + c1 + 6 => c0 + cd + 3,
+                _ => c0 + c1 + 6,
+            },
+            (BE::Zero, BE::Zero) | (BE::Ones, BE::Ones) => unreachable!("tt is not constant"),
+        };
+        if best.as_ref().is_some_and(|(c, _)| cost >= *c) {
+            continue;
+        }
         let cand = match (bool_expr(f0, &rest), bool_expr(f1, &rest)) {
             (BE::Zero, BE::Ones) => (1, x),
             (BE::Ones, BE::Zero) => (2, not(x)),
@@ -460,13 +476,13 @@ fn decompose(tt: u64, n: usize) -> Option<(usize, B)> {
         (0..n).filter(|&i| keep >> i & 1 == 0).fold(t, |t, i| f(fix(t, i, 0), fix(t, i, 1)))
     };
     let zero_out = |t: u64, keep: usize| (0..n).filter(|&i| keep >> i & 1 == 0).fold(t, |t, i| fix(t, i, 0));
-    let sub = |t: u64, keep: usize| -> Option<(usize, B)> {
+    let sub = |t: u64, keep: usize| -> Option<(usize, B, Vec<usize>)> {
         let vars: Vec<usize> = (0..n).filter(|&i| keep >> i & 1 == 1).collect();
         let st = (0..1usize << vars.len())
             .filter(|&q| t >> vars.iter().enumerate().fold(0, |p, (j, &i)| p | (q >> j & 1) << i) & 1 == 1)
             .fold(0u64, |a, q| a | 1 << q);
-        match bool_expr(st, &vars) {
-            BE::E(c, b) => Some((c, b)),
+        match bool_expr_canon(st, vars.len()) {
+            BE::E(c, b) => Some((c, b, vars)),
             _ => None,
         }
     };
@@ -490,9 +506,9 @@ fn decompose(tt: u64, n: usize) -> Option<(usize, B)> {
                 if joined != tt {
                     continue;
                 }
-                let (Some((cg, eg)), Some((ch, eh))) = (sub(g, a), sub(h, b)) else { continue };
+                let (Some((cg, eg, vg)), Some((ch, eh, vh))) = (sub(g, a), sub(h, b)) else { continue };
                 if best.as_ref().is_none_or(|(c, _)| cg + ch + 1 < *c) {
-                    best = Some((cg + ch + 1, B::Bin(op, Box::new(eg), Box::new(eh))));
+                    best = Some((cg + ch + 1, B::Bin(op, Arc::new(remap(&eg, &vg)), Arc::new(remap(&eh, &vh)))));
                 }
             }
         }
@@ -505,6 +521,15 @@ fn b_to_t(b: &B, leaves: &[T]) -> T {
         B::V(i) => leaves[*i].clone(),
         B::Not(x) => T::Op(Op::Not, vec![b_to_t(x, leaves)]),
         B::Bin(op, x, y) => T::Op(*op, vec![b_to_t(x, leaves), b_to_t(y, leaves)]),
+    }
+}
+
+/// `b_to_t` of `b` with variable `i` standing for `leaves[vars[i]]`.
+fn b_to_t_at(b: &B, vars: &[usize], leaves: &[T]) -> T {
+    match b {
+        B::V(i) => leaves[vars[*i]].clone(),
+        B::Not(x) => T::Op(Op::Not, vec![b_to_t_at(x, vars, leaves)]),
+        B::Bin(op, x, y) => T::Op(*op, vec![b_to_t_at(x, vars, leaves), b_to_t_at(y, vars, leaves)]),
     }
 }
 
@@ -994,9 +1019,9 @@ fn small_blocks(t: &T, w: &Ctx) -> Option<T> {
                 }
             }
             let Some(c) = solve_mul(a[full] & m, coef[s], w) else { continue };
-            let BE::E(_, b) = bool_expr(tt, &vars) else { continue };
+            let BE::E(_, b) = bool_expr_canon(tt, vars.len()) else { continue };
             let adds: Vec<(usize, u64)> = (1..full).map(|q| (global(q), c.wrapping_mul(a[q]) & m)).filter(|&(_, v)| v != 0).collect();
-            out.push((c, b_to_t(&b, &ph), adds, c.wrapping_mul(a[0]) & m));
+            out.push((c, b_to_t_at(&b, &vars, &ph), adds, c.wrapping_mul(a[0]) & m));
         }
         out.sort_by_key(|o| wsize(&o.1));
         out
@@ -3236,7 +3261,6 @@ fn rebuild_table_uncached(gp: &[u64], lv: &[T], shape: &[(usize, bool)], konst: 
     let n = lv.len();
     let pts = 1usize << n;
     let m = w.mask;
-    let all_vars: Vec<usize> = (0..n).collect();
     let mut cands: Vec<(Vec<(u64, T)>, u64)> = Vec::new();
     // Leaves with their own coefficient, then one term per remaining value. A leaf
     // with coefficient 0 would repeat the subset without it.
@@ -3257,7 +3281,7 @@ fn rebuild_table_uncached(gp: &[u64], lv: &[T], shape: &[(usize, bool)], konst: 
         distinct.dedup();
         for u in distinct {
             let tt = (0..pts).filter(|&p| r[p] == u).fold(0u64, |acc, p| acc | 1 << p);
-            let BE::E(_, b) = bool_expr(tt, &all_vars) else {
+            let BE::E(_, b) = bool_expr_canon(tt, n) else {
                 unreachable!("r[0] == 0, so the table is neither empty nor full")
             };
             terms.push((u, b_to_t(&b, lv)));
@@ -3281,7 +3305,6 @@ const OVERLAP_MAX_VALUES: usize = 4;
 /// for a value `v` of `gp`, i.e. `h` is zero where `gp` is `v`.
 fn overlapping_terms(gp: &[u64], lv: &[T], konst: u64, w: &Ctx) -> Vec<(Vec<(u64, T)>, u64)> {
     let m = w.mask;
-    let all_vars: Vec<usize> = (0..lv.len()).collect();
     let distinct = |t: &[u64]| {
         let mut v: Vec<u64> = t.iter().copied().filter(|&u| u != 0).collect();
         v.sort_unstable();
@@ -3312,7 +3335,7 @@ fn overlapping_terms(gp: &[u64], lv: &[T], konst: u64, w: &Ctx) -> Vec<(Vec<(u64
         for k in (1..=3usize).filter(|k| hv.len() < 1 << k) {
             // At k = 3 a repeated coefficient leaves ambiguous points (rejected) or two equal terms.
             for coefs in combinations(&pool, k, k == 2) {
-                if let Some(c) = split_by_sums(&h, &hv, &coefs, &all_vars, lv, konst.wrapping_add(d) & m, w) {
+                if let Some(c) = split_by_sums(&h, &hv, &coefs, lv, konst.wrapping_add(d) & m, w) {
                     out.push(c);
                 }
             }
@@ -3344,7 +3367,7 @@ const MAX_SUBSET_CHOICES: usize = 16;
 /// be ambiguous when `c1 + c2 = 0` (as in `(y ^ k) - k`); such points are
 /// resolved in up to `MAX_SUBSET_CHOICES` ways and the shortest result wins.
 /// With three terms ambiguity is common and too costly to resolve, so it fails.
-fn split_by_sums(h: &[u64], h_vals: &[u64], coefs: &[u64], vars: &[usize], lv: &[T], konst: u64, w: &Ctx) -> Option<(Vec<(u64, T)>, u64)> {
+fn split_by_sums(h: &[u64], h_vals: &[u64], coefs: &[u64], lv: &[T], konst: u64, w: &Ctx) -> Option<(Vec<(u64, T)>, u64)> {
     let m = w.mask;
     let k = coefs.len();
     let sums: Vec<u64> = (0..1usize << k)
@@ -3380,7 +3403,7 @@ fn split_by_sums(h: &[u64], h_vals: &[u64], coefs: &[u64], vars: &[usize], lv: &
         let mut terms = Vec::new();
         let mut kk = konst;
         for (j, &tt) in tts.iter().enumerate() {
-            match bool_expr(tt, vars) {
+            match bool_expr_canon(tt, lv.len()) {
                 BE::Zero => continue 'ways,
                 // All ones in every bit is the word -1.
                 BE::Ones => kk = kk.wrapping_sub(coefs[j]) & m,
