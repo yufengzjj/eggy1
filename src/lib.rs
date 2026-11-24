@@ -976,10 +976,24 @@ fn sched_options(cli: &Cli) -> sched::Options {
     }
 }
 
-fn simplify_round_with(egg: &str, s: &str, cli: &Cli, keep_input: bool, opts: &sched::Options) -> Result<String, Error> {
+/// A fresh e-graph with the primitives and the program `egg` loaded, cloned from one
+/// built once per thread.
+fn rules_egraph(egg: &str) -> Result<EGraph, Error> {
+    thread_local! {
+        static BUILT: std::cell::RefCell<Option<(String, EGraph)>> = const { std::cell::RefCell::new(None) };
+    }
+    if let Some(e) = BUILT.with(|b| b.borrow().as_ref().filter(|(p, _)| p == egg).map(|(_, e)| e.clone())) {
+        return Ok(e);
+    }
     let mut egraph = new_experimental_egraph();
     init_egg_function(&mut egraph);
     egraph.parse_and_run_program(None, egg)?;
+    BUILT.with(|b| *b.borrow_mut() = Some((egg.to_string(), egraph.clone())));
+    Ok(egraph)
+}
+
+fn simplify_round_with(egg: &str, s: &str, cli: &Cli, keep_input: bool, opts: &sched::Options) -> Result<String, Error> {
+    let mut egraph = rules_egraph(egg)?;
     let (alt, other) = linear_mba::simplify_linear_with(s, width_of(&cli.num_type), opts);
     let mut roots: Vec<&str> = match alt != s {
         true if !keep_input => vec![&alt],
