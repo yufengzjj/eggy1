@@ -2100,3 +2100,22 @@ fn split_difference_with_signed_constant() {
         ],
     );
 }
+
+/// `polish` moves leaf terms between the groups of a wide semi-linear result and rewrites
+/// every pair many times; with semi-linear groups of many leaves searched in full, this
+/// input took tens of seconds there.
+#[test]
+fn polish_join_linear_stays_fast() {
+    let start = std::time::Instant::now();
+    check(
+        "i8",
+        &[(
+            "((((4 * ((z & z) ^ (~v & z))) - (-0x40 * (~y | ((u & ~x) | (u | u))))) - (2 * ~((~u ^ (~z & w)) & (~z & ~x)))) - (1 * (w | (~0x3f | ~~z))))",
+            &["((((4 * (z & v)) + (0x40 * (~y | u))) + (-2 * (z | ((u ^ w) | x)))) - ((w | -0x40) | z))"],
+            10,
+        )],
+    );
+    if !cfg!(debug_assertions) {
+        assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
+    }
+}

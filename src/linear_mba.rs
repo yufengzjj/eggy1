@@ -4595,7 +4595,14 @@ pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
     const PASSES: [Pass; 11] = [
         ("push_not", push_not),
         ("join_constants", |t, w| join_constants(t, w, false)),
-        ("join_linear", |t, w| join_linear(t, w, false)),
+        ("join_linear", |t, w| {
+            // It rewrites every pair of leaf groups many times; semi-linear groups of
+            // many leaves take seconds there.
+            w.limit_semi_leaves(2);
+            let r = join_linear(t, w, false);
+            w.limit_semi_leaves(MAX_LEAVES);
+            r
+        }),
         ("relate", |t, w| {
             if size(t) > MAX_POLISH_RELATE {
                 return t.clone();
