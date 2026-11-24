@@ -486,17 +486,16 @@ fn decompose(tt: u64, n: usize) -> Option<(usize, B)> {
             _ => None,
         }
     };
+    let any: Vec<u64> = (0..=full_vars).map(|k| over(tt, k, &|x, y| x | y)).collect();
+    let all: Vec<u64> = (0..=full_vars).map(|k| over(tt, k, &|x, y| x & y)).collect();
+    let zero: Vec<u64> = (0..=full_vars).map(|k| zero_out(tt, k)).collect();
     let mut best: Option<(usize, B)> = None;
     for a in 1..full_vars {
         for b in a..full_vars {
             if a | b != full_vars {
                 continue;
             }
-            let pairs = [
-                (Op::And, over(tt, a, &|x, y| x | y), over(tt, b, &|x, y| x | y)),
-                (Op::Or, over(tt, a, &|x, y| x & y), over(tt, b, &|x, y| x & y)),
-                (Op::Xor, zero_out(tt, a), zero_out(tt, b) ^ zero_out(tt, a & b)),
-            ];
+            let pairs = [(Op::And, any[a], any[b]), (Op::Or, all[a], all[b]), (Op::Xor, zero[a], zero[b] ^ zero[a & b])];
             for (op, g, h) in pairs {
                 let joined = match op {
                     Op::And => g & h,
