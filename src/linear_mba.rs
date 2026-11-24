@@ -476,16 +476,24 @@ fn decompose(tt: u64, n: usize) -> Option<(usize, B)> {
         (0..n).filter(|&i| keep >> i & 1 == 0).fold(t, |t, i| f(fix(t, i, 0), fix(t, i, 1)))
     };
     let zero_out = |t: u64, keep: usize| (0..n).filter(|&i| keep >> i & 1 == 0).fold(t, |t, i| fix(t, i, 0));
-    let sub = |t: u64, keep: usize| -> Option<(usize, B, Vec<usize>)> {
-        let vars: Vec<usize> = (0..n).filter(|&i| keep >> i & 1 == 1).collect();
-        let st = (0..1usize << vars.len())
-            .filter(|&q| t >> vars.iter().enumerate().fold(0, |p, (j, &i)| p | (q >> j & 1) << i) & 1 == 1)
-            .fold(0u64, |a, q| a | 1 << q);
-        match bool_expr_canon(st, vars.len()) {
-            BE::E(c, b) => Some((c, b, vars)),
+    // The points with no variable outside `keep`, in increasing order, are the points of
+    // the table over `keep`'s variables.
+    let sub = |t: u64, keep: usize| -> Option<(usize, B)> {
+        let (mut st, mut p, mut q) = (0u64, 0usize, 0);
+        loop {
+            st |= (t >> p & 1) << q;
+            q += 1;
+            p = p.wrapping_sub(keep) & keep;
+            if p == 0 {
+                break;
+            }
+        }
+        match bool_expr_canon(st, keep.count_ones() as usize) {
+            BE::E(c, b) => Some((c, b)),
             _ => None,
         }
     };
+    let vars = |keep: usize| -> Vec<usize> { (0..n).filter(|&i| keep >> i & 1 == 1).collect() };
     let any: Vec<u64> = (0..=full_vars).map(|k| over(tt, k, &|x, y| x | y)).collect();
     let all: Vec<u64> = (0..=full_vars).map(|k| over(tt, k, &|x, y| x & y)).collect();
     let zero: Vec<u64> = (0..=full_vars).map(|k| zero_out(tt, k)).collect();
@@ -505,9 +513,13 @@ fn decompose(tt: u64, n: usize) -> Option<(usize, B)> {
                 if joined != tt {
                     continue;
                 }
-                let (Some((cg, eg, vg)), Some((ch, eh, vh))) = (sub(g, a), sub(h, b)) else { continue };
+                let Some((cg, eg)) = sub(g, a) else { continue };
+                if best.as_ref().is_some_and(|(c, _)| cg + 2 >= *c) {
+                    continue;
+                }
+                let Some((ch, eh)) = sub(h, b) else { continue };
                 if best.as_ref().is_none_or(|(c, _)| cg + ch + 1 < *c) {
-                    best = Some((cg + ch + 1, B::Bin(op, Arc::new(remap(&eg, &vg)), Arc::new(remap(&eh, &vh)))));
+                    best = Some((cg + ch + 1, B::Bin(op, Arc::new(remap(&eg, &vars(a))), Arc::new(remap(&eh, &vars(b))))));
                 }
             }
         }
