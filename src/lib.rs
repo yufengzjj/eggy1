@@ -1102,9 +1102,9 @@ fn drive(egg: &str, s: &str, cli: &Cli, opts: &sched::Options) -> Result<String,
             extra -= 1;
         }
     }
-    let polished = linear_mba::polish(&seed, width_of(&cli.num_type));
+    let (polished, used) = linear_mba::polish(&seed, width_of(&cli.num_type));
     if opts.trace {
-        eprintln!("polish: {} -> {}", size_of(&seed), size_of(&polished));
+        eprintln!("polish: {} -> {} by {}", size_of(&seed), size_of(&polished), used.join(","));
     }
     offer(&polished);
     match smallest {

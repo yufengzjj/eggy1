@@ -4037,14 +4037,50 @@ fn split_in(t: &T, w: &Ctx, run: &dyn Fn(&T) -> T) -> T {
     }
 }
 
-/// The egglog term `egg` with each linear region's constant rebuilt with its leaf groups
-/// (`join_constants`), when smaller. Run on the final result only: as a pre-pass
-/// candidate, even a slightly smaller form changes how the rules finish.
-pub fn polish(egg: &str, w: u32) -> String {
+/// Largest final result `polish` runs `relate` on.
+const MAX_POLISH_RELATE: usize = 128;
+/// Uncached `rewrite` calls one `polish` call may make.
+const POLISH_REWRITES: usize = 2000;
+
+/// The egglog term `egg` with the passes below applied while one makes it smaller, and the
+/// names of those that did. Run on the final result only: as a pre-pass candidate, even a
+/// slightly smaller form changes how the rules finish.
+pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
+    type Pass = (&'static str, fn(&T, &Ctx) -> T);
+    const PASSES: [Pass; 6] = [
+        ("join_constants", |t, w| join_constants(t, w, false)),
+        ("relate", |t, w| {
+            if size(t) > MAX_POLISH_RELATE {
+                return t.clone();
+            }
+            w.limit_semi_leaves(2);
+            let r = relate(t, w);
+            w.limit_semi_leaves(MAX_LEAVES);
+            r
+        }),
+        ("over_const_bitwise", over_const_bitwise),
+        ("over_shared_bitwise", over_shared_bitwise),
+        ("over_products", |t, w| crate::lowbits::over_products(t, w, |a| rebuild_once(a, w))),
+        ("recombine", |t, w| if selectors(t, w).is_empty() { recombine_regions(t, w, false) } else { t.clone() }),
+    ];
     let w = Ctx::new(w);
-    let t = parse(egg);
-    let r = join_constants(&t, &w, false);
-    if size(&r) < size(&t) { show(&r) } else { egg.to_string() }
+    w.limit_rewrites(POLISH_REWRITES);
+    let mut best = parse(egg);
+    let mut used = Vec::new();
+    loop {
+        let before = used.len();
+        for (name, run) in PASSES {
+            let r = run(&best, &w);
+            if size(&r) < size(&best) {
+                best = r;
+                used.push(name);
+            }
+        }
+        if used.len() == before || used.len() >= 8 {
+            break;
+        }
+    }
+    if used.is_empty() { (egg.to_string(), used) } else { (show(&best), used) }
 }
 
 /// Rewrite the egglog term `egg` (W-bit wrapping semantics) with every linear
