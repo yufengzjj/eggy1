@@ -3346,29 +3346,27 @@ fn overlapping_terms(gp: &[u64], lv: &[T], konst: u64, w: &Ctx) -> Vec<(Vec<(u64
         pool.dedup();
         for k in (1..=3usize).filter(|k| hv.len() < 1 << k) {
             // At k = 3 a repeated coefficient leaves ambiguous points (rejected) or two equal terms.
-            for coefs in combinations(&pool, k, k == 2) {
-                if let Some(c) = split_by_sums(&h, &hv, &coefs, lv, konst.wrapping_add(d) & m, w) {
+            combinations(&pool, k, k == 2, &mut Vec::new(), &mut |coefs| {
+                if let Some(c) = split_by_sums(&h, &hv, coefs, lv, konst.wrapping_add(d) & m, w) {
                     out.push(c);
                 }
-            }
+            });
         }
     }
     out
 }
 
-/// The `k`-element multisets of `pool` (sets unless `repeat`), in pool order.
-fn combinations(pool: &[u64], k: usize, repeat: bool) -> Vec<Vec<u64>> {
+/// `f` on `prefix` followed by each `k`-element multiset of `pool` (sets unless `repeat`),
+/// in pool order.
+fn combinations(pool: &[u64], k: usize, repeat: bool, prefix: &mut Vec<u64>, f: &mut dyn FnMut(&[u64])) {
     if k == 0 {
-        return vec![Vec::new()];
+        return f(prefix);
     }
-    (0..pool.len())
-        .flat_map(|i| {
-            combinations(&pool[i + usize::from(!repeat)..], k - 1, repeat).into_iter().map(move |mut rest| {
-                rest.insert(0, pool[i]);
-                rest
-            })
-        })
-        .collect()
+    for i in 0..pool.len() {
+        prefix.push(pool[i]);
+        combinations(&pool[i + usize::from(!repeat)..], k - 1, repeat, prefix, f);
+        prefix.pop();
+    }
 }
 
 /// Most ways tried to resolve points whose value is the sum of several subsets of `coefs`.
