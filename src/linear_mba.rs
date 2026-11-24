@@ -4326,6 +4326,20 @@ pub(crate) fn decompose_regions(t: &T, w: &Ctx, in_bit: bool) -> T {
     if size(&r) < size(&node) { r } else { node }
 }
 
+/// `t` with each linear region written as `factored_sum` of its terms where that is smaller:
+/// the rules do not always gather `c·a + c·b` or absorb a constant `c` into a `c·~a`.
+pub(crate) fn factor_regions(t: &T, w: &Ctx, in_lin: bool) -> T {
+    let T::Op(op, a) = t else { return t.clone() };
+    let lin = kind(t, w) == Kind::Lin;
+    let node = T::Op(*op, a.iter().map(|x| factor_regions(x, w, lin)).collect());
+    if !lin || in_lin {
+        return node;
+    }
+    let (terms, konst) = region_terms(&node, w);
+    let f = factored_sum(&terms, konst, w);
+    if size(&f) < size(&node) { f } else { node }
+}
+
 /// Multiples of a shared leaf `join_linear` moves between two leaf groups; 0 rebuilds the
 /// two groups as they are.
 const MOVED_MULTIPLES: [i64; 7] = [0, 1, -1, 2, -2, 3, -3];
@@ -5196,7 +5210,7 @@ const POLISH_REWRITES: usize = 2000;
 /// slightly smaller form changes how the rules finish.
 pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
     type Pass = (&'static str, fn(&T, &Ctx) -> T);
-    const PASSES: [Pass; 11] = [
+    const PASSES: [Pass; 12] = [
         ("push_not", push_not),
         ("join_constants", |t, w| join_constants(t, w, false)),
         ("join_linear", |t, w| {
@@ -5223,6 +5237,7 @@ pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
         ("shift_cases", shift_cases),
         ("split_bits", split_rebuilt),
         ("decompose", |t, w| decompose_regions(t, w, false)),
+        ("factor", |t, w| factor_regions(t, w, false)),
     ];
     let w = Ctx::new(w);
     w.limit_rewrites(POLISH_REWRITES);
