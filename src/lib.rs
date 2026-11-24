@@ -4,6 +4,7 @@ pub mod expr_convert;
 pub mod linear_mba;
 mod poly_mba;
 mod lowbits;
+mod minimal;
 mod tfunc;
 pub mod sched;
 
@@ -1111,8 +1112,16 @@ fn drive(egg: &str, s: &str, cli: &Cli, opts: &sched::Options) -> Result<String,
         // inputs with shifts, division or mulhi, unless the rebuild is already tiny.
         let opaque = ["(Shl ", "(Shr ", "(Div ", "(Mod ", "(Mulhi "].iter().any(|o| seed.contains(o))
             && !(first && eval::size(&eval::parse(&linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), &opts).0)) <= linear_mba::TINY);
-        let mut extracted = simplify_round_with(&egg, &seed, cli, first && opaque, &opts)?;
-        if first && !opaque && mixed(&eval::parse(&extracted)) {
+        // No smaller term equals `alt`, so saturation could only pick another of its size.
+        let minimal = {
+            let t = eval::parse(&alt);
+            minimal::is_tidy(&t) && eval::NumType::from_name(&cli.num_type).is_some_and(|ty| minimal::is_minimal(&t, ty))
+        };
+        let mut extracted = match minimal {
+            true => alt.clone(),
+            false => simplify_round_with(&egg, &seed, cli, first && opaque, &opts)?,
+        };
+        if first && !opaque && !minimal && mixed(&eval::parse(&extracted)) {
             let full = simplify_round_with(&egg, &seed, cli, true, &opts)?;
             if eval::size(&eval::parse(&full)) <= eval::size(&eval::parse(&extracted)) {
                 extracted = full;
