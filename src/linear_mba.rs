@@ -3832,7 +3832,7 @@ pub(crate) fn join_linear(t: &T, w: &Ctx, in_lin: bool) -> T {
     if !lin || in_lin {
         return node;
     }
-    move_linear(&node, w, true).unwrap_or(node)
+    move_linear(&node, w).unwrap_or(node)
 }
 
 /// Most nodes a move may add and still be followed by a second one, how many such moves
@@ -3842,26 +3842,47 @@ const NEAR_MOVE_SLACK: usize = 4;
 const NEAR_MOVES: usize = 3;
 const MAX_NEAR_GROUPS: usize = 8;
 
-fn move_linear(t: &T, w: &Ctx, ahead: bool) -> Option<T> {
+fn move_linear(t: &T, w: &Ctx) -> Option<T> {
     let (terms, konst) = region_terms(t, w);
     if terms.len() < 2 {
         return None;
     }
-    let groups = leaf_groups(terms, w);
-    let n = groups.len();
-    if n > MAX_MOVE_GROUPS {
+    let groups: Vec<Vec<(u64, T)>> = leaf_groups(terms, w).into_iter().map(|(_, g)| g).collect();
+    if groups.len() > MAX_MOVE_GROUPS {
         return None;
     }
+    let mut best = t.clone();
+    let mut near = Vec::new();
+    move_groups(&groups, konst, size(t), w, &mut best, Some(&mut near));
+    near.sort_by_key(|(_, _, alt)| size(alt));
+    for (groups, konst, alt) in near.into_iter().take(NEAR_MOVES) {
+        move_groups(&groups, konst, size(t), w, &mut best, None);
+        let (terms, konst) = region_terms(&alt, w);
+        let regrouped: Vec<Vec<(u64, T)>> = leaf_groups(terms, w).into_iter().map(|(_, g)| g).collect();
+        if regrouped.len() <= MAX_MOVE_GROUPS {
+            move_groups(&regrouped, konst, size(t), w, &mut best, None);
+        }
+    }
+    (best != *t).then_some(best)
+}
+
+/// A region's leaf groups, its constant kept apart, and their sum.
+type Moved = (Vec<Vec<(u64, T)>>, u64, T);
+
+/// `best` replaced by each smaller move between `groups`; with `near`, the moves (not the
+/// plain rebuilds, `a = 0`) of at most `NEAR_MOVE_SLACK` nodes more than `size0` are
+/// collected there with the moved groups kept apart: grouping their sum again by leaves
+/// can undo the move, or allow other moves.
+fn move_groups(groups: &[Vec<(u64, T)>], konst: u64, size0: usize, w: &Ctx, best: &mut T, mut near: Option<&mut Vec<Moved>>) {
+    let n = groups.len();
     let leaf_terms: Vec<Vec<T>> = groups
         .iter()
-        .map(|(_, g)| {
+        .map(|g| {
             let mut lv = Vec::new();
             g.iter().for_each(|(_, x)| leaves(x, w, &mut lv));
             lv
         })
         .collect();
-    let mut best = t.clone();
-    let mut near: Vec<T> = Vec::new();
     for i in 0..n {
         for j in (0..n).filter(|&j| j != i) {
             let shared = leaf_terms[j].iter().filter(|v| leaf_terms[i].contains(v));
@@ -3870,40 +3891,37 @@ fn move_linear(t: &T, w: &Ctx, ahead: bool) -> Option<T> {
             for v in &moved {
                 for a in MOVED_MULTIPLES.into_iter().filter(|&a| a != 0 || !matches!(v, T::Op(Op::Not, _))) {
                     let a = a as u64 & w.mask;
-                    let (mut gi, mut gj) = (groups[i].1.clone(), groups[j].1.clone());
+                    let (mut gi, mut gj) = (groups[i].clone(), groups[j].clone());
                     if a != 0 {
                         gi.push((a, v.clone()));
                         gj.push((a.wrapping_neg() & w.mask, v.clone()));
                     }
                     let rj = rewrite(&build_sum(&gj, 0, w), w);
-                    let others: Vec<(u64, T)> = (0..n).filter(|&k| k != i && k != j).flat_map(|k| groups[k].1.clone()).collect();
+                    let others: Vec<(u64, T)> = (0..n).filter(|&k| k != i && k != j).flat_map(|k| groups[k].clone()).collect();
                     for with_konst in [false, true] {
                         let (k_in, k_out) = if with_konst { (konst, 0) } else { (0, konst) };
                         let ri = rewrite(&build_sum(&gi, k_in, w), w);
                         let mut all = others.clone();
-                        all.extend([(1, ri), (1, rj.clone())]);
+                        all.extend([(1, ri.clone()), (1, rj.clone())]);
                         // A negative first term costs a `Neg`; later ones become `Sub`.
                         if let Some(p) = all.iter().position(|(c, _)| w.signed(*c) > 0) {
                             all[..=p].rotate_right(1);
                         }
                         let alt = build_sum(&all, k_out, w);
-                        if size(&alt) < size(&best) {
-                            best = alt;
-                        } else if ahead && n <= MAX_NEAR_GROUPS && size(&alt) <= size(t) + NEAR_MOVE_SLACK && !near.contains(&alt) {
-                            near.push(alt);
+                        if size(&alt) < size(best) {
+                            *best = alt;
+                        } else if let Some(near) = near.as_deref_mut().filter(|_| a != 0 && n <= MAX_NEAR_GROUPS && size(&alt) <= size0 + NEAR_MOVE_SLACK) {
+                            if !near.iter().any(|(_, _, x)| *x == alt) {
+                                let mut moved: Vec<Vec<(u64, T)>> = (0..n).filter(|&k| k != i && k != j).map(|k| groups[k].clone()).collect();
+                                moved.extend([vec![(1, ri)], vec![(1, rj.clone())]]);
+                                near.push((moved, k_out, alt));
+                            }
                         }
                     }
                 }
             }
         }
     }
-    near.sort_by_key(size);
-    for alt in near.into_iter().take(NEAR_MOVES) {
-        if let Some(r) = move_linear(&alt, w, false).filter(|r| size(r) < size(&best)) {
-            best = r;
-        }
-    }
-    (best != *t).then_some(best)
 }
 
 /// `terms` plus `k` with `k` moved into one term, `a·B + a` as `-a·~B`, where some term has

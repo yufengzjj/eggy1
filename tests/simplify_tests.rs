@@ -1597,7 +1597,25 @@ fn leaf_moves_two_steps() {
         "u64",
         &[(
             "((((((3 * (t & ~x)) + x) + (-2 * (y + (y & s)))) + (3 * ((v & -0xf0f0f0f0f0f0f10) | x))) + ((4 * (x & y)) + (-0xb * ((~x | u) ^ y)))) + (-2 * ((r ^ z) ^ x)))",
-            &["(((((3 * ((v & -0xf0f0f0f0f0f0f10) | x)) - (2 * (y & s))) - (2 * ((r ^ z) ^ x))) + (3 * (t | x))) + ((-0xb * ((~x | u) ^ y)) - (2 * (x ^ y))))"],
+            &[
+                "(((((3 * ((v & -0xf0f0f0f0f0f0f10) | x)) - (2 * (y & s))) - (2 * ((r ^ z) ^ x))) + (3 * (t | x))) + ((-0xb * ((~x | u) ^ y)) - (2 * (x ^ y))))",
+                "(((((3 * (t | x)) - (2 * (y & s))) - (2 * ((z ^ x) ^ r))) + (3 * ((-0xf0f0f0f0f0f0f10 & v) | x))) + ((-0xb * ((~x | u) ^ y)) - (2 * (x ^ y))))",
+            ],
+            10,
+        )],
+    );
+}
+
+/// A second move into a group the first one grew: `-3·~y` from the group of `t ^ y`, then
+/// `-3·v` from that of `v & (~z | u)`, rebuild the group of `v ^ (s & y)` as
+/// `3·(v ^ y) + 7·((v ^ s) & y)`.
+#[test]
+fn leaf_moves_into_moved_group() {
+    check(
+        "u64",
+        &[(
+            "((((((((v & (~z | u)) + ~y) * -3) + (t ^ y)) + (7 * (v ^ (s & y)))) - (~y & v)) + (-3 * (~w | (t | x)))) + w)",
+            &["((((w - (3 * (~w | (t | x)))) + (t ^ y)) + (-3 * (~(v & z) | u))) + ((3 * (v ^ y)) + (7 * ((v ^ s) & y))))"],
             10,
         )],
     );
