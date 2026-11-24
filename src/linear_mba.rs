@@ -597,14 +597,23 @@ pub(crate) fn simba(t: &T, w: &Ctx) -> Option<T> {
     leaves(t, w, &mut lv);
     let n = lv.len();
     if n > MAX_LEAVES {
-        return match (drop_unused(t, &lv, w), clustered(t, w)) {
-            (Some(d), Some(c)) if size(&c) >= size(&d) => Some(d),
-            (d, None) => d,
-            (_, c) => {
-                w.st.clustered.store(true, Relaxed);
-                c
-            }
+        let (d, c) = (drop_unused(t, &lv, w), clustered(t, w));
+        // A region too large to evaluate is peeled in its clustered form. With unused leaves
+        // dropped, the rewrite of `d` peels.
+        let p = if d.is_some() { None } else { peel(t, w).map(|p| (p, false)).or_else(|| Some((peel(c.as_ref()?, w)?, true))) };
+        let best = match (d, c) {
+            (Some(d), Some(c)) if size(&c) >= size(&d) => Some((d, false)),
+            (d, None) => d.map(|d| (d, false)),
+            (_, c) => c.map(|c| (c, true)),
         };
+        let best = match (best, p) {
+            (Some(b), Some(p)) if size(&p.0) >= size(&b.0) => Some(b),
+            (b, p) => p.or(b),
+        };
+        if best.as_ref().is_some_and(|b| b.1) {
+            w.st.clustered.store(true, Relaxed);
+        }
+        return best.map(|b| b.0);
     }
     if n == 0 {
         return None;
@@ -711,6 +720,16 @@ fn drop_leaves(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
 /// `MAX_WIDE_LEAVES` leaves or `WIDE_BUDGET`.
 fn used_leaves(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<bool>)> {
     let n = lv.len();
+    let (e0, _, tables) = bit_tables(t, lv, w)?;
+    let used = (0..n).map(|i| tables.iter().any(|g| (0..g.len()).any(|q| g[q] != g[q & !(1 << i)]))).collect();
+    Some((e0, used))
+}
+
+/// `e(0)`, the table index of each bit position, and the tables `g_j(q)` with
+/// `e(q·2^j) = e(0) + 2^j·g_j(q)`, taken modulo `2^(w-j)` for every bit `j` that shares
+/// table `g_b` with a lower `b`; `None` past `MAX_WIDE_LEAVES` leaves or `WIDE_BUDGET`.
+fn bit_tables(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<usize>, Vec<Vec<u64>>)> {
+    let n = lv.len();
     if n > MAX_WIDE_LEAVES {
         return None;
     }
@@ -754,8 +773,85 @@ fn used_leaves(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<bool>)> {
         }
         tables.push(g);
     }
-    let used = (0..n).map(|i| tables.iter().any(|g| (0..g.len()).any(|q| g[q] != g[q & !(1 << i)]))).collect();
-    Some((e0, used))
+    let col = (0..w.w).map(|j| bits.iter().position(|&b| column(b) == column(j)).unwrap_or(0)).collect();
+    Some((e0, col, tables))
+}
+
+/// A region with more than `MAX_LEAVES` leaves whose value is a bitwise function of its
+/// leaves, with one leaf `v` that is not arithmetic peeled off: `v | r`, `~v & r` or `v ^ r`
+/// with `r` the region at `v = 0`, or `v & r`, `~v | r` with `r` at `v = -1`; `r` is
+/// rewritten, which peels again until few enough leaves are left.
+fn peel(t: &T, w: &Ctx) -> Option<T> {
+    let mut lv = Vec::new();
+    leaves(t, w, &mut lv);
+    let n = lv.len();
+    if !(MAX_LEAVES + 1..=MAX_WIDE_LEAVES).contains(&n) {
+        return None;
+    }
+    // Most regions fail; at points of 0s and 1s a bitwise value differs from e(0) in bit 0 only.
+    let prog = Prog::new(t, &lv, w);
+    let e0 = prog.at(0, w);
+    let mut h = 0x9e37_79b9_7f4a_7c15u64;
+    let spread = (0..16).map(|_| {
+        h ^= h << 13;
+        h ^= h >> 7;
+        h ^= h << 17;
+        h as usize & ((1 << n) - 1)
+    });
+    if !(0..n).map(|i| 1 << i).chain(spread).all(|q| prog.at(q, w) ^ e0 <= 1) {
+        return None;
+    }
+    let (e0, col, tables) = bit_tables(t, &lv, w)?;
+    // Bit j of the value is f_j(bits j of the leaves) when every f_j(q) is 0 or 1.
+    let mut fs: Vec<Vec<bool>> = Vec::new();
+    for j in 0..w.w {
+        let m = w.mask >> j;
+        let e0j = e0 >> j & 1;
+        let mut f = Vec::with_capacity(1 << n);
+        for &g in &tables[col[j as usize]] {
+            match g.wrapping_add(e0j) & m {
+                0 => f.push(false),
+                1 => f.push(true),
+                _ => return None,
+            }
+        }
+        if !fs.contains(&f) {
+            fs.push(f);
+        }
+    }
+    // `p(f at v = 0, f at v = 1)` for every point and table.
+    let all = |i: usize, p: &dyn Fn(bool, bool) -> bool| fs.iter().all(|f| (0..1usize << n).filter(|q| q >> i & 1 == 0).all(|q| p(f[q], f[q | 1 << i])));
+    let not = |x: T| T::Op(Op::Not, vec![x]);
+    // Arithmetic leaves are left to `relate`, which rebuilds them too.
+    for i in (0..n).filter(|&i| kind(&lv[i], w) != Kind::Lin) {
+        // (operation, complement v, value substituted for v)
+        let how = if all(i, &|_, hi| hi) {
+            (Op::Or, false, 0)
+        } else if all(i, &|_, hi| !hi) {
+            (Op::And, true, 0)
+        } else if all(i, &|lo, hi| lo != hi) {
+            (Op::Xor, false, 0)
+        } else if all(i, &|lo, _| !lo) {
+            (Op::And, false, -1)
+        } else if all(i, &|lo, _| lo) {
+            (Op::Or, true, -1)
+        } else {
+            continue;
+        };
+        // Leaves are found as `Prog` finds them: the first subterm equal to one, anywhere.
+        fn put(t: &T, lv: &[T], v: &T, k: i64) -> T {
+            match t {
+                _ if t == v => T::Num(k),
+                _ if lv.contains(t) => t.clone(),
+                T::Op(op, a) => T::Op(*op, a.iter().map(|x| put(x, lv, v, k)).collect()),
+                _ => t.clone(),
+            }
+        }
+        let rest = rewrite(&put(t, &lv, &lv[i], how.2), w);
+        let v = if how.1 { not(lv[i].clone()) } else { lv[i].clone() };
+        return Some(T::Op(how.0, vec![v, rest])).filter(|r| size(r) < size(t));
+    }
+    None
 }
 
 /// The linear MBA over `lv` with values `vals` on {0,1}^n. When every value is a
@@ -4729,6 +4825,55 @@ mod tests {
                 assert_eq!(sum_size(&terms, konst, &wd), size(&build_sum(&terms, konst, &wd)), "{terms:?} {konst}");
             }
         }
+    }
+
+    #[test]
+    fn peel_preserves_value() {
+        let op = |o: Op, a: Vec<T>| T::Op(o, a);
+        let var = |s: &str| T::Var(s.into());
+        let lv = [var("x"), var("y"), var("z"), var("u"), op(Op::Mul, vec![var("a"), var("b")]), op(Op::Add, vec![var("c"), var("x")]), var("v"), var("w")];
+        fn bit_term(r: &mut Rng, depth: u32, lv: &[T]) -> T {
+            if depth == 0 {
+                return match r.next() % 8 {
+                    0 => T::Num([0x55, -0x10, 0x3c][(r.next() % 3) as usize]),
+                    _ => lv[(r.next() % lv.len() as u64) as usize].clone(),
+                };
+            }
+            let ops = [Op::And, Op::Or, Op::Xor, Op::Not];
+            match ops[(r.next() % 4) as usize] {
+                Op::Not => T::Op(Op::Not, vec![bit_term(r, depth - 1, lv)]),
+                o => T::Op(o, vec![bit_term(r, depth - 1, lv), bit_term(r, depth - 1, lv)]),
+            }
+        }
+        // A linear sum equal to the bitwise `t`, its outer operations written arithmetically.
+        fn lin(t: &T) -> T {
+            let op = |o: Op, a: Vec<T>| T::Op(o, a);
+            match t {
+                T::Op(Op::Or, a) => op(Op::Sub, vec![op(Op::Add, vec![a[0].clone(), lin(&a[1])]), op(Op::And, a.clone())]),
+                T::Op(Op::And, a) => op(Op::Sub, vec![op(Op::Add, vec![a[0].clone(), lin(&a[1])]), op(Op::Or, a.clone())]),
+                T::Op(Op::Xor, a) => op(Op::Sub, vec![op(Op::Add, vec![a[0].clone(), lin(&a[1])]), op(Op::Mul, vec![T::Num(2), op(Op::And, a.clone())])]),
+                T::Op(Op::Not, a) => op(Op::Sub, vec![op(Op::Neg, vec![lin(&a[0])]), T::Num(1)]),
+                _ => t.clone(),
+            }
+        }
+        let mut r = Rng(0x7e1e_0ff5_0123_4567);
+        let mut peeled = 0;
+        for k in 0..200 {
+            let w = Ctx::new(if k % 2 == 0 { 8 } else { 64 });
+            let mut f = bit_term(&mut r, 3, &lv[..6]);
+            for l in &lv[6..] {
+                let l = if r.next() % 3 == 0 { op(Op::Not, vec![l.clone()]) } else { l.clone() };
+                f = op([Op::And, Op::Or, Op::Xor][(r.next() % 3) as usize], vec![l, f]);
+            }
+            let t = lin(&f);
+            let Some(p) = peel(&t, &w) else { continue };
+            peeled += 1;
+            for _ in 0..200 {
+                let env: HashMap<String, u64> = ["a", "b", "c", "x", "y", "z", "u", "v", "w"].iter().map(|s| (s.to_string(), r.next() & w.mask)).collect();
+                assert_eq!(full_eval(&t, &w, &env), full_eval(&p, &w, &env), "{}\n{}", show(&t), show(&p));
+            }
+        }
+        assert!(peeled > 30, "peeled {peeled}");
     }
 
     #[test]
