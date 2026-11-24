@@ -79,8 +79,8 @@ pub fn make_egg(num_type: &str) -> String {
     let datatype = format!(
         r#"
 (datatype Expr
-    ; Constants cost a little less than other nodes, so they break ties between forms of the same size.
-    (Num i64 :cost 9)
+    ; Constants only break ties between forms with the same number of other nodes.
+    (Num i64 :cost 1)
     (Add Expr Expr :cost 10)
     (Sub Expr Expr :cost 10)
     (Mul Expr Expr :cost 10)
