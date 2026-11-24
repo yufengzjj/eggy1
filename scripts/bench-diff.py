@@ -1,11 +1,14 @@
 """Compare two bench runs case by case.
 
     python -I scripts/bench-diff.py out/old out/new [-l 20] [--show [-w 300]]
+    python -I scripts/bench-diff.py out/run          # size totals of one run only
 
 Each argument is a bench-shards.py output directory (its results.tsv) or a file written by
 bench -r. Cases are matched by type, dataset, section and input hash. Lists status changes and,
 for cases whose status did not change, output size changes, worse first, then totals and the
-average seconds per section. --show prints each listed case's input (from fails.txt next to the
+average seconds per section, and a size table per section: summed output and ground-truth
+sizes, the cases strictly below / above ground truth, and the summed size_out - size_gt (cases
+without an output, such as timeouts, count with their input size). --show prints each listed case's input (from fails.txt next to the
 results, else the dataset file under --data) and both outputs.
 """
 
@@ -59,6 +62,46 @@ def load(arg):
 
 def size(r):
     return int(r["size_out"]) if r["status"] in SIZED and r["size_out"] else None
+
+
+def out_size(r):
+    """Output size, or the input size when the case has no output (timeout, error, wrong)."""
+    s = size(r)
+    return int(r["size_in"]) if s is None else s
+
+
+def size_totals(rows):
+    """Per section and in total: [cases, sum out, sum gt, below gt, above gt, sum out - gt, no output]."""
+    tot = defaultdict(lambda: [0] * 7)
+    for key, r in rows.items():
+        if not r.get("size_gt"):
+            continue
+        so, sg = out_size(r), int(r["size_gt"])
+        for k in (key[:3], ("total", "", "")):
+            t = tot[k]
+            t[0] += 1
+            t[1] += so
+            t[2] += sg
+            t[3] += so < sg
+            t[4] += so > sg
+            t[5] += so - sg
+            t[6] += size(r) is None
+    return tot
+
+
+def size_table(runs):
+    """runs: list of (label, rows); one column group per run."""
+    tots = [size_totals(rows) for _, rows in runs]
+    keys = sorted(set().union(*tots) - {("total", "", "")}) + [("total", "", "")]
+    groups = ["sum out", "sum gt", "below gt", "above gt", "out - gt", "no output"]
+    labels = [g if len(runs) == 1 else f"{g} {label}" for g in groups for label, _ in runs]
+    print("| type | dataset | section | cases | " + " | ".join(labels) + " |")
+    print("|---|---|---|---" + "|---" * len(labels) + "|")
+    for k in keys:
+        cells = [str(max(t[k][0] for t in tots))]
+        for i in range(1, 7):
+            cells += [str(t[k][i]) if k in t else "-" for t in tots]
+        print(f"| {k[0]} | {k[1]} | {k[2]} | " + " | ".join(cells) + " |")
 
 
 def compare(o, n):
@@ -130,12 +173,16 @@ def listing(title, items, limit, show, inputs, width):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("old", help="old run: bench-shards.py output directory or bench -r file")
-    ap.add_argument("new", help="new run, same forms")
+    ap.add_argument("new", nargs="?", help="new run, same forms (omitted: only the size table of old)")
     ap.add_argument("-l", "--limit", type=int, default=20, help="cases listed per listing (0: all)")
     ap.add_argument("--show", action="store_true", help="print input and both outputs of listed cases")
     ap.add_argument("--data", default="bench-data", help="dataset directory for inputs not in fails.txt")
     ap.add_argument("-w", "--width", type=int, default=300, help="cut shown expressions to this many characters (0: no cut)")
+    ap.add_argument("--no-sizes", action="store_true", help="leave out the size table")
     a = ap.parse_args()
+    if a.new is None:
+        size_table([("", load(a.old))])
+        return
     old, new = load(a.old), load(a.new)
     inputs = Inputs([a.old, a.new], a.data)
 
