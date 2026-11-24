@@ -5200,8 +5200,6 @@ fn push_not(t: &T, w: &Ctx) -> T {
     if size(&r) < size(&t) { r } else { t }
 }
 
-/// Largest final result `polish` runs `relate` on.
-const MAX_POLISH_RELATE: usize = 128;
 /// Uncached `rewrite` calls one `polish` call may make.
 const POLISH_REWRITES: usize = 2000;
 
@@ -5210,7 +5208,7 @@ const POLISH_REWRITES: usize = 2000;
 /// slightly smaller form changes how the rules finish.
 pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
     type Pass = (&'static str, fn(&T, &Ctx) -> T);
-    const PASSES: [Pass; 12] = [
+    const PASSES: [Pass; 10] = [
         ("push_not", push_not),
         ("join_constants", |t, w| join_constants(t, w, false)),
         ("join_linear", |t, w| {
@@ -5221,21 +5219,11 @@ pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
             w.limit_semi_leaves(MAX_LEAVES);
             r
         }),
-        ("relate", |t, w| {
-            if size(t) > MAX_POLISH_RELATE {
-                return t.clone();
-            }
-            w.limit_semi_leaves(2);
-            let r = relate(t, w);
-            w.limit_semi_leaves(MAX_LEAVES);
-            r
-        }),
         ("over_const_bitwise", over_const_bitwise),
         ("over_shared_bitwise", over_shared_bitwise),
         ("over_products", |t, w| crate::lowbits::over_products(t, w, |a| rebuild_once(a, w))),
         ("recombine", |t, w| if selectors(t, w).is_empty() { recombine_regions(t, w, false) } else { t.clone() }),
         ("shift_cases", shift_cases),
-        ("split_bits", split_rebuilt),
         ("decompose", |t, w| decompose_regions(t, w, false)),
         ("factor", |t, w| factor_regions(t, w, false)),
     ];
