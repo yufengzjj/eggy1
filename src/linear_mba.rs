@@ -4288,7 +4288,8 @@ fn split_bits(t: T, depth: usize, budget: &std::cell::Cell<usize>, w: &Ctx, run:
         }
         let d = run(&op(Op::Sub, vec![r1, r0.clone()]));
         let ty = crate::eval::NumType { bits: w.w, signed: false };
-        let c = Some(()).filter(|_| crate::eval::vars(&d).is_empty()).and_then(|_| crate::eval::eval(&d, ty, &|_| 0));
+        // Only T-function operations: `/ % >> mulhi` depend on the signedness, which `w` does not give.
+        let c = Some(()).filter(|_| crate::eval::vars(&d).is_empty() && crate::minimal::t_term(&d)).and_then(|_| crate::eval::eval(&d, ty, &|_| 0));
         let sel = match c {
             Some(c) if c & (m - 1) == 0 => op(Op::Mul, vec![op(Op::And, vec![var.clone(), T::Num(w.signed(m))]), T::Num(w.signed(c >> k))]),
             _ if k == 0 => op(Op::Mul, vec![op(Op::And, vec![var.clone(), T::Num(1)]), d]),

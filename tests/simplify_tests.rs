@@ -2087,3 +2087,16 @@ fn complement_pushed_inward() {
     );
     check("u32", &[("((x + 0xfffffffe) & ~y) + 1", &["-(~(x + 0xfffffffe) | y)", "-((1 - x) | y)"], 10)]);
 }
+
+/// A case split's constant difference is folded only when it has no signed operation:
+/// `-1 % 2` is -1 in i32, not the unsigned remainder 1.
+#[test]
+fn split_difference_with_signed_constant() {
+    check(
+        "i32",
+        &[
+            ("(x & 1) * (-1 % 2)", &["-(x & 1)"], 10),
+            ("(z & 1) * (-0x7fffffff % 0x4000)", &["((z & 1) * -0x3fff)", "(-0x3fff * (z & 1))"], 10),
+        ],
+    );
+}
