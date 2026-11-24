@@ -4429,6 +4429,61 @@ fn split_in(t: &T, w: &Ctx, run: &dyn Fn(&T) -> T) -> T {
     }
 }
 
+/// The smallest of `~t` and forms with the `~` moved inward: `~~a = a`, `~(a + K) = ~K - a`,
+/// `~(a - K) = (K - 1) - a`, `~(K - a) = a + ~K`, De Morgan, `~(a ^ b) = ~a ^ b`.
+fn complement(t: &T, w: &Ctx) -> T {
+    let not = |k: i64| w.signed(!(k as u64) & w.mask);
+    let neg = |x: &T| T::Op(Op::Neg, vec![x.clone()]);
+    let sub_from = |k: i64, x: &T| if w.signed(k as u64 & w.mask) == 0 { neg(x) } else { T::Op(Op::Sub, vec![T::Num(w.signed(k as u64 & w.mask)), x.clone()]) };
+    let plain = T::Op(Op::Not, vec![t.clone()]);
+    let c = match t {
+        T::Num(k) => T::Num(not(*k)),
+        T::Op(Op::Not, a) => a[0].clone(),
+        T::Op(Op::Add, a) => match (&a[0], &a[1]) {
+            (x, T::Num(k)) | (T::Num(k), x) => sub_from(not(*k), x),
+            _ => plain.clone(),
+        },
+        T::Op(Op::Sub, a) => match (&a[0], &a[1]) {
+            (x, T::Num(k)) => sub_from(k.wrapping_sub(1), x),
+            (T::Num(k), x) if not(*k) == 0 => x.clone(),
+            (T::Num(k), x) => T::Op(Op::Add, vec![x.clone(), T::Num(not(*k))]),
+            _ => plain.clone(),
+        },
+        T::Op(op @ (Op::And | Op::Or), a) => {
+            let dual = if *op == Op::And { Op::Or } else { Op::And };
+            T::Op(dual, vec![complement(&a[0], w), complement(&a[1], w)])
+        }
+        T::Op(Op::Xor, a) => {
+            let l = T::Op(Op::Xor, vec![complement(&a[0], w), a[1].clone()]);
+            let r = T::Op(Op::Xor, vec![a[0].clone(), complement(&a[1], w)]);
+            if size(&r) < size(&l) { r } else { l }
+        }
+        _ => plain.clone(),
+    };
+    if size(&c) < size(&plain) { c } else { plain }
+}
+
+/// `t` with `~x` written by `complement`, and `x + 1`, `x - -1` as `-~x`, wherever that is
+/// smaller (`((a - 1) | b) + 1` is `-(-a & ~b)`).
+fn push_not(t: &T, w: &Ctx) -> T {
+    let T::Op(op, a) = t else { return t.clone() };
+    let t = T::Op(*op, a.iter().map(|x| push_not(x, w)).collect());
+    let is = |k: i64, v: i64| (k as u64 ^ v as u64) & w.mask == 0;
+    let r = match &t {
+        T::Op(Op::Not, a) => complement(&a[0], w),
+        T::Op(Op::Add, a) => match (&a[0], &a[1]) {
+            (x, T::Num(k)) | (T::Num(k), x) if is(*k, 1) => T::Op(Op::Neg, vec![complement(x, w)]),
+            _ => return t,
+        },
+        T::Op(Op::Sub, a) => match (&a[0], &a[1]) {
+            (x, T::Num(k)) if is(*k, -1) => T::Op(Op::Neg, vec![complement(x, w)]),
+            _ => return t,
+        },
+        _ => return t,
+    };
+    if size(&r) < size(&t) { r } else { t }
+}
+
 /// Largest final result `polish` runs `relate` on.
 const MAX_POLISH_RELATE: usize = 128;
 /// Uncached `rewrite` calls one `polish` call may make.
@@ -4439,7 +4494,8 @@ const POLISH_REWRITES: usize = 2000;
 /// slightly smaller form changes how the rules finish.
 pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
     type Pass = (&'static str, fn(&T, &Ctx) -> T);
-    const PASSES: [Pass; 10] = [
+    const PASSES: [Pass; 11] = [
+        ("push_not", push_not),
         ("join_constants", |t, w| join_constants(t, w, false)),
         ("join_linear", |t, w| join_linear(t, w, false)),
         ("relate", |t, w| {
