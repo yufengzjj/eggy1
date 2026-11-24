@@ -2,7 +2,7 @@
 
 use crate::eval::{apply, size, vars, NumType, Op, Term};
 
-const POINTS: usize = 32;
+const POINTS: usize = 64;
 const BINARY: [Op; 11] = [Op::Add, Op::Sub, Op::Mul, Op::Div, Op::Mod, Op::And, Op::Or, Op::Xor, Op::Shl, Op::Shr, Op::Mulhi];
 
 /// Whether every term with fewer nodes than `t` differs from `t` at some point; `false`
@@ -86,7 +86,8 @@ fn trees(set: u32, u: usize) -> Vec<Term> {
     out
 }
 
-/// Evaluation points: the corner values, then pseudo-random ones.
+/// Evaluation points: the corner values, then pseudo-random ones, half of them of small
+/// magnitude so that shift amounts such as `~y` or `x + y` stay below the width.
 fn points(k: usize) -> Vec<Vec<u64>> {
     let mut s = 0x9e37_79b9_7f4a_7c15u64;
     let mut next = || {
@@ -97,7 +98,16 @@ fn points(k: usize) -> Vec<Vec<u64>> {
     };
     let corner = [0u64, 1, u64::MAX, 2, 3, 5];
     (0..POINTS)
-        .map(|i| (0..k).map(|v| if i < corner.len() { corner[(i + v) % corner.len()] } else { next() >> (next() % 64) }).collect())
+        .map(|i| {
+            (0..k)
+                .map(|v| match i {
+                    _ if i < corner.len() => corner[(i + v) % corner.len()],
+                    _ if i % 4 == 0 => (next() % 9).wrapping_sub(4),
+                    _ if i % 4 == 2 => (next() % 81).wrapping_sub(40),
+                    _ => next() >> (next() % 64),
+                })
+                .collect()
+        })
         .collect()
 }
 

@@ -1112,16 +1112,18 @@ fn drive(egg: &str, s: &str, cli: &Cli, opts: &sched::Options) -> Result<String,
         // inputs with shifts, division or mulhi, unless the rebuild is already tiny.
         let opaque = ["(Shl ", "(Shr ", "(Div ", "(Mod ", "(Mulhi "].iter().any(|o| seed.contains(o))
             && !(first && eval::size(&eval::parse(&linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), &opts).0)) <= linear_mba::TINY);
-        // No smaller term equals `alt`, so saturation could only pick another of its size.
-        let minimal = {
-            let t = eval::parse(&alt);
+        // When no smaller term equals `alt` (or the first extraction, for the rerun with the
+        // input), saturation could only pick another term of its size.
+        let is_min = |e: &str| {
+            let t = eval::parse(e);
             minimal::is_tidy(&t) && eval::NumType::from_name(&cli.num_type).is_some_and(|ty| minimal::is_minimal(&t, ty))
         };
+        let minimal = is_min(&alt);
         let mut extracted = match minimal {
             true => alt.clone(),
             false => simplify_round_with(&egg, &seed, cli, first && opaque, &opts)?,
         };
-        if first && !opaque && !minimal && mixed(&eval::parse(&extracted)) {
+        if first && !opaque && !minimal && mixed(&eval::parse(&extracted)) && !is_min(&extracted) {
             let full = simplify_round_with(&egg, &seed, cli, true, &opts)?;
             if eval::size(&eval::parse(&full)) <= eval::size(&eval::parse(&extracted)) {
                 extracted = full;
