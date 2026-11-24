@@ -3999,6 +3999,116 @@ fn low_multiplier(c: u64, y: &T, w: &Ctx) -> u64 {
     if w.signed(low).unsigned_abs() <= w.signed(high).unsigned_abs() { low } else { high }
 }
 
+/// Most leaves of an arithmetic operand that `unify_operands` compares by its values.
+const MAX_UNIFY_LEAVES: usize = 8;
+
+#[derive(PartialEq, Eq, Hash)]
+enum OperandKey {
+    /// The leaves, sorted, and the values on {0,1}^n (or their complements, whichever is smaller).
+    Linear(Vec<T>, Vec<u64>),
+    Exact(T),
+}
+
+struct Unifier<'a> {
+    w: &'a Ctx,
+    classes: crate::eval::FastMap<OperandKey, usize>,
+    /// Per class: the smallest member and whether it is the complement of the class key.
+    best: Vec<(usize, T, bool)>,
+    of: crate::eval::FastMap<T, (usize, bool)>,
+    built: Vec<Option<T>>,
+    changed: bool,
+}
+
+impl Unifier<'_> {
+    fn is_operand(&self, t: &T, in_bit: bool) -> bool {
+        in_bit && !matches!(t, T::Op(Op::Not, _)) && matches!(t, T::Op(..)) && kind(t, self.w) == Kind::Lin
+    }
+
+    fn inner(&self, t: &T, in_bit: bool) -> bool {
+        match t {
+            T::Op(op, _) => kind(t, self.w) != Kind::Atom && (in_bit || matches!(op, Op::And | Op::Or | Op::Xor)),
+            _ => false,
+        }
+    }
+
+    /// `t` with each arithmetic operand of a bitwise operation replaced by `#c<class>`, or
+    /// `~#c<class>` for the complement of the class key.
+    fn classify(&mut self, t: &T, in_bit: bool) -> T {
+        let T::Op(op, a) = t else { return t.clone() };
+        let inner = self.inner(t, in_bit);
+        let abs = T::Op(*op, a.iter().map(|x| self.classify(x, inner && !self.is_operand(t, in_bit))).collect());
+        if !self.is_operand(t, in_bit) {
+            return abs;
+        }
+        let w = self.w;
+        let mut lv = Vec::new();
+        leaves(&abs, w, &mut lv);
+        let (key, flip) = if lv.len() <= MAX_UNIFY_LEAVES && !has_const_bitwise(&abs, w) {
+            lv.sort_by_key(term_hash);
+            let prog = Prog::new(&abs, &lv, w);
+            let vals: Vec<u64> = (0..1usize << lv.len()).map(|p| prog.at(p, w)).collect();
+            let comp: Vec<u64> = vals.iter().map(|v| !v & w.mask).collect();
+            if comp < vals { (OperandKey::Linear(lv, comp), true) } else { (OperandKey::Linear(lv, vals), false) }
+        } else {
+            (OperandKey::Exact(abs), false)
+        };
+        let n = self.classes.len();
+        let id = *self.classes.entry(key).or_insert(n);
+        let s = size(t);
+        if id == self.best.len() {
+            self.best.push((s, t.clone(), flip));
+            self.built.push(None);
+        } else {
+            let b = &mut self.best[id];
+            if b.1 != *t || b.2 != flip {
+                self.changed = true;
+                if s < b.0 {
+                    *b = (s, t.clone(), flip);
+                }
+            }
+        }
+        self.of.insert(t.clone(), (id, flip));
+        let p = T::Var(format!("#c{id}"));
+        if flip { T::Op(Op::Not, vec![p]) } else { p }
+    }
+
+    fn replace(&mut self, t: &T, in_bit: bool) -> T {
+        let T::Op(op, a) = t else { return t.clone() };
+        if self.is_operand(t, in_bit) {
+            let (id, flip) = self.of[t];
+            let r = match &self.built[id] {
+                Some(r) => r.clone(),
+                None => {
+                    let T::Op(op, a) = self.best[id].1.clone() else { unreachable!() };
+                    let r = T::Op(op, a.iter().map(|x| self.replace(x, false)).collect());
+                    self.built[id] = Some(r.clone());
+                    r
+                }
+            };
+            return if flip != self.best[id].2 { T::Op(Op::Not, vec![r]) } else { r };
+        }
+        let inner = self.inner(t, in_bit);
+        let a: Vec<T> = a.iter().map(|x| self.replace(x, inner)).collect();
+        match (op, a.as_slice()) {
+            (Op::Not, [T::Op(Op::Not, b)]) => b[0].clone(),
+            _ => T::Op(*op, a),
+        }
+    }
+}
+
+/// `t` with the arithmetic operands of bitwise operations that are equal or complements
+/// of each other as linear MBAs (equal values on {0,1}^n over the same leaves, which
+/// proves it) written as the smallest of them or its `~`, so that the regions around
+/// them share the leaf: `(a & (~x - z)) + ((~y - w) & (x + z))` with `a = y + w`.
+pub(crate) fn unify_operands(t: &T, w: &Ctx) -> T {
+    let mut u = Unifier { w, classes: Default::default(), best: Vec::new(), of: Default::default(), built: Vec::new(), changed: false };
+    u.classify(t, false);
+    if !u.changed {
+        return t.clone();
+    }
+    u.replace(t, false)
+}
+
 /// Rewrite inside the atom leaves of a rebuilt region.
 fn substitute_atoms(t: &T, w: &Ctx) -> T {
     match t {
@@ -4720,6 +4830,15 @@ fn simplify_linear_uncached(egg: &str, w: u32, opts: &crate::sched::Options) -> 
         }
     };
     let r = run(&t, true);
+    // Unified operands let the regions around them share leaves, but the rebuild of the
+    // input as written is sometimes smaller.
+    let unified = unify_operands(&t, &w);
+    let r = if unified != t {
+        let u = run(&unified, true);
+        if size(&u) < size(&r) { u } else { r }
+    } else {
+        r
+    };
     let mut rebuilt: Vec<(&str, T)> = vec![("first", r.clone())];
     if size(&r) <= MAX_SPLIT_SIZE {
         let s = split_in(&r, &w, &|t| run(&unshift(&crate::lowbits::simplify(t, &w), &w), false));

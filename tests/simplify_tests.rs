@@ -1727,7 +1727,7 @@ fn related_leaves_by_placeholder() {
                 &["(((y * 5) ^ ((y * z) - (z ^ y))) ^ (z & 0x80000000))"],
                 10,
             ),
-            ("0xb * ((~(y & x) | (x + 0xff)) - ((y & x) | (-0x100 - x)))", &["(((x & ~y) + 0xff) * 0xb)"], 10),
+            ("0xb * ((~(y & x) | (x + 0xff)) - ((y & x) | (-0x100 - x)))", &["(((x & ~y) + 0xff) * 0xb)", "((0xb * (~y & x)) + 0xaf5)"], 10),
             ("(y * (z + -1)) + (2 * (x - ((x - y) & (y * z))))", &["(x + ((x - y) ^ (y * z)))"], 10),
             (
                 "(0x80000002 - ((x * x) + (~y * y))) + (2 * (((x * x) + ~(y * y)) | (-0x80000001 - y)))",
@@ -2140,5 +2140,19 @@ fn xor_with_top_bit_product() {
     check(
         "u8",
         &[("0xd * (((0x45*x) + (0xcf*y)) ^ (0x80*((y*y) ^ (x*x))))", &["(x + (3 * y))", "((3 * y) + x)"], 10)],
+    );
+}
+
+/// Arithmetic operands of bitwise operations that are complements of each other
+/// written differently share one leaf, so `(A & ~B) + (~A & B)` becomes `A ^ B`.
+#[test]
+fn complement_operands_written_differently() {
+    check(
+        "u32",
+        &[
+            ("((y + x) & (~(x*w) - z)) + ((~y - x) & ((x*w) + z))", &["((y + x) ^ ((x * w) + z))"], 10),
+            ("((y - w) & (~x - z)) + ((w + ~y) & (x + z))", &["((y - w) ^ (x + z))"], 10),
+            ("(((z ^ x) + y) & (~x + (w & z))) + (((z ^ ~x) - y) & (x - (w & z)))", &["(((z ^ x) + y) ^ (x - (w & z)))"], 10),
+        ],
     );
 }
