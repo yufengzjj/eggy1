@@ -909,19 +909,52 @@ fn small_blocks(t: &T, w: &Ctx) -> Option<T> {
         }
         build_sum(&terms, konst, w)
     };
+    // `wsize(&build(choice))` from sizes alone: the leftover monomials in `build`'s key order.
+    let mut keys: Vec<usize> = support.iter().copied().filter(|p| !blocks.contains(p)).collect();
+    keys.extend(opts.iter().flatten().flat_map(|o| o.2.iter().map(|a| a.0)));
+    keys.sort_unstable();
+    keys.dedup();
+    let base: Vec<u64> = keys.iter().map(|&q| if support.contains(&q) && !blocks.contains(&q) { coef[q] } else { 0 }).collect();
+    let conj_size: Vec<usize> = keys.iter().map(|&q| (0..n).filter(|i| q >> i & 1 == 1).map(|i| leaf_size[i]).sum::<usize>() + q.count_ones() as usize - 1).collect();
+    #[allow(clippy::type_complexity)]
+    let sized: Vec<Vec<(u64, usize, bool, Vec<(usize, u64)>, u64)>> = opts
+        .iter()
+        .map(|o| {
+            o.iter()
+                .map(|(c, term, adds, k0)| {
+                    let adds = adds.iter().map(|&(q, v)| (keys.binary_search(&q).unwrap(), v)).collect();
+                    (*c, wsize(term), matches!(term, T::Op(Op::Not, _)), adds, *k0)
+                })
+                .collect()
+        })
+        .collect();
+    let score = |choice: &[usize]| -> usize {
+        let mut vals = base.clone();
+        let mut konst = coef[0];
+        let mut terms: Vec<(u64, usize, bool)> = Vec::with_capacity(choice.len() + keys.len());
+        for (o, &ci) in sized.iter().zip(choice) {
+            let (c, s, not, adds, k0) = &o[ci];
+            for &(q, v) in adds {
+                vals[q] = vals[q].wrapping_sub(v) & m;
+            }
+            konst = konst.wrapping_add(*k0) & m;
+            terms.push((*c, *s, *not));
+        }
+        terms.extend(vals.iter().zip(&conj_size).filter(|(v, _)| **v != 0).map(|(&v, &s)| (v, s, false)));
+        folded_sum_size(&terms, konst, w)
+    };
     let mut choice = vec![0usize; blocks.len()];
-    let mut best = build(&choice);
-    let mut best_size = wsize(&best);
+    let mut best_choice = choice.clone();
+    let mut best_size = score(&choice);
     // Blocks that share leaves can need to change together (`2*~(a|c) + 2*(e & (c|d))`),
     // so few enough combinations are all tried; otherwise coordinate descent.
     let combos = opts.iter().try_fold(1usize, |acc, o| acc.checked_mul(o.len())).unwrap_or(usize::MAX);
     if combos <= MAX_BLOCK_COMBOS {
         let mut c = vec![0usize; blocks.len()];
         'all: loop {
-            let cand = build(&c);
-            let cs = wsize(&cand);
+            let cs = score(&c);
             if cs < best_size {
-                (best, best_size) = (cand, cs);
+                (best_choice, best_size) = (c.clone(), cs);
             }
             for (e, o) in opts.iter().enumerate() {
                 c[e] += 1;
@@ -939,10 +972,10 @@ fn small_blocks(t: &T, w: &Ctx) -> Option<T> {
             for ci in 0..opts[e].len() {
                 let mut c = choice.clone();
                 c[e] = ci;
-                let cand = build(&c);
-                let cs = wsize(&cand);
+                let cs = score(&c);
                 if cs < best_size {
-                    (best, best_size, choice, improved) = (cand, cs, c, true);
+                    (best_choice, best_size, improved) = (c.clone(), cs, true);
+                    choice = c;
                 }
             }
         }
@@ -950,6 +983,8 @@ fn small_blocks(t: &T, w: &Ctx) -> Option<T> {
             break;
         }
     }
+    let best = build(&best_choice);
+    debug_assert_eq!(wsize(&best), best_size);
     fn fill(t: &T, ph: &[T], lv: &[T]) -> T {
         match t {
             T::Var(_) => ph.iter().position(|p| p == t).map_or_else(|| t.clone(), |i| lv[i].clone()),
