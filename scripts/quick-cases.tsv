@@ -1356,3 +1356,14 @@ u8	semi_linear	3-variable semi-linear MBA,groundtruth	29	6b6feeb8b773
 u8	semi_linear	3-variable semi-linear MBA,groundtruth	36	cc40963e54ec
 u8	semi_linear	3-variable semi-linear MBA,groundtruth	57	9464f272ce49
 u8	semi_linear	3-variable semi-linear MBA,groundtruth	67	aefa4653ca65
+i64	ext_hard2_stack_u64	h2_stack_tig_ea2_pluto_mba_u64,groundtruth	54	485e3e92c35a
+i64	qsynth_ea	expression,groundtruth	297	37b099e81177
+u32	ext_hard2_ensia_u32	h2_ensia_poly_mba3x2_u32,groundtruth	37	7e524345f1c0
+u32	ext_hard2_llvm_u32	h2_llvm_poly_pluto_mba2_u32,groundtruth	12	6778cd3a174c
+u32	ext_hard2_llvm_u32	h2_llvm_poly_pluto_mba2_u32,groundtruth	55	5ff4674ed855
+u32	ext_hard3_ensia_u32	h3_ensia_wsemi_p40_mba2_u32,groundtruth	47	6a5b594cad2a
+u32	ext_hard3_stack_u32	h3_stack_tig_ea2_pluto_mba_u32,groundtruth	0	6ce83d1fb9a0
+u32	ext_hard3_stack_u32	h3_stack_tig_ea2_pluto_mba_u32,groundtruth	40	fe50d782e8b2
+u32	ext_hard3_tigress_u32	h3_tig_wide_ea5_u32,groundtruth	98	437ed97f3e24
+u32	ext_hard3_tigress_u32	h3_tig_wsemi_ea5_u32,groundtruth	81	5ed772012218
+u64	ext_hard3_tigress_u64	h3_tig_ops_ea6_u64,groundtruth	26	e82dba13dc25
