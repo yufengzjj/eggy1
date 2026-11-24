@@ -2033,3 +2033,16 @@ fn overlapping_terms_with_equal_coefficients() {
         &[("-(y ^ z) - (x & ~y & z) - (x & y & ~z) + (a | b) + 2", &["(((a | b) - ((y ^ z) + ((y ^ z) & x))) + 2)"], 10)],
     );
 }
+
+/// `((X - 1) | Y) + 1` is `-(-X & ~Y)`: one node fewer, with one constant fewer.
+#[test]
+fn constants_cost_close_to_nodes() {
+    check(
+        "i64",
+        &[(
+            "~ (~ ((((~ b | e) + b) + 1) - 1) - (~ ((((~ b | e) + b) + 1) - 1) & ((b ^ b) + ((b & b) + (b & b))))) + 1",
+            &["-(-(b & e) & ~(2 * b))", "-(-(b & e) & ~(b + b))"],
+            10,
+        )],
+    );
+}
