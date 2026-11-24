@@ -3593,6 +3593,83 @@ fn join_constant(t: &T, w: &Ctx) -> Option<T> {
     (best != *t).then_some(best)
 }
 
+/// Most leaf groups of a region `join_linear` moves leaves between: it rebuilds each
+/// ordered pair for every shared leaf and multiple.
+const MAX_MOVE_GROUPS: usize = 12;
+
+/// Multiples of a shared leaf `join_linear` moves between two leaf groups; 0 rebuilds the
+/// two groups as they are.
+const MOVED_MULTIPLES: [i64; 7] = [0, 1, -1, 2, -2, 3, -3];
+
+/// `t` with each linear region's smallest rebuild after moving `a·v` from one leaf group to
+/// another that also uses leaf `v` (and the region's constant into the first, or not): the
+/// groups are rebuilt apart, and which group takes a shared leaf's linear part is not
+/// known; `(s - (z & (y | s))) + z + (u ^ x ^ z)` is `((z & ~y) | s) + (u ^ x ^ z)`.
+pub(crate) fn join_linear(t: &T, w: &Ctx, in_lin: bool) -> T {
+    let T::Op(op, a) = t else { return t.clone() };
+    let lin = kind(t, w) == Kind::Lin;
+    let node = T::Op(*op, a.iter().map(|x| join_linear(x, w, lin)).collect());
+    if !lin || in_lin {
+        return node;
+    }
+    move_linear(&node, w).unwrap_or(node)
+}
+
+fn move_linear(t: &T, w: &Ctx) -> Option<T> {
+    let (terms, konst) = region_terms(t, w);
+    if terms.len() < 2 {
+        return None;
+    }
+    let groups = leaf_groups(terms, w);
+    let n = groups.len();
+    if n > MAX_MOVE_GROUPS {
+        return None;
+    }
+    let leaf_terms: Vec<Vec<T>> = groups
+        .iter()
+        .map(|(_, g)| {
+            let mut lv = Vec::new();
+            g.iter().for_each(|(_, x)| leaves(x, w, &mut lv));
+            lv
+        })
+        .collect();
+    let mut best = t.clone();
+    for i in 0..n {
+        for j in 0..n {
+            if i == j {
+                continue;
+            }
+            for v in leaf_terms[i].iter().filter(|v| leaf_terms[j].contains(v)) {
+                for a in MOVED_MULTIPLES {
+                    let a = a as u64 & w.mask;
+                    let (mut gi, mut gj) = (groups[i].1.clone(), groups[j].1.clone());
+                    if a != 0 {
+                        gi.push((a, v.clone()));
+                        gj.push((a.wrapping_neg() & w.mask, v.clone()));
+                    }
+                    let rj = rewrite(&build_sum(&gj, 0, w), w);
+                    let others: Vec<(u64, T)> = (0..n).filter(|&k| k != i && k != j).flat_map(|k| groups[k].1.clone()).collect();
+                    for with_konst in [false, true] {
+                        let (k_in, k_out) = if with_konst { (konst, 0) } else { (0, konst) };
+                        let ri = rewrite(&build_sum(&gi, k_in, w), w);
+                        let mut all = others.clone();
+                        all.extend([(1, ri), (1, rj.clone())]);
+                        // A negative first term costs a `Neg`; later ones become `Sub`.
+                        if let Some(p) = all.iter().position(|(c, _)| w.signed(*c) > 0) {
+                            all[..=p].rotate_right(1);
+                        }
+                        let alt = build_sum(&all, k_out, w);
+                        if size(&alt) < size(&best) {
+                            best = alt;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (best != *t).then_some(best)
+}
+
 /// `terms` plus `k` with `k` moved into one term, `a·B + a` as `-a·~B`, where some term has
 /// coefficient `k`, also after writing each `a·~B` as `-a·B - a` (`7·~(u ^ v)` for
 /// `-7·(u ^ v) - 7`).
@@ -4154,8 +4231,9 @@ const POLISH_REWRITES: usize = 2000;
 /// slightly smaller form changes how the rules finish.
 pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
     type Pass = (&'static str, fn(&T, &Ctx) -> T);
-    const PASSES: [Pass; 8] = [
+    const PASSES: [Pass; 9] = [
         ("join_constants", |t, w| join_constants(t, w, false)),
+        ("join_linear", |t, w| join_linear(t, w, false)),
         ("relate", |t, w| {
             if size(t) > MAX_POLISH_RELATE {
                 return t.clone();

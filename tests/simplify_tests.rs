@@ -1559,6 +1559,20 @@ fn variable_shift_low_bits() {
     check("i8", &[("x + ((y << (y & 7)) & 1)", &["x"], 10)]);
 }
 
+/// A leaf group of a wide region rebuilt on its own: `s - (z & (y | s)) + z` is
+/// `(~y & z) | s`, beside a group that also uses `z`.
+#[test]
+fn leaf_group_rebuilt_alone() {
+    check(
+        "u32",
+        &[(
+            "(((s - (z & (y | s))) - ~w) + ((((u ^ x) ^ z) - ((x | v) + (0xfffffff9 * ((v ^ (x | t)) + ((v ^ t) & 0x3f))))) + z))",
+            &["((((((7 * (v ^ (x | t))) - ~w) - (x | v)) + (7 * ((v ^ t) & 0x3f))) + ((~y & z) | s)) + ((u ^ x) ^ z))"],
+            10,
+        )],
+    );
+}
+
 /// Loki: proved by cases of the shift amount, whose low bits of `c` or `y` also fix the
 /// other uses of it.
 #[test]
