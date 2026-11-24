@@ -3820,8 +3820,9 @@ pub(crate) fn decompose_regions(t: &T, w: &Ctx, in_bit: bool) -> T {
 /// two groups as they are.
 const MOVED_MULTIPLES: [i64; 7] = [0, 1, -1, 2, -2, 3, -3];
 
-/// `t` with each linear region's smallest rebuild after moving `a·v` from one leaf group to
-/// another that also uses leaf `v` (and the region's constant into the first, or not): the
+/// `t` with each linear region's smallest rebuild after moving `a·v` or `a·~v` from one leaf
+/// group to another that also uses leaf `v` (and the region's constant into the first, or
+/// not), also two such moves when the first adds at most `NEAR_MOVE_SLACK` nodes: the
 /// groups are rebuilt apart, and which group takes a shared leaf's linear part is not
 /// known; `(s - (z & (y | s))) + z + (u ^ x ^ z)` is `((z & ~y) | s) + (u ^ x ^ z)`.
 pub(crate) fn join_linear(t: &T, w: &Ctx, in_lin: bool) -> T {
@@ -3831,10 +3832,17 @@ pub(crate) fn join_linear(t: &T, w: &Ctx, in_lin: bool) -> T {
     if !lin || in_lin {
         return node;
     }
-    move_linear(&node, w).unwrap_or(node)
+    move_linear(&node, w, true).unwrap_or(node)
 }
 
-fn move_linear(t: &T, w: &Ctx) -> Option<T> {
+/// Most nodes a move may add and still be followed by a second one, how many such moves
+/// are followed, and the most leaf groups of a region where they are: some regions only get
+/// smaller after two moves, but each second move rebuilds every pair again.
+const NEAR_MOVE_SLACK: usize = 4;
+const NEAR_MOVES: usize = 3;
+const MAX_NEAR_GROUPS: usize = 8;
+
+fn move_linear(t: &T, w: &Ctx, ahead: bool) -> Option<T> {
     let (terms, konst) = region_terms(t, w);
     if terms.len() < 2 {
         return None;
@@ -3853,13 +3861,14 @@ fn move_linear(t: &T, w: &Ctx) -> Option<T> {
         })
         .collect();
     let mut best = t.clone();
+    let mut near: Vec<T> = Vec::new();
     for i in 0..n {
-        for j in 0..n {
-            if i == j {
-                continue;
-            }
-            for v in leaf_terms[i].iter().filter(|v| leaf_terms[j].contains(v)) {
-                for a in MOVED_MULTIPLES {
+        for j in (0..n).filter(|&j| j != i) {
+            let shared = leaf_terms[j].iter().filter(|v| leaf_terms[i].contains(v));
+            // `a·~v` moves the constant `-a` along with `-a·v`.
+            let moved: Vec<T> = shared.into_iter().flat_map(|v| [v.clone(), T::Op(Op::Not, vec![v.clone()])]).collect();
+            for v in &moved {
+                for a in MOVED_MULTIPLES.into_iter().filter(|&a| a != 0 || !matches!(v, T::Op(Op::Not, _))) {
                     let a = a as u64 & w.mask;
                     let (mut gi, mut gj) = (groups[i].1.clone(), groups[j].1.clone());
                     if a != 0 {
@@ -3880,10 +3889,18 @@ fn move_linear(t: &T, w: &Ctx) -> Option<T> {
                         let alt = build_sum(&all, k_out, w);
                         if size(&alt) < size(&best) {
                             best = alt;
+                        } else if ahead && n <= MAX_NEAR_GROUPS && size(&alt) <= size(t) + NEAR_MOVE_SLACK && !near.contains(&alt) {
+                            near.push(alt);
                         }
                     }
                 }
             }
+        }
+    }
+    near.sort_by_key(size);
+    for alt in near.into_iter().take(NEAR_MOVES) {
+        if let Some(r) = move_linear(&alt, w, false).filter(|r| size(r) < size(&best)) {
+            best = r;
         }
     }
     (best != *t).then_some(best)

@@ -1589,6 +1589,20 @@ fn six_leaf_decomposition() {
     );
 }
 
+/// Two moves between leaf groups, the first of which alone makes the sum larger:
+/// `3·(t & ~x) + x` becomes `3·(t | x)` once `2·x` comes from the group of `x ^ y`.
+#[test]
+fn leaf_moves_two_steps() {
+    check(
+        "u64",
+        &[(
+            "((((((3 * (t & ~x)) + x) + (-2 * (y + (y & s)))) + (3 * ((v & -0xf0f0f0f0f0f0f10) | x))) + ((4 * (x & y)) + (-0xb * ((~x | u) ^ y)))) + (-2 * ((r ^ z) ^ x)))",
+            &["(((((3 * ((v & -0xf0f0f0f0f0f0f10) | x)) - (2 * (y & s))) - (2 * ((r ^ z) ^ x))) + (3 * (t | x))) + ((-0xb * ((~x | u) ^ y)) - (2 * (x ^ y))))"],
+            10,
+        )],
+    );
+}
+
 /// Loki: proved by cases of the shift amount, whose low bits of `c` or `y` also fix the
 /// other uses of it.
 #[test]
