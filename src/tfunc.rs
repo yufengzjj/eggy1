@@ -45,15 +45,28 @@ fn points(w: &Ctx) -> [[u64; MAX_VARS]; POINTS] {
 }
 
 fn op_vals(op: Op, a: &Fp, b: &Fp, m: u64) -> Fp {
-    let f: fn(u64, u64) -> u64 = match op {
-        Op::Add => u64::wrapping_add,
-        Op::Sub => u64::wrapping_sub,
-        Op::Mul => u64::wrapping_mul,
-        Op::And => |x, y| x & y,
-        Op::Or => |x, y| x | y,
-        _ => |x, y| x ^ y,
-    };
-    std::array::from_fn(|k| f(a[k], b[k]) & m)
+    fn lanes(a: &Fp, b: &Fp, m: u64, f: impl Fn(u64, u64) -> u64) -> Fp {
+        std::array::from_fn(|k| f(a[k], b[k]) & m)
+    }
+    match op {
+        Op::Add => lanes(a, b, m, u64::wrapping_add),
+        Op::Sub => lanes(a, b, m, u64::wrapping_sub),
+        Op::Mul => lanes(a, b, m, u64::wrapping_mul),
+        Op::And => lanes(a, b, m, |x, y| x & y),
+        Op::Or => lanes(a, b, m, |x, y| x | y),
+        _ => lanes(a, b, m, |x, y| x ^ y),
+    }
+}
+
+/// A value vector hashed by a few of its pseudo-random points only, which tell most
+/// vectors apart; equality still compares all of them.
+#[derive(PartialEq, Eq)]
+struct Key(Fp);
+
+impl std::hash::Hash for Key {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.0[6..10].hash(h);
+    }
 }
 
 /// Values of `t` at the points, with `vars[j]` read from coordinate `j`; `None` for
@@ -78,8 +91,29 @@ fn values(t: &T, vars: &[String], pts: &[[u64; MAX_VARS]; POINTS], w: &Ctx) -> O
     })
 }
 
+/// An expression of the table, its operands given by their index in `Table::entries`.
+#[derive(Clone, Copy)]
+enum Entry {
+    Var(usize),
+    Num(i64),
+    Un(Op, u32),
+    Bin(Op, u32, u32),
+}
+
 struct Table {
-    by_fp: crate::eval::FastMap<Fp, T>,
+    by_fp: crate::eval::FastMap<Key, u32>,
+    entries: Vec<Entry>,
+}
+
+impl Table {
+    fn term(&self, i: u32) -> T {
+        match self.entries[i as usize] {
+            Entry::Var(j) => T::Var(j.to_string()),
+            Entry::Num(k) => T::Num(k),
+            Entry::Un(op, a) => T::Op(op, vec![self.term(a)]),
+            Entry::Bin(op, a, b) => T::Op(op, vec![self.term(a), self.term(b)]),
+        }
+    }
 }
 
 fn table(n: usize, w: &Ctx) -> &'static Table {
@@ -92,44 +126,52 @@ fn table(n: usize, w: &Ctx) -> &'static Table {
 /// placeholder variables `"0"`, `"1"`, ... and the constants 1 and -1.
 fn build_table(n: usize, w: &Ctx) -> Table {
     let pts = points(w);
-    let vars: Vec<String> = (0..n).map(|j| j.to_string()).collect();
-    let mut by_fp: crate::eval::FastMap<Fp, T> = Default::default();
-    let mut levels: Vec<Vec<(T, Fp)>> = vec![Vec::new()];
-    let mut add = |fp: Fp, t: &dyn Fn() -> T, level: &mut Vec<(T, Fp)>| {
-        if let std::collections::hash_map::Entry::Vacant(e) = by_fp.entry(fp) {
-            let t = t();
-            e.insert(t.clone());
-            level.push((t, fp));
+    let mut table = Table { by_fp: Default::default(), entries: Vec::new() };
+    let mut fps: Vec<Fp> = Vec::new();
+    let add = |table: &mut Table, fps: &mut Vec<Fp>, fp: Fp, e: Entry, level: &mut Vec<u32>| {
+        if let std::collections::hash_map::Entry::Vacant(v) = table.by_fp.entry(Key(fp)) {
+            let i = table.entries.len() as u32;
+            v.insert(i);
+            table.entries.push(e);
+            fps.push(fp);
+            level.push(i);
         }
     };
-    let mut first = Vec::new();
+    let mut levels: Vec<Vec<u32>> = vec![Vec::new(), Vec::new()];
     for j in 0..n {
-        let t = T::Var(j.to_string());
-        add(values(&t, &vars, &pts, w).unwrap(), &|| t.clone(), &mut first);
+        add(&mut table, &mut fps, std::array::from_fn(|k| pts[k][j]), Entry::Var(j), &mut levels[1]);
     }
     for k in [1, w.signed(w.mask)] {
-        add([k as u64 & w.mask; POINTS], &|| T::Num(k), &mut first);
+        add(&mut table, &mut fps, [k as u64 & w.mask; POINTS], Entry::Num(k), &mut levels[1]);
     }
-    levels.push(first);
     let m = w.mask;
     for s in 2..=MAX_SIZE {
         let mut level = Vec::new();
-        for (t, fp) in &levels[s - 1] {
-            add(fp.map(|x| !x & m), &|| T::Op(Op::Not, vec![t.clone()]), &mut level);
-            add(fp.map(|x| x.wrapping_neg() & m), &|| T::Op(Op::Neg, vec![t.clone()]), &mut level);
+        for &x in &levels[s - 1] {
+            let fx = fps[x as usize];
+            add(&mut table, &mut fps, fx.map(|v| !v & m), Entry::Un(Op::Not, x), &mut level);
+            add(&mut table, &mut fps, fx.map(|v| v.wrapping_neg() & m), Entry::Un(Op::Neg, x), &mut level);
         }
         for a in 1..s - 1 {
-            for (x, fx) in &levels[a] {
-                for (y, fy) in &levels[s - 1 - a] {
+            let b = s - 1 - a;
+            for (i, &x) in levels[a].iter().enumerate() {
+                let fx = fps[x as usize];
+                for (j, &y) in levels[b].iter().enumerate() {
+                    let fy = fps[y as usize];
+                    // A commutative operation on the swapped pair was already added.
+                    let swapped = a > b || a == b && j < i;
                     for op in [Op::Add, Op::Sub, Op::And, Op::Or, Op::Xor] {
-                        add(op_vals(op, fx, fy, m), &|| T::Op(op, vec![x.clone(), y.clone()]), &mut level);
+                        if swapped && op != Op::Sub {
+                            continue;
+                        }
+                        add(&mut table, &mut fps, op_vals(op, &fx, &fy, m), Entry::Bin(op, x, y), &mut level);
                     }
                 }
             }
         }
         levels.push(level);
     }
-    Table { by_fp }
+    table
 }
 
 enum Gate {
@@ -337,7 +379,8 @@ fn direct(t: &T, w: &Ctx) -> Option<T> {
         return None;
     }
     let fp = values(t, &vars, &points(w), w)?;
-    let cand = rename(table(vars.len(), w).by_fp.get(&fp)?, &vars);
+    let tb = table(vars.len(), w);
+    let cand = rename(&tb.term(*tb.by_fp.get(&Key(fp))?), &vars);
     (size(&cand) < size(t) && equal(t, &cand, &vars, w)?).then_some(cand)
 }
 
