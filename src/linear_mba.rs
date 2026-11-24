@@ -2720,13 +2720,13 @@ fn pick_bits(group_of: &[usize], options: &[Vec<(u8, u8)>], c: (u64, u64), e0: u
 /// The carry DP of `pick_bits`; `Err(true)` when it gives up past 4096 carries,
 /// `Err(false)` when no choice exists.
 #[allow(clippy::type_complexity)]
-fn carry_layers(group_of: &[usize], options: &[Vec<(u8, u8)>], (c1, c2): (u64, u64), e0: u64, w: &Ctx) -> Result<Vec<std::collections::HashMap<i128, (i128, usize)>>, bool> {
+fn carry_layers(group_of: &[usize], options: &[Vec<(u8, u8)>], (c1, c2): (u64, u64), e0: u64, w: &Ctx) -> Result<Vec<std::collections::BTreeMap<i128, (i128, usize)>>, bool> {
     let bits = w.w as usize;
     let val = |o: (u8, u8)| (w.signed(c1) as i128) * (o.0 & 1) as i128 + (w.signed(c2) as i128) * (o.1 & 1) as i128;
     // layers[j]: carry into bit j -> (carry into bit j-1, option at bit j-1).
-    let mut layers: Vec<std::collections::HashMap<i128, (i128, usize)>> = vec![std::collections::HashMap::from([(0, (0, 0))])];
+    let mut layers: Vec<std::collections::BTreeMap<i128, (i128, usize)>> = vec![std::collections::BTreeMap::from([(0, (0, 0))])];
     for j in 0..bits {
-        let mut next = std::collections::HashMap::new();
+        let mut next = std::collections::BTreeMap::new();
         for &carry in layers[j].keys() {
             for (o, &opt) in options[group_of[j]].iter().enumerate() {
                 let s = carry + val(opt);
