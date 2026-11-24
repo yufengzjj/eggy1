@@ -45,6 +45,9 @@ impl Ctx {
     pub(crate) fn narrow(&self, w: u32) -> Ctx {
         Ctx { st: self.st.clone(), ..Ctx::new(w) }
     }
+    pub(crate) fn low_values(&self) -> &crate::lowbits::ValuesMemo {
+        &self.st.low_values
+    }
     pub(crate) fn signed(&self, v: u64) -> i64 {
         let sh = 64 - self.w;
         ((v << sh) as i64) >> sh
@@ -61,6 +64,7 @@ struct State {
     related: Memo<(u32, usize, usize, T), T>,
     rebuilt: std::sync::Mutex<std::collections::HashMap<RebuiltKey, (Vec<(u64, T)>, u64)>>,
     grouped: std::sync::Mutex<std::collections::HashMap<GroupedKey, T>>,
+    low_values: crate::lowbits::ValuesMemo,
     /// Most leaves of a region `relate_region` tries.
     relate_leaves: AtomicUsize,
     /// `rewrite` calls left before it returns its input unchanged.
@@ -83,6 +87,7 @@ impl Default for State {
             related: Default::default(),
             rebuilt: Default::default(),
             grouped: Default::default(),
+            low_values: Default::default(),
             relate_leaves: AtomicUsize::new(MAX_WIDE_LEAVES),
             rewrites_left: AtomicUsize::new(usize::MAX),
             semi_leaves: AtomicUsize::new(MAX_LEAVES),

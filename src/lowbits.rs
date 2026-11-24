@@ -143,6 +143,7 @@ fn info(t: &T, w: &Ctx) -> Info {
     }
 }
 
+#[derive(Clone)]
 enum Ins {
     Leaf(usize),
     Const(u64),
@@ -151,6 +152,7 @@ enum Ins {
 }
 
 /// `t` as a stack program over its leaves: variables and subterms that are not `det`.
+#[derive(Clone)]
 struct Prog {
     ops: Vec<Ins>,
     leaves: Vec<T>,
@@ -227,6 +229,25 @@ fn assignments(n: usize, m: u32) -> impl Iterator<Item = Vec<u64>> {
     (0u64..1 << (n as u32 * m)).map(move |p| (0..n).map(|j| p >> (j as u32 * m) & lowmask(m)).collect())
 }
 
+/// `Pass::values` results of one pre-pass run, with the budget each one cost.
+#[derive(Default)]
+pub(crate) struct ValuesMemo(std::sync::Mutex<HashMap<(u32, T, u32), (u64, Option<Vec<u64>>, Prog)>>);
+
+fn distinct_values(prog: &Prog, n: usize, m: u32) -> Option<Vec<u64>> {
+    let mut out = Vec::new();
+    let mut stack = Vec::new();
+    for low in assignments(n, m) {
+        let v = prog.run(&low, &mut stack);
+        if !out.contains(&v) {
+            if out.len() == MAX_VALUES {
+                return None;
+            }
+            out.push(v);
+        }
+    }
+    Some(out)
+}
+
 struct Cand {
     m: u32,
     values: Vec<u64>,
@@ -247,25 +268,23 @@ struct Pass<'a> {
 impl Pass<'_> {
     /// Distinct values of a `det` subterm whose bits from `m` up are known, if at most `MAX_VALUES`.
     fn values(&mut self, t: &T, m: u32) -> Option<(Vec<u64>, Prog)> {
+        let key = (self.w.w, t.clone(), m);
+        // A hit draws the same budget as computing it again, so later calls see the same budget.
+        if let Some((cost, vals, prog)) = self.w.low_values().0.lock().unwrap().get(&key) {
+            self.budget = self.budget.checked_sub(*cost)?;
+            return vals.clone().map(|v| (v, prog.clone()));
+        }
         let prog = Prog::new(t, self.w);
         let n = prog.leaves.len();
-        if n as u32 * m > MAX_BITS {
-            return None;
-        }
-        let cost = (1u64 << (n as u32 * m)) * prog.ops.len() as u64;
-        self.budget = self.budget.checked_sub(cost)?;
-        let mut out = Vec::new();
-        let mut stack = Vec::new();
-        for low in assignments(n, m) {
-            let v = prog.run(&low, &mut stack);
-            if !out.contains(&v) {
-                if out.len() == MAX_VALUES {
-                    return None;
-                }
-                out.push(v);
-            }
-        }
-        Some((out, prog))
+        let (cost, vals) = if n as u32 * m > MAX_BITS {
+            (0, None)
+        } else {
+            let cost = (1u64 << (n as u32 * m)) * prog.ops.len() as u64;
+            self.budget = self.budget.checked_sub(cost)?;
+            (cost, distinct_values(&prog, n, m))
+        };
+        self.w.low_values().0.lock().unwrap().insert(key, (cost, vals.clone(), prog.clone()));
+        vals.map(|v| (v, prog))
     }
 
     fn fold(&mut self, t: &T) -> (T, Info) {
