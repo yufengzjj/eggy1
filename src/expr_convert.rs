@@ -207,7 +207,6 @@ fn parse_atom(tokens: &[Token]) -> (Ast, &[Token]) {
 /// Canonical form modulo associativity/commutativity of + * & | ^ :
 /// same-operator chains are flattened and operands sorted, so two
 /// AC-equivalent expressions produce identical strings.
-#[allow(dead_code)]
 pub fn ac_canon_infix(expr: &str) -> String {
     let tokens = tokenize(expr);
     let (ast, rest) = parse_infix_expr(&tokens, 0);
@@ -215,7 +214,6 @@ pub fn ac_canon_infix(expr: &str) -> String {
     ac_canon(&ast)
 }
 
-#[allow(dead_code)]
 fn ac_canon(ast: &Ast) -> String {
     match ast {
         Ast::Num(n) => format!("#{}", *n as i64),
@@ -235,7 +233,6 @@ fn ac_canon(ast: &Ast) -> String {
     }
 }
 
-#[allow(dead_code)]
 fn ac_flatten(op: &str, ast: &Ast, out: &mut Vec<String>) {
     if let Ast::BinaryOp(o, l, r) = ast {
         if o == op {
@@ -253,7 +250,6 @@ pub fn infix_to_prefix(expr: &str) -> String {
     assert!(rest.is_empty(), "Unconsumed tokens: {:?}", rest);
     ast_to_prefix(&ast)
 }
-#[allow(dead_code)]
 pub fn prefix_to_infix(expr: &str) -> String {
     let tokens = tokenize(expr);
     let (ast, rest) = parse_prefix_expr(&tokens, 0);
