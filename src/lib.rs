@@ -2,6 +2,7 @@ pub mod dag;
 pub mod eval;
 pub mod expr_convert;
 pub mod linear_mba;
+pub mod pipe;
 pub mod sched;
 pub mod stats;
 mod poly_mba;
@@ -986,6 +987,11 @@ pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result
         false => vec![s],
     };
     roots.extend(other.iter().map(String::as_str));
+    egglog_round(egg, &roots, cli)
+}
+
+/// The extraction of a saturation round on the e-graph with the terms `roots` unioned.
+pub(crate) fn egglog_round(egg: &str, roots: &[&str], cli: &Cli) -> Result<String, Error> {
     // Subterms repeat a lot in large inputs; egglog reads the text once per occurrence.
     let mut table = dag::NodeTable::new();
     let ids: Vec<dag::NodeId> = roots.iter().map(|r| table.intern(&eval::parse(r))).collect();
@@ -1042,30 +1048,33 @@ pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result
 /// available again.
 pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
     let egg = make_egg(&cli.num_type);
-    let norm = |n| norm_const(n, &cli.num_type);
     stats::set_width(width_of(&cli.num_type));
-    let (seed, origin) = drive(&egg, s, cli, cli.max_restarts.max(1), cli.passes.extra)?;
-    let out = egglog_to_infix(&seed, &norm);
-    if seed == s || cli.passes.printed == 0 {
-        stats::add(&format!("final/{origin}"), 0.0);
-        stats::settle(&eval::parse(&seed));
-        return Ok(out);
+    let env = pipe::Env::new(cli, egg, s);
+    let out = pipe::run(&cli.passes.pipeline, vec![s.to_string()], &env)?;
+    let r = out.into_iter().next().unwrap_or_else(|| s.to_string());
+    stats::add(&format!("final/{}", env.origin.borrow()), 0.0);
+    stats::settle(&eval::parse(&r));
+    Ok(egglog_to_infix(&r, &|n| norm_const(n, &cli.num_type)))
+}
+
+/// The run from the printed form of `seed`, the result of `drive` on `input`, when it
+/// ends smaller: it starts with the first-round handling again, which sometimes ends
+/// smaller than the last rounds did.
+fn printed(egg: &str, input: &str, seed: String, cli: &Cli, origin: &std::cell::RefCell<String>) -> Result<String, Error> {
+    if seed == input || cli.passes.printed == 0 {
+        return Ok(seed);
     }
-    // A run from the printed result starts with the first-round handling again, which
-    // sometimes ends smaller than the last rounds did.
+    let out = egglog_to_infix(&seed, &|n| norm_const(n, &cli.num_type));
     let clock = std::time::Instant::now();
-    let (again, again_origin) = drive(&egg, &infix_to_egglog(&out, true), cli, cli.passes.printed, 0)?;
+    let (again, again_origin) = drive(egg, &infix_to_egglog(&out, true), cli, cli.passes.printed, 0)?;
     let won = eval::size(&eval::parse(&again)) < eval::size(&eval::parse(&seed));
     stats::add("rerun_printed/run", stats::since(clock));
-    if won {
-        stats::add(&format!("rerun_printed/won/{again_origin}"), 0.0);
-        stats::add("final/rerun_printed", 0.0);
-        stats::settle(&eval::parse(&again));
-        return Ok(egglog_to_infix(&again, &norm));
+    if !won {
+        return Ok(seed);
     }
-    stats::add(&format!("final/{origin}"), 0.0);
-    stats::settle(&eval::parse(&seed));
-    Ok(out)
+    stats::add(&format!("rerun_printed/won/{again_origin}"), 0.0);
+    *origin.borrow_mut() = "rerun_printed".into();
+    Ok(again)
 }
 
 /// The restart rounds of `simplify`: `rounds`, plus up to `extra` while the pre-pass still

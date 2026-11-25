@@ -720,6 +720,60 @@ fn rebuild_once(t: &T, w: &Ctx) -> T {
     crate::tfunc::replacement(&t, w).unwrap_or_else(|| crate::tfunc::simplify(&cluster_regions(&rewrite(&t, w), w, false), w))
 }
 
+/// `t` with `f` applied to each maximal region that is not an atom, keeping the smaller
+/// forms, or `None` when none is smaller.
+fn on_regions(t: &T, w: &Ctx, f: fn(&T, &Ctx) -> Option<T>) -> Option<T> {
+    let T::Op(op, a) = t else { return None };
+    if kind(t, w) != Kind::Atom
+        && let Some(r) = f(t, w).filter(|r| size(r) < size(t))
+    {
+        return Some(r);
+    }
+    let b: Vec<T> = a.iter().map(|x| on_regions(x, w, f).unwrap_or_else(|| x.clone())).collect();
+    (b != *a).then(|| T::Op(*op, b))
+}
+
+/// The passes over one term that `crate::pipe` runs by name: each gives an equivalent
+/// term, or `None` when it does not apply. Passes on linear regions run on each region.
+pub(crate) const TERM_PASSES: &[(&str, fn(&T, &Ctx) -> Option<T>)] = &[
+    ("lowbits", |t, w| Some(crate::lowbits::simplify(t, w))),
+    ("unshift", |t, w| Some(unshift(t, w))),
+    ("tfunc_whole", |t, w| crate::tfunc::replacement(t, w)),
+    ("rewrite", |t, w| Some(rewrite(t, w))),
+    ("cluster_regions", |t, w| Some(cluster_regions(t, w, false))),
+    ("relate", |t, w| Some(relate(t, w))),
+    ("tfunc", |t, w| Some(crate::tfunc::simplify(t, w))),
+    ("unify_operands", |t, w| Some(unify_operands(t, w))),
+    ("recombine", |t, w| Some(recombine_regions(t, w, false))),
+    ("cut_products", |t, w| Some(crate::lowbits::cut_products(t, w))),
+    ("shifted_xor", |t, w| Some(crate::lowbits::shifted_xor(t, w))),
+    ("simplify_rebuilt", |t, w| Some(crate::lowbits::simplify_rebuilt(t, w))),
+    ("finish", |t, w| Some(finish(t, w))),
+    ("halve", |t, w| Some(halve(t, w))),
+    ("over_const_bitwise", |t, w| Some(over_const_bitwise(t, w))),
+    ("over_shared_bitwise", |t, w| Some(over_shared_bitwise(t, w))),
+    ("over_products", |t, w| Some(crate::lowbits::over_products(t, w, |x| rebuild_once(x, w)))),
+    ("split_bits", |t, w| Some(split_in(t, w, &|x| rebuild_once(x, w)))),
+    ("drop_identities", |t, w| Some(drop_identities(t, w))),
+    ("rebuild", |t, w| Some(rebuild_once(t, w))),
+    ("simba", |t, w| on_regions(t, w, simba)),
+    ("small_blocks", |t, w| on_regions(t, w, small_blocks)),
+    ("wide_blocks", |t, w| on_regions(t, w, wide_blocks)),
+    ("clustered", |t, w| on_regions(t, w, clustered)),
+    ("peel", |t, w| on_regions(t, w, peel)),
+    ("poly_mba", |t, w| on_regions(t, w, crate::poly_mba::simplify_poly)),
+];
+
+/// The pass over one term named `name`: an entry of `TERM_PASSES`, or `polish/NAME` for a
+/// polish pass.
+pub(crate) fn term_pass(name: &str) -> Option<Box<dyn Fn(&T, &Ctx) -> Option<T>>> {
+    if let Some((_, f)) = TERM_PASSES.iter().find(|(n, _)| *n == name) {
+        return Some(Box::new(*f));
+    }
+    let (_, f) = POLISH.iter().find(|(n, _)| name.strip_prefix("polish/") == Some(n))?;
+    Some(Box::new(move |t, w| Some(f(t, w))))
+}
+
 /// Rewrite the egglog term `egg` (W-bit wrapping semantics) with every linear
 /// MBA region, and every polynomial MBA region,
 /// rebuilt in a smaller form. Returns `egg` unchanged when nothing gets smaller.

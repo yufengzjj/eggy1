@@ -117,12 +117,18 @@ thread_local! {
     static OFF: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// The limits of the run on this thread, if not the defaults.
     static LIMIT: std::cell::RefCell<Option<Vec<usize>>> = const { std::cell::RefCell::new(None) };
+    /// Bits of the `INNER` passes an enclosing `Pipe::Off` turns off.
+    static SCOPED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// Sets the `INNER` passes `p.off` turns off and the limits of `p` for the runs on this
-/// thread that follow.
+fn off_bits(names: &[&str]) -> u64 {
+    names.iter().filter_map(|n| INNER.iter().position(|k| k == n)).fold(0u64, |b, i| b | 1 << i)
+}
+
+/// Sets the `INNER` passes `p.off` (and an enclosing `Pipe::Off`) turns off and the limits
+/// of `p` for the runs on this thread that follow.
 pub fn apply(p: &Passes) {
-    let bits = p.off.iter().filter_map(|n| INNER.iter().position(|k| k == n)).fold(0u64, |b, i| b | 1 << i);
+    let bits = off_bits(&p.off) | SCOPED.with(|s| s.get());
     OFF.with(|o| o.set(bits));
     let custom = p.limits.iter().zip(LIMITS).any(|(v, (_, d))| v != d);
     LIMIT.with(|l| *l.borrow_mut() = custom.then(|| p.limits.clone()));
@@ -132,6 +138,121 @@ pub fn apply(p: &Passes) {
 pub fn limit(l: Limit) -> usize {
     LIMIT.with(|v| v.borrow().as_ref().map_or(LIMITS[l as usize].1, |v| v[l as usize]))
 }
+
+/// `f()` with the `INNER` passes `names` also turned off.
+pub fn with_off<R>(names: &[&str], f: impl FnOnce() -> R) -> R {
+    let bits = off_bits(names);
+    let (scoped, off) = (SCOPED.with(|s| s.replace(s.get() | bits)), OFF.with(|o| o.replace(o.get() | bits)));
+    let r = f();
+    SCOPED.with(|s| s.set(scoped));
+    OFF.with(|o| o.set(off));
+    r
+}
+
+/// A pass pipeline: every pass maps a list of equivalent candidate terms (the first is the
+/// main one) to another, so any pass can follow any other. Written `name` or
+/// `combinator(arguments)`, e.g. `seq(lowbits,rewrite,egglog,polish)`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pipe {
+    /// A pass by name (`crate::pipe::names`).
+    Pass(String),
+    /// Each in turn on the candidates of the one before (`seq(a,b,...)`).
+    Seq(Vec<Pipe>),
+    /// All on the same candidates; their candidates in order, repeats dropped
+    /// (`union(a,b,...)`).
+    Union(Vec<Pipe>),
+    /// All on the same candidates; the `k` smallest of their candidates, the earlier of
+    /// equal ones first (`best(k,a,b,...)`).
+    Best(usize, Vec<Pipe>),
+    /// The candidates of the first whose candidates differ from its input's, else the
+    /// input (`first(a,b,...)`).
+    First(Vec<Pipe>),
+    /// Repeated at most `n` times while the main candidate changes (`fix(n,p)`).
+    Fix(usize, Box<Pipe>),
+    /// With the `INNER` passes named also turned off (`off(relate+tfunc,p)`).
+    Off(Vec<&'static str>, Box<Pipe>),
+}
+
+impl Pipe {
+    pub fn parse(s: &str) -> Result<Pipe, String> {
+        let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+        let (p, rest) = Pipe::parse_at(&s)?;
+        if !rest.is_empty() {
+            return Err(format!("unexpected {rest} in pipeline {s}"));
+        }
+        Ok(p)
+    }
+
+    fn parse_at(s: &str) -> Result<(Pipe, &str), String> {
+        let end = s.find(['(', ',', ')']).unwrap_or(s.len());
+        let (name, rest) = s.split_at(end);
+        if name.is_empty() {
+            return Err(format!("expected a pass or combinator at {s}"));
+        }
+        let Some(mut rest) = rest.strip_prefix('(') else {
+            if !crate::pipe::names().iter().any(|n| n == name) {
+                return Err(format!("unknown pass {name}; known: {}", crate::pipe::names().join(" ")));
+            }
+            return Ok((Pipe::Pass(name.to_string()), rest));
+        };
+        let mut args = Vec::new();
+        let mut first = None;
+        if matches!(name, "best" | "fix" | "off") {
+            let end = rest.find(',').ok_or_else(|| format!("{name} needs a first argument and a pipeline: {s}"))?;
+            first = Some(&rest[..end]);
+            rest = &rest[end + 1..];
+        }
+        loop {
+            let (p, r) = Pipe::parse_at(rest)?;
+            args.push(p);
+            match r.chars().next() {
+                Some(',') => rest = &r[1..],
+                Some(')') => {
+                    rest = &r[1..];
+                    break;
+                }
+                _ => return Err(format!("expected , or ) after an argument of {name}: {s}")),
+            }
+        }
+        let num = || first.unwrap().parse::<usize>().map_err(|_| format!("expected a number: {name}({}", first.unwrap()));
+        let one = |args: Vec<Pipe>| if args.len() == 1 { Ok(Box::new(args.into_iter().next().unwrap())) } else { Err(format!("{name} takes one pipeline: {s}")) };
+        let p = match name {
+            "seq" => Pipe::Seq(args),
+            "union" => Pipe::Union(args),
+            "first" => Pipe::First(args),
+            "best" => Pipe::Best(num()?, args),
+            "fix" => Pipe::Fix(num()?, one(args)?),
+            "off" => {
+                let names = first.unwrap().split('+').map(|n| INNER.iter().find(|k| **k == n).copied().ok_or_else(|| format!("unknown off name {n}; known: {}", INNER.join(",")))).collect::<Result<_, _>>()?;
+                Pipe::Off(names, one(args)?)
+            }
+            _ => return Err(format!("unknown combinator {name}; known: seq union best first fix off")),
+        };
+        Ok((p, rest))
+    }
+}
+
+impl fmt::Display for Pipe {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let list = |f: &mut fmt::Formatter, name: &str, head: Option<String>, ps: &[Pipe]| {
+            let args: Vec<String> = head.into_iter().chain(ps.iter().map(|p| p.to_string())).collect();
+            write!(f, "{name}({})", args.join(","))
+        };
+        match self {
+            Pipe::Pass(n) => write!(f, "{n}"),
+            Pipe::Seq(ps) => list(f, "seq", None, ps),
+            Pipe::Union(ps) => list(f, "union", None, ps),
+            Pipe::First(ps) => list(f, "first", None, ps),
+            Pipe::Best(k, ps) => list(f, "best", Some(k.to_string()), ps),
+            Pipe::Fix(n, p) => list(f, "fix", Some(n.to_string()), std::slice::from_ref(p)),
+            Pipe::Off(ns, p) => list(f, "off", Some(ns.join("+")), std::slice::from_ref(p)),
+        }
+    }
+}
+
+/// The pipeline of `simplify`: the restart rounds with the pre-pass and polish, then the
+/// run from the printed result.
+pub const PIPELINE: &str = "seq(drive,printed)";
 
 /// `INNER` passes that `set_gates` turns off for inputs where paired runs without them
 /// lost nothing.
@@ -205,6 +326,8 @@ pub struct Passes {
     pub gates: Vec<&'static str>,
     /// Values of the `LIMITS`, in order.
     pub limits: Vec<usize>,
+    /// The passes `simplify` runs on its input (`PIPELINE`).
+    pub pipeline: Pipe,
 }
 
 impl Default for Passes {
@@ -232,6 +355,7 @@ impl Default for Passes {
             off: vec!["semi/peel_shapes"],
             gates: GATES.to_vec(),
             limits: LIMITS.iter().map(|(_, d)| *d).collect(),
+            pipeline: Pipe::parse(PIPELINE).unwrap(),
         }
     }
 }
@@ -263,10 +387,29 @@ impl Passes {
     /// The default pipeline changed by `spec`: items separated by spaces or `;`, each
     /// `key=value`, and for the lists `pre`, `polish` and `schedule` also `key+=names` and
     /// `key-=names` (also `off` and `gates`; names separated by `,`; schedule steps written `run:`, `once:` or
-    /// `sat:` and a ruleset). The `LIMITS` are keys too (`split_runs=8`).
+    /// `sat:` and a ruleset). The `LIMITS` are keys too (`split_runs=8`), and `pipeline`
+    /// takes a `Pipe` (spaces inside its parentheses allowed).
     pub fn parse(spec: &str) -> Result<Passes, String> {
         let mut p = Passes::default();
-        for item in spec.split([' ', ';']).filter(|s| !s.is_empty()) {
+        let mut items = Vec::new();
+        let (mut depth, mut start) = (0i32, 0);
+        for (i, c) in spec.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ' ' | ';' if depth == 0 => {
+                    items.push(&spec[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        items.push(&spec[start..]);
+        for item in items.into_iter().filter(|s| !s.is_empty()) {
+            if let Some(val) = item.strip_prefix("pipeline=") {
+                p.pipeline = Pipe::parse(val)?;
+                continue;
+            }
             let (key, op, val) = ["+=", "-=", "="]
                 .iter()
                 .find_map(|op| item.split_once(op).map(|(k, v)| (k, *op, v)))
@@ -371,7 +514,7 @@ impl fmt::Display for Passes {
                 write!(f, " {name}={v}")?;
             }
         }
-        Ok(())
+        write!(f, " pipeline={}", self.pipeline)
     }
 }
 
@@ -406,7 +549,7 @@ mod tests {
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("schedule=run:nope").is_err() && Passes::parse("schedule=go:simplify").is_err());
         let p = Passes::parse("split_runs=4 poly_builds=64").unwrap();
-        assert!(p.to_string().ends_with(" split_runs=4 poly_builds=64"));
+        assert!(p.to_string().contains(" split_runs=4 poly_builds=64 "));
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("split_runs+=1").is_err() && Passes::parse("split_runs=x").is_err());
         assert_eq!(limit(Limit::SplitRuns), 16);
@@ -414,5 +557,18 @@ mod tests {
         assert_eq!((limit(Limit::SplitRuns), limit(Limit::PolyBuilds), limit(Limit::SplitDepth)), (4, 64, 2));
         apply(&Passes::default());
         assert_eq!(limit(Limit::SplitRuns), 16);
+        let p = Passes::parse("keep=1 pipeline=seq(lowbits, best(2, rewrite, off(relate+tfunc, rebuild)), fix(3, egglog), polish/factor) extra=0").unwrap();
+        assert_eq!(p.pipeline.to_string(), "seq(lowbits,best(2,rewrite,off(relate+tfunc,rebuild)),fix(3,egglog),polish/factor)");
+        assert_eq!((p.keep, p.extra), (1, 0));
+        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
+        for bad in ["pipeline=nope", "pipeline=seq(rewrite", "pipeline=best(x,rewrite)", "pipeline=fix(2,a,b)", "pipeline=off(nope,rewrite)", "pipeline=loop(rewrite)"] {
+            assert!(Passes::parse(bad).is_err(), "{bad}");
+        }
+        with_off(&["relate"], || {
+            apply(&Passes::default());
+            assert!(is_off("relate"));
+        });
+        apply(&Passes::default());
+        assert!(!is_off("relate"));
     }
 }
