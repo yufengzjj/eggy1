@@ -7,6 +7,7 @@
 //! position then has its own bitwise function, see `semi_linear`.
 
 use crate::eval::{Op, Term as T, parse, show, size};
+use crate::sched::Passes;
 use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::Relaxed};
 
@@ -28,7 +29,8 @@ use shapes::*;
 use split::*;
 use tables::*;
 use wide::*;
-pub use polish::polish;
+pub use polish::{polish, polish_with};
+pub(crate) use polish::POLISH;
 pub(crate) use linear::simba_memo;
 pub(crate) use split::low_consts;
 
@@ -718,7 +720,7 @@ fn rebuild_once(t: &T, w: &Ctx) -> T {
 /// MBA region, and every polynomial MBA region,
 /// rebuilt in a smaller form. Returns `egg` unchanged when nothing gets smaller.
 pub fn simplify_linear(egg: &str, w: u32) -> String {
-    simplify_linear_with(egg, w, false).0
+    simplify_linear_both(egg, w).0
 }
 
 /// `simplify_linear`, and the other rebuilds worth unioning: the next smallest (`egg` and
@@ -726,22 +728,23 @@ pub fn simplify_linear(egg: &str, w: u32) -> String {
 /// `halve`, and which result the rules finish best is not known) and the first rebuild
 /// without `clustered`, when that was used.
 pub fn simplify_linear_both(egg: &str, w: u32) -> (String, Vec<String>) {
-    simplify_linear_with(egg, w, false)
+    simplify_linear_with(egg, w, false, &Passes::default())
 }
 
-/// `simplify_linear_both`, printing the candidates to stderr when `trace` is set.
-pub fn simplify_linear_with(egg: &str, w: u32, trace: bool) -> (String, Vec<String>) {
+/// `simplify_linear_both` with the candidates of `p`, printing them to stderr when `trace`
+/// is set.
+pub fn simplify_linear_with(egg: &str, w: u32, trace: bool, p: &Passes) -> (String, Vec<String>) {
     type Result = (String, Vec<String>);
-    type Last = Option<(String, u32, bool, Result)>;
+    type Last = Option<(String, u32, bool, Passes, Result)>;
     thread_local! {
         static LAST: std::cell::RefCell<Last> = const { std::cell::RefCell::new(None) };
     }
-    let hit = |(e, bits, t, _): &&(String, u32, bool, Result)| e == egg && *bits == w && *t == trace;
-    match LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.3.clone())) {
+    let hit = |(e, bits, t, q, _): &&(String, u32, bool, Passes, Result)| e == egg && *bits == w && *t == trace && q == p;
+    match LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.4.clone())) {
         Some(r) => r,
         None => {
-            let r = simplify_linear_uncached(egg, w, trace);
-            LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, trace, r.clone())));
+            let r = simplify_linear_uncached(egg, w, trace, p);
+            LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, trace, p.clone(), r.clone())));
             r
         }
     }
@@ -774,7 +777,7 @@ fn drop_identities(t: &T, w: &Ctx) -> T {
 }
 
 /// The pre-pass result and the forms to union with it.
-fn simplify_linear_uncached(egg: &str, w: u32, trace: bool) -> (String, Vec<String>) {
+fn simplify_linear_uncached(egg: &str, w: u32, trace: bool, p: &Passes) -> (String, Vec<String>) {
     use crate::stats;
     let clock = std::time::Instant::now();
     let w = Ctx::new(w);
@@ -797,7 +800,7 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool) -> (String, Vec<Stri
     // Unified operands let the regions around them share leaves, but the rebuild of the
     // input as written is sometimes smaller. The second rebuild redoes only the regions
     // unification changed, and is dropped once it needs `UNIFIED_REWRITES` rewrites.
-    let unified = unify_operands(&t, &w);
+    let unified = if p.pre_on("unified") { unify_operands(&t, &w) } else { t.clone() };
     let r = if unified != t {
         let left = w.st.rewrites_left.load(Relaxed);
         w.limit_rewrites(UNIFIED_REWRITES);
@@ -832,7 +835,7 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool) -> (String, Vec<Stri
     // A region rebuilt by `wide_blocks` is smaller there, but the other rebuilds can leave
     // subterms the abstracted rebuilds share across terms. Only smaller ones are kept: a
     // larger one unioned beside the first rebuild made the rules finish worse as often as better.
-    if w.st.used.load(Relaxed) & WIDE != 0 {
+    if p.pre_on("no_wide") && w.st.used.load(Relaxed) & WIDE != 0 {
         w.st.excluded.store(WIDE, Relaxed);
         let n = run(&t, true);
         let abstracted = [over_const_bitwise(&n, &w), over_shared_bitwise(&n, &w)];
@@ -844,38 +847,48 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool) -> (String, Vec<Stri
             }
         }
     }
-    if size(&r) <= MAX_SPLIT_SIZE {
+    if p.pre_on("split_bits") && size(&r) <= MAX_SPLIT_SIZE {
         let s = split_in(&r, &w, &|t| run(&unshift(&crate::lowbits::simplify(t, &w), &w), false));
         if s != r {
             rebuilt.push(("split_bits", s));
         }
         made_by("split_bits", &mut clock);
     }
-    let hr = halve(&r, &w);
-    if hr != r {
-        rebuilt.push(("halve_first", run(&hr, false)));
-    }
-    made_by("halve_first", &mut clock);
-    let pr = crate::lowbits::over_products(&r, &w, |t| rebuild_once(t, &w));
-    if pr != r {
-        rebuilt.push(("over_products", pr));
-    }
-    made_by("over_products", &mut clock);
-    for (name, o) in [("over_const_bitwise", over_const_bitwise(&r, &w)), ("over_shared_bitwise", over_shared_bitwise(&r, &w))] {
-        if o != r {
-            rebuilt.push((name, o));
+    if p.pre_on("halve_first") {
+        let hr = halve(&r, &w);
+        if hr != r {
+            rebuilt.push(("halve_first", run(&hr, false)));
         }
+        made_by("halve_first", &mut clock);
     }
-    made_by("over_bitwise", &mut clock);
-    // Halving the whole input can give semi-linear regions that are slow to search,
-    // so only small ones are rebuilt there, also inside `halve`.
-    w.st.semi_leaves.store(2, Relaxed);
-    let ht = if size(&r) <= TINY { t.clone() } else { halve(&t, &w) };
-    if ht != t {
-        rebuilt.push(("halve_input", run(&ht, false)));
+    if p.pre_on("over_products") {
+        let pr = crate::lowbits::over_products(&r, &w, |t| rebuild_once(t, &w));
+        if pr != r {
+            rebuilt.push(("over_products", pr));
+        }
+        made_by("over_products", &mut clock);
     }
-    made_by("halve_input", &mut clock);
-    w.st.semi_leaves.store(MAX_LEAVES, Relaxed);
+    let over: [(&str, fn(&T, &Ctx) -> T); 2] = [("over_const_bitwise", over_const_bitwise), ("over_shared_bitwise", over_shared_bitwise)];
+    if over.iter().any(|(n, _)| p.pre_on(n)) {
+        for (name, f) in over.into_iter().filter(|(n, _)| p.pre_on(n)) {
+            let o = f(&r, &w);
+            if o != r {
+                rebuilt.push((name, o));
+            }
+        }
+        made_by("over_bitwise", &mut clock);
+    }
+    if p.pre_on("halve_input") {
+        // Halving the whole input can give semi-linear regions that are slow to search,
+        // so only small ones are rebuilt there, also inside `halve`.
+        w.st.semi_leaves.store(2, Relaxed);
+        let ht = if size(&r) <= TINY { t.clone() } else { halve(&t, &w) };
+        if ht != t {
+            rebuilt.push(("halve_input", run(&ht, false)));
+        }
+        made_by("halve_input", &mut clock);
+        w.st.semi_leaves.store(MAX_LEAVES, Relaxed);
+    }
     let mut rebuilt: Vec<(&str, T)> = rebuilt.into_iter().map(|(n, t)| (n, finish(&t, &w))).collect();
     // A form from abstracted subterms only a little smaller than the first rebuild, or
     // larger, made the rules finish worse at least as often as better (Ensia, LLVM Pluto);
@@ -886,7 +899,7 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool) -> (String, Vec<Stri
     // A region rebuilt in clusters is smaller there but can leave the rules a worse
     // start than rebuilding it whole, so the rebuild without clusters is kept too.
     let made = usize::MAX - w.st.rewrites_left.load(Relaxed);
-    let unclustered = if w.st.used.load(Relaxed) & CLUSTERED != 0 && made <= UNCLUSTERED_AFTER && crate::tfunc::replacement(&t, &w).is_none() {
+    let unclustered = if p.pre_on("unclustered") && w.st.used.load(Relaxed) & CLUSTERED != 0 && made <= UNCLUSTERED_AFTER && crate::tfunc::replacement(&t, &w).is_none() {
         w.st.bit_splits.store(BIT_SPLIT_BUDGET, Relaxed);
         w.st.excluded.store(CLUSTERED, Relaxed);
         w.st.relate_leaves.store(UNCLUSTERED_RELATE_LEAVES, Relaxed);
@@ -919,7 +932,7 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool) -> (String, Vec<Stri
     }
     rebuilt.sort_by_key(|(_, t)| size(t));
     rebuilt.dedup_by(|a, b| a.1 == b.1);
-    rebuilt.truncate(2);
+    rebuilt.truncate(p.keep);
     // An equal-size one can take the extraction from the first rebuild with nothing gained.
     match unclustered {
         Some(u) if size(&u) < size(&rebuilt[0].1) => rebuilt.insert(0, ("unclustered", u)),

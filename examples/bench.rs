@@ -45,6 +45,9 @@ struct Args {
     /// Print pre-pass statistics to stderr (child mode).
     #[arg(long)]
     trace: bool,
+    /// Pass pipeline changes, as `eggy1 --passes`.
+    #[arg(long, default_value = "")]
+    passes: String,
     /// Child mode: read input and ground truth from stdin, print one result line.
     #[arg(long, hide = true)]
     one: bool,
@@ -70,6 +73,10 @@ struct Outcome {
 
 fn main() {
     let args = Args::parse();
+    if let Err(e) = eggy1::sched::Passes::parse(&args.passes) {
+        eprintln!("--passes: {e}");
+        std::process::exit(2);
+    }
     if args.one {
         run_one(&args);
     } else {
@@ -232,7 +239,7 @@ fn report(cases: &[Case], results: &[Outcome]) {
 fn run_child(args: &Args, case: &Case) -> Outcome {
     let start = Instant::now();
     let mut child = Command::new(std::env::current_exe().unwrap())
-        .args(["--one", "-n", &args.num_type, "-i", &args.iter_limit.to_string(), "-m", &args.max_restarts.to_string()])
+        .args(["--one", "-n", &args.num_type, "-i", &args.iter_limit.to_string(), "-m", &args.max_restarts.to_string(), "--passes", &args.passes])
         .env("EGGY_CASE", format!("{}\t{}\t{}\t{}", args.num_type, case.file, case.section, case.index))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -297,6 +304,7 @@ fn run_one(args: &Args) {
         iter_limit: args.iter_limit,
         max_restarts: args.max_restarts,
         trace: args.trace,
+        passes: eggy1::sched::Passes::parse(&args.passes).expect("bad --passes"),
         expr: input.clone(),
         ..Default::default()
     };

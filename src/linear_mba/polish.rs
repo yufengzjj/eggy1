@@ -393,37 +393,46 @@ fn push_not(t: &T, w: &Ctx) -> T {
 /// Uncached `rewrite` calls one `polish` call may make.
 const POLISH_REWRITES: usize = 2000;
 
-/// The egglog term `egg` with the passes below applied while one makes it smaller, and the
-/// names of those that did. Run on the final result only: as a pre-pass candidate, even a
-/// slightly smaller form changes how the rules finish.
+type Pass = (&'static str, fn(&T, &Ctx) -> T);
+
+/// The polish passes by name, in their default order.
+pub(crate) const POLISH: [Pass; 10] = [
+    ("push_not", push_not),
+    ("join_constants", |t, w| join_constants(t, w, false)),
+    ("join_linear", |t, w| {
+        // It rewrites every pair of leaf groups many times; semi-linear groups of
+        // many leaves take seconds there.
+        w.limit_semi_leaves(2);
+        let r = join_linear(t, w, false);
+        w.limit_semi_leaves(MAX_LEAVES);
+        r
+    }),
+    ("over_const_bitwise", over_const_bitwise),
+    ("over_shared_bitwise", over_shared_bitwise),
+    ("over_products", |t, w| crate::lowbits::over_products(t, w, |a| rebuild_once(a, w))),
+    ("recombine", |t, w| if selectors(t, w).is_empty() { recombine_regions(t, w, false) } else { t.clone() }),
+    ("shift_cases", shift_cases),
+    ("decompose", |t, w| decompose_regions(t, w, false)),
+    ("factor", |t, w| factor_regions(t, w, false)),
+];
+
+/// `polish_with` the default passes.
 pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
-    type Pass = (&'static str, fn(&T, &Ctx) -> T);
-    const PASSES: [Pass; 10] = [
-        ("push_not", push_not),
-        ("join_constants", |t, w| join_constants(t, w, false)),
-        ("join_linear", |t, w| {
-            // It rewrites every pair of leaf groups many times; semi-linear groups of
-            // many leaves take seconds there.
-            w.limit_semi_leaves(2);
-            let r = join_linear(t, w, false);
-            w.limit_semi_leaves(MAX_LEAVES);
-            r
-        }),
-        ("over_const_bitwise", over_const_bitwise),
-        ("over_shared_bitwise", over_shared_bitwise),
-        ("over_products", |t, w| crate::lowbits::over_products(t, w, |a| rebuild_once(a, w))),
-        ("recombine", |t, w| if selectors(t, w).is_empty() { recombine_regions(t, w, false) } else { t.clone() }),
-        ("shift_cases", shift_cases),
-        ("decompose", |t, w| decompose_regions(t, w, false)),
-        ("factor", |t, w| factor_regions(t, w, false)),
-    ];
+    polish_with(egg, w, &crate::sched::Passes::default())
+}
+
+/// The egglog term `egg` with the polish passes of `p` applied in turn while one makes it
+/// smaller, and the names of those that did. Run on the final result only: as a pre-pass
+/// candidate, even a slightly smaller form changes how the rules finish.
+pub fn polish_with(egg: &str, w: u32, p: &crate::sched::Passes) -> (String, Vec<&'static str>) {
     let w = Ctx::new(w);
     w.limit_rewrites(POLISH_REWRITES);
     let mut best = parse(egg);
     let mut used = Vec::new();
+    let passes: Vec<Pass> = p.polish.iter().filter_map(|n| POLISH.iter().find(|(m, _)| m == n).copied()).collect();
     loop {
         let before = used.len();
-        for (name, run) in PASSES {
+        for &(name, run) in &passes {
             let clock = std::time::Instant::now();
             let r = drop_identities(&run(&best, &w), &w);
             crate::stats::add(&format!("polish/{name}/run"), crate::stats::since(clock));
@@ -433,7 +442,7 @@ pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
                 used.push(name);
             }
         }
-        if used.len() == before || used.len() >= 8 {
+        if used.len() == before || used.len() >= p.polish_wins {
             break;
         }
     }

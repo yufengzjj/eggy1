@@ -2,6 +2,7 @@ pub mod dag;
 pub mod eval;
 pub mod expr_convert;
 pub mod linear_mba;
+pub mod sched;
 pub mod stats;
 mod poly_mba;
 mod lowbits;
@@ -978,7 +979,7 @@ fn rules_egraph(egg: &str) -> Result<EGraph, Error> {
 /// One saturate-and-extract round on `s` together with its linear-MBA rebuild, or
 /// on the rebuild alone if `keep_input` is false and the pre-pass changed `s`.
 pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result<String, Error> {
-    let (alt, other) = linear_mba::simplify_linear_with(s, width_of(&cli.num_type), cli.trace);
+    let (alt, other) = linear_mba::simplify_linear_with(s, width_of(&cli.num_type), cli.trace, &cli.passes);
     let mut roots: Vec<&str> = match alt != s {
         true if !keep_input => vec![&alt],
         true => vec![s, &alt],
@@ -1058,16 +1059,16 @@ pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result
 pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
     let egg = make_egg(&cli.num_type);
     let norm = |n| norm_const(n, &cli.num_type);
-    let (seed, origin) = drive(&egg, s, cli, cli.max_restarts.max(1), 2)?;
+    let (seed, origin) = drive(&egg, s, cli, cli.max_restarts.max(1), cli.passes.extra)?;
     let out = egglog_to_infix(&seed, &norm);
-    if seed == s {
+    if seed == s || cli.passes.printed == 0 {
         stats::add(&format!("final/{origin}"), 0.0);
         return Ok(out);
     }
     // A run from the printed result starts with the first-round handling again, which
     // sometimes ends smaller than the last rounds did.
     let clock = std::time::Instant::now();
-    let (again, again_origin) = drive(&egg, &infix_to_egglog(&out, true), cli, 2, 0)?;
+    let (again, again_origin) = drive(&egg, &infix_to_egglog(&out, true), cli, cli.passes.printed, 0)?;
     let won = eval::size(&eval::parse(&again)) < eval::size(&eval::parse(&seed));
     stats::add("rerun_printed/run", stats::since(clock));
     if won {
@@ -1098,7 +1099,7 @@ fn drive(egg: &str, s: &str, cli: &Cli, rounds: usize, extra: usize) -> Result<(
     let (mut rounds, mut extra, mut first) = (rounds, extra, true);
     while rounds > 0 {
         rounds -= 1;
-        let (alt, other) = linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), cli.trace);
+        let (alt, other) = linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), cli.trace, &cli.passes);
         offer(&alt, pre(&alt));
         other.iter().for_each(|o| offer(o, pre(o)));
         // Saturating a large input is most of the run time and rarely beats its
@@ -1106,7 +1107,7 @@ fn drive(egg: &str, s: &str, cli: &Cli, rounds: usize, extra: usize) -> Result<(
         // that still mix arithmetic or constants into bitwise operations, and
         // inputs with shifts, division or mulhi, unless the rebuild is already tiny.
         let opaque = ["(Shl ", "(Shr ", "(Div ", "(Mod ", "(Mulhi "].iter().any(|o| seed.contains(o))
-            && !(first && eval::size(&eval::parse(&linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), cli.trace).0)) <= linear_mba::TINY);
+            && !(first && eval::size(&eval::parse(&linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), cli.trace, &cli.passes).0)) <= linear_mba::TINY);
         // When no smaller term equals `alt` (or the first extraction, for the rerun with the
         // input), saturation could only pick another term of its size. No rule makes a
         // shift, division or mulhi from a term without one, so without them in the program
@@ -1114,7 +1115,8 @@ fn drive(egg: &str, s: &str, cli: &Cli, rounds: usize, extra: usize) -> Result<(
         let t_only = !["(Shl ", "(Shr ", "(Div ", "(Mod ", "(Mulhi "].iter().any(|o| seed.contains(o) || alt.contains(o) || other.iter().any(|x| x.contains(o)));
         let is_min = |e: &str| {
             let t = eval::parse(e);
-            minimal::is_tidy(&t)
+            cli.passes.minimal
+                && minimal::is_tidy(&t)
                 && (eval::NumType::from_name(&cli.num_type).is_some_and(|ty| minimal::is_minimal(&t, ty)) || t_only && minimal::is_t_minimal(&t))
         };
         let minimal = is_min(&alt);
@@ -1138,7 +1140,7 @@ fn drive(egg: &str, s: &str, cli: &Cli, rounds: usize, extra: usize) -> Result<(
                 }
             }
         };
-        if first && !opaque && !minimal && mixed(&eval::parse(&extracted)) && !is_min(&extracted) {
+        if cli.passes.rerun_input && first && !opaque && !minimal && mixed(&eval::parse(&extracted)) && !is_min(&extracted) {
             let clock = std::time::Instant::now();
             let full = simplify_round(&egg, &seed, cli, true)?;
             stats::add("egglog/rerun_input", stats::since(clock));
@@ -1161,13 +1163,13 @@ fn drive(egg: &str, s: &str, cli: &Cli, rounds: usize, extra: usize) -> Result<(
         seed = extracted;
         seed_origin = origin;
         // The last extraction can still hold a linear region the pre-pass rebuilds.
-        if rounds == 0 && extra > 0 && linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), cli.trace).0 != seed {
+        if rounds == 0 && extra > 0 && linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), cli.trace, &cli.passes).0 != seed {
             rounds = 1;
             extra -= 1;
             stats::add("round/extra", 0.0);
         }
     }
-    let (polished, used) = linear_mba::polish(&seed, width_of(&cli.num_type));
+    let (polished, used) = linear_mba::polish_with(&seed, width_of(&cli.num_type), &cli.passes);
     if cli.trace {
         eprintln!("polish: {} -> {} by {}", size_of(&seed), size_of(&polished), used.join(","));
     }
@@ -1245,7 +1247,17 @@ pub struct Cli {
     pub max_restarts: usize,
     #[arg(long, help = "Print pre-pass candidates and round sizes to stderr")]
     pub trace: bool,
-    #[arg(help = "The infix expression to simplify")]
+    #[arg(
+        long,
+        default_value = "",
+        hide_default_value = true,
+        value_parser = sched::Passes::parse,
+        help = "Change the pass pipeline: items key=value, key+=names or key-=names (pre, polish), e.g. \"pre-=halve_input polish=push_not,factor extra=0\"; --show-passes prints the result"
+    )]
+    pub passes: sched::Passes,
+    #[arg(long, help = "Print the pass pipeline in --passes form and exit")]
+    pub show_passes: bool,
+    #[arg(default_value = "", hide_default_value = true, help = "The infix expression to simplify")]
     pub expr: String,
 }
 
@@ -1258,6 +1270,8 @@ impl Default for Cli {
             iter_limit: 10,
             max_restarts: 2,
             trace: false,
+            passes: sched::Passes::default(),
+            show_passes: false,
             expr: String::new(),
         }
     }

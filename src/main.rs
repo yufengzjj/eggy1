@@ -4,6 +4,10 @@ use eggy1::{simplify, Cli};
 
 fn main() {
     let cli = Cli::parse();
+    if cli.show_passes {
+        println!("{}", cli.passes);
+        return;
+    }
     if cli.expr.is_empty() {
         println!("please enter a expression");
         return;
