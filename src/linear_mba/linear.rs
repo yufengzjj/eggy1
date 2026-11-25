@@ -9,13 +9,19 @@ pub(crate) fn simba_memo(t: &T, w: &Ctx) -> Option<T> {
     if let Some(r) = memo_get(&w.st.simba_memo, &key, w) {
         return r;
     }
-    let (r, used) = tracking_clusters(w, || simba(t, w));
+    let (r, used) = tracking_clusters(w, || simba_in(t, w, false));
     w.st.simba_memo.lock().unwrap().insert(key, (r.clone(), used));
     r
 }
 
 /// Smallest rebuilt form of the linear region `t`, if it has 1..=MAX_LEAVES leaves.
 pub(super) fn simba(t: &T, w: &Ctx) -> Option<T> {
+    simba_in(t, w, true)
+}
+
+/// `simba`, with `sub_sums` tried when `split`: on the linear cofactors of `poly_mba` it
+/// costs several times what it gains.
+fn simba_in(t: &T, w: &Ctx, split: bool) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
     let n = lv.len();
@@ -51,12 +57,102 @@ pub(super) fn simba(t: &T, w: &Ctx) -> Option<T> {
             Some(r) if size(&r) < size(&rebuilt) => r,
             _ => rebuilt,
         };
-        match related_leaves(t, &lv, w) {
+        let rebuilt = match related_leaves(t, &lv, w) {
+            Some(r) if size(&r) < size(&rebuilt) => r,
+            _ => rebuilt,
+        };
+        if !split {
+            return Some(rebuilt).filter(|b| size(b) < size(t));
+        }
+        match sub_sums(t, &lv, w) {
             Some(r) if size(&r) < size(&rebuilt) => r,
             _ => rebuilt,
         }
     };
     Some(rebuilt).filter(|b| size(b) < size(t))
+}
+
+/// Most sub-sums beside which `sub_sums` also rebuilds the other terms.
+const MAX_REST_REBUILDS: usize = 2;
+
+/// Most leaves of a sub-sum `sub_sums` rebuilds on its own.
+const SUB_SUM_LEAVES: usize = 3;
+
+/// The region `t` with the terms that depend only on some `SUB_SUM_LEAVES` of its leaves
+/// rebuilt on their own, beside the other terms as they are or rebuilt: the whole
+/// region's values can split into terms that the rebuild does not find
+/// (`(x ^ (c & f)) + ((a | f) + (~f & b) - (a & b))`, the sum on the right `(a ^ b) | (a ^ f)`).
+fn sub_sums(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
+    let n = lv.len();
+    if n <= SUB_SUM_LEAVES {
+        return None;
+    }
+    let (mut terms, mut konst) = (Vec::new(), 0);
+    sum_terms(t, 1, w, &mut terms, &mut konst);
+    if terms.len() < 3 {
+        return None;
+    }
+    // The leaves each term reads, found as `Prog` finds them: `x << 7` is the leaf of
+    // `a & (x << 7)` also outside it.
+    fn reads(t: &T, lv: &[T]) -> usize {
+        match (lv.iter().position(|l| l == t), t) {
+            (Some(i), _) => 1 << i,
+            (_, T::Op(_, a)) => a.iter().fold(0, |d, x| d | reads(x, lv)),
+            _ => 0,
+        }
+    }
+    let deps: Vec<usize> = terms.iter().map(|(_, x)| reads(x, lv)).collect();
+    // Arithmetic leaves stay out of the sub-sums: rebuilt around them, a sum came out smaller
+    // but left the rules a worse start more often than a better one.
+    let arith = (0..n).filter(|&i| kind(&lv[i], w) == Kind::Lin).fold(0usize, |m, i| m | 1 << i);
+    // Each term is evaluated on its own: a sum of terms can equal a leaf (`b + c` in `a & (b + c)`).
+    let progs: Vec<Prog> = terms.iter().map(|(_, x)| Prog::new(x, lv, w)).collect();
+    let value = |set: &[usize], k: u64, p: usize| set.iter().fold(k, |a, &j| a.wrapping_add(terms[j].0.wrapping_mul(progs[j].at(p, w)))) & w.mask;
+    let mut tried: Vec<Vec<usize>> = Vec::new();
+    let mut subs: Vec<(usize, Vec<usize>, T)> = Vec::new();
+    for u in (1..1usize << n).filter(|u| u.count_ones() as usize <= SUB_SUM_LEAVES && u & arith == 0) {
+        let inside: Vec<usize> = (0..terms.len()).filter(|&j| deps[j] != 0 && deps[j] & !u == 0).collect();
+        if inside.len() < 2 || inside.len() == terms.len() || tried.contains(&inside) {
+            continue;
+        }
+        tried.push(inside.clone());
+        let vars: Vec<usize> = (0..n).filter(|i| u >> i & 1 == 1).collect();
+        let own: Vec<(u64, T)> = inside.iter().map(|&j| terms[j].clone()).collect();
+        let own_sum = build_sum(&own, konst, w);
+        let sub_vals: Vec<u64> = (0..1usize << vars.len()).map(|q| value(&inside, konst, vars.iter().enumerate().fold(0, |p, (j, &i)| p | (q >> j & 1) << i))).collect();
+        let sub_lv: Vec<T> = vars.iter().map(|&i| lv[i].clone()).collect();
+        let sub = rebuild_values(&sub_vals, &sub_lv, w);
+        if size(&sub) >= size(&own_sum) {
+            continue;
+        }
+        subs.push((size(&own_sum) - size(&sub), inside, sub));
+    }
+    // The other terms as they are, and rebuilt beside the sub-sums that gain most (each
+    // rebuild of them is over all leaves).
+    let mut order: Vec<usize> = (0..subs.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(subs[i].0));
+    let mut best: Option<T> = None;
+    for (rank, &i) in order.iter().enumerate() {
+        let (_, inside, sub) = &subs[i];
+        let outside: Vec<usize> = (0..terms.len()).filter(|j| !inside.contains(j)).collect();
+        let kept: Vec<(u64, T)> = outside.iter().map(|&j| terms[j].clone()).collect();
+        let mut rest = build_sum(&kept, 0, w);
+        if rank < MAX_REST_REBUILDS && kept.len() > 1 {
+            let vals: Vec<u64> = (0..1usize << n).map(|p| value(&outside, 0, p)).collect();
+            let r = rebuild_values(&vals, lv, w);
+            if size(&r) < size(&rest) {
+                rest = r;
+            }
+        }
+        let (mut all, mut k) = (Vec::new(), 0);
+        sum_terms(sub, 1, w, &mut all, &mut k);
+        sum_terms(&rest, 1, w, &mut all, &mut k);
+        let cand = build_sum(&all, k, w);
+        if best.as_ref().is_none_or(|b| size(&cand) < size(b)) {
+            best = Some(cand);
+        }
+    }
+    best
 }
 
 /// `c·(v_1 + ... + v_k) + L` for leaves whose own coefficients are within 1 of `c = ±2^k`
