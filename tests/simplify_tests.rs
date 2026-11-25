@@ -1664,6 +1664,14 @@ fn decomposition_with_free_points() {
     }
 }
 
+/// A sum over 6 leaves whose values are one bitwise function, split by `decompose`.
+#[test]
+fn six_leaf_sum_of_one_bitwise_function() {
+    for t in ["u64", "u8"] {
+        check(t, &[("(a & (~f ^ c)) + (~a & ((b | g) & ((f ^ e) ^ c)))", &["((a | (b | g)) & (f ^ (c ^ (a | e))))"], 10)]);
+    }
+}
+
 /// Two moves between leaf groups, the first of which alone makes the sum larger:
 /// `3·(t & ~x) + x` becomes `3·(t | x)` once `2·x` comes from the group of `x ^ y`.
 #[test]

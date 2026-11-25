@@ -19,8 +19,8 @@ pub(super) fn simba(t: &T, w: &Ctx) -> Option<T> {
     simba_in(t, w, true)
 }
 
-/// `simba`, with `sub_sums` tried when `split`: on the linear cofactors of `poly_mba` it
-/// costs several times what it gains.
+/// `simba`, with `one_wide_term` and `sub_sums` tried when `split`: on the linear cofactors
+/// of `poly_mba` they cost several times what they gain.
 fn simba_in(t: &T, w: &Ctx, split: bool) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
@@ -64,12 +64,33 @@ fn simba_in(t: &T, w: &Ctx, split: bool) -> Option<T> {
         if !split {
             return Some(rebuilt).filter(|b| size(b) < size(t));
         }
+        let rebuilt = match one_wide_term(&vals, &lv, w) {
+            Some(r) if size(&r) < size(&rebuilt) => r,
+            _ => rebuilt,
+        };
         match sub_sums(t, &lv, w) {
             Some(r) if size(&r) < size(&rebuilt) => r,
             _ => rebuilt,
         }
     };
     Some(rebuilt).filter(|b| size(b) < size(t))
+}
+
+/// `c·B + k` for values that take two values only, `B` split by `decompose` past the
+/// `MAX_DECOMPOSE` leaves where `bool_expr` stops: `(g | b | a) & (c ^ f ^ (a | e))`.
+fn one_wide_term(vals: &[u64], lv: &[T], w: &Ctx) -> Option<T> {
+    let n = lv.len();
+    if n <= MAX_DECOMPOSE {
+        return None;
+    }
+    let k = vals[0];
+    let c = vals.iter().find(|&&v| v != k)?.wrapping_sub(k) & w.mask;
+    if vals.iter().any(|&v| v != k && v.wrapping_sub(k) & w.mask != c) {
+        return None;
+    }
+    let tt = (0..vals.len()).filter(|&p| vals[p] != k).fold(0u64, |t, p| t | 1 << p);
+    let (_, b) = decompose(tt, n, usize::MAX, true)?;
+    Some(build_sum(&[(c, b_to_t(&b, lv))], k, w))
 }
 
 /// Most sub-sums beside which `sub_sums` also rebuilds the other terms.
