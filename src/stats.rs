@@ -7,7 +7,8 @@
 //! them, `pass/NAME/smaller` counts results smaller than the pass's input, `pass/NAME/won`
 //! results kept among alternatives, and `pass/NAME/gain` sums the nodes a pass saved: for
 //! a pass in a chain its input's size less its result's, for one of several alternatives
-//! the next best alternative's size (or the input's) less the kept one's.
+//! the next best alternative's size (or the input's) less the kept one's. `KEY/survived`
+//! sums the gain of the forms the final result still contains (`settle`).
 
 use crate::eval::{Term, size};
 use std::cell::RefCell;
@@ -19,6 +20,8 @@ use std::time::Instant;
 static ON: AtomicBool = AtomicBool::new(false);
 /// Key → (count, seconds).
 static COUNTS: Mutex<BTreeMap<String, (u64, f64)>> = Mutex::new(BTreeMap::new());
+/// Forms that saved nodes: hash, key and gain, for `settle`.
+static PRODUCED: Mutex<Vec<(u64, String, u64)>> = Mutex::new(Vec::new());
 /// Printed form of each pre-pass candidate of the current call → its source.
 static LABELS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
@@ -59,18 +62,26 @@ pub fn since(start: Instant) -> f64 {
 
 /// A pass result whose size can be compared with the pass's input.
 pub trait Out {
-    fn out_size(&self) -> Option<usize>;
+    fn term(&self) -> Option<&Term>;
+    /// The result of the pass turned off: its input, or no form.
+    fn skipped(input: &Term) -> Self;
 }
 
 impl Out for Term {
-    fn out_size(&self) -> Option<usize> {
-        Some(size(self))
+    fn term(&self) -> Option<&Term> {
+        Some(self)
+    }
+    fn skipped(input: &Term) -> Term {
+        input.clone()
     }
 }
 
 impl Out for Option<Term> {
-    fn out_size(&self) -> Option<usize> {
-        self.as_ref().map(size)
+    fn term(&self) -> Option<&Term> {
+        self.as_ref()
+    }
+    fn skipped(_: &Term) -> Option<Term> {
+        None
     }
 }
 
@@ -96,56 +107,132 @@ pub fn time<R>(name: &str, f: impl FnOnce() -> R) -> R {
     r
 }
 
-/// `time` for a pass in a chain: also counts `pass/NAME/smaller` and adds the nodes it
-/// saved to `pass/NAME/gain`.
+/// `time`, or the default result when the pass is turned off (`sched::is_off`).
+pub fn optional<R: Default>(name: &str, f: impl FnOnce() -> R) -> R {
+    if crate::sched::is_off(name) {
+        return R::default();
+    }
+    time(name, f)
+}
+
+/// `time` for a pass in a chain, which returns its input when turned off: also counts
+/// `pass/NAME/smaller` and adds the nodes it saved to `pass/NAME/gain`.
 pub fn pass<R: Out>(name: &str, input: &Term, f: impl FnOnce() -> R) -> R {
+    if crate::sched::is_off(name) {
+        return R::skipped(input);
+    }
     if !on() {
         return f();
     }
     let r = time(name, f);
-    smaller(name, size(input), r.out_size());
-    if let Some(out) = r.out_size().filter(|&o| o < size(input)) {
-        add_n(&format!("pass/{name}/gain"), (size(input) - out) as u64, 0.0);
+    if let Some(out) = r.term().filter(|o| size(o) < size(input)) {
+        add(&format!("pass/{name}/smaller"), 0.0);
+        produced(&format!("pass/{name}"), out, size(input) - size(out));
     }
     r
 }
 
-/// `time` for one of several alternatives: also counts `pass/NAME/smaller`; its gain is
-/// counted by `won` if it is kept.
+/// `time` for one of several alternatives, which gives no form when turned off: also
+/// counts `pass/NAME/smaller`; its gain is counted by `won` if it is kept.
 pub fn try_pass<R: Out>(name: &str, input: &Term, f: impl FnOnce() -> R) -> R {
+    if crate::sched::is_off(name) {
+        return R::skipped(input);
+    }
     if !on() {
         return f();
     }
     let r = time(name, f);
-    smaller(name, size(input), r.out_size());
-    r
-}
-
-fn smaller(name: &str, input: usize, out: Option<usize>) {
-    if out.is_some_and(|o| o < input) {
+    if r.term().is_some_and(|o| size(o) < size(input)) {
         add(&format!("pass/{name}/smaller"), 0.0);
     }
+    r
 }
 
-/// Counts `pass/NAME/won`, its form kept among alternatives, of size `kept` where the
-/// next best had `next`.
-pub fn won(name: &str, next: usize, kept: usize) {
+/// Counts `pass/NAME/won`, its form `kept` kept among alternatives where the next best
+/// had size `next`.
+pub fn won(name: &str, next: usize, kept: &Term) {
     if on() {
         add(&format!("pass/{name}/won"), 0.0);
-        add_n(&format!("pass/{name}/gain"), next.saturating_sub(kept) as u64, 0.0);
+        produced(&format!("pass/{name}"), kept, next.saturating_sub(size(kept)));
     }
 }
 
-/// `won` for `name` among alternatives of the given sizes, when its form is smaller than
-/// the input of size `input`; the next best is the smallest other one or the input.
-pub fn won_among(name: &str, sizes: &[(&str, usize)], input: usize) {
+/// `won` for `name` among alternatives of the given sizes, when its form `kept` is smaller
+/// than the input of size `input`; the next best is the smallest other one or the input.
+pub fn won_among(name: &str, sizes: &[(&str, usize)], input: usize, kept: &Term) {
+    if !on() || size(kept) >= input {
+        return;
+    }
+    let next = sizes.iter().filter(|(n, _)| *n != name).map(|(_, s)| *s).fold(input, usize::min);
+    won(name, next, kept);
+}
+
+/// Bits of the numeric type of the current run, for comparing constants in `settle`.
+static MASK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// Sets the width constants are compared in by `settle`.
+pub fn set_width(w: u32) {
+    MASK.store(if w >= 64 { u64::MAX } else { (1 << w) - 1 }, Relaxed);
+}
+
+/// A hash equal for terms that differ only in the order and grouping of the operands of
+/// `+ * & | ^` and in how constants are extended past the type's width, since the rules
+/// rearrange those freely.
+fn term_hash(t: &Term) -> u64 {
+    use crate::eval::Op;
+    use std::hash::{Hash, Hasher};
+    fn flat<'a>(t: &'a Term, op: Op, out: &mut Vec<&'a Term>) {
+        match t {
+            Term::Op(o, a) if *o == op => a.iter().for_each(|x| flat(x, op, out)),
+            _ => out.push(t),
+        }
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match t {
+        Term::Num(v) => (0u8, *v as u64 & MASK.load(Relaxed)).hash(&mut h),
+        Term::Var(v) => (1u8, v).hash(&mut h),
+        Term::Op(op @ (Op::Add | Op::Mul | Op::And | Op::Or | Op::Xor), _) => {
+            let mut parts = Vec::new();
+            flat(t, *op, &mut parts);
+            let mut hs: Vec<u64> = parts.into_iter().map(term_hash).collect();
+            hs.sort_unstable();
+            (2u8, op, hs).hash(&mut h);
+        }
+        Term::Op(op, a) => (3u8, op, a.iter().map(term_hash).collect::<Vec<_>>()).hash(&mut h),
+    }
+    h.finish()
+}
+
+/// Adds `gain` to `KEY/gain` and remembers the form, so `settle` can add it to
+/// `KEY/survived` if the final result contains it.
+pub fn produced(key: &str, form: &Term, gain: usize) {
+    if !on() || gain == 0 {
+        return;
+    }
+    add_n(&format!("{key}/gain"), gain as u64, 0.0);
+    PRODUCED.lock().unwrap().push((term_hash(form), key.to_string(), gain as u64));
+}
+
+/// Adds the gain of each form `produced` remembered to `KEY/survived` when `result` has it
+/// as a subterm, and forgets them. Forms the rules rewrote count as lost, so this is a
+/// lower bound on what reached the result.
+pub fn settle(result: &Term) {
     if !on() {
         return;
     }
-    let Some(&(_, kept)) = sizes.iter().find(|(n, _)| *n == name) else { return };
-    if kept < input {
-        let next = sizes.iter().filter(|(n, _)| *n != name).map(|(_, s)| *s).fold(input, usize::min);
-        won(name, next, kept);
+    fn walk(t: &Term, out: &mut std::collections::HashSet<u64>) {
+        out.insert(term_hash(t));
+        if let Term::Op(_, a) = t {
+            a.iter().for_each(|x| walk(x, out));
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    walk(result, &mut seen);
+    let produced = std::mem::take(&mut *PRODUCED.lock().unwrap());
+    for (h, key, gain) in produced {
+        if seen.contains(&h) {
+            add_n(&format!("{key}/survived"), gain, 0.0);
+        }
     }
 }
 
@@ -167,6 +254,7 @@ pub fn source_of(egg: &str) -> Option<String> {
 /// The counts so far, cleared with the labels.
 pub fn take() -> BTreeMap<String, (u64, f64)> {
     LABELS.lock().unwrap().clear();
+    PRODUCED.lock().unwrap().clear();
     std::mem::take(&mut *COUNTS.lock().unwrap())
 }
 

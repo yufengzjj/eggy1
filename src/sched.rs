@@ -17,6 +17,62 @@ pub const PRE: [&str; 9] = [
     "unclustered",
 ];
 
+/// Passes inside a rebuild that `off` can turn off: one in a chain then returns its input,
+/// one of several alternatives gives no form.
+pub const INNER: [&str; 34] = [
+    "lowbits",
+    "unshift",
+    "tfunc_whole",
+    "relate",
+    "tfunc",
+    "unify_operands",
+    "recombine",
+    "cut_products",
+    "shifted_xor",
+    "simplify_rebuilt",
+    "cluster_regions",
+    "simba",
+    "small_blocks",
+    "wide_blocks",
+    "poly_mba",
+    "poly/masked",
+    "rebuild_values",
+    "common_multiple",
+    "related_leaves",
+    "one_wide_term",
+    "semi_linear",
+    "drop_unused",
+    "clustered",
+    "peel",
+    "peel_clustered",
+    "semi/grouped",
+    "semi/peel_grouped",
+    "semi/shapes",
+    "semi/pairs",
+    "semi/peel_shapes",
+    "semi/semi_split",
+    "semi/scaled",
+    "semi/bit_split",
+    "semi/short_consts",
+];
+
+thread_local! {
+    /// Bits of the `INNER` passes turned off for the run on this thread.
+    static OFF: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Turns off the `INNER` passes `p.off` names for the runs on this thread that follow.
+pub fn set_off(p: &Passes) {
+    let bits = p.off.iter().filter_map(|n| INNER.iter().position(|k| k == n)).fold(0u64, |b, i| b | 1 << i);
+    OFF.with(|o| o.set(bits));
+}
+
+/// Whether the pass `name` is turned off on this thread.
+pub fn is_off(name: &str) -> bool {
+    let bits = OFF.with(|o| o.get());
+    bits != 0 && INNER.iter().position(|k| *k == name).is_some_and(|i| bits >> i & 1 == 1)
+}
+
 /// The rulesets of `make_egg`.
 pub const RULESETS: [&str; 6] = ["default-ruleset", "canonicalization", "constant-folding", "analysis", "identity-zero-element", "simplify"];
 
@@ -58,6 +114,8 @@ pub struct Passes {
     pub polish: Vec<&'static str>,
     /// Polish stops after this many winning passes.
     pub polish_wins: usize,
+    /// Entries of `INNER` turned off.
+    pub off: Vec<&'static str>,
 }
 
 impl Default for Passes {
@@ -82,6 +140,7 @@ impl Default for Passes {
             minimal: true,
             polish: crate::linear_mba::POLISH.iter().map(|(n, _)| *n).collect(),
             polish_wins: 8,
+            off: Vec::new(),
         }
     }
 }
@@ -112,7 +171,7 @@ impl Passes {
 
     /// The default pipeline changed by `spec`: items separated by spaces or `;`, each
     /// `key=value`, and for the lists `pre`, `polish` and `schedule` also `key+=names` and
-    /// `key-=names` (names separated by `,`; schedule steps written `run:`, `once:` or
+    /// `key-=names` (also `off`; names separated by `,`; schedule steps written `run:`, `once:` or
     /// `sat:` and a ruleset).
     pub fn parse(spec: &str) -> Result<Passes, String> {
         let mut p = Passes::default();
@@ -128,6 +187,7 @@ impl Passes {
             let list = match key {
                 "pre" => Some((&mut p.pre, names(&PRE)?)),
                 "polish" => Some((&mut p.polish, names(&polish_names)?)),
+                "off" => Some((&mut p.off, names(&INNER)?)),
                 _ => None,
             };
             if let Some((list, ns)) = list {
@@ -174,11 +234,13 @@ impl Passes {
                 "polish_wins" => p.polish_wins = num()?,
                 "match_limit" => p.match_limit = num()?,
                 "ban_length" => p.ban_length = num()?,
-                _ => return Err(format!("unknown key {key}; known: schedule match_limit ban_length pre keep extra rerun_input printed minimal polish polish_wins")),
+                _ => return Err(format!("unknown key {key}; known: schedule match_limit ban_length pre keep extra rerun_input printed minimal polish polish_wins off")),
             }
         }
         p.pre.sort_by_key(|n| PRE.iter().position(|k| k == n));
         p.pre.dedup();
+        p.off.sort_by_key(|n| INNER.iter().position(|k| k == n));
+        p.off.dedup();
         Ok(p)
     }
 }
@@ -189,7 +251,7 @@ impl fmt::Display for Passes {
         let steps: Vec<String> = self.schedule.iter().map(|(s, rs)| format!("{}:{rs}", STEPS.iter().find(|(k, _)| k == s).unwrap().1)).collect();
         write!(
             f,
-            "schedule={} match_limit={} ban_length={} pre={} keep={} extra={} rerun_input={} printed={} minimal={} polish={} polish_wins={}",
+            "schedule={} match_limit={} ban_length={} pre={} keep={} extra={} rerun_input={} printed={} minimal={} polish={} polish_wins={} off={}",
             steps.join(","),
             self.match_limit,
             self.ban_length,
@@ -200,7 +262,8 @@ impl fmt::Display for Passes {
             self.printed,
             self.minimal as u8,
             self.polish.join(","),
-            self.polish_wins
+            self.polish_wins,
+            self.off.join(",")
         )
     }
 }
@@ -217,6 +280,13 @@ mod tests {
         assert_eq!(p.polish, ["factor", "push_not", "factor"]);
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("pre+=nope").is_err() && Passes::parse("keep+=1").is_err());
+        let p = Passes::parse("off=semi/bit_split,relate").unwrap();
+        assert_eq!(p.off, ["relate", "semi/bit_split"]);
+        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
+        set_off(&p);
+        assert!(is_off("relate") && !is_off("simba"));
+        set_off(&Passes::default());
+        assert!(!is_off("relate"));
         let p = Passes::parse("schedule-=sat:analysis schedule+=once:simplify,sat:analysis match_limit=128").unwrap();
         assert_eq!(p.schedule.last(), Some(&(Step::Saturate, "analysis")));
         assert_eq!(p.schedule.len(), 7);

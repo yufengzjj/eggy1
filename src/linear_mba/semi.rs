@@ -41,9 +41,9 @@ pub(super) fn semi_linear(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
     // The search only needs each leaf's size, so it runs on slots: cheap to copy,
     // and the memoized searches repeat across regions with other leaves.
     let lv: &[T] = &real.iter().enumerate().map(|(i, l)| T::Op(Op::Slot(i as u32, size(l) as u32), Vec::new())).collect::<Vec<_>>();
-    use crate::stats::time;
+    use crate::stats::optional;
     let mut cands = Vec::new();
-    time("semi/grouped", || semi_linear_candidates(&groups, lv, e0, w, &mut cands));
+    optional("semi/grouped", || semi_linear_candidates(&groups, lv, e0, w, &mut cands));
     let mut from = vec![(cands.len(), "grouped")];
     let mut peels = Vec::new();
     let mut best: Option<((u64, u64), usize)> = None;
@@ -63,7 +63,7 @@ pub(super) fn semi_linear(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
     if let Some((_, k)) = best {
         let (i, a, e0, gs) = &peels[k];
         let mut sub = Vec::new();
-        time("semi/peel_grouped", || semi_linear_candidates(gs, lv, *e0, w, &mut sub));
+        optional("semi/peel_grouped", || semi_linear_candidates(gs, lv, *e0, w, &mut sub));
         cands.extend(sub.into_iter().map(|c| add(c, *i, *a)));
     }
     from.push((cands.len(), "peel_grouped"));
@@ -75,41 +75,43 @@ pub(super) fn semi_linear(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
         limit
     };
     let limit = smallest(&cands);
-    time("semi/shapes", || shape_candidates(&groups, lv, e0, w, limit, &mut cands));
+    optional("semi/shapes", || shape_candidates(&groups, lv, e0, w, limit, &mut cands));
     from.push((cands.len(), "shapes"));
     let limit = smallest(&cands);
-    time("semi/pairs", || pair_candidates(&groups, lv, e0, w, limit, &mut cands));
+    optional("semi/pairs", || pair_candidates(&groups, lv, e0, w, limit, &mut cands));
     from.push((cands.len(), "pairs"));
     for (i, a, e0, gs) in &peels {
         let limit = smallest(&cands);
         let extra = size(&add(T::Num(1), *i, *a)) - 1;
         if limit > extra {
             let mut sub = Vec::new();
-            time("semi/peel_shapes", || shape_candidates(gs, lv, *e0, w, limit - extra, &mut sub));
+            optional("semi/peel_shapes", || shape_candidates(gs, lv, *e0, w, limit - extra, &mut sub));
             cands.extend(sub.into_iter().map(|c| add(c, *i, *a)));
         }
     }
     from.push((cands.len(), "peel_shapes"));
     let limit = smallest(&cands);
-    cands.extend(time("semi/semi_split", || semi_split(&groups, lv, e0, w, limit)));
+    cands.extend(optional("semi/semi_split", || semi_split(&groups, lv, e0, w, limit)));
     from.push((cands.len(), "semi_split"));
     let limit = smallest(&cands);
-    cands.extend(time("semi/scaled", || scaled(&groups, lv, e0, w, limit)));
+    cands.extend(optional("semi/scaled", || scaled(&groups, lv, e0, w, limit)));
     from.push((cands.len(), "scaled"));
     let limit = smallest(&cands);
-    cands.extend(time("semi/bit_split", || bit_split(&groups, lv, arith, e0, w, limit)));
+    cands.extend(optional("semi/bit_split", || bit_split(&groups, lv, arith, e0, w, limit)));
     from.push((cands.len(), "bit_split"));
     // Masks that differ only in bits that cannot matter tie on size; keep the short one.
     let i = (0..cands.len()).min_by_key(|&i| (size(&cands[i]), const_bits(&cands[i])))?;
-    if crate::stats::on() {
-        let source = |j: usize| from.iter().find(|(end, _)| j < *end).map_or("", |f| f.1);
+    let source = |j: usize| from.iter().find(|(end, _)| j < *end).map_or("", |f| f.1);
+    let won = (crate::stats::on() && size(&cands[i]) < size(t)).then(|| {
         let next = (0..cands.len()).filter(|&j| source(j) != source(i)).map(|j| size(&cands[j])).fold(size(t), usize::min);
-        if size(&cands[i]) < size(t) {
-            crate::stats::won(&format!("semi/{}", source(i)), next, size(&cands[i]));
-        }
-    }
+        (source(i), next)
+    });
     let best = cands.swap_remove(i);
-    Some(fill_slots(&time("semi/short_consts", || short_consts(best, lv, w)), &real))
+    let r = fill_slots(&crate::stats::pass("semi/short_consts", &best, || short_consts(best.clone(), lv, w)), &real);
+    if let Some((name, next)) = won {
+        crate::stats::won(&format!("semi/{name}"), next, &r);
+    }
+    Some(r)
 }
 
 fn fill_slots(t: &T, lv: &[&T]) -> T {

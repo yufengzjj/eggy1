@@ -483,7 +483,7 @@ fn rewrite_uncached(t: &T, w: &Ctx) -> T {
     let lin = rewrite_linear(t, w);
     let mut r = match stats::try_pass("poly_mba", t, || crate::poly_mba::simplify_poly(t, w)) {
         Some(p) if size(&p) < size(&lin) => {
-            stats::won_among("poly_mba", &[("poly_mba", size(&p)), ("linear", size(&lin))], size(t));
+            stats::won_among("poly_mba", &[("poly_mba", size(&p)), ("linear", size(&lin))], size(t), &p);
             p
         }
         _ => lin,
@@ -610,8 +610,9 @@ fn rewrite_linear(t: &T, w: &Ctx) -> T {
             }
         };
         if let Some((name, best)) = best {
-            stats::won_among(name, &sizes, size(t));
-            return substitute_atoms(&best, w);
+            let r = substitute_atoms(&best, w);
+            stats::won_among(name, &sizes, size(t), &r);
+            return r;
         }
     }
     T::Op(*op, args.iter().map(|a| rewrite(a, w)).collect())
@@ -751,6 +752,7 @@ pub fn simplify_linear_with(egg: &str, w: u32, trace: bool, p: &Passes) -> (Stri
     thread_local! {
         static LAST: std::cell::RefCell<Last> = const { std::cell::RefCell::new(None) };
     }
+    crate::sched::set_off(p);
     let hit = |(e, bits, t, q, _): &&(String, u32, bool, Passes, Result)| e == egg && *bits == w && *t == trace && q == p;
     match LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.4.clone())) {
         Some(r) => r,

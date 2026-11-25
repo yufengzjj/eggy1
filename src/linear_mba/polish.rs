@@ -425,6 +425,7 @@ pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
 /// smaller, and the names of those that did. Run on the final result only: as a pre-pass
 /// candidate, even a slightly smaller form changes how the rules finish.
 pub fn polish_with(egg: &str, w: u32, p: &crate::sched::Passes) -> (String, Vec<&'static str>) {
+    crate::sched::set_off(p);
     let w = Ctx::new(w);
     w.limit_rewrites(POLISH_REWRITES);
     let mut best = parse(egg);
@@ -438,7 +439,7 @@ pub fn polish_with(egg: &str, w: u32, p: &crate::sched::Passes) -> (String, Vec<
             crate::stats::add(&format!("polish/{name}/run"), crate::stats::since(clock));
             if size(&r) < size(&best) {
                 crate::stats::add(&format!("polish/{name}/won"), 0.0);
-                crate::stats::add_n(&format!("polish/{name}/gain"), (size(&best) - size(&r)) as u64, 0.0);
+                crate::stats::produced(&format!("polish/{name}"), &r, size(&best) - size(&r));
                 best = r;
                 used.push(name);
             }

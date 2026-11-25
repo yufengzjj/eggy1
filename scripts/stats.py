@@ -27,7 +27,8 @@ features (size, vars, depth, mul, bitconst, arith_in_bit, shift, div), then
                     alternatives the next best one's size (or the input's) less the kept
                     one's, a pre-pass candidate the first rebuild's size less its own, a
                     polish pass the size it removed
-ROI is nodes saved per millisecond of the pass's time with the passes it calls (its
+survived is the part of gain in forms the final result still contains (a lower bound:
+forms the rules rewrote count as lost); ROI is nodes saved per millisecond of the pass's time with the passes it calls (its
 gain comes from them too); hit is the share of calls
 that saved nodes. Gains are local: whether they reach the final result is measured by
 scripts/pass-value.py from runs with the pass turned off.
@@ -38,7 +39,7 @@ import argparse
 import sys
 from collections import defaultdict
 
-SUFFIXES = ("/self", "/smaller", "/won", "/gain")
+SUFFIXES = ("/self", "/smaller", "/won", "/gain", "/survived")
 
 
 def bucket(v):
@@ -108,10 +109,10 @@ def summarize(cases, title):
     for key in sorted(k for k in total if k.startswith(("egglog/", "round/", "rerun_printed/"))):
         print(f"  {key:40s} {total[key][0]:7d} {total[key][1]:9.1f}s")
     passes = sorted({k.split("/")[1] for k in total if k.startswith("polish/")})
-    print("\npolish passes: runs, seconds, won, final, gain, ROI")
+    print("\npolish passes: runs, seconds, won, final, gain, survived, ROI")
     for name in sorted(passes, key=lambda p: -total[f"polish/{p}/run"][1]):
-        run, won, gain = total[f"polish/{name}/run"], total[f"polish/{name}/won"], total[f"polish/{name}/gain"]
-        print(f"  {name:20s} {run[0]:7d} {run[1]:9.1f}s {won[0]:7d} {final.get('polish/' + name, 0):7d} {gain[0]:8d} {roi(gain[0], run[1])}")
+        run, won, gain, surv = total[f"polish/{name}/run"], total[f"polish/{name}/won"], total[f"polish/{name}/gain"], total[f"polish/{name}/survived"]
+        print(f"  {name:20s} {run[0]:7d} {run[1]:9.1f}s {won[0]:7d} {final.get('polish/' + name, 0):7d} {gain[0]:8d} {surv[0]:8d} {roi(gain[0], run[1])}")
     inner(total)
     print()
 
@@ -121,12 +122,12 @@ def inner(total, only=None):
     names = [n for n in names if not n.endswith(SUFFIXES) and (only is None or n == only)]
     if not names:
         return
-    print("\npasses inside rebuilds: calls, cases, seconds with nested passes, own seconds, smaller, won, gain, ROI, hit")
+    print("\npasses inside rebuilds: calls, cases, seconds with nested passes, own seconds, smaller, won, gain, survived, ROI, survived ROI, hit")
     for name in sorted(names, key=lambda n: -total[f"pass/{n}/self"][1]):
         g = lambda f: total[f"pass/{name}{f}"]
-        run, own, gain = g(""), g("/self"), g("/gain")[0]
+        run, own, gain, surv = g(""), g("/self"), g("/gain")[0], g("/survived")[0]
         hits = g("/won")[0] if g("/won")[0] else (g("/smaller")[0] if gain else 0)
-        print(f"  {name:22s} {run[0]:9d} {run[2]:6d} {run[1]:8.1f}s {own[1]:8.1f}s {g('/smaller')[0]:8d} {g('/won')[0]:8d} {gain:9d} {roi(gain, run[1])} {100 * hits / max(run[0], 1):5.1f}%")
+        print(f"  {name:22s} {run[0]:9d} {run[2]:6d} {run[1]:8.1f}s {own[1]:8.1f}s {g('/smaller')[0]:8d} {g('/won')[0]:8d} {gain:9d} {surv:8d} {roi(gain, run[1])} {roi(surv, run[1])} {100 * hits / max(run[0], 1):5.1f}%")
 
 
 def main():

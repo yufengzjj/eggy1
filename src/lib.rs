@@ -1043,10 +1043,12 @@ pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result
 pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
     let egg = make_egg(&cli.num_type);
     let norm = |n| norm_const(n, &cli.num_type);
+    stats::set_width(width_of(&cli.num_type));
     let (seed, origin) = drive(&egg, s, cli, cli.max_restarts.max(1), cli.passes.extra)?;
     let out = egglog_to_infix(&seed, &norm);
     if seed == s || cli.passes.printed == 0 {
         stats::add(&format!("final/{origin}"), 0.0);
+        stats::settle(&eval::parse(&seed));
         return Ok(out);
     }
     // A run from the printed result starts with the first-round handling again, which
@@ -1058,9 +1060,11 @@ pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
     if won {
         stats::add(&format!("rerun_printed/won/{again_origin}"), 0.0);
         stats::add("final/rerun_printed", 0.0);
+        stats::settle(&eval::parse(&again));
         return Ok(egglog_to_infix(&again, &norm));
     }
     stats::add(&format!("final/{origin}"), 0.0);
+    stats::settle(&eval::parse(&seed));
     Ok(out)
 }
 

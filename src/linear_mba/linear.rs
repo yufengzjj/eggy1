@@ -45,8 +45,8 @@ fn simba_in(t: &T, w: &Ctx, split: bool) -> Option<T> {
         if best.as_ref().is_some_and(|b| matches!(b.1, "clustered" | "peel_clustered")) {
             w.st.used.fetch_or(CLUSTERED, Relaxed);
         }
-        if let Some((_, name)) = &best {
-            stats::won_among(name, &sizes, size(t));
+        if let Some((kept, name)) = &best {
+            stats::won_among(name, &sizes, size(t), kept);
         }
         return best.map(|b| b.0);
     }
@@ -55,7 +55,7 @@ fn simba_in(t: &T, w: &Ctx, split: bool) -> Option<T> {
     }
     let rebuilt = if has_const_bitwise(t, w) {
         let r = stats::try_pass("semi_linear", t, || semi_linear(t, &lv, w))?;
-        stats::won_among("semi_linear", &[("semi_linear", size(&r))], size(t));
+        stats::won_among("semi_linear", &[("semi_linear", size(&r))], size(t), &r);
         r
     } else {
         let prog = Prog::new(t, &lv, w);
@@ -75,7 +75,7 @@ fn simba_in(t: &T, w: &Ctx, split: bool) -> Option<T> {
         if split {
             try_one("one_wide_term", stats::try_pass("one_wide_term", t, || one_wide_term(&vals, &lv, w)));
         }
-        stats::won_among(best.0, &sizes, size(t));
+        stats::won_among(best.0, &sizes, size(t), &best.1);
         best.1
     };
     Some(rebuilt).filter(|b| size(b) < size(t))
