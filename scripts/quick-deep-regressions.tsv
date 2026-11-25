@@ -1,0 +1,10 @@
+type	file	section	index	hash
+i64	deep_i64	lin12x5: linear MBA, 12 variables, 5-variable terms,groundtruth	4	7d27052a8a40
+i64	deep_i64	lin12x5: linear MBA, 12 variables, 5-variable terms,groundtruth	38	d2758ea600ea
+u32	deep_u32	lin12x5: linear MBA, 12 variables, 5-variable terms,groundtruth	2	c5e079e31694
+u64	deep_u64	lin12x5: linear MBA, 12 variables, 5-variable terms,groundtruth	26	b5f9ffdae201
+i64	deep_i64	nonpoly12: depth-6 non-polynomial ground truth over 12 variables, encoded once,groundtruth	10	662700768146
+i64	deep_i64	nonpoly12: depth-6 non-polynomial ground truth over 12 variables, encoded once,groundtruth	24	c603964f92ab
+u64	deep_u64	nonpoly12: depth-6 non-polynomial ground truth over 12 variables, encoded once,groundtruth	20	8c497625ef72
+u8	deep_u8	nonpoly8x2: depth-5 non-polynomial ground truth over 8 variables, encoded twice,groundtruth	36	05cf4ba73128
+u8	deep_u8	lin12x5: linear MBA, 12 variables, 5-variable terms,groundtruth	25	a138e5e9dab5
