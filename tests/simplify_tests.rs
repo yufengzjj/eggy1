@@ -2172,11 +2172,9 @@ fn overlapping_terms_with_equal_coefficients() {
         "i64",
         &[("-(y ^ z) - (x & ~y & z) - (x & y & ~z) + (a | b) + 2", &["(((a | b) - ((y ^ z) + ((y ^ z) & x))) + 2)"], 10)],
     );
-    // Too many ambiguous points to try each way: one term over at most 3 leaves is enumerated.
+    // Too many ambiguous points to try each way; the terms over 3 leaves are rebuilt on their own.
     for t in ["i64", "u64"] {
         check(t, &[("(d ^ (c & f)) + (a | f) + (~f & b) - (a & b)", &["((d ^ (c & f)) + ((a ^ b) | (f ^ b)))"], 10)]);
-        check(t, &[("(g ^ ((c ^ d) & ~f)) + (f & (~d ^ c))", &["((g & f) + (c ^ (d ^ (g | f))))"], 10)]);
-        check(t, &[("(f & (h & (g & l))) - ((g | i) ^ ((h & g) | (f & l)))", &["((h & g) - ((g | i) ^ (f & l)))"], 10)]);
     }
 }
 

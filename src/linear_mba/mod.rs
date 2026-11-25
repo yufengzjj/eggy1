@@ -404,7 +404,6 @@ pub(crate) fn build_sum(terms: &[(u64, T)], konst: u64, w: &Ctx) -> T {
 }
 
 /// `size(&build_sum(terms, konst, w))` without building it.
-#[cfg(test)]
 fn sum_size(terms: &[(u64, T)], konst: u64, w: &Ctx) -> usize {
     let terms: Vec<(u64, usize, bool)> = terms.iter().map(|(c, t)| (*c, size(t), matches!(t, T::Op(op, _) if *op == Op::Not))).collect();
     folded_sum_size(&terms, konst, w)

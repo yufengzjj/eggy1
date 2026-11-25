@@ -371,8 +371,7 @@ fn rebuild_table_uncached(gp: &[u64], lv: &[T], shape: &[(usize, bool)], konst: 
         }
         cands.push((terms, konst));
     }
-    let bound = cands.iter().map(|(ts, k)| sum_size(ts, *k, w)).min().unwrap();
-    cands.extend(overlapping_terms(gp, lv, konst, w, &|ts, k| sum_size(ts, k, w), bound));
+    cands.extend(overlapping_terms(gp, lv, konst, w));
     cands
         .into_iter()
         .min_by_key(|(ts, k)| sum_size(ts, *k, w))
@@ -387,8 +386,7 @@ const OVERLAP_MAX_VALUES: usize = 4;
 /// `h = gp + d = Σ c_j·b_j` per bit, and then `e = Σ c_j·b_j(x) + konst + d`,
 /// since a per-bit constant `d` is the word `-d`. `d` is tried as 0 or `-v`
 /// for a value `v` of `gp`, i.e. `h` is zero where `gp` is `v`.
-/// `bound` is the size of a known candidate; larger ones may be skipped.
-pub(super) fn overlapping_terms(gp: &[u64], lv: &[T], konst: u64, w: &Ctx, cost: &dyn Fn(&[(u64, T)], u64) -> usize, mut bound: usize) -> Vec<(Vec<(u64, T)>, u64)> {
+pub(super) fn overlapping_terms(gp: &[u64], lv: &[T], konst: u64, w: &Ctx) -> Vec<(Vec<(u64, T)>, u64)> {
     let m = w.mask;
     let distinct = |t: &[u64]| {
         let mut v: Vec<u64> = t.iter().copied().filter(|&u| u != 0).collect();
@@ -420,8 +418,7 @@ pub(super) fn overlapping_terms(gp: &[u64], lv: &[T], konst: u64, w: &Ctx, cost:
         for k in (1..=3usize).filter(|k| hv.len() < 1 << k) {
             // At k = 3 a repeated coefficient leaves ambiguous points (rejected) or two equal terms.
             combinations(&pool, k, k == 2, &mut Vec::new(), &mut |coefs| {
-                if let Some(c) = split_by_sums(&h, &hv, coefs, lv, konst.wrapping_add(d) & m, w, cost, bound) {
-                    bound = bound.min(cost(&c.0, c.1));
+                if let Some(c) = split_by_sums(&h, &hv, coefs, lv, konst.wrapping_add(d) & m, w) {
                     out.push(c);
                 }
             });
@@ -448,11 +445,10 @@ const MAX_SUBSET_CHOICES: usize = 16;
 
 /// Write `h` as `Σ coefs[j]·b_j`, where each point's value is the sum of the
 /// coefficients of the `b_j` that are 1 there. With two terms a point can only
-/// be ambiguous when `c1 + c2 = 0` (as in `(y ^ k) - k`) or `c1 = c2`; such points are
-/// resolved in up to `MAX_SUBSET_CHOICES` ways, and beyond that also by `small_side`; the
-/// shortest result wins. With three terms ambiguity is common and too costly to
-/// resolve, so it fails.
-fn split_by_sums(h: &[u64], h_vals: &[u64], coefs: &[u64], lv: &[T], konst: u64, w: &Ctx, cost: &dyn Fn(&[(u64, T)], u64) -> usize, bound: usize) -> Option<(Vec<(u64, T)>, u64)> {
+/// be ambiguous when `c1 + c2 = 0` (as in `(y ^ k) - k`); such points are
+/// resolved in up to `MAX_SUBSET_CHOICES` ways and the shortest result wins.
+/// With three terms ambiguity is common and too costly to resolve, so it fails.
+fn split_by_sums(h: &[u64], h_vals: &[u64], coefs: &[u64], lv: &[T], konst: u64, w: &Ctx) -> Option<(Vec<(u64, T)>, u64)> {
     let m = w.mask;
     let k = coefs.len();
     let sums: Vec<u64> = (0..1usize << k)
@@ -495,101 +491,9 @@ fn split_by_sums(h: &[u64], h_vals: &[u64], coefs: &[u64], lv: &[T], konst: u64,
                 BE::E(_, b) => terms.push((coefs[j], b_to_t(&b, lv))),
             }
         }
-        if best.as_ref().is_none_or(|(bt, bk)| cost(&terms, kk) < cost(bt, *bk)) {
+        if best.as_ref().is_none_or(|(bt, bk)| sum_size(&terms, kk, w) < sum_size(bt, *bk, w)) {
             best = Some((terms, kk));
         }
     }
-    if ways > MAX_SUBSET_CHOICES && lv.len() <= SMALL_SIDE_MAX_LEAVES {
-        let bound = best.as_ref().map_or(bound, |b| bound.min(cost(&b.0, b.1)));
-        if let Some(s) = small_side(&options, coefs, lv, konst, cost, bound) {
-            best = Some(s);
-        }
-    }
     best
-}
-
-/// The points where variable `i` is 0, as a truth table.
-const VAR_LOW: [u64; 6] = [0x5555_5555_5555_5555, 0x3333_3333_3333_3333, 0x0f0f_0f0f_0f0f_0f0f, 0x00ff_00ff_00ff_00ff, 0x0000_ffff_0000_ffff, 0x0000_0000_ffff_ffff];
-
-/// Most leaves of a region `small_side` searches: over 6, building the other term
-/// (`bool_expr` by Shannon expansion) takes milliseconds per table.
-const SMALL_SIDE_MAX_LEAVES: usize = 5;
-
-/// Most other terms `small_side` builds, those with the smallest lower bounds first.
-const MAX_SMALL_SIDE_BUILDS: usize = 32;
-
-/// Most leaves of the term `small_side` enumerates.
-const SMALL_SIDE_LEAVES: usize = 3;
-
-/// The two-term split of `split_by_sums` (`options[p]`: the subsets of the two terms
-/// that may be 1 at point `p`) where one term depends on at most `SMALL_SIDE_LEAVES`
-/// leaves: every table over such a leaf set that the points allow is tried, and the
-/// other term follows from it (`(a & b) - ((c & d) ^ (b | e))`).
-fn small_side(options: &[Vec<usize>], coefs: &[u64], lv: &[T], konst: u64, cost: &dyn Fn(&[(u64, T)], u64) -> usize, bound: usize) -> Option<(Vec<(u64, T)>, u64)> {
-    let n = lv.len();
-    let roles = if coefs[0] == coefs[1] { 1 } else { 2 };
-    let leaf_size: Vec<usize> = lv.iter().map(|l| cost(&[(1, l.clone())], 0)).collect();
-    // (lower bound on the size, role, the small term and its leaves, the other term's table).
-    let mut cands: Vec<(usize, usize, B, Vec<usize>, u64)> = Vec::new();
-    for r in 0..roles {
-        for s in (1..1usize << n).filter(|s| s.count_ones() as usize <= SMALL_SIDE_LEAVES) {
-            let vars: Vec<usize> = (0..n).filter(|i| s >> i & 1 == 1).collect();
-            let class: Vec<usize> = (0..1usize << n).map(|p| vars.iter().enumerate().fold(0, |q, (j, &i)| q | (p >> i & 1) << j)).collect();
-            // Bit v of allowed[q]: term r may be v on class q.
-            let mut allowed = vec![3u8; 1 << vars.len()];
-            for (p, o) in options.iter().enumerate() {
-                allowed[class[p]] &= o.iter().fold(0, |a, &o| a | 1 << (o >> r & 1));
-            }
-            if allowed.contains(&0) {
-                continue;
-            }
-            let free: Vec<usize> = (0..allowed.len()).filter(|&q| allowed[q] == 3).collect();
-            let base = (0..allowed.len()).filter(|&q| allowed[q] == 2).fold(0u64, |t, q| t | 1 << q);
-            // The other term's table where term r is 0, and where it is 1.
-            let follow = |bit: usize| {
-                (0..options.len()).fold(0u64, |acc, p| match options[p].iter().find(|&&o| o >> r & 1 == bit) {
-                    Some(o) => acc | ((o >> (1 - r) & 1) as u64) << p,
-                    None => acc,
-                })
-            };
-            let (other0, other1) = (follow(0), follow(1));
-            for choice in 0..1u64 << free.len() {
-                let tt = free.iter().enumerate().filter(|(j, _)| choice >> j & 1 == 1).fold(base, |t, (_, &q)| t | 1 << q);
-                let BE::E(_, b) = bool_expr_canon(tt, vars.len()) else { continue };
-                let on = (0..options.len()).filter(|&p| tt >> class[p] & 1 == 1).fold(0u64, |m, p| m | 1 << p);
-                let other = (other1 & on) | (other0 & !on);
-                // The other term has each leaf it depends on and the operations joining them;
-                // one more joins the terms, and a folded constant saves one.
-                let dep: Vec<usize> = (0..n).filter(|&i| (other ^ other >> (1 << i)) & VAR_LOW[i] & table_full(n) != 0).collect();
-                let lb = b_cost(&b, &|i| leaf_size[vars[i]]) + dep.iter().map(|&i| leaf_size[i] + 1).sum::<usize>() - 1;
-                if !dep.is_empty() && lb < bound {
-                    cands.push((lb, r, b, vars.clone(), other));
-                }
-            }
-        }
-    }
-    cands.sort_by_key(|c| c.0);
-    let (mut best, mut limit) = (None, bound);
-    for (lb, r, b, vars, other) in cands.into_iter().take(MAX_SMALL_SIDE_BUILDS) {
-        if lb >= limit {
-            break;
-        }
-        let small = (coefs[r], b_to_t_at(&b, &vars, lv));
-        let BE::E(_, b2) = bool_expr_canon(other, n) else { continue };
-        let terms = vec![small, (coefs[1 - r], b_to_t(&b2, lv))];
-        let c = cost(&terms, konst);
-        if c < limit {
-            (best, limit) = (Some((terms, konst)), c);
-        }
-    }
-    best
-}
-
-/// Size of `b` with variable `i` of size `leaf(i)`.
-fn b_cost(b: &B, leaf: &dyn Fn(usize) -> usize) -> usize {
-    match b {
-        B::V(i) => leaf(*i),
-        B::Not(x) => 1 + b_cost(x, leaf),
-        B::Bin(_, x, y) => 1 + b_cost(x, leaf) + b_cost(y, leaf),
-    }
 }
