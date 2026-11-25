@@ -2,6 +2,7 @@ pub mod dag;
 pub mod eval;
 pub mod expr_convert;
 pub mod linear_mba;
+pub mod stats;
 mod poly_mba;
 mod lowbits;
 mod minimal;
@@ -1057,40 +1058,49 @@ pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result
 pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
     let egg = make_egg(&cli.num_type);
     let norm = |n| norm_const(n, &cli.num_type);
-    let seed = drive(&egg, s, cli, cli.max_restarts.max(1), 2)?;
+    let (seed, origin) = drive(&egg, s, cli, cli.max_restarts.max(1), 2)?;
     let out = egglog_to_infix(&seed, &norm);
     if seed == s {
+        stats::add(&format!("final/{origin}"), 0.0);
         return Ok(out);
     }
     // A run from the printed result starts with the first-round handling again, which
     // sometimes ends smaller than the last rounds did.
-    let again = drive(&egg, &infix_to_egglog(&out, true), cli, 2, 0)?;
-    match eval::size(&eval::parse(&again)) < eval::size(&eval::parse(&seed)) {
-        true => Ok(egglog_to_infix(&again, &norm)),
-        false => Ok(out),
+    let clock = std::time::Instant::now();
+    let (again, again_origin) = drive(&egg, &infix_to_egglog(&out, true), cli, 2, 0)?;
+    let won = eval::size(&eval::parse(&again)) < eval::size(&eval::parse(&seed));
+    stats::add("rerun_printed/run", stats::since(clock));
+    if won {
+        stats::add(&format!("rerun_printed/won/{again_origin}"), 0.0);
+        stats::add("final/rerun_printed", 0.0);
+        return Ok(egglog_to_infix(&again, &norm));
     }
+    stats::add(&format!("final/{origin}"), 0.0);
+    Ok(out)
 }
 
 /// The restart rounds of `simplify`: `rounds`, plus up to `extra` while the pre-pass still
-/// changes the last extraction; returns the smallest form seen.
-fn drive(egg: &str, s: &str, cli: &Cli, rounds: usize, extra: usize) -> Result<String, Error> {
+/// changes the last extraction; returns the smallest form seen and where it came from.
+fn drive(egg: &str, s: &str, cli: &Cli, rounds: usize, extra: usize) -> Result<(String, String), Error> {
     let mut seed = s.to_string();
+    let mut seed_origin = "input".to_string();
+    let pre = |e: &str| format!("pre/{}", stats::source_of(e).unwrap_or_else(|| "unlabeled".into()));
     // Extraction prefers fewer non-constant nodes, but results are compared by node count,
     // so the forms the pre-pass and the rules give along the way are kept by node count.
     let size_of = |e: &str| eval::size(&eval::parse(e));
-    let mut smallest: Option<(usize, String)> = None;
-    let mut offer = |e: &str| {
+    let mut smallest: Option<(usize, String, String)> = None;
+    let mut offer = |e: &str, origin: String| {
         let n = size_of(e);
-        if smallest.as_ref().is_none_or(|(m, _)| n < *m) {
-            smallest = Some((n, e.to_string()));
+        if smallest.as_ref().is_none_or(|(m, _, _)| n < *m) {
+            smallest = Some((n, e.to_string(), origin));
         }
     };
     let (mut rounds, mut extra, mut first) = (rounds, extra, true);
     while rounds > 0 {
         rounds -= 1;
         let (alt, other) = linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), cli.trace);
-        offer(&alt);
-        other.iter().for_each(|o| offer(o));
+        offer(&alt, pre(&alt));
+        other.iter().for_each(|o| offer(o, pre(o)));
         // Saturating a large input is most of the run time and rarely beats its
         // rebuild; it is kept only where rules do better from the input: results
         // that still mix arithmetic or constants into bitwise operations, and
@@ -1108,17 +1118,38 @@ fn drive(egg: &str, s: &str, cli: &Cli, rounds: usize, extra: usize) -> Result<S
                 && (eval::NumType::from_name(&cli.num_type).is_some_and(|ty| minimal::is_minimal(&t, ty)) || t_only && minimal::is_t_minimal(&t))
         };
         let minimal = is_min(&alt);
+        let clock = std::time::Instant::now();
         let mut extracted = match minimal {
             true => alt.clone(),
             false => simplify_round(&egg, &seed, cli, first && opaque)?,
         };
+        let round = if first { "first" } else { "later" };
+        let mut origin = match minimal {
+            true => {
+                stats::add("round/minimal", stats::since(clock));
+                pre(&alt)
+            }
+            false => {
+                stats::add(&format!("egglog/{round}"), stats::since(clock));
+                match stats::source_of(&extracted) {
+                    Some(src) => format!("pre/{src}"),
+                    None if extracted == seed => seed_origin.clone(),
+                    None => format!("egglog/{round}"),
+                }
+            }
+        };
         if first && !opaque && !minimal && mixed(&eval::parse(&extracted)) && !is_min(&extracted) {
+            let clock = std::time::Instant::now();
             let full = simplify_round(&egg, &seed, cli, true)?;
+            stats::add("egglog/rerun_input", stats::since(clock));
             if eval::size(&eval::parse(&full)) <= eval::size(&eval::parse(&extracted)) {
+                if eval::size(&eval::parse(&full)) < eval::size(&eval::parse(&extracted)) {
+                    origin = "egglog/rerun_input".to_string();
+                }
                 extracted = full;
             }
         }
-        offer(&extracted);
+        offer(&extracted, origin.clone());
         if cli.trace {
             eprintln!("round: seed {} extracted {}", eval::size(&eval::parse(&seed)), eval::size(&eval::parse(&extracted)));
         }
@@ -1128,20 +1159,24 @@ fn drive(egg: &str, s: &str, cli: &Cli, rounds: usize, extra: usize) -> Result<S
             break;
         }
         seed = extracted;
+        seed_origin = origin;
         // The last extraction can still hold a linear region the pre-pass rebuilds.
         if rounds == 0 && extra > 0 && linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), cli.trace).0 != seed {
             rounds = 1;
             extra -= 1;
+            stats::add("round/extra", 0.0);
         }
     }
     let (polished, used) = linear_mba::polish(&seed, width_of(&cli.num_type));
     if cli.trace {
         eprintln!("polish: {} -> {} by {}", size_of(&seed), size_of(&polished), used.join(","));
     }
-    offer(&polished);
+    if let Some(last) = used.last() {
+        offer(&polished, format!("polish/{last}"));
+    }
     match smallest {
-        Some((n, e)) if n < size_of(&seed) => Ok(e),
-        _ => Ok(seed),
+        Some((n, e, origin)) if n < size_of(&seed) => Ok((e, origin)),
+        _ => Ok((seed, seed_origin)),
     }
 }
 

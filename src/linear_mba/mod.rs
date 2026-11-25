@@ -775,6 +775,8 @@ fn drop_identities(t: &T, w: &Ctx) -> T {
 
 /// The pre-pass result and the forms to union with it.
 fn simplify_linear_uncached(egg: &str, w: u32, trace: bool) -> (String, Vec<String>) {
+    use crate::stats;
+    let clock = std::time::Instant::now();
     let w = Ctx::new(w);
     let t = parse(egg);
     let t0 = t.clone();
@@ -789,6 +791,9 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool) -> (String, Vec<Stri
         }
     };
     let r = run(&t, true);
+    stats::add("pre/first/made", stats::since(clock));
+    let clock = std::time::Instant::now();
+    let mut first_name = "first";
     // Unified operands let the regions around them share leaves, but the rebuild of the
     // input as written is sometimes smaller. The second rebuild redoes only the regions
     // unification changed, and is dropped once it needs `UNIFIED_REWRITES` rewrites.
@@ -807,14 +812,23 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool) -> (String, Vec<Stri
         };
         let used = UNIFIED_REWRITES - w.st.rewrites_left.load(Relaxed);
         w.limit_rewrites(left.saturating_sub(used));
+        stats::add("pre/unified/made", stats::since(clock));
         match u {
-            Some(u) if size(&u) < size(&r) => u,
+            Some(u) if size(&u) < size(&r) => {
+                first_name = "unified";
+                u
+            }
             _ => r,
         }
     } else {
         r
     };
-    let mut rebuilt: Vec<(&str, T)> = vec![("first", r.clone())];
+    let mut rebuilt: Vec<(&str, T)> = vec![(first_name, r.clone())];
+    let mut clock = std::time::Instant::now();
+    let made_by = |name: &str, clock: &mut std::time::Instant| {
+        stats::add(&format!("pre/{name}/made"), stats::since(*clock));
+        *clock = std::time::Instant::now();
+    };
     // A region rebuilt by `wide_blocks` is smaller there, but the other rebuilds can leave
     // subterms the abstracted rebuilds share across terms. Only smaller ones are kept: a
     // larger one unioned beside the first rebuild made the rules finish worse as often as better.
@@ -823,6 +837,7 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool) -> (String, Vec<Stri
         let n = run(&t, true);
         let abstracted = [over_const_bitwise(&n, &w), over_shared_bitwise(&n, &w)];
         w.st.excluded.store(0, Relaxed);
+        made_by("no_wide", &mut clock);
         for (name, o) in [("no_wide", n.clone())].into_iter().chain(abstracted.map(|o| ("no_wide_abstracted", o))) {
             if size(&o) < size(&r) && (name == "no_wide" || 4 * size(&o) <= 3 * size(&n)) {
                 rebuilt.push((name, o));
@@ -834,20 +849,24 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool) -> (String, Vec<Stri
         if s != r {
             rebuilt.push(("split_bits", s));
         }
+        made_by("split_bits", &mut clock);
     }
     let hr = halve(&r, &w);
     if hr != r {
         rebuilt.push(("halve_first", run(&hr, false)));
     }
+    made_by("halve_first", &mut clock);
     let pr = crate::lowbits::over_products(&r, &w, |t| rebuild_once(t, &w));
     if pr != r {
         rebuilt.push(("over_products", pr));
     }
+    made_by("over_products", &mut clock);
     for (name, o) in [("over_const_bitwise", over_const_bitwise(&r, &w)), ("over_shared_bitwise", over_shared_bitwise(&r, &w))] {
         if o != r {
             rebuilt.push((name, o));
         }
     }
+    made_by("over_bitwise", &mut clock);
     // Halving the whole input can give semi-linear regions that are slow to search,
     // so only small ones are rebuilt there, also inside `halve`.
     w.st.semi_leaves.store(2, Relaxed);
@@ -855,6 +874,7 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool) -> (String, Vec<Stri
     if ht != t {
         rebuilt.push(("halve_input", run(&ht, false)));
     }
+    made_by("halve_input", &mut clock);
     w.st.semi_leaves.store(MAX_LEAVES, Relaxed);
     let mut rebuilt: Vec<(&str, T)> = rebuilt.into_iter().map(|(n, t)| (n, finish(&t, &w))).collect();
     // A form from abstracted subterms only a little smaller than the first rebuild, or
@@ -878,10 +898,21 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool) -> (String, Vec<Stri
         w.st.rewrites_left.store(usize::MAX, Relaxed);
         w.st.relate_leaves.store(MAX_WIDE_LEAVES, Relaxed);
         w.st.excluded.store(0, Relaxed);
+        made_by("unclustered", &mut clock);
         u
     } else {
         None
     };
+    for (n, t) in &rebuilt {
+        if *n != first_name {
+            stats::add(&format!("pre/{n}/differs"), 0.0);
+        }
+        stats::label(&show(t), n);
+    }
+    if let Some(u) = &unclustered {
+        stats::add("pre/unclustered/differs", 0.0);
+        stats::label(&show(u), "unclustered");
+    }
     if trace {
         let all: Vec<String> = rebuilt.iter().map(|(n, t)| format!("{n} {}", size(t))).chain(unclustered.iter().map(|u| format!("unclustered {}", size(u)))).collect();
         eprintln!("prepass: input {} candidates: {}; dropped: {}", size(&t0), all.join(", "), dropped.join(", "));
@@ -898,6 +929,9 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool) -> (String, Vec<Stri
     if trace {
         let kept: Vec<String> = rebuilt.iter().map(|(n, t)| format!("{n} {}", size(t))).collect();
         eprintln!("prepass: chosen {}", kept.join(", then "));
+    }
+    for (i, (n, _)) in rebuilt.iter().enumerate() {
+        stats::add(&format!("pre/{n}/{}", if i == 0 { "main" } else { "kept" }), 0.0);
     }
     let others: Vec<T> = rebuilt.split_off(1).into_iter().map(|(_, t)| t).collect();
     let r = rebuilt.swap_remove(0).1;

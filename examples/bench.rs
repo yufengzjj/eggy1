@@ -233,6 +233,7 @@ fn run_child(args: &Args, case: &Case) -> Outcome {
     let start = Instant::now();
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args(["--one", "-n", &args.num_type, "-i", &args.iter_limit.to_string(), "-m", &args.max_restarts.to_string()])
+        .env("EGGY_CASE", format!("{}\t{}\t{}\t{}", args.num_type, case.file, case.section, case.index))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -322,6 +323,19 @@ fn run_one(args: &Args) {
         "unchanged"
     };
     println!("{status}\tsize in/gt/out {s_in}/{s_gt}/{s_out}: {out}");
+    write_stats(status, (s_in, s_gt, s_out));
+}
+
+/// With `EGGY_STATS` set, appends the case's candidate-source counts to that file as
+/// `type file section index status in gt out key=count:secs;...`.
+fn write_stats(status: &str, (s_in, s_gt, s_out): (usize, usize, usize)) {
+    let counts = eggy1::stats::take();
+    let (Ok(path), Ok(case)) = (std::env::var("EGGY_STATS"), std::env::var("EGGY_CASE")) else { return };
+    let cells: Vec<String> = counts.iter().map(|(k, (n, secs))| format!("{k}={n}:{secs:.4}")).collect();
+    let line = format!("{case}\t{status}\t{s_in}\t{s_gt}\t{s_out}\t{}\n", cells.join(";"));
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(line.as_bytes());
+    }
 }
 
 /// Compare on random and boundary inputs; inputs that divide by zero are skipped.

@@ -424,8 +424,11 @@ pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
     loop {
         let before = used.len();
         for (name, run) in PASSES {
+            let clock = std::time::Instant::now();
             let r = drop_identities(&run(&best, &w), &w);
+            crate::stats::add(&format!("polish/{name}/run"), crate::stats::since(clock));
             if size(&r) < size(&best) {
+                crate::stats::add(&format!("polish/{name}/won"), 0.0);
                 best = r;
                 used.push(name);
             }
