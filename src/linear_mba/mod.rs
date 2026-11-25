@@ -796,6 +796,7 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool, p: &Passes) -> (Stri
     let clock = std::time::Instant::now();
     let w = Ctx::new(w);
     let t = parse(egg);
+    crate::sched::set_gates(p, &stats::shape(&t));
     let t0 = t.clone();
     let t = stats::pass("lowbits", &t, || crate::lowbits::simplify(&t, &w));
     let t = stats::pass("unshift", &t, || unshift(&t, &w));

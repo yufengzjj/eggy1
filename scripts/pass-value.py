@@ -11,7 +11,8 @@ and without the pass), since a case near the time limit times out by chance. For
   benefit = loss without it - loss with it   (summed over cases; negative: it hurts)
   cost    = seconds with it - seconds without it
   ROI     = benefit per second of cost
-also the cases where keeping it gives a smaller or larger result, and solved with/without.
+also the cases where keeping it gives a smaller or larger result, the output nodes it saves
+(counting gains past the ground truth, which benefit does not), and solved with/without.
 With --features (a stats file of any run over the same cases, `bench --stats`), --by
 groups the cases by an input feature in powers of two.
 """
@@ -62,10 +63,11 @@ def row(name, pairs):
     cost = sum(on[1] - off[1] for on, off in pairs)
     smaller = sum(on[2] < off[2] for on, off in pairs)
     larger = sum(on[2] > off[2] for on, off in pairs)
+    nodes = sum(off[2] - on[2] for on, off in pairs)
     solved_on, solved_off = sum(on[3] for on, _ in pairs), sum(off[3] for _, off in pairs)
     off_timeouts, t_off = t_off, sum(off[1] for _, off in pairs)
     roi = f"{benefit / cost:8.3f}" if cost > 0 else ("    free" if benefit > 0 else "       -")
-    print(f"  {name:24s} {len(pairs):7d} {solved_on - solved_off:+6d} {smaller:6d} {larger:6d} {benefit:+9.2f} {cost:+8.1f}s {100 * cost / max(t_off, 1e-9):+6.1f}% {roi}  {t_on}/{off_timeouts}")
+    print(f"  {name:24s} {len(pairs):7d} {solved_on - solved_off:+6d} {smaller:6d} {larger:6d} {benefit:+9.2f} {nodes:+8d} {cost:+8.1f}s {100 * cost / max(t_off, 1e-9):+6.1f}% {roi}  {t_on}/{off_timeouts}")
 
 
 def main():
@@ -78,7 +80,7 @@ def main():
     a = ap.parse_args()
     base = load(a.base)
     feats = features(a.features) if a.features else {}
-    header = "cases solved smaller larger  benefit     cost  cost%     ROI  timeouts with/without"
+    header = "cases solved smaller larger  benefit    nodes     cost  cost%     ROI  timeouts with/without"
     for spec in a.off:
         name, _, d = spec.partition("=")
         off = load(d)

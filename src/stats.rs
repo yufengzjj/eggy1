@@ -258,44 +258,54 @@ pub fn take() -> BTreeMap<String, (u64, f64)> {
     std::mem::take(&mut *COUNTS.lock().unwrap())
 }
 
-/// Features of an input term, as `name=value,...`, so pass counts can be grouped by them:
-/// size, distinct variables, depth, products of two non-constant factors, bitwise
-/// operations with a constant operand, arithmetic operations directly under a bitwise
-/// one, shifts, and divisions, remainders and mulhi.
-pub fn features(t: &Term) -> String {
+/// Features of an input term: size, distinct variables, depth, products of two
+/// non-constant factors, bitwise operations with a constant operand, arithmetic operations
+/// directly under a bitwise one, shifts, and divisions, remainders and mulhi.
+#[derive(Default)]
+pub struct Shape {
+    pub size: usize,
+    pub vars: usize,
+    pub depth: usize,
+    pub mul: usize,
+    pub bitconst: usize,
+    pub arith_in_bit: usize,
+    pub shift: usize,
+    pub div: usize,
+}
+
+pub fn shape(t: &Term) -> Shape {
     use crate::eval::Op;
-    #[derive(Default)]
-    struct F {
-        depth: usize,
-        mul: usize,
-        bitconst: usize,
-        arith_in_bit: usize,
-        shift: usize,
-        div: usize,
-    }
-    fn go(t: &Term, d: usize, f: &mut F) {
+    /// Whether `t` has no variable.
+    fn go(t: &Term, d: usize, f: &mut Shape) -> bool {
         f.depth = f.depth.max(d);
-        let Term::Op(op, a) = t else { return };
+        let Term::Op(op, a) = t else { return !matches!(t, Term::Var(_)) };
+        let konst: Vec<bool> = a.iter().map(|x| go(x, d + 1, f)).collect();
         let bit = matches!(op, Op::And | Op::Or | Op::Xor);
         let arith = |x: &Term| matches!(x, Term::Op(Op::Add | Op::Sub | Op::Mul | Op::Neg | Op::Shl, _));
         match op {
-            Op::Mul if a.iter().all(|x| !matches!(x, Term::Num(_))) => f.mul += 1,
+            Op::Mul if !konst.contains(&true) => f.mul += 1,
             Op::Shl | Op::Shr => f.shift += 1,
             Op::Div | Op::Mod | Op::Mulhi => f.div += 1,
-            _ if bit && a.iter().any(|x| matches!(x, Term::Num(_))) => f.bitconst += 1,
+            _ if bit && konst.contains(&true) => f.bitconst += 1,
             _ => {}
         }
         if bit || matches!(op, Op::Not) {
             f.arith_in_bit += a.iter().filter(|x| arith(x)).count();
         }
-        a.iter().for_each(|x| go(x, d + 1, f));
+        !konst.contains(&false)
     }
-    let mut f = F::default();
+    let mut f = Shape { size: size(t), vars: crate::eval::vars(t).len(), ..Shape::default() };
     go(t, 0, &mut f);
+    f
+}
+
+/// `shape(t)` as `name=value,...`, so pass counts can be grouped by it.
+pub fn features(t: &Term) -> String {
+    let f = shape(t);
     format!(
         "size={},vars={},depth={},mul={},bitconst={},arith_in_bit={},shift={},div={}",
-        size(t),
-        crate::eval::vars(t).len(),
+        f.size,
+        f.vars,
         f.depth,
         f.mul,
         f.bitconst,
