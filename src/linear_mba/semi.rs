@@ -20,7 +20,7 @@ pub(super) fn semi_linear(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
     let pts = 1usize << lv.len();
     let base: Vec<u64> = {
         let prog = Prog::new(t, lv, w);
-        (0..w.w).flat_map(|j| (0..pts).map(move |q| (j, q))).map(|(j, q)| prog.run(|i| ((q >> i & 1) as u64) << j, w)).collect()
+        (0..w.w).flat_map(|j| prog.run_many(pts, |i, q| ((q >> i & 1) as u64) << j, w)).collect()
     };
     let (e0, all_groups) = groups_from(&|j, q| base[j as usize * pts + q], lv.len(), w)?;
     // Leaves that cancel out are dropped, so the shape search sees fewer leaves.
@@ -383,10 +383,21 @@ fn short_consts(t: T, lv: &[T], w: &Ctx) -> T {
 fn short_consts_over(t: T, lv: &[T], w: &Ctx) -> Option<T> {
     let reference = bit_groups(&t, lv, w)?;
     // Equal tables mean equal functions, so values at a few points rule out most
-    // candidates before their tables are computed.
+    // candidates before their tables are computed. A changed constant bit shows only
+    // where the leaves have certain bits, so 2 points let through about a quarter.
+    const SEEDS: [u64; 8] = [
+        0x9e37_79b9_7f4a_7c15,
+        0x6a09_e667_f3bc_c909,
+        0xbb67_ae85_84ca_a73b,
+        0x3c6e_f372_fe94_f82b,
+        0xa54f_f53a_5f1d_36f1,
+        0x510e_527f_ade6_82d1,
+        0x9b05_688c_2b3e_6c1f,
+        0x1f83_d9ab_fb41_bd6b,
+    ];
     let probe = |t: &T| {
         let prog = Prog::new(t, lv, w);
-        [0x9e37_79b9_7f4a_7c15u64, 0x6a09_e667_f3bc_c909].map(|s| prog.run(|i| s.wrapping_mul(2 * i as u64 + 1).rotate_left(i as u32 * 7), w) & w.mask)
+        SEEDS.map(|s| prog.run(|i| s.wrapping_mul(2 * i as u64 + 1).rotate_left(i as u32 * 7), w) & w.mask)
     };
     let at_probes = probe(&t);
     let same = |cand: &T| probe(cand) == at_probes && bit_groups(cand, lv, w).as_ref() == Some(&reference);
@@ -669,7 +680,9 @@ pub(super) fn spread(groups: &[(Vec<u64>, u64)], w: &Ctx) -> (u64, u64) {
 /// `(table, mask)`; `None` if `t` is not semi-linear.
 fn bit_groups(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<(Vec<u64>, u64)>)> {
     let prog = Prog::new(t, lv, w);
-    groups_from(&|j, q| prog.run(|i| ((q >> i & 1) as u64) << j, w), lv.len(), w)
+    let pts = 1usize << lv.len();
+    let vals: Vec<u64> = (0..w.w).flat_map(|j| prog.run_many(pts, |i, q| ((q >> i & 1) as u64) << j, w)).collect();
+    groups_from(&|j, q| vals[j as usize * pts + q], lv.len(), w)
 }
 
 /// `bit_groups` from `at(j, q)`, the value with leaf `i` set to bit `j` of `q >> i & 1`.

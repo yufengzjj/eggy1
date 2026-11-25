@@ -251,7 +251,30 @@ enum Ins {
     Not(usize),
     Neg(usize),
     Shl(usize, u32),
-    Bin(fn(u64, u64) -> u64, usize, usize),
+    Bin(BinOp, usize, usize),
+}
+
+#[derive(Clone, Copy)]
+enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    And,
+    Or,
+    Xor,
+}
+
+impl BinOp {
+    fn apply(self, x: u64, y: u64) -> u64 {
+        match self {
+            BinOp::Add => x.wrapping_add(y),
+            BinOp::Sub => x.wrapping_sub(y),
+            BinOp::Mul => x.wrapping_mul(y),
+            BinOp::And => x & y,
+            BinOp::Or => x | y,
+            BinOp::Xor => x ^ y,
+        }
+    }
 }
 
 impl Prog {
@@ -271,13 +294,13 @@ impl Prog {
                 Op::Neg => Ins::Neg(self.push(&a[0], lv, w)),
                 Op::Shl => Ins::Shl(self.push(&a[0], lv, w), const_shift(&a[1], w).unwrap()),
                 op => {
-                    let f: fn(u64, u64) -> u64 = match op {
-                        Op::Add => u64::wrapping_add,
-                        Op::Sub => u64::wrapping_sub,
-                        Op::Mul => u64::wrapping_mul,
-                        Op::And => |x, y| x & y,
-                        Op::Or => |x, y| x | y,
-                        Op::Xor => |x, y| x ^ y,
+                    let f = match op {
+                        Op::Add => BinOp::Add,
+                        Op::Sub => BinOp::Sub,
+                        Op::Mul => BinOp::Mul,
+                        Op::And => BinOp::And,
+                        Op::Or => BinOp::Or,
+                        Op::Xor => BinOp::Xor,
                         _ => unreachable!("non-linear op {op} inside a linear region"),
                     };
                     let x = self.push(&a[0], lv, w);
@@ -298,11 +321,41 @@ impl Prog {
                 Ins::Not(x) => !v[x],
                 Ins::Neg(x) => u64::wrapping_neg(v[x]),
                 Ins::Shl(x, k) => v[x] << k,
-                Ins::Bin(f, x, y) => f(v[x], v[y]),
+                Ins::Bin(f, x, y) => f.apply(v[x], v[y]),
             };
             v.push(r & w.mask);
         }
         v[v.len() - 1]
+    }
+
+    /// `run` at `n` points at once, leaf `i` at point `k` being `leaf(i, k)`.
+    pub(crate) fn run_many(&self, n: usize, leaf: impl Fn(usize, usize) -> u64, w: &Ctx) -> Vec<u64> {
+        let mut v = vec![0u64; self.0.len() * n];
+        for (i, ins) in self.0.iter().enumerate() {
+            let (done, rest) = v.split_at_mut(i * n);
+            let out = &mut rest[..n];
+            let col = |x: usize| &done[x * n..(x + 1) * n];
+            match *ins {
+                Ins::Leaf(l) => out.iter_mut().enumerate().for_each(|(k, o)| *o = leaf(l, k)),
+                Ins::Num(c) => out.fill(c),
+                Ins::Not(x) => out.iter_mut().zip(col(x)).for_each(|(o, a)| *o = !a),
+                Ins::Neg(x) => out.iter_mut().zip(col(x)).for_each(|(o, a)| *o = a.wrapping_neg()),
+                Ins::Shl(x, s) => out.iter_mut().zip(col(x)).for_each(|(o, a)| *o = a << s),
+                Ins::Bin(f, x, y) => {
+                    let (a, b) = (col(x), col(y));
+                    match f {
+                        BinOp::Add => out.iter_mut().zip(a.iter().zip(b)).for_each(|(o, (a, b))| *o = a.wrapping_add(*b)),
+                        BinOp::Sub => out.iter_mut().zip(a.iter().zip(b)).for_each(|(o, (a, b))| *o = a.wrapping_sub(*b)),
+                        BinOp::Mul => out.iter_mut().zip(a.iter().zip(b)).for_each(|(o, (a, b))| *o = a.wrapping_mul(*b)),
+                        BinOp::And => out.iter_mut().zip(a.iter().zip(b)).for_each(|(o, (a, b))| *o = a & b),
+                        BinOp::Or => out.iter_mut().zip(a.iter().zip(b)).for_each(|(o, (a, b))| *o = a | b),
+                        BinOp::Xor => out.iter_mut().zip(a.iter().zip(b)).for_each(|(o, (a, b))| *o = a ^ b),
+                    }
+                }
+            }
+            out.iter_mut().for_each(|o| *o &= w.mask);
+        }
+        v.split_off((self.0.len() - 1) * n)
     }
 
     /// Value with leaf `i` set to bit `i` of `p`.
