@@ -72,6 +72,7 @@ pub(super) fn remap(b: &B, vars: &[usize]) -> B {
 /// Short bitwise expression for truth table `tt` over `vars` (table bit `p`
 /// is the value where bit `j` of `p` is `vars[j]`). Exact table lookup up to 3
 /// variables; above that, Shannon expansion on the best variable.
+#[cfg(test)]
 pub(super) fn bool_expr(tt: u64, vars: &[usize]) -> BE {
     match bool_expr_canon(tt, vars.len()) {
         BE::E(c, b) => BE::E(c, remap(&b, vars)),
@@ -85,21 +86,28 @@ pub(super) fn table_full(n: usize) -> u64 {
 
 /// `bool_expr` over variables `0..n`, cached.
 pub(super) fn bool_expr_canon(tt: u64, n: usize) -> BE {
+    bool_expr_cached(tt, n, true)
+}
+
+/// `bool_expr_canon`; `top` is false for the tables its own search builds from, which
+/// `decompose` splits without filling free points (they come back many times, and that
+/// search costs more than it gains there).
+fn bool_expr_cached(tt: u64, n: usize, top: bool) -> BE {
     thread_local! {
-        static CACHE: std::cell::RefCell<crate::eval::FastMap<(u64, usize), BE>> = Default::default();
+        static CACHE: std::cell::RefCell<crate::eval::FastMap<(u64, usize, bool), BE>> = Default::default();
     }
     if n <= 3 {
-        return bool_expr_uncached(tt, n);
+        return bool_expr_uncached(tt, n, false);
     }
-    if let Some(r) = CACHE.with(|c| c.borrow().get(&(tt, n)).cloned()) {
+    if let Some(r) = CACHE.with(|c| c.borrow().get(&(tt, n, top)).cloned()) {
         return r;
     }
-    let r = bool_expr_uncached(tt, n);
-    CACHE.with(|c| c.borrow_mut().insert((tt, n), r.clone()));
+    let r = bool_expr_uncached(tt, n, top);
+    CACHE.with(|c| c.borrow_mut().insert((tt, n, top), r.clone()));
     r
 }
 
-fn bool_expr_uncached(tt: u64, n: usize) -> BE {
+fn bool_expr_uncached(tt: u64, n: usize, top: bool) -> BE {
     let pts = 1usize << n;
     if tt == 0 {
         return BE::Zero;
@@ -125,14 +133,15 @@ fn bool_expr_uncached(tt: u64, n: usize) -> BE {
         }
         let x = B::V(i);
         let sub_full = table_full(n - 1);
-        let cost = match (bool_expr_canon(f0, n - 1), bool_expr_canon(f1, n - 1)) {
+        let inner = |t: u64| bool_expr_cached(t, n - 1, false);
+        let cost = match (inner(f0), inner(f1)) {
             (BE::Zero, BE::Ones) => 1,
             (BE::Ones, BE::Zero) => 2,
             (BE::Zero, BE::E(c, _)) | (BE::E(c, _), BE::Ones) => c + 2,
             (BE::E(c, _), BE::Zero) | (BE::Ones, BE::E(c, _)) => c + 3,
             (BE::E(c, _), _) if f0 == f1 => c,
             (BE::E(c, _), _) if f1 == !f0 & sub_full => c + 2,
-            (BE::E(c0, _), BE::E(c1, _)) => match bool_expr_canon(f0 ^ f1, n - 1) {
+            (BE::E(c0, _), BE::E(c1, _)) => match inner(f0 ^ f1) {
                 BE::E(cd, _) if c0 + cd + 3 < c0 + c1 + 6 => c0 + cd + 3,
                 _ => c0 + c1 + 6,
             },
@@ -141,7 +150,11 @@ fn bool_expr_uncached(tt: u64, n: usize) -> BE {
         if best.as_ref().is_some_and(|(c, _)| cost >= *c) {
             continue;
         }
-        let cand = match (bool_expr(f0, &rest), bool_expr(f1, &rest)) {
+        let at_rest = |t: u64| match inner(t) {
+            BE::E(c, b) => BE::E(c, remap(&b, &rest)),
+            other => other,
+        };
+        let cand = match (at_rest(f0), at_rest(f1)) {
             (BE::Zero, BE::Ones) => (1, x),
             (BE::Ones, BE::Zero) => (2, not(x)),
             (BE::Zero, BE::E(c, e)) => (c + 2, bin(Op::And, x, e)),
@@ -152,7 +165,7 @@ fn bool_expr_uncached(tt: u64, n: usize) -> BE {
             (BE::E(c, e), _) if f1 == !f0 & sub_full => (c + 2, bin(Op::Xor, x, e)),
             (BE::E(c0, e0), BE::E(c1, e1)) => {
                 let mux = (c0 + c1 + 6, bin(Op::Or, bin(Op::And, x.clone(), e1), bin(Op::And, not(x.clone()), e0.clone())));
-                match bool_expr(f0 ^ f1, &rest) {
+                match at_rest(f0 ^ f1) {
                     BE::E(cd, d) if c0 + cd + 3 < mux.0 => (c0 + cd + 3, bin(Op::Xor, e0, bin(Op::And, x, d))),
                     _ => mux,
                 }
@@ -164,7 +177,7 @@ fn bool_expr_uncached(tt: u64, n: usize) -> BE {
         }
     }
     let bound = best.as_ref().map_or(usize::MAX, |b| b.0);
-    if let Some(cand) = if n <= MAX_DECOMPOSE { decompose(tt, n, bound) } else { None } {
+    if let Some(cand) = if n <= MAX_DECOMPOSE { decompose(tt, n, bound, top) } else { None } {
         best = Some(cand);
     }
     let (c, b) = best.unwrap();
@@ -179,8 +192,11 @@ pub(super) const MAX_DECOMPOSE: usize = 5;
 /// `((w ^ x) | (x & y)) & ~(y ^ z)`. For `&`, `g` and `h` are `tt` ORed over the
 /// variables outside their set; for `|`, ANDed; for `^`, `g = tt(B \ A = 0)` and
 /// `h = tt(A \ B = 0) ^ tt(A \ B = 0, B \ A = 0)`. Each is checked against `tt`. Only
-/// splits smaller than `bound` are returned.
-pub(super) fn decompose(tt: u64, n: usize, bound: usize) -> Option<(usize, B)> {
+/// splits smaller than `bound` are returned. With `free_points`, a side of at most 3
+/// variables is also tried with the points the other side decides alone set either way
+/// (`(e | (f & c)) & (c ^ e ^ m)`), and for `^` both sides with a function of `A ∩ B`
+/// XORed in.
+pub(super) fn decompose(tt: u64, n: usize, bound: usize, free_points: bool) -> Option<(usize, B)> {
     let full_vars = (1usize << n) - 1;
     let full = table_full(n);
     // Table with variable `i` forced to `v`, still over all `n` variables.
@@ -205,7 +221,7 @@ pub(super) fn decompose(tt: u64, n: usize, bound: usize) -> Option<(usize, B)> {
                 break;
             }
         }
-        match bool_expr_canon(st, keep.count_ones() as usize) {
+        match bool_expr_cached(st, keep.count_ones() as usize, false) {
             BE::E(c, b) => Some((c, b)),
             _ => None,
         }
@@ -214,38 +230,110 @@ pub(super) fn decompose(tt: u64, n: usize, bound: usize) -> Option<(usize, B)> {
     let any: Vec<u64> = (0..=full_vars).map(|k| over(tt, k, &|x, y| x | y)).collect();
     let all: Vec<u64> = (0..=full_vars).map(|k| over(tt, k, &|x, y| x & y)).collect();
     let zero: Vec<u64> = (0..=full_vars).map(|k| zero_out(tt, k)).collect();
+    // Tables over `keep` that are 1 on the classes `one` and on any subset of `free`
+    // (a class is the set of points agreeing on `keep`, named by that common part).
+    let tables_over = |keep: usize, one: u64, free: &[usize]| -> Vec<u64> {
+        let spread = |chosen: u64| (0..1usize << n).filter(|&p| chosen >> (p & keep) & 1 == 1).fold(0u64, |t, p| t | 1 << p);
+        (0..1u64 << free.len())
+            .map(|c| spread(free.iter().enumerate().filter(|(j, _)| c >> j & 1 == 1).fold(one, |t, (_, &q)| t | 1 << q)))
+            .collect()
+    };
+    let classes = |keep: usize| (0..1usize << n).filter(move |&q| q & !keep == 0);
+    // The tables `v` over `keep` with `fixed op v = tt`: for `&`, `v` is 1 where `tt` is
+    // and 0 where `fixed` is 1 and `tt` 0, free elsewhere (`|` dually); each class of
+    // points agreeing on `keep` is free when all of its points are.
+    let completions = |op: Op, fixed: u64, keep: usize| -> Vec<u64> {
+        let (mut one, mut zero) = (0u64, 0u64);
+        for p in 0..1usize << n {
+            let (t, f) = (tt >> p & 1 == 1, fixed >> p & 1 == 1);
+            let (must1, must0) = match op {
+                Op::And => (t, f && !t),
+                _ => (t && !f, !t),
+            };
+            one |= u64::from(must1) << (p & keep);
+            zero |= u64::from(must0) << (p & keep);
+        }
+        let free: Vec<usize> = classes(keep).filter(|&q| (one | zero) >> q & 1 == 0).collect();
+        if free.is_empty() || free.len() > MAX_FREE_CLASSES {
+            return Vec::new();
+        }
+        tables_over(keep, one, &free)
+    };
     // The size to beat, and the best split below it (built once at the end).
-    let mut best: (usize, Option<(Op, usize, usize, u64, u64)>) = (bound, None);
-    for a in 1..full_vars {
-        for b in a..full_vars {
-            if a | b != full_vars {
-                continue;
-            }
-            let pairs = [(Op::And, any[a], any[b]), (Op::Or, all[a], all[b]), (Op::Xor, zero[a], zero[b] ^ zero[a & b])];
-            for (op, g, h) in pairs {
-                let joined = match op {
-                    Op::And => g & h,
-                    Op::Or => g | h,
-                    _ => g ^ h,
-                } & full;
-                if joined != tt {
+    type Split = (Op, (u64, usize), (u64, usize));
+    let mut best: (usize, Option<Split>) = (bound, None);
+    let offer = |op: Op, g: (u64, usize), h: (u64, usize), best: &mut (usize, Option<Split>)| {
+        let Some((cg, _)) = sub(g.0, g.1) else { return };
+        if cg + 2 >= best.0 {
+            return;
+        }
+        let Some((ch, _)) = sub(h.0, h.1) else { return };
+        if cg + ch + 1 < best.0 {
+            *best = (cg + ch + 1, Some((op, g, h)));
+        }
+    };
+    // Free points are filled only when the size to beat is large: small tables are many
+    // and rarely improve.
+    for fill in [false, true] {
+        if fill && (!free_points || best.0 < MIN_FREE_POINTS_SIZE) {
+            break;
+        }
+        for a in 1..full_vars {
+            for b in a..full_vars {
+                if a | b != full_vars {
                     continue;
                 }
-                let Some((cg, _)) = sub(g, a) else { continue };
-                if cg + 2 >= best.0 {
-                    continue;
-                }
-                let Some((ch, _)) = sub(h, b) else { continue };
-                if cg + ch + 1 < best.0 {
-                    best = (cg + ch + 1, Some((op, a, b, g, h)));
+                let pairs = [(Op::And, any[a], any[b]), (Op::Or, all[a], all[b]), (Op::Xor, zero[a], zero[b] ^ zero[a & b])];
+                for (op, g, h) in pairs {
+                    let joined = match op {
+                        Op::And => g & h,
+                        Op::Or => g | h,
+                        _ => g ^ h,
+                    } & full;
+                    if joined != tt {
+                        continue;
+                    }
+                    if !fill {
+                        offer(op, (g, a), (h, b), &mut best);
+                        continue;
+                    }
+                    let small = |k: usize| k.count_ones() <= 3;
+                    if op == Op::Xor {
+                        // `g ^ φ` and `h ^ φ` for any `φ` over the shared variables.
+                        if small(a) && small(b) && a & b != 0 && (a & b).count_ones() <= 2 {
+                            let shared: Vec<usize> = classes(a & b).collect();
+                            for phi in tables_over(a & b, 0, &shared).into_iter().skip(1) {
+                                offer(op, (g ^ phi, a), (h ^ phi, b), &mut best);
+                            }
+                        }
+                        continue;
+                    }
+                    // A changed side costs at least 1, joined by one operation.
+                    let room = |kept: u64, keep: usize, best: &(usize, Option<Split>)| sub(kept, keep).is_some_and(|(c, _)| c + 2 < best.0);
+                    if small(b) && room(g, a, &best) {
+                        for h2 in completions(op, g, b) {
+                            offer(op, (g, a), (h2, b), &mut best);
+                        }
+                    }
+                    if small(a) && room(h, b, &best) {
+                        for g2 in completions(op, h, a) {
+                            offer(op, (g2, a), (h, b), &mut best);
+                        }
+                    }
                 }
             }
         }
     }
-    let (op, a, b, g, h) = best.1?;
+    let (op, (g, a), (h, b)) = best.1?;
     let (eg, eh) = (sub(g, a)?.1, sub(h, b)?.1);
     Some((best.0, B::Bin(op, Arc::new(remap(&eg, &vars(a))), Arc::new(remap(&eh, &vars(b))))))
 }
+
+/// Smallest size to beat for which `decompose` also fills free points.
+const MIN_FREE_POINTS_SIZE: usize = 10;
+
+/// Most classes of free points `decompose` enumerates for one side.
+const MAX_FREE_CLASSES: usize = 4;
 
 pub(super) fn b_to_t(b: &B, leaves: &[T]) -> T {
     match b {

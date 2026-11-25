@@ -1656,6 +1656,14 @@ fn six_leaf_decomposition() {
     );
 }
 
+/// In `g(A) & h(B)`, `h` is free where `g` is 0: `c ^ e ^ m`, not the projection `(e | c) & (c ^ e ^ m)`.
+#[test]
+fn decomposition_with_free_points() {
+    for t in ["u32", "i64"] {
+        check(t, &[("(~m & e) ^ (c & ((~m & f) | e))", &["(((e ^ c) ^ m) & (e | (c & f)))"], 10)]);
+    }
+}
+
 /// Two moves between leaf groups, the first of which alone makes the sum larger:
 /// `3·(t & ~x) + x` becomes `3·(t | x)` once `2·x` comes from the group of `x ^ y`.
 #[test]
