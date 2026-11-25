@@ -157,13 +157,6 @@ pub(super) fn halve(t: &T, w: &Ctx) -> T {
     if c == 0 { scaled } else { T::Op(Op::Add, vec![scaled, T::Num(c as i64)]) }
 }
 
-/// Most variable bits `split_bits` tries on one term, how deep it nests, and the
-/// largest first rebuild it runs on.
-const MAX_SPLITS: usize = 4;
-const SPLIT_DEPTH: usize = 2;
-pub(super) const MAX_SPLIT_SIZE: usize = 64;
-/// Most rebuilds one `split_bits` call runs.
-const SPLIT_RUNS: usize = 16;
 
 /// `(s, k)` for a product factor with one or two bits not known, `k` the lowest of them:
 /// first the subterm `s` it is built from with constants alone, as `z + x` in
@@ -249,7 +242,7 @@ pub(super) fn split_bits(t: T, depth: usize, budget: &std::cell::Cell<usize>, w:
         run(t)
     };
     let op = |o: Op, a: Vec<T>| T::Op(o, a);
-    for (s, k) in split_points(&t, w).into_iter().take(MAX_SPLITS) {
+    for (s, k) in split_points(&t, w).into_iter().take(limit(Limit::Splits)) {
         if budget.get() < 3 {
             break;
         }
@@ -355,7 +348,7 @@ fn over_subterms(t: &T, w: &Ctx, pick: &dyn Fn(&T) -> bool) -> T {
 /// `split_bits` on `t`, then on the operands of `t` when it is a bitwise operation, since
 /// a case split rarely gives a constant difference through one; each with its own budget.
 pub(super) fn split_in(t: &T, w: &Ctx, run: &dyn Fn(&T) -> T) -> T {
-    let s = split_bits(t.clone(), SPLIT_DEPTH, &std::cell::Cell::new(SPLIT_RUNS), w, run);
+    let s = split_bits(t.clone(), limit(Limit::SplitDepth), &std::cell::Cell::new(limit(Limit::SplitRuns)), w, run);
     if s != *t {
         return s;
     }

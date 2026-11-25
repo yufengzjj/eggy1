@@ -7,6 +7,7 @@
 
 use crate::eval::{Op, Term as T, size};
 use crate::linear_mba::{Kind, MAX_LEAVES, Ctx, build_sum, Prog, const_shift, kind, leaves, rewrite, simba_memo};
+use crate::sched::{Limit, limit};
 use std::collections::BTreeMap;
 
 /// Conjunction of leaves, as a set of leaf indices.
@@ -18,12 +19,7 @@ type Poly = BTreeMap<Mono, u64>;
 const MAX_MONOS: usize = 4096;
 /// Candidate factors tried at the top level of `build`; one below it.
 const FACTOR_TRIES: usize = 3;
-/// Most products `build` tries with every choice before it keeps to the first.
-const MAX_BUILDS: usize = 512;
 const MAX_FACTOR_MONOS: usize = 64;
-/// Expansions with more monomials than this keep to the first choice at each level from
-/// the start, as after `MAX_BUILDS` products.
-const MAX_BRANCH_MONOS: usize = 128;
 const MAX_FACTOR_VARS: usize = 12;
 const MAX_PIVOTS: usize = 4;
 const MAX_ROOTS: usize = 16;
@@ -686,7 +682,7 @@ impl<'a> Expansion<'a> {
         // can block a shorter linear rebuild of the rest, so try both, while the
         // budget lasts: the choices multiply at every level.
         self.builds.set(self.builds.get() + 1);
-        let (tries, both) = if self.builds.get() > MAX_BUILDS { (1, 1) } else { (tries, 2) };
+        let (tries, both) = if self.builds.get() > limit(Limit::PolyBuilds) { (1, 1) } else { (tries, 2) };
         let choices = cands.iter().take(tries).flat_map(|&(f, _)| [(f, false), (f, true)].into_iter().take(both));
         for (f, with_linear) in choices {
             let (mut q, mut r) = (Poly::new(), Poly::new());
@@ -822,8 +818,8 @@ pub(crate) fn simplify_poly(t: &T, w: &Ctx) -> Option<T> {
     if p.len().min(q.len()) > 4 * size(t) {
         return None;
     }
-    if p.len().min(q.len()) > MAX_BRANCH_MONOS {
-        ctx.builds.set(MAX_BUILDS);
+    if p.len().min(q.len()) > limit(Limit::PolyBranchMonos) {
+        ctx.builds.set(limit(Limit::PolyBuilds));
     }
     let r = stats::time("poly/build", || ctx.build(if q.len() < p.len() { &q } else { &p }, FACTOR_TRIES));
     // As many monomials, but a null polynomial can have made coefficients huge (`2^63·y` beside

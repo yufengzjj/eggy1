@@ -56,15 +56,81 @@ pub const INNER: [&str; 34] = [
     "semi/short_consts",
 ];
 
+macro_rules! limits {
+    ($($(#[doc = $doc:literal])* $id:ident $name:literal = $default:expr;)*) => {
+        /// Numeric limits of the passes inside a rebuild; `--passes` sets them as `NAME=value`.
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        pub enum Limit {
+            $($(#[doc = $doc])* $id,)*
+        }
+        /// Names and defaults of the `Limit`s, in order.
+        pub const LIMITS: &[(&str, usize)] = &[$(($name, $default),)*];
+    };
+}
+
+limits! {
+    /// `relate` in the rebuild without `clustered` only on regions of at most this many
+    /// leaves; wider ones take seconds there.
+    UnclusteredRelateLeaves "unclustered_relate_leaves" = 10;
+    /// Most `rewrite` calls the rebuild without `clustered` makes; past them it is dropped.
+    UnclusteredRewrites "unclustered_rewrites" = 256;
+    /// Most `rewrite` calls of the other rebuilds after which the one without `clustered`
+    /// is still tried: inputs that need more are slow to rebuild without it.
+    UnclusteredAfter "unclustered_after" = 1024;
+    /// Most `rewrite` calls the rebuild of the input with unified operands makes; past them
+    /// it is dropped.
+    UnifiedRewrites "unified_rewrites" = 128;
+    /// Most combinations `related_leaves` rebuilds.
+    RelatedRebuilds "related_rebuilds" = 8;
+    /// Most arithmetic leaves `relate_region` tries.
+    Related "related" = 4;
+    /// Most leaf splits `bit_split` rebuilds per region.
+    BitSplits "bit_splits" = 4;
+    /// Most `P op Q` pairs `bit_split` rebuilds per `simplify_linear` call.
+    BitSplitBudget "bit_split_budget" = 8;
+    /// Most variable bits `split_bits` tries on one term.
+    Splits "splits" = 4;
+    /// How deep `split_bits` nests.
+    SplitDepth "split_depth" = 2;
+    /// Most rebuilds one `split_bits` call runs.
+    SplitRuns "split_runs" = 16;
+    /// Largest first rebuild `split_bits` runs on.
+    SplitSize "split_size" = 64;
+    /// Most leaves `small_blocks` handles.
+    BlockLeaves "block_leaves" = 12;
+    /// Most combinations of block choices `small_blocks` tries exhaustively, and steps of
+    /// the `wide_blocks` search.
+    BlockCombos "block_combos" = 1 << 15;
+    /// Most `clustered` calls nested inside each other.
+    ClusterDepth "cluster_depth" = 2;
+    /// Most products `poly_mba` builds with every choice before it keeps to the first.
+    PolyBuilds "poly_builds" = 512;
+    /// Expansions with more monomials than this keep to the first choice at each level
+    /// from the start, as after `poly_builds` products.
+    PolyBranchMonos "poly_branch_monos" = 128;
+    /// Uncached `rewrite` calls one `polish` call may make.
+    PolishRewrites "polish_rewrites" = 2000;
+}
+
 thread_local! {
     /// Bits of the `INNER` passes turned off for the run on this thread.
     static OFF: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The limits of the run on this thread, if not the defaults.
+    static LIMIT: std::cell::RefCell<Option<Vec<usize>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Turns off the `INNER` passes `p.off` names for the runs on this thread that follow.
-pub fn set_off(p: &Passes) {
+/// Sets the `INNER` passes `p.off` turns off and the limits of `p` for the runs on this
+/// thread that follow.
+pub fn apply(p: &Passes) {
     let bits = p.off.iter().filter_map(|n| INNER.iter().position(|k| k == n)).fold(0u64, |b, i| b | 1 << i);
     OFF.with(|o| o.set(bits));
+    let custom = p.limits.iter().zip(LIMITS).any(|(v, (_, d))| v != d);
+    LIMIT.with(|l| *l.borrow_mut() = custom.then(|| p.limits.clone()));
+}
+
+/// The value of `l` on this thread.
+pub fn limit(l: Limit) -> usize {
+    LIMIT.with(|v| v.borrow().as_ref().map_or(LIMITS[l as usize].1, |v| v[l as usize]))
 }
 
 /// `INNER` passes that `set_gates` turns off for inputs where paired runs without them
@@ -137,6 +203,8 @@ pub struct Passes {
     pub off: Vec<&'static str>,
     /// Entries of `GATES` turned off for inputs that do not need them (`set_gates`).
     pub gates: Vec<&'static str>,
+    /// Values of the `LIMITS`, in order.
+    pub limits: Vec<usize>,
 }
 
 impl Default for Passes {
@@ -163,6 +231,7 @@ impl Default for Passes {
             polish_wins: 8,
             off: vec!["semi/peel_shapes"],
             gates: GATES.to_vec(),
+            limits: LIMITS.iter().map(|(_, d)| *d).collect(),
         }
     }
 }
@@ -194,7 +263,7 @@ impl Passes {
     /// The default pipeline changed by `spec`: items separated by spaces or `;`, each
     /// `key=value`, and for the lists `pre`, `polish` and `schedule` also `key+=names` and
     /// `key-=names` (also `off` and `gates`; names separated by `,`; schedule steps written `run:`, `once:` or
-    /// `sat:` and a ruleset).
+    /// `sat:` and a ruleset). The `LIMITS` are keys too (`split_runs=8`).
     pub fn parse(spec: &str) -> Result<Passes, String> {
         let mut p = Passes::default();
         for item in spec.split([' ', ';']).filter(|s| !s.is_empty()) {
@@ -257,7 +326,13 @@ impl Passes {
                 "polish_wins" => p.polish_wins = num()?,
                 "match_limit" => p.match_limit = num()?,
                 "ban_length" => p.ban_length = num()?,
-                _ => return Err(format!("unknown key {key}; known: schedule match_limit ban_length pre keep extra rerun_input printed minimal polish polish_wins off")),
+                _ => match LIMITS.iter().position(|(n, _)| *n == key) {
+                    Some(i) => p.limits[i] = num()?,
+                    None => {
+                        let limits: Vec<&str> = LIMITS.iter().map(|(n, _)| *n).collect();
+                        return Err(format!("unknown key {key}; known: schedule match_limit ban_length pre keep extra rerun_input printed minimal polish polish_wins off gates {}", limits.join(" ")));
+                    }
+                },
             }
         }
         p.pre.sort_by_key(|n| PRE.iter().position(|k| k == n));
@@ -290,7 +365,13 @@ impl fmt::Display for Passes {
             self.polish_wins,
             self.off.join(","),
             self.gates.join(",")
-        )
+        )?;
+        for ((name, default), v) in LIMITS.iter().zip(&self.limits) {
+            if v != default {
+                write!(f, " {name}={v}")?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -309,20 +390,29 @@ mod tests {
         let p = Passes::parse("off=semi/bit_split,relate").unwrap();
         assert_eq!(p.off, ["relate", "semi/bit_split"]);
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
-        set_off(&p);
+        apply(&p);
         assert!(is_off("relate") && !is_off("simba"));
-        set_off(&Passes::default());
+        apply(&Passes::default());
         assert!(!is_off("relate"));
         let p = Passes::parse("gates-=lowbits").unwrap();
         assert_eq!(p.gates, ["poly_mba", "small_blocks"]);
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         set_gates(&p, &crate::stats::Shape::default());
         assert!(is_off("poly_mba") && !is_off("lowbits") && !is_off("small_blocks"));
-        set_off(&p);
+        apply(&p);
         let p = Passes::parse("schedule-=sat:analysis schedule+=once:simplify,sat:analysis match_limit=128").unwrap();
         assert_eq!(p.schedule.last(), Some(&(Step::Saturate, "analysis")));
         assert_eq!(p.schedule.len(), 7);
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("schedule=run:nope").is_err() && Passes::parse("schedule=go:simplify").is_err());
+        let p = Passes::parse("split_runs=4 poly_builds=64").unwrap();
+        assert!(p.to_string().ends_with(" split_runs=4 poly_builds=64"));
+        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
+        assert!(Passes::parse("split_runs+=1").is_err() && Passes::parse("split_runs=x").is_err());
+        assert_eq!(limit(Limit::SplitRuns), 16);
+        apply(&p);
+        assert_eq!((limit(Limit::SplitRuns), limit(Limit::PolyBuilds), limit(Limit::SplitDepth)), (4, 64, 2));
+        apply(&Passes::default());
+        assert_eq!(limit(Limit::SplitRuns), 16);
     }
 }

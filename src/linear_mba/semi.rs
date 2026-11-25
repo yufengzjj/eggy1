@@ -122,10 +122,6 @@ fn fill_slots(t: &T, lv: &[&T]) -> T {
     }
 }
 
-/// Most leaf splits `bit_split` rebuilds per region.
-const MAX_BIT_SPLITS: usize = 4;
-/// Most `P op Q` pairs `bit_split` rebuilds per `simplify_linear` call.
-pub(super) const BIT_SPLIT_BUDGET: usize = 8;
 
 /// A purely bitwise semi-linear region of 4 to 6 leaves as `P op Q`, `P` over the
 /// leaves `A` and `Q` over `B` (they may share leaves, neither holds the other),
@@ -314,7 +310,7 @@ fn bit_split(groups: &[(Vec<u64>, u64)], lv: &[T], arith: bool, e0: u64, w: &Ctx
     let mut out = Vec::new();
     // Each side has a leaf per leaf it depends on and a mask per table, so most
     // splits are ruled out by size before they are rebuilt.
-    for &(low, op, a, b, ..) in found.iter().take(MAX_BIT_SPLITS) {
+    for &(low, op, a, b, ..) in found.iter().take(crate::sched::limit(Limit::BitSplits)) {
         for (ps, qs) in (0..5).filter_map(|v| pick(op, a, b, v)) {
             if low as usize + 1 >= limit || take_one(&w.st.bit_splits) == 0 {
                 return out;

@@ -192,8 +192,6 @@ pub(super) fn peel(t: &T, w: &Ctx) -> Option<T> {
     None
 }
 
-/// Most leaves `small_blocks` handles.
-const MAX_BLOCK_LEAVES: usize = 12;
 
 /// Upper bound on the degree of `t`'s conjunction-basis expansion: the most leaves
 /// any bitwise subterm of the linear region has.
@@ -211,8 +209,6 @@ fn bit_degree(t: &T, w: &Ctx) -> usize {
     }
 }
 
-/// Most combinations of block choices `small_blocks` tries exhaustively.
-const MAX_BLOCK_COMBOS: usize = 1 << 15;
 
 /// Rebuild a linear region from its conjunction-basis expansion when every maximal
 /// set of leaves with a non-zero coefficient (a block) has at most 3 leaves: one
@@ -225,7 +221,7 @@ pub(super) fn small_blocks(t: &T, w: &Ctx) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
     let n = lv.len();
-    if !(2..=MAX_BLOCK_LEAVES).contains(&n) || has_const_bitwise(t, w) {
+    if !(2..=limit(Limit::BlockLeaves)).contains(&n) || has_const_bitwise(t, w) {
         return None;
     }
     let m = w.mask;
@@ -355,7 +351,7 @@ pub(super) fn small_blocks(t: &T, w: &Ctx) -> Option<T> {
     // Blocks that share leaves can need to change together (`2*~(a|c) + 2*(e & (c|d))`),
     // so few enough combinations are all tried; otherwise coordinate descent.
     let combos = opts.iter().try_fold(1usize, |acc, o| acc.checked_mul(o.len())).unwrap_or(usize::MAX);
-    if combos <= MAX_BLOCK_COMBOS {
+    if combos <= limit(Limit::BlockCombos) {
         let mut c = vec![0usize; blocks.len()];
         'all: loop {
             let cs = score(&c);
@@ -372,7 +368,7 @@ pub(super) fn small_blocks(t: &T, w: &Ctx) -> Option<T> {
             break;
         }
     }
-    for _ in 0..if combos <= MAX_BLOCK_COMBOS { 0 } else { 4 } {
+    for _ in 0..if combos <= limit(Limit::BlockCombos) { 0 } else { 4 } {
         let mut improved = false;
         for e in 0..blocks.len() {
             for ci in 0..opts[e].len() {
@@ -617,7 +613,7 @@ fn wide_blocks_uncached(t: &T, lv: Vec<T>, w: &Ctx) -> Option<T> {
         let last = (0..nb).rev().find(|&e| opts[e].iter().any(|o| o.adds.iter().any(|a| a.0 == q)));
         done[last.map_or(0, |e| e + 1)].push(q);
     }
-    let mut search = Search { opts: &opts, rest_min, done, conj_size: &conj_size, score: &score, mask: m, best: (pick(&best_choice), best_size.min(size(t))), steps: MAX_BLOCK_COMBOS };
+    let mut search = Search { opts: &opts, rest_min, done, conj_size: &conj_size, score: &score, mask: m, best: (pick(&best_choice), best_size.min(size(t))), steps: limit(Limit::BlockCombos) };
     search.run(0, 0, &mut Vec::new(), &mut base.clone());
     let (chosen, best_size) = search.best;
     if best_size >= size(t) {
@@ -873,8 +869,6 @@ fn fill_placeholders(t: &T, ph: &[T], lv: &[T]) -> T {
     }
 }
 
-/// Most `clustered` calls nested inside each other.
-const MAX_CLUSTER_DEPTH: usize = 2;
 
 /// A region with more than `MAX_LEAVES` leaves rebuilt in parts: its terms grouped by the
 /// leaves they use, a group whose leaves are a subset of another's joining the smallest
@@ -886,7 +880,7 @@ pub(super) fn clustered(t: &T, w: &Ctx) -> Option<T> {
     // enclosing ones.
     let nested = {
         let c = w.st.clustering.lock().unwrap();
-        c.len() >= MAX_CLUSTER_DEPTH || c.contains(t)
+        c.len() >= limit(Limit::ClusterDepth) || c.contains(t)
     };
     if w.st.excluded.load(Relaxed) & CLUSTERED != 0 || nested {
         return None;

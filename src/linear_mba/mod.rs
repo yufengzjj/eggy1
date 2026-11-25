@@ -7,7 +7,7 @@
 //! position then has its own bitwise function, see `semi_linear`.
 
 use crate::eval::{Op, Term as T, parse, show, size};
-use crate::sched::Passes;
+use crate::sched::{Limit, Passes, limit};
 use crate::stats;
 use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::Relaxed};
@@ -124,7 +124,7 @@ impl Default for State {
             relate_leaves: AtomicUsize::new(MAX_WIDE_LEAVES),
             rewrites_left: AtomicUsize::new(usize::MAX),
             semi_leaves: AtomicUsize::new(MAX_LEAVES),
-            bit_splits: AtomicUsize::new(BIT_SPLIT_BUDGET),
+            bit_splits: AtomicUsize::new(limit(Limit::BitSplitBudget)),
             peel_depth: AtomicUsize::new(0),
             clustering: Default::default(),
             excluded: AtomicU8::new(0),
@@ -444,13 +444,6 @@ fn sized_sum(terms: impl Iterator<Item = (u64, usize)>, konst: u64, w: &Ctx) -> 
     }
 }
 
-/// `relate_leaves` in the rebuild without `clustered`, where wider regions take seconds.
-const UNCLUSTERED_RELATE_LEAVES: usize = 10;
-/// Most `rewrite` calls the rebuild without `clustered` makes; past them it is dropped.
-const UNCLUSTERED_REWRITES: usize = 256;
-/// Most `rewrite` calls of the other rebuilds after which the one without `clustered` is
-/// still tried: inputs that need more are slow to rebuild without it.
-const UNCLUSTERED_AFTER: usize = 1024;
 
 /// Whether the linear region `t` has a bitwise operation with a constant operand.
 fn has_const_bitwise(t: &T, w: &Ctx) -> bool {
@@ -699,8 +692,6 @@ fn memo_get<K: std::hash::Hash + Eq, V: Clone>(memo: &Memo<K, V>, key: &K, w: &C
     Some(r)
 }
 
-/// Most `rewrite` calls the rebuild of the input with unified operands makes; past them it is dropped.
-const UNIFIED_REWRITES: usize = 128;
 /// Rewrite inside the atom leaves of a rebuilt region.
 fn substitute_atoms(t: &T, w: &Ctx) -> T {
     match t {
@@ -752,7 +743,7 @@ pub fn simplify_linear_with(egg: &str, w: u32, trace: bool, p: &Passes) -> (Stri
     thread_local! {
         static LAST: std::cell::RefCell<Last> = const { std::cell::RefCell::new(None) };
     }
-    crate::sched::set_off(p);
+    crate::sched::apply(p);
     let hit = |(e, bits, t, q, _): &&(String, u32, bool, Passes, Result)| e == egg && *bits == w && *t == trace && q == p;
     match LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.4.clone())) {
         Some(r) => r,
@@ -817,11 +808,11 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool, p: &Passes) -> (Stri
     let mut first_name = "first";
     // Unified operands let the regions around them share leaves, but the rebuild of the
     // input as written is sometimes smaller. The second rebuild redoes only the regions
-    // unification changed, and is dropped once it needs `UNIFIED_REWRITES` rewrites.
+    // unification changed, and is dropped once it needs `unified_rewrites` rewrites.
     let unified = if p.pre_on("unified") { stats::pass("unify_operands", &t, || unify_operands(&t, &w)) } else { t.clone() };
     let r = if unified != t {
         let left = w.st.rewrites_left.load(Relaxed);
-        w.limit_rewrites(UNIFIED_REWRITES);
+        w.limit_rewrites(limit(Limit::UnifiedRewrites));
         let within = || w.st.rewrites_left.load(Relaxed) > 0;
         let u = match crate::tfunc::replacement(&unified, &w) {
             Some(u) => Some(u),
@@ -831,7 +822,7 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool, p: &Passes) -> (Stri
                 .filter(|_| within())
                 .map(|u| crate::tfunc::simplify(&u, &w)),
         };
-        let used = UNIFIED_REWRITES - w.st.rewrites_left.load(Relaxed);
+        let used = limit(Limit::UnifiedRewrites) - w.st.rewrites_left.load(Relaxed);
         w.limit_rewrites(left.saturating_sub(used));
         stats::add("pre/unified/made", stats::since(clock));
         match u {
@@ -865,7 +856,7 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool, p: &Passes) -> (Stri
             }
         }
     }
-    if p.pre_on("split_bits") && size(&r) <= MAX_SPLIT_SIZE {
+    if p.pre_on("split_bits") && size(&r) <= limit(Limit::SplitSize) {
         let s = split_in(&r, &w, &|t| run(&unshift(&crate::lowbits::simplify(t, &w), &w), false));
         if s != r {
             rebuilt.push(("split_bits", s));
@@ -917,11 +908,11 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool, p: &Passes) -> (Stri
     // A region rebuilt in clusters is smaller there but can leave the rules a worse
     // start than rebuilding it whole, so the rebuild without clusters is kept too.
     let made = usize::MAX - w.st.rewrites_left.load(Relaxed);
-    let unclustered = if p.pre_on("unclustered") && w.st.used.load(Relaxed) & CLUSTERED != 0 && made <= UNCLUSTERED_AFTER && crate::tfunc::replacement(&t, &w).is_none() {
-        w.st.bit_splits.store(BIT_SPLIT_BUDGET, Relaxed);
+    let unclustered = if p.pre_on("unclustered") && w.st.used.load(Relaxed) & CLUSTERED != 0 && made <= limit(Limit::UnclusteredAfter) && crate::tfunc::replacement(&t, &w).is_none() {
+        w.st.bit_splits.store(limit(Limit::BitSplitBudget), Relaxed);
         w.st.excluded.store(CLUSTERED, Relaxed);
-        w.st.relate_leaves.store(UNCLUSTERED_RELATE_LEAVES, Relaxed);
-        w.st.rewrites_left.store(UNCLUSTERED_REWRITES, Relaxed);
+        w.st.relate_leaves.store(limit(Limit::UnclusteredRelateLeaves), Relaxed);
+        w.st.rewrites_left.store(limit(Limit::UnclusteredRewrites), Relaxed);
         let within = || w.st.rewrites_left.load(Relaxed) > 0;
         let r = Some(rewrite(&t, &w)).filter(|_| within());
         let r = r.map(|r| relate(&r, &w)).filter(|_| within());

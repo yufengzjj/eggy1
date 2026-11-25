@@ -71,10 +71,9 @@ pub(super) fn related_leaves(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
         })
         .collect();
     cands.sort_by_key(|c| c.0);
-    cands.into_iter().take(MAX_RELATED_REBUILDS).map(|(_, vals)| rebuild_values(&vals, &ext, w)).min_by_key(size)
+    cands.into_iter().take(limit(Limit::RelatedRebuilds)).map(|(_, vals)| rebuild_values(&vals, &ext, w)).min_by_key(size)
 }
 
-const MAX_RELATED_REBUILDS: usize = 8;
 
 /// Leaves used and non-zero coefficients of `vals` (on {0,1}^n) in the conjunction basis.
 fn conj_measure(vals: &[u64], n: usize, w: &Ctx) -> (u32, usize) {
@@ -120,8 +119,6 @@ fn relate_uncached(t: &T, w: &Ctx) -> T {
     relate_region(&t, w).filter(|r| size(r) < size(&t)).unwrap_or(t)
 }
 
-/// Most arithmetic leaves `relate_region` tries.
-const MAX_RELATED: usize = 4;
 /// Most further arithmetic leaves `relate_region` tries that the region also has written out.
 const MAX_WRITTEN_OUT: usize = 2;
 /// Largest product leaf `relate_region` tries when it is not an operand of a bitwise operation.
@@ -329,15 +326,15 @@ fn relate_in(t: &T, w: &Ctx) -> Option<T> {
     let candidates: Vec<usize> = (0..lv.len())
         .filter(|&i| matches!(&lv[i], T::Op(..)) && kind(&lv[i], w) != Kind::Bit && (operands.contains(&lv[i]) || size(&lv[i]) <= MAX_FREE_PRODUCT) && (0..lv.len()).any(|j| j != i && vars[j].iter().any(|v| vars[i].contains(v))))
         .collect();
-    let mut arith: Vec<usize> = candidates.iter().copied().take(MAX_RELATED).collect();
+    let mut arith: Vec<usize> = candidates.iter().copied().take(limit(Limit::Related)).collect();
     // Past those, leaves written out in the region as well, whose `μ·(v - L)` cancels terms.
-    if candidates.len() > MAX_RELATED {
+    if candidates.len() > limit(Limit::Related) {
         let own = region_terms(t, w).0;
         let written_out = |l: &T| {
             let (lt, _) = region_terms(l, w);
             lt.len() > 1 && lt.iter().all(|(_, x)| own.iter().any(|(_, y)| x == y))
         };
-        arith.extend(candidates[MAX_RELATED..].iter().copied().filter(|&i| kind(&lv[i], w) == Kind::Lin && written_out(&lv[i])).take(MAX_WRITTEN_OUT));
+        arith.extend(candidates[limit(Limit::Related)..].iter().copied().filter(|&i| kind(&lv[i], w) == Kind::Lin && written_out(&lv[i])).take(MAX_WRITTEN_OUT));
     }
     if arith.is_empty() {
         return None;

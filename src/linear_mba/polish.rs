@@ -390,8 +390,6 @@ fn push_not(t: &T, w: &Ctx) -> T {
     if size(&r) < size(&t) { r } else { t }
 }
 
-/// Uncached `rewrite` calls one `polish` call may make.
-const POLISH_REWRITES: usize = 2000;
 
 type Pass = (&'static str, fn(&T, &Ctx) -> T);
 
@@ -425,9 +423,9 @@ pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
 /// smaller, and the names of those that did. Run on the final result only: as a pre-pass
 /// candidate, even a slightly smaller form changes how the rules finish.
 pub fn polish_with(egg: &str, w: u32, p: &crate::sched::Passes) -> (String, Vec<&'static str>) {
-    crate::sched::set_off(p);
+    crate::sched::apply(p);
     let w = Ctx::new(w);
-    w.limit_rewrites(POLISH_REWRITES);
+    w.limit_rewrites(limit(Limit::PolishRewrites));
     let mut best = parse(egg);
     let mut used = Vec::new();
     let passes: Vec<Pass> = p.polish.iter().filter_map(|n| POLISH.iter().find(|(m, _)| m == n).copied()).collect();
