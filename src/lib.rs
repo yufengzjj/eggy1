@@ -997,7 +997,8 @@ pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result
     thread_local! {
         static RUNS: std::cell::RefCell<Vec<(String, String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
     }
-    let key = format!("{}\n{lets}\n{s}\n{union}", cli.iter_limit);
+    let schedule = cli.passes.egglog_schedule(cli.iter_limit);
+    let key = format!("{schedule}\n{lets}\n{s}\n{union}");
     let hit = |(e, k, _): &&(String, String, String)| e == egg && *k == key;
     if let Some(r) = RUNS.with(|c| c.borrow().iter().find(hit).map(|(_, _, r)| r.clone())) {
         return Ok(r);
@@ -1010,26 +1011,9 @@ pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result
 {lets}
 (let expr {})
 {union}
-(run-schedule
-    (let-scheduler babibo
-      (back-off
-        :match-limit 64
-        :ban-length 3
-      )
-    )
-    (repeat {}
-        (seq
-            (run-with babibo default-ruleset)
-            (run-with babibo canonicalization)
-            (saturate (run constant-folding))
-            (saturate (run analysis))
-            (saturate (run identity-zero-element))
-            (run-with babibo simplify)
-        )
-    )
-)
+{schedule}
 (extract expr)"#,
-            s, cli.iter_limit
+            s
         ),
     )?;
     let result = result
