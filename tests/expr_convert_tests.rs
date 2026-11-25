@@ -279,3 +279,9 @@ fn negative_constants_print_as_subtraction() {
     let u32 = |n: i64| n as u32 as i64;
     assert_eq!(show("y + 0xfffffffe", &u32), "(y + 0xfffffffe)");
 }
+
+#[test]
+fn literals_wrap_modulo_2_64() {
+    assert_eq!(infix_to_egglog("x + 18446744073709551617", true), infix_to_egglog("x + 1", true));
+    assert_eq!(infix_to_egglog("x + 0x1fffffffffffffffe", true), infix_to_egglog("x + 0xfffffffffffffffe", true));
+}

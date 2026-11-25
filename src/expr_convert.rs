@@ -95,16 +95,13 @@ fn tokenize(expr: &str) -> Vec<Token> {
                     }
                     count += 1;
                 }
-                if num.starts_with("0x") {
-                    tokens.push(Token::Num(
-                        u64::from_str_radix(&num[2..], 16)
-                            .expect(&format!("fail to parse num:{}", num)),
-                    ));
-                } else {
-                    tokens.push(Token::Num(
-                        u64::from_str_radix(&num, 10).expect(&format!("fail to parse num:{}", num)),
-                    ));
-                }
+                // Literals wrap modulo 2^64, which every numeric type truncates further.
+                let (digits, radix) = match num.strip_prefix("0x") {
+                    Some(h) => (h, 16),
+                    None => (num.as_str(), 10),
+                };
+                let v = digits.chars().fold(0u64, |v, c| v.wrapping_mul(radix).wrapping_add(c.to_digit(radix as u32).unwrap() as u64));
+                tokens.push(Token::Num(v));
             }
             _ => {
                 chars.next();
