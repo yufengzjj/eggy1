@@ -131,7 +131,10 @@ pub(super) fn relate_region(t: &T, w: &Ctx) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
     if lv.len() > w.st.relate_leaves.load(Relaxed) {
-        return None;
+        // Not in the rebuild with fewer leaves related, where parts can leave it the first
+        // rebuild's form and so nothing to union.
+        let parts = w.st.relate_leaves.load(Relaxed) == MAX_WIDE_LEAVES;
+        return relate_abstracted(t, w).or_else(|| if parts { relate_parts(t, &lv, w) } else { None });
     }
     relate_complemented(t, &lv, w)
 }
@@ -144,6 +147,157 @@ fn relate_complemented(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
         Some(r) if plain.as_ref().is_none_or(|p| size(&r) < size(p)) => Some(r),
         _ => plain,
     }
+}
+
+/// The operands of the bitwise operations of the region `t`, with `~` stripped.
+fn bit_operands(t: &T, w: &Ctx, out: &mut Vec<T>) {
+    let T::Op(op, a) = t else { return };
+    if kind(t, w) == Kind::Atom {
+        return;
+    }
+    for x in a {
+        if matches!(op, Op::And | Op::Or | Op::Xor) {
+            let mut x = x;
+            while let T::Op(o, b) = x {
+                if *o != Op::Not {
+                    break;
+                }
+                x = &b[0];
+            }
+            out.push(x.clone());
+        }
+        bit_operands(x, w, out);
+    }
+}
+
+/// Most arithmetic leaves `relate_parts` tries.
+const MAX_PARTS: usize = 8;
+
+/// `relate_region` on parts of the region `t` (`lv` its leaves): for an arithmetic operand
+/// `L` of a bitwise operation, the terms whose leaves are all among the leaves of the terms
+/// that contain `L` and the leaves of the arithmetic leaves there (`L` included) as linear
+/// MBAs. Each part rewritten smaller replaces its terms in the region.
+fn relate_parts(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
+    let (mut terms, mut konst) = region_terms(t, w);
+    let leaves_of = |x: &T| {
+        let mut l = Vec::new();
+        leaves(x, w, &mut l);
+        l
+    };
+    let mut operands = Vec::new();
+    bit_operands(t, w, &mut operands);
+    let (mut changed, mut tried) = (false, Vec::new());
+    for l in lv.iter().filter(|l| matches!(l, T::Op(..)) && kind(l, w) != Kind::Bit && operands.contains(l)).take(MAX_PARTS) {
+        let term_leaves: Vec<Vec<T>> = terms.iter().map(|(_, x)| leaves_of(x)).collect();
+        let mut near = leaves_of(l);
+        for x in term_leaves.iter().filter(|tl| tl.contains(l)).flatten() {
+            if !near.contains(x) {
+                near.push(x.clone());
+            }
+            if x != l && matches!(x, T::Op(..)) && kind(x, w) == Kind::Lin {
+                near.extend(leaves_of(x));
+            }
+        }
+        let part: Vec<usize> = (0..terms.len()).filter(|&i| term_leaves[i].iter().all(|x| near.contains(x))).collect();
+        if part.len() < 2 {
+            continue;
+        }
+        let sum = build_sum(&part.iter().map(|&i| terms[i].clone()).collect::<Vec<_>>(), 0, w);
+        if tried.contains(&sum) {
+            continue;
+        }
+        tried.push(sum.clone());
+        // Past the limit, the bitwise subterms beside `L` without it are abstracted, which
+        // holds for any value they take.
+        let (mut from, mut to) = (Vec::new(), Vec::new());
+        let mut plv = leaves_of(&sum);
+        let abstracted = if plv.len() > w.st.relate_leaves.load(Relaxed) {
+            beside(&sum, l, w, false, &mut from);
+            to = (0..from.len()).map(|k| T::Var(format!("\u{4}{k}"))).collect();
+            let a = crate::lowbits::replace(&sum, &from, &to);
+            plv = leaves_of(&a);
+            a
+        } else if part.len() == terms.len() {
+            continue;
+        } else {
+            sum.clone()
+        };
+        if plv.len() > w.st.relate_leaves.load(Relaxed) {
+            continue;
+        }
+        let Some(r) = relate_complemented(&abstracted, &plv, w).map(|r| crate::lowbits::replace(&r, &to, &from)).filter(|r| size(r) < size(&sum)) else { continue };
+        let (rt, rk) = region_terms(&r, w);
+        terms = terms.into_iter().enumerate().filter(|(i, _)| !part.contains(i)).map(|(_, x)| x).collect();
+        for (c, x) in rt {
+            match terms.iter_mut().find(|(_, y)| *y == x) {
+                Some(e) => e.0 = e.0.wrapping_add(c) & w.mask,
+                None => terms.push((c, x)),
+            }
+        }
+        terms.retain(|(c, _)| *c != 0);
+        konst = konst.wrapping_add(rk) & w.mask;
+        changed = true;
+    }
+    changed.then(|| build_sum(&terms, konst, w))
+}
+
+/// The bitwise subterms of `t` (of at least two variables) that do not contain `l` but are
+/// operands of bitwise operations that do.
+fn beside(t: &T, l: &T, w: &Ctx, in_bitwise: bool, out: &mut Vec<T>) {
+    fn contains(t: &T, l: &T) -> bool {
+        t == l || matches!(t, T::Op(_, a) if a.iter().any(|x| contains(x, l)))
+    }
+    let T::Op(op, a) = t else { return };
+    let k = kind(t, w);
+    if k == Kind::Atom || (in_bitwise && k == Kind::Lin && *op != Op::Not) || !contains(t, l) {
+        return;
+    }
+    let bitwise = matches!(op, Op::And | Op::Or | Op::Xor);
+    for x in a {
+        if bitwise && !contains(x, l) && matches!(x, T::Op(Op::And | Op::Or | Op::Xor | Op::Not, _)) && crate::eval::vars(x).len() > 1 {
+            if !out.contains(x) {
+                out.push(x.clone());
+            }
+        } else {
+            beside(x, l, w, in_bitwise || bitwise, out);
+        }
+    }
+}
+
+/// `relate_region` on the region `t` with its bitwise subterms over leaves used nowhere else
+/// in it replaced by placeholders, as `p ^ q` in `(p ^ q) + ... - b - (~(e + b) & y) - e`,
+/// when that leaves few enough leaves.
+fn relate_abstracted(t: &T, w: &Ctx) -> Option<T> {
+    fn private(t: &T, root: &T, w: &Ctx, in_bitwise: bool, from: &mut Vec<T>) {
+        let T::Op(op, a) = t else { return };
+        let k = kind(t, w);
+        if k == Kind::Atom || (in_bitwise && k == Kind::Lin && *op != Op::Not) {
+            return;
+        }
+        let bitwise = matches!(op, Op::And | Op::Or | Op::Xor);
+        if bitwise {
+            let own = crate::eval::vars(t);
+            let ph = T::Var("\u{3}".into());
+            let rest = crate::eval::vars(&crate::lowbits::replace(root, std::slice::from_ref(t), std::slice::from_ref(&ph)));
+            if own.len() > 1 && !own.iter().any(|v| rest.contains(v)) {
+                return from.push(t.clone());
+            }
+        }
+        a.iter().for_each(|x| private(x, root, w, in_bitwise || bitwise, from));
+    }
+    let mut from = Vec::new();
+    private(t, t, w, false, &mut from);
+    if from.is_empty() {
+        return None;
+    }
+    let to: Vec<T> = (0..from.len()).map(|k| T::Var(format!("\u{3}{k}"))).collect();
+    let s = crate::lowbits::replace(t, &from, &to);
+    let mut lv = Vec::new();
+    leaves(&s, w, &mut lv);
+    if lv.len() > w.st.relate_leaves.load(Relaxed) {
+        return None;
+    }
+    Some(crate::lowbits::replace(&relate_complemented(&s, &lv, w)?, &to, &from))
 }
 
 /// The region `t` with each arithmetic leaf `L'` of two or more leaves that is `-1` at 0
@@ -169,25 +323,6 @@ fn complemented(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
 fn relate_in(t: &T, w: &Ctx) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
-    fn bit_operands(t: &T, w: &Ctx, out: &mut Vec<T>) {
-        let T::Op(op, a) = t else { return };
-        if kind(t, w) == Kind::Atom {
-            return;
-        }
-        for x in a {
-            if matches!(op, Op::And | Op::Or | Op::Xor) {
-                let mut x = x;
-                while let T::Op(o, b) = x {
-                    if *o != Op::Not {
-                        break;
-                    }
-                    x = &b[0];
-                }
-                out.push(x.clone());
-            }
-            bit_operands(x, w, out);
-        }
-    }
     let mut operands = Vec::new();
     bit_operands(t, w, &mut operands);
     let vars: Vec<Vec<String>> = lv.iter().map(crate::eval::vars).collect();

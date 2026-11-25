@@ -787,6 +787,36 @@ fn complemented_arithmetic_leaves() {
     );
 }
 
+/// Related arithmetic leaves in regions of more than 16 leaves, on the terms around them.
+#[test]
+fn related_leaves_past_wide_limit() {
+    check(
+        "u32",
+        &[(
+            "(p1^q1)+(p2^q2)+(p3^q3)+(p4^q4)+(p5^q5)+(p6^q6)+(p7^q7)+(p8^q8) - b - (~(e + b) & y) - e",
+            &["(((((((((p1 ^ q1) + (p2 ^ q2)) + (p3 ^ q3)) + (p4 ^ q4)) + (p5 ^ q5)) + (p6 ^ q6)) + (p7 ^ q7)) + (p8 ^ q8)) - ((e + b) | y))"],
+            10,
+        )],
+    );
+    check(
+        "i64",
+        &[(
+            "(a+b+c+d+e+f+g+h+i) + (((p ^ q) | (r & (s ^ (t | (u & v))))) & (-1 - a - b - c - d - e - f - g - h - i))",
+            &["(((((((((a + b) + c) + d) + e) + f) + g) + h) + i) | ((p ^ q) | (r & (s ^ (t | (u & v))))))"],
+            10,
+        )],
+    );
+    // The operand beside `~A` shares leaves with `A`.
+    check(
+        "i64",
+        &[(
+            "(a|b) - (c&d) + (e^f) - (g*h) + k + (m|n) - (o&p) + q + ((~(a|b) + (c&d) - (e^f) + (g*h) - k - (m|n) + (o&p) - q) & (((a - r) | (s ^ t)) ^ (b & u)))",
+            &["(((q - (o & p)) + (((k - (g * h)) + (((a | b) - (c & d)) + (e ^ f))) + (m | n))) | (((a - r) | (s ^ t)) ^ (b & u)))"],
+            10,
+        )],
+    );
+}
+
 /// The last extraction still holds a region the linear pre-pass rebuilds.
 #[test]
 fn extra_round_after_last_extraction() {
