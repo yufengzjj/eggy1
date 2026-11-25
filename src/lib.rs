@@ -1056,12 +1056,24 @@ pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result
 /// available again.
 pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
     let egg = make_egg(&cli.num_type);
-    let seed = drive(&egg, s, cli)?;
-    Ok(egglog_to_infix(&seed, &|n| norm_const(n, &cli.num_type)))
+    let norm = |n| norm_const(n, &cli.num_type);
+    let seed = drive(&egg, s, cli, cli.max_restarts.max(1), 2)?;
+    let out = egglog_to_infix(&seed, &norm);
+    if seed == s {
+        return Ok(out);
+    }
+    // A run from the printed result starts with the first-round handling again, which
+    // sometimes ends smaller than the last rounds did.
+    let again = drive(&egg, &infix_to_egglog(&out, true), cli, 2, 0)?;
+    match eval::size(&eval::parse(&again)) < eval::size(&eval::parse(&seed)) {
+        true => Ok(egglog_to_infix(&again, &norm)),
+        false => Ok(out),
+    }
 }
 
-/// The restart rounds of `simplify`; returns the last extraction.
-fn drive(egg: &str, s: &str, cli: &Cli) -> Result<String, Error> {
+/// The restart rounds of `simplify`: `rounds`, plus up to `extra` while the pre-pass still
+/// changes the last extraction; returns the smallest form seen.
+fn drive(egg: &str, s: &str, cli: &Cli, rounds: usize, extra: usize) -> Result<String, Error> {
     let mut seed = s.to_string();
     // Extraction prefers fewer non-constant nodes, but results are compared by node count,
     // so the forms the pre-pass and the rules give along the way are kept by node count.
@@ -1073,7 +1085,7 @@ fn drive(egg: &str, s: &str, cli: &Cli) -> Result<String, Error> {
             smallest = Some((n, e.to_string()));
         }
     };
-    let (mut rounds, mut extra, mut first) = (cli.max_restarts.max(1), 2, true);
+    let (mut rounds, mut extra, mut first) = (rounds, extra, true);
     while rounds > 0 {
         rounds -= 1;
         let (alt, other) = linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), cli.trace);
