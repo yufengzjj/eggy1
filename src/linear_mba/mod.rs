@@ -8,7 +8,7 @@
 
 use crate::eval::{Op, Term as T, parse, show, size};
 use std::sync::{Arc, OnceLock};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::Relaxed};
 
 mod linear;
 mod polish;
@@ -76,7 +76,10 @@ impl Ctx {
     }
 }
 
-type Memo<K, V> = std::sync::Mutex<crate::eval::FastMap<K, (V, bool)>>;
+type Memo<K, V> = std::sync::Mutex<crate::eval::FastMap<K, (V, u8)>>;
+/// Bits of `State::used` and `State::excluded`.
+pub(super) const CLUSTERED: u8 = 1;
+pub(super) const WIDE: u8 = 2;
 type RebuiltKey = (Vec<u64>, Vec<(usize, bool)>, u64, u32);
 type GroupedKey = (Vec<(Vec<u64>, u64)>, Vec<T>, u64, u32);
 type PairKey = (u32, Vec<(Vec<u64>, u64)>, u64, Vec<T>, usize);
@@ -99,10 +102,10 @@ struct State {
     /// `peel` calls nested inside each other.
     peel_depth: AtomicUsize,
     clustering: std::sync::Mutex<Vec<T>>,
-    /// Turns `clustered` off, for the rebuild without it.
-    no_cluster: AtomicBool,
-    /// Whether a form from `clustered` was kept since the last reset.
-    clustered: AtomicBool,
+    /// `CLUSTERED` turns `clustered` off and `WIDE` turns `wide_blocks` off, for the rebuilds without them.
+    excluded: AtomicU8,
+    /// Which of `clustered` and `wide_blocks` gave a kept form since the last reset.
+    used: AtomicU8,
 }
 
 impl Default for State {
@@ -121,8 +124,8 @@ impl Default for State {
             bit_splits: AtomicUsize::new(BIT_SPLIT_BUDGET),
             peel_depth: AtomicUsize::new(0),
             clustering: Default::default(),
-            no_cluster: AtomicBool::new(false),
-            clustered: AtomicBool::new(false),
+            excluded: AtomicU8::new(0),
+            used: AtomicU8::new(0),
         }
     }
 }
@@ -531,7 +534,15 @@ fn recombine_products(t: &T, w: &Ctx) -> Option<T> {
 fn rewrite_linear(t: &T, w: &Ctx) -> T {
     let T::Op(op, args) = t else { return t.clone() };
     if kind(t, w) != Kind::Atom {
-        let best = [simba(t, w), small_blocks(t, w), wide_blocks(t, w)].into_iter().flatten().reduce(|b, x| if size(&x) < size(&b) { x } else { b });
+        let best = [simba(t, w), small_blocks(t, w)].into_iter().flatten().reduce(|b, x| if size(&x) < size(&b) { x } else { b });
+        let best = match (best, wide_blocks(t, w)) {
+            (Some(b), Some(x)) if size(&x) >= size(&b) => Some(b),
+            (b, None) => b,
+            (_, Some(x)) => {
+                w.st.used.fetch_or(WIDE, Relaxed);
+                Some(x)
+            }
+        };
         if let Some(best) = best {
             return substitute_atoms(&best, w);
         }
@@ -593,30 +604,30 @@ fn cluster_regions(t: &T, w: &Ctx, in_lin: bool) -> T {
     }
     match clustered(&node, w) {
         Some(c) => {
-            w.st.clustered.store(true, Relaxed);
+            w.st.used.fetch_or(CLUSTERED, Relaxed);
             c
         }
         None => node,
     }
 }
 
-/// `f()`, and whether a form from `clustered` was kept during it (which then also counts
-/// for the enclosing call).
-fn tracking_clusters<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, bool) {
-    let outer = w.st.clustered.swap(false, Relaxed);
+/// `f()`, and which of `clustered` and `wide_blocks` gave a kept form during it (which then
+/// also counts for the enclosing call).
+fn tracking_clusters<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, u8) {
+    let outer = w.st.used.swap(0, Relaxed);
     let r = f();
-    let used = w.st.clustered.load(Relaxed);
-    w.st.clustered.store(outer || used, Relaxed);
+    let used = w.st.used.load(Relaxed);
+    w.st.used.store(outer | used, Relaxed);
     (r, used)
 }
 
-/// A memoized result, unless it came from `clustered` while that is off.
+/// A memoized result, unless it came from a pass that is now off.
 fn memo_get<K: std::hash::Hash + Eq, V: Clone>(memo: &Memo<K, V>, key: &K, w: &Ctx) -> Option<V> {
     let (r, used) = memo.lock().unwrap().get(key).cloned()?;
-    if used && w.st.no_cluster.load(Relaxed) {
+    if used & w.st.excluded.load(Relaxed) != 0 {
         return None;
     }
-    w.st.clustered.fetch_or(used, Relaxed);
+    w.st.used.fetch_or(used, Relaxed);
     Some(r)
 }
 
@@ -751,6 +762,20 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool) -> (String, Vec<Stri
         r
     };
     let mut rebuilt: Vec<(&str, T)> = vec![("first", r.clone())];
+    // A region rebuilt by `wide_blocks` is smaller there, but the other rebuilds can leave
+    // subterms the abstracted rebuilds share across terms. Only smaller ones are kept: a
+    // larger one unioned beside the first rebuild made the rules finish worse as often as better.
+    if w.st.used.load(Relaxed) & WIDE != 0 {
+        w.st.excluded.store(WIDE, Relaxed);
+        let n = run(&t, true);
+        let abstracted = [over_const_bitwise(&n, &w), over_shared_bitwise(&n, &w)];
+        w.st.excluded.store(0, Relaxed);
+        for (name, o) in [("no_wide", n.clone())].into_iter().chain(abstracted.map(|o| ("no_wide_abstracted", o))) {
+            if size(&o) < size(&r) && (name == "no_wide" || 4 * size(&o) <= 3 * size(&n)) {
+                rebuilt.push((name, o));
+            }
+        }
+    }
     if size(&r) <= MAX_SPLIT_SIZE {
         let s = split_in(&r, &w, &|t| run(&unshift(&crate::lowbits::simplify(t, &w), &w), false));
         if s != r {
@@ -788,9 +813,9 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool) -> (String, Vec<Stri
     // A region rebuilt in clusters is smaller there but can leave the rules a worse
     // start than rebuilding it whole, so the rebuild without clusters is kept too.
     let made = usize::MAX - w.st.rewrites_left.load(Relaxed);
-    let unclustered = if w.st.clustered.load(Relaxed) && made <= UNCLUSTERED_AFTER && crate::tfunc::replacement(&t, &w).is_none() {
+    let unclustered = if w.st.used.load(Relaxed) & CLUSTERED != 0 && made <= UNCLUSTERED_AFTER && crate::tfunc::replacement(&t, &w).is_none() {
         w.st.bit_splits.store(BIT_SPLIT_BUDGET, Relaxed);
-        w.st.no_cluster.store(true, Relaxed);
+        w.st.excluded.store(CLUSTERED, Relaxed);
         w.st.relate_leaves.store(UNCLUSTERED_RELATE_LEAVES, Relaxed);
         w.st.rewrites_left.store(UNCLUSTERED_REWRITES, Relaxed);
         let within = || w.st.rewrites_left.load(Relaxed) > 0;
@@ -799,7 +824,7 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool) -> (String, Vec<Stri
         let u = r.map(|r| drop_identities(&finish(&crate::tfunc::simplify(&r, &w), &w), &w));
         w.st.rewrites_left.store(usize::MAX, Relaxed);
         w.st.relate_leaves.store(MAX_WIDE_LEAVES, Relaxed);
-        w.st.no_cluster.store(false, Relaxed);
+        w.st.excluded.store(0, Relaxed);
         u
     } else {
         None

@@ -427,7 +427,7 @@ struct BlockTerm {
 /// overlap (`-2·(((h ^ g) & a) ^ f) - 2·((g | j) & (a ^ h))`) split their shared part as
 /// the smallest terms need. Memoized per thread, across runs: later rounds see the same regions.
 pub(super) fn wide_blocks(t: &T, w: &Ctx) -> Option<T> {
-    if has_const_bitwise(t, w) {
+    if w.st.excluded.load(Relaxed) & WIDE != 0 || has_const_bitwise(t, w) {
         return None;
     }
     let mut lv = Vec::new();
@@ -888,7 +888,7 @@ pub(super) fn clustered(t: &T, w: &Ctx) -> Option<T> {
         let c = w.st.clustering.lock().unwrap();
         c.len() >= MAX_CLUSTER_DEPTH || c.contains(t)
     };
-    if w.st.no_cluster.load(Relaxed) || nested {
+    if w.st.excluded.load(Relaxed) & CLUSTERED != 0 || nested {
         return None;
     }
     w.st.clustering.lock().unwrap().push(t.clone());

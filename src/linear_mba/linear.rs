@@ -34,7 +34,7 @@ pub(super) fn simba(t: &T, w: &Ctx) -> Option<T> {
             (b, p) => p.or(b),
         };
         if best.as_ref().is_some_and(|b| b.1) {
-            w.st.clustered.store(true, Relaxed);
+            w.st.used.fetch_or(CLUSTERED, Relaxed);
         }
         return best.map(|b| b.0);
     }

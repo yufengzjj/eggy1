@@ -1966,6 +1966,13 @@ fn wide_region_rebuilt_by_blocks() {
     check("u8", &[("(((((((-(((g ^ g) & (g | g))) + ((((g | g) - (g & g)) + ((g + g) - (g & g))) - ((g ^ g) | (g | g)))) + (0x3 * (((-(a) - 0x1) + ((a + f) - (a | f))) - (~(a) | (a & f))))) + ((((((~((f ^ c)) + ((d | a) - (d & a))) - (~((f ^ c)) & (d ^ a))) + b) - ((~((f ^ c)) | (d ^ a)) & b)) + (((-(g) - 0x1) + e) - (~(g) & e))) - (((~((f ^ c)) | (d ^ a)) | b) | (~(g) | e)))) - ((d | b) | (b | d))) - g) - (0x3 * (~(a) & (a & f)))) + ((((d + b) - (d & b)) + ((b + d) - (b & d))) - ((d | b) & (b | d))))", &["(((~g | e) & (b | ((~c ^ f) | (a ^ d)))) - g)"], 10)]);
 }
 
+/// Two blocks of 5 leaves sharing 4: the rebuild without `wide_blocks` keeps `(j | e)` and
+/// `i` in several terms, where the abstracted rebuild joins them.
+#[test]
+fn wide_region_rebuilt_without_blocks() {
+    check("u64", &[("(((((((((((((((-((((-(((h + a) - (h & a))) - 0x1) + j) - (~((h | a)) & j))) + (0x3 * (((k ^ d) | ((b | i) | c)) - ((k ^ d) & ((b | i) | c))))) + ((i ^ (l | e)) | (j ^ k))) + (((((j | e) | i) - ((j | e) & i)) + ((d | k) - (d & k))) - (((j | e) ^ i) & (d ^ k)))) - (0x3 * (((((-(f) - 0x1) + g) - (~(f) | g)) + e) - ((~(f) & g) | e)))) + ((c + ((k | h) - (k & h))) - (c & (k ^ h)))) + (i ^ (f ^ l))) + (0x7 * ((((k + b) - (k & b)) + l) - ((k | b) | l)))) + (0x3 * (((-(((b | (~(f) & j)) - (b & (~(f) & j)))) - 0x1) + ((a + h) - (a & h))) - (~((b ^ (~(f) & j))) | (a | h))))) - (0x3 * (((-(c) - 0x1) + (((-(j) - 0x1) + f) - (~(j) | f))) - (~(c) | (~(j) & f))))) + (0x3 * (~(c) & (~(j) & f)))) + (0x3 * ((~(f) & g) & e))) - (c | (k ^ h))) - (0x7 * ((k | b) & l))) + (~((h | a)) | j)) - ((i | (f ^ l)) - (i & (f ^ l))))", &["(((3 * ((k ^ (d ^ (b | (i | c)))) + (((~j | f) ^ b) & (a | h)))) + (((j | e) ^ i) | (d ^ k))) + ((i ^ (l | e)) | (j ^ k)))"], 10)]);
+}
+
 /// The final result has the terms of one coefficient summed under it, and a constant `c`
 /// absorbed into a term `c·a` as `-c·~a`, where the rules leave them apart.
 #[test]
