@@ -87,7 +87,7 @@ pub(super) fn decompose_regions(t: &T, w: &Ctx, in_bit: bool) -> T {
         let env = |v: &str| if p >> v[2..].parse::<usize>().unwrap() & 1 == 1 { w.mask } else { 0 };
         acc | (crate::eval::eval(&x, ty, &env).unwrap_or(0) & 1) << p
     });
-    let Some((_, b)) = decompose(tt, 6) else { return node };
+    let Some((_, b)) = decompose(tt, 6, usize::MAX) else { return node };
     let r = b_to_t(&b, &lv);
     if size(&r) < size(&node) { r } else { node }
 }

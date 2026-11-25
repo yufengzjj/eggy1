@@ -88,6 +88,9 @@ pub(super) fn bool_expr_canon(tt: u64, n: usize) -> BE {
     thread_local! {
         static CACHE: std::cell::RefCell<crate::eval::FastMap<(u64, usize), BE>> = Default::default();
     }
+    if n <= 3 {
+        return bool_expr_uncached(tt, n);
+    }
     if let Some(r) = CACHE.with(|c| c.borrow().get(&(tt, n)).cloned()) {
         return r;
     }
@@ -160,8 +163,8 @@ fn bool_expr_uncached(tt: u64, n: usize) -> BE {
             best = Some(cand);
         }
     }
-    let split = if n <= MAX_DECOMPOSE { decompose(tt, n) } else { None };
-    if let Some(cand) = split.filter(|d| best.as_ref().is_none_or(|(c, _)| d.0 < *c)) {
+    let bound = best.as_ref().map_or(usize::MAX, |b| b.0);
+    if let Some(cand) = if n <= MAX_DECOMPOSE { decompose(tt, n, bound) } else { None } {
         best = Some(cand);
     }
     let (c, b) = best.unwrap();
@@ -175,8 +178,9 @@ pub(super) const MAX_DECOMPOSE: usize = 5;
 /// Smallest `g(A) op h(B)` with `A ∪ B` all variables and both proper subsets, as in
 /// `((w ^ x) | (x & y)) & ~(y ^ z)`. For `&`, `g` and `h` are `tt` ORed over the
 /// variables outside their set; for `|`, ANDed; for `^`, `g = tt(B \ A = 0)` and
-/// `h = tt(A \ B = 0) ^ tt(A \ B = 0, B \ A = 0)`. Each is checked against `tt`.
-pub(super) fn decompose(tt: u64, n: usize) -> Option<(usize, B)> {
+/// `h = tt(A \ B = 0) ^ tt(A \ B = 0, B \ A = 0)`. Each is checked against `tt`. Only
+/// splits smaller than `bound` are returned.
+pub(super) fn decompose(tt: u64, n: usize, bound: usize) -> Option<(usize, B)> {
     let full_vars = (1usize << n) - 1;
     let full = table_full(n);
     // Table with variable `i` forced to `v`, still over all `n` variables.
@@ -210,7 +214,8 @@ pub(super) fn decompose(tt: u64, n: usize) -> Option<(usize, B)> {
     let any: Vec<u64> = (0..=full_vars).map(|k| over(tt, k, &|x, y| x | y)).collect();
     let all: Vec<u64> = (0..=full_vars).map(|k| over(tt, k, &|x, y| x & y)).collect();
     let zero: Vec<u64> = (0..=full_vars).map(|k| zero_out(tt, k)).collect();
-    let mut best: Option<(usize, B)> = None;
+    // The size to beat, and the best split below it (built once at the end).
+    let mut best: (usize, Option<(Op, usize, usize, u64, u64)>) = (bound, None);
     for a in 1..full_vars {
         for b in a..full_vars {
             if a | b != full_vars {
@@ -226,18 +231,20 @@ pub(super) fn decompose(tt: u64, n: usize) -> Option<(usize, B)> {
                 if joined != tt {
                     continue;
                 }
-                let Some((cg, eg)) = sub(g, a) else { continue };
-                if best.as_ref().is_some_and(|(c, _)| cg + 2 >= *c) {
+                let Some((cg, _)) = sub(g, a) else { continue };
+                if cg + 2 >= best.0 {
                     continue;
                 }
-                let Some((ch, eh)) = sub(h, b) else { continue };
-                if best.as_ref().is_none_or(|(c, _)| cg + ch + 1 < *c) {
-                    best = Some((cg + ch + 1, B::Bin(op, Arc::new(remap(&eg, &vars(a))), Arc::new(remap(&eh, &vars(b))))));
+                let Some((ch, _)) = sub(h, b) else { continue };
+                if cg + ch + 1 < best.0 {
+                    best = (cg + ch + 1, Some((op, a, b, g, h)));
                 }
             }
         }
     }
-    best
+    let (op, a, b, g, h) = best.1?;
+    let (eg, eh) = (sub(g, a)?.1, sub(h, b)?.1);
+    Some((best.0, B::Bin(op, Arc::new(remap(&eg, &vars(a))), Arc::new(remap(&eh, &vars(b))))))
 }
 
 pub(super) fn b_to_t(b: &B, leaves: &[T]) -> T {
