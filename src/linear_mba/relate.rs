@@ -133,6 +133,42 @@ pub(super) fn relate_region(t: &T, w: &Ctx) -> Option<T> {
     if lv.len() > w.st.relate_leaves.load(Relaxed) {
         return None;
     }
+    relate_complemented(t, &lv, w)
+}
+
+/// `relate_in` on the region `t` (`lv` its leaves), and with its leaves `complemented` when
+/// that gives a smaller result.
+fn relate_complemented(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
+    let plain = relate_in(t, w);
+    match complemented(t, lv, w).and_then(|c| relate_in(&c, w)) {
+        Some(r) if plain.as_ref().is_none_or(|p| size(&r) < size(p)) => Some(r),
+        _ => plain,
+    }
+}
+
+/// The region `t` with each arithmetic leaf `L'` of two or more leaves that is `-1` at 0
+/// written as `~L`, `L = -L' - 1` rebuilt, when that is smaller: `c + ~b` as `~(b - c)`, so
+/// the leaf `L` meets its terms written out in the region (`+ b - c`) as `~` leaves do.
+fn complemented(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
+    let (mut from, mut to) = (Vec::new(), Vec::new());
+    for l in lv.iter().filter(|l| matches!(l, T::Op(..)) && kind(l, w) == Kind::Lin) {
+        let mut own = Vec::new();
+        leaves(l, w, &mut own);
+        if own.len() < 2 || Prog::new(l, &own, w).at(0, w) != w.mask {
+            continue;
+        }
+        let c = rewrite(&T::Op(Op::Sub, vec![T::Op(Op::Neg, vec![l.clone()]), T::Num(1)]), w);
+        if size(&c) < size(l) {
+            from.push(l.clone());
+            to.push(T::Op(Op::Not, vec![c]));
+        }
+    }
+    (!from.is_empty()).then(|| crate::lowbits::replace(t, &from, &to))
+}
+
+fn relate_in(t: &T, w: &Ctx) -> Option<T> {
+    let mut lv = Vec::new();
+    leaves(t, w, &mut lv);
     fn bit_operands(t: &T, w: &Ctx, out: &mut Vec<T>) {
         let T::Op(op, a) = t else { return };
         if kind(t, w) == Kind::Atom {
@@ -241,7 +277,9 @@ pub(super) fn relate_region(t: &T, w: &Ctx) -> Option<T> {
         .collect();
     let mut combos: Vec<Vec<(usize, i64)>> = Vec::new();
     for k in 0..arith.len() {
-        if !same[k].is_empty() {
+        // Also when `L` is written out as a term of a wide region, where `Prog` takes it for the
+        // leaf too (in smaller ones the rebuild finds that).
+        if !same[k].is_empty() || (lv.len() > MAX_LEAVES && in_sum(t, &lv[arith[k]])) {
             combos.push(vec![(k, 0)]);
         }
         for mu in [1, -1, 2, -2].into_iter().chain(derived[k]).chain(cancel[k]) {
@@ -267,23 +305,25 @@ pub(super) fn relate_region(t: &T, w: &Ctx) -> Option<T> {
             }
         }
     }
-    // Rebuilds can be slow, so only the combinations that leave a semi-linear region the
-    // fewest leaves (fewer than before), or another the fewest monomials (no more than
-    // before), are rebuilt.
-    let semi_used = |t: &T| -> Option<usize> {
+    // Rebuilds can be slow, so only the combinations that leave the region the fewest used
+    // leaves (fewer than before), a region that is not semi-linear the fewest monomials (no
+    // more than before), or the fewest terms (fewer than before) are rebuilt.
+    let semi_used = |t: &T| -> Option<Vec<T>> {
         let t = &signed_products(t);
         let mut lv = Vec::new();
         leaves(t, w, &mut lv);
-        Some(used_leaves(t, &lv, w)?.1.into_iter().filter(|&u| u).count())
+        let used = used_leaves(t, &lv, w)?.1;
+        Some(lv.into_iter().zip(used).filter(|p| p.1).map(|p| p.0).collect())
     };
-    // A region of more than `MAX_LEAVES` leaves is also scored by used leaves, since there
-    // the cancelled ones are dropped before rebuilding.
     let (semi, wide) = (has_const_bitwise(t, w), lv.len() > MAX_LEAVES);
-    let base_used = if semi || wide { Some(semi_used(t).unwrap_or(lv.len())) } else { None };
+    let base_used = semi_used(t);
+    let base_count = base_used.as_ref().map_or(lv.len(), |u| u.len());
     let base_monos = if semi { None } else { crate::poly_mba::monomials(t, w) };
-    // In a wide region, also those where `μ·L` cancels terms of the region, as in
-    // `L + (~L & B)` with `L` written out there: no leaf goes, but the rebuild is smaller.
+    // Terms count where `μ·L` cancels terms of a wide region, as in `L + (~L & B)` with `L`
+    // written out there (no leaf goes, but the rebuild is smaller), and in any region where
+    // the leaf terms left join bitwise terms.
     let base_terms = wide.then(|| region_terms(t, w).0.len());
+    let base_merged = merged_terms(t, w);
     let mut tried: Vec<(Option<usize>, Option<usize>, Option<usize>, Vec<(usize, i64)>, T)> = Vec::new();
     for combo in combos {
         let (mut from, mut to) = (Vec::new(), Vec::new());
@@ -302,13 +342,16 @@ pub(super) fn relate_region(t: &T, w: &Ctx) -> Option<T> {
             let rel = op(Op::Sub, vec![ph[k].clone(), lv[arith[k]].clone()]);
             s = op(Op::Add, vec![s, op(Op::Mul, vec![T::Num(mu), rel])]);
         }
-        let by_used = base_used.and_then(|b| semi_used(&s).filter(|&u| u < b));
+        // As many leaves, but one of the region's own cancelled: `L = h + e` takes `e` for `h`.
+        let replaced: Vec<T> = from.iter().map(signed_products).collect();
+        let swapped = |u: &[T]| base_used.as_ref().is_some_and(|b| b.iter().any(|x| !u.contains(x) && !replaced.contains(x)));
+        let by_used = semi_used(&s).filter(|u| u.len() < base_count || (u.len() == base_count && swapped(u))).map(|u| u.len());
         let by_monos = match base_monos {
             _ if semi => None,
             Some(b) => crate::poly_mba::monomials(&s, w).filter(|&u| u <= b),
             None => (!wide).then_some(0),
         };
-        let by_terms = base_terms.map(|_| region_terms(&s, w).0.len()).filter(|&n| base_terms.is_some_and(|b| n < b));
+        let by_terms = base_terms.map(|_| region_terms(&s, w).0.len()).filter(|&n| base_terms.is_some_and(|b| n < b)).or_else(|| Some(merged_terms(&s, w)).filter(|&n| n < base_merged));
         if by_used.is_some() || by_monos.is_some() || by_terms.is_some() {
             tried.push((by_used, by_monos, by_terms, combo, s));
         }
@@ -341,12 +384,47 @@ pub(super) fn relate_region(t: &T, w: &Ctx) -> Option<T> {
         } else {
             (false, r)
         };
-        // In a wide region only results where leaves or terms cancelled: others shift extraction for little gain.
-        if (!wide || fewer || (by_terms.is_some() && size(&r) < size(t))) && best.as_ref().is_none_or(|b| size(&r) < size(b)) {
+        // In a wide region only results where leaves or terms cancelled, or much smaller:
+        // others shift extraction for little gain.
+        let much = 10 * size(&r) <= 9 * size(t);
+        if (!wide || fewer || much || (by_terms.is_some() && size(&r) < size(t))) && best.as_ref().is_none_or(|b| size(&r) < size(b)) {
             best = Some(r);
         }
     }
     best
+}
+
+/// Whether `l` is `t` or a term of the sum `t`.
+fn in_sum(t: &T, l: &T) -> bool {
+    t == l
+        || match t {
+            T::Op(Op::Add | Op::Sub | Op::Neg, a) => a.iter().any(|x| in_sum(x, l)),
+            T::Op(Op::Mul, a) => (matches!(a[0], T::Num(_)) && in_sum(&a[1], l)) || (matches!(a[1], T::Num(_)) && in_sum(&a[0], l)),
+            _ => false,
+        }
+}
+
+/// Terms of the region `t`, not counting a leaf term `c·x` that joins a bitwise term
+/// `c·B` with `B = 0` where `x = 1` (`x + (y & ~x) = x | y`), or `-c·B` with `B = 1` there.
+fn merged_terms(t: &T, w: &Ctx) -> usize {
+    let (terms, _) = region_terms(t, w);
+    let joins = |c: u64, x: &T| {
+        terms.iter().any(|(d, b)| {
+            let want = if *d == c { 0 } else if *d == c.wrapping_neg() & w.mask { 1 } else { return false };
+            if !matches!(b, T::Op(..)) || kind(b, w) != Kind::Bit {
+                return false;
+            }
+            let mut bl = Vec::new();
+            leaves(b, w, &mut bl);
+            let Some(i) = bl.iter().position(|l| l == x) else { return false };
+            if bl.len() > MAX_LEAVES {
+                return false;
+            }
+            let prog = Prog::new(b, &bl, w);
+            (0..1usize << bl.len()).filter(|p| p >> i & 1 == 1).all(|p| prog.at(p, w) & 1 == want)
+        })
+    };
+    terms.iter().filter(|(c, x)| !((matches!(x, T::Var(_)) || kind(x, w) == Kind::Atom) && joins(*c, x))).count()
 }
 
 /// Whether `t` is 0 at a few fixed points, a quick check before a proof.

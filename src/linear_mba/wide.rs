@@ -898,13 +898,11 @@ pub(super) fn clustered(t: &T, w: &Ctx) -> Option<T> {
 }
 
 fn clustered_in(t: &T, w: &Ctx) -> Option<T> {
-    // Regions with products are left to `poly_mba`, which expands them across terms.
-    let mut lv = Vec::new();
-    leaves(t, w, &mut lv);
-    if lv.iter().any(|l| matches!(l, T::Op(Op::Mul, a) if !matches!(a[0], T::Num(_)) && !matches!(a[1], T::Num(_)))) {
+    // Regions with product terms are left to `poly_mba`, which expands them across terms.
+    let (terms, konst) = region_terms(t, w);
+    if terms.iter().any(|(_, l)| matches!(l, T::Op(Op::Mul, a) if !matches!(a[0], T::Num(_)) && !matches!(a[1], T::Num(_)))) {
         return None;
     }
-    let (terms, konst) = region_terms(t, w);
     if terms.len() < 2 {
         return None;
     }

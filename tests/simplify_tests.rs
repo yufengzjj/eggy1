@@ -754,6 +754,39 @@ fn related_leaves_in_wide_regions() {
     );
 }
 
+/// Arithmetic leaves that are complements of a linear MBA written out in the region
+/// (`c + ~b` = `~(b - c)`, `~h - e` = `~(h + e)`).
+#[test]
+fn complemented_arithmetic_leaves() {
+    check(
+        "u8",
+        &[
+            ("((f | a) & (c + ~b)) + b - c", &["((f | a) | (b - c))"], 10),
+            ("(a & e) + (a & ~c) + ((f | a) & (c + ~b)) + b", &["(((a & e) + (a | c)) + (a | (f | (b - c))))"], 10),
+        ],
+    );
+    check(
+        "i64",
+        &[
+            ("p - ((~h - e) & (c ^ j)) - h", &["((p - ((c ^ j) | (h + e))) + e)"], 10),
+            (
+                "((((((c | f) * (b * a)) - (d & a)) - d) - a) - ((~d + c) & (d | e))) + ((~c ^ e) & (a + c))",
+                &["(((((c | f) * (b * a)) - (d & a)) - (d | ((d - c) | e))) - ((e ^ c) & (a + c)))"],
+                10,
+            ),
+        ],
+    );
+    // `L = (b | i) + 2*b` relates without dropping a leaf.
+    check(
+        "u32",
+        &[(
+            "((h + l) ^ ((i | (l ^ e)) ^ (b & (i ^ c)))) + b + (2 * (b | ((h + l) & i))) - (((b | i) + (2 * b)) & ~g)",
+            &["((((b | i) + (2 * b)) & g) + ((h + l) ^ ((~i & (l ^ e)) ^ (b & c))))"],
+            10,
+        )],
+    );
+}
+
 /// The last extraction still holds a region the linear pre-pass rebuilds.
 #[test]
 fn extra_round_after_last_extraction() {
@@ -2080,7 +2113,7 @@ fn complement_leaves_of_wide_region() {
         "u32",
         &[(
             "(((0xd * s) - ((u ^ z) ^ y)) + ((0xfffffffe * ((3 * (t | x)) & (((3 * ~((t & y) ^ u)) + (0xfffffffe * (~(z & w) | y))) + ((s & t) ^ v)))) + ((3 * (t | x)) ^ (((3 * ((t & y) ^ u)) + (0xfffffffe * (~y & (z & w)))) - ((s & t) ^ v)))))",
-            &["(((0xd * s) - ((s & t) ^ v)) + ((((((t & y) ^ u) - (t | x)) * 3) - ((u ^ z) ^ y)) + (0xfffffffe * (~y & (z & w)))))", "(((((0xd * s) - ((u ^ z) ^ y)) - ((s & t) ^ v)) + ((((t & y) ^ u) - (t | x)) * 3)) + (0xfffffffe * (~y & (z & w))))"],
+            &["(((0xd * s) - ((s & t) ^ v)) + ((((((t & y) ^ u) - (t | x)) * 3) - ((u ^ z) ^ y)) + (0xfffffffe * (~y & (z & w)))))", "(((((3 * (((t & y) ^ u) - (t | x))) + (0xd * s)) - ((z ^ y) ^ u)) - ((t & s) ^ v)) - (2 * (~y & (z & w))))", "(((((0xd * s) - ((u ^ z) ^ y)) - ((s & t) ^ v)) + ((((t & y) ^ u) - (t | x)) * 3)) + (0xfffffffe * (~y & (z & w))))"],
             10,
         )],
     );
