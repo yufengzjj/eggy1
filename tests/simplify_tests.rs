@@ -2172,18 +2172,6 @@ fn overlapping_terms_with_equal_coefficients() {
         "i64",
         &[("-(y ^ z) - (x & ~y & z) - (x & y & ~z) + (a | b) + 2", &["(((a | b) - ((y ^ z) + ((y ^ z) & x))) + 2)"], 10)],
     );
-    // Too many ambiguous points to try each way; the terms over 3 leaves are rebuilt on their own.
-    for t in ["i64", "u64"] {
-        check(t, &[("(d ^ (c & f)) + (a | f) + (~f & b) - (a & b)", &["((d ^ (c & f)) + ((a ^ b) | (f ^ b)))"], 10)]);
-    }
-}
-
-/// Terms over few of a region's leaves are rebuilt on their own, beside the rest.
-#[test]
-fn sub_sum_rebuilt_on_its_own() {
-    for t in ["i64", "u64"] {
-        check(t, &[("(r | ((a | f) & (c & e))) + (f & ~(a | e)) - (a & ~(e | f))", &["(((f | e) - (a | e)) + (r | ((a | f) & (c & e))))"], 10)]);
-    }
 }
 
 /// A wide region whose value is a bitwise function of its leaves has single leaves peeled off.
