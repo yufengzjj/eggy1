@@ -264,3 +264,18 @@ fn test_complex_nested_expressions() {
         assert_eq!(infix, case, "Roundtrip failed for complex case: {}", case);
     }
 }
+
+#[test]
+fn negative_constants_print_as_subtraction() {
+    let show = |s: &str, norm: &dyn Fn(i64) -> i64| egglog_to_infix(&infix_to_egglog(s, true), &|n| norm(n));
+    let id = |n| n;
+    assert_eq!(show("z + -1", &id), "(z - 1)");
+    assert_eq!(show("z - -1", &id), "(z + 1)");
+    assert_eq!(show("(-4 * x) + y", &id), "(y - (4 * x))");
+    assert_eq!(show("y - (x * -3)", &id), "(y + (3 * x))");
+    assert_eq!(show("(-4 * x) + 5", &id), "((-4 * x) + 5)");
+    let i8 = |n: i64| n as i8 as i64;
+    assert_eq!(show("x + -128", &i8), "(x + -0x80)");
+    let u32 = |n: i64| n as u32 as i64;
+    assert_eq!(show("y + 0xfffffffe", &u32), "(y + 0xfffffffe)");
+}

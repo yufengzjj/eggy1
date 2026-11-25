@@ -114,7 +114,7 @@ fn tokenize(expr: &str) -> Vec<Token> {
     tokens
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Ast {
     Num(u64),
     Operand(String),
@@ -277,7 +277,56 @@ pub fn egglog_to_infix(expr: &str, norm: &impl Fn(i64) -> i64) -> String {
     let (ast, rest) = parse_prefix_expr(&tokens, 0);
     assert!(rest.is_empty(), "Unconsumed tokens: {:?}", rest);
     let ast = normalize_nums(ast, norm);
-    ast_to_infix(&ast)
+    ast_to_infix(&tidy_signs(ast, norm))
+}
+
+/// `a + -k` as `a - k`, `a - -k` as `a + k` and `a ± (-k * x)` as `a ∓ (k * x)`, for constants
+/// that print negative and whose negation does not; constant factors go first.
+fn tidy_signs(ast: Ast, norm: &impl Fn(i64) -> i64) -> Ast {
+    let flip = |a: &Ast| match a {
+        Ast::Num(n) if (*n as i64) < 0 && norm((*n as i64).wrapping_neg()) > 0 => {
+            Some(Ast::Num(norm((*n as i64).wrapping_neg()) as u64))
+        }
+        _ => None,
+    };
+    let flip_term = |a: &Ast| match a {
+        Ast::BinaryOp(op, l, r) if op == "*" => match (flip(l), flip(r)) {
+            (Some(k), _) => Some(Ast::BinaryOp(op.clone(), Box::new(k), r.clone())),
+            (None, Some(k)) => Some(Ast::BinaryOp(op.clone(), l.clone(), Box::new(k))),
+            _ => None,
+        },
+        a => flip(a),
+    };
+    match ast {
+        Ast::BinaryOp(op, l, r) => {
+            let (l, r) = (tidy_signs(*l, norm), tidy_signs(*r, norm));
+            match op.as_str() {
+                "+" => {
+                    if let Some(k) = flip_term(&r) {
+                        return Ast::BinaryOp("-".into(), Box::new(l), Box::new(k));
+                    }
+                    if !matches!(r, Ast::Num(_))
+                        && let Some(k) = flip_term(&l)
+                    {
+                        return Ast::BinaryOp("-".into(), Box::new(r), Box::new(k));
+                    }
+                }
+                "-" => {
+                    if let Some(k) = flip_term(&r) {
+                        return Ast::BinaryOp("+".into(), Box::new(l), Box::new(k));
+                    }
+                }
+                "*" if matches!(r, Ast::Num(_)) && !matches!(l, Ast::Num(_)) => {
+                    return Ast::BinaryOp(op, Box::new(r), Box::new(l));
+                }
+                _ => {}
+            }
+            Ast::BinaryOp(op, Box::new(l), Box::new(r))
+        }
+        Ast::UnaryOp(op, a) if op == "Num" => tidy_signs(*a, norm),
+        Ast::UnaryOp(op, a) => Ast::UnaryOp(op, Box::new(tidy_signs(*a, norm))),
+        a => a,
+    }
 }
 
 /// Fold each constant through `norm` (truncation to the active numeric width)

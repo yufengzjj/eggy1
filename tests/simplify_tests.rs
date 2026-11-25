@@ -1,4 +1,4 @@
-use eggy1::expr_convert::{ac_canon_infix, infix_to_egglog};
+use eggy1::expr_convert::{ac_canon_infix, egglog_to_infix, infix_to_egglog};
 use eggy1::{
     Cli, kz_add, kz_low, kz_mul, kz_shl, kz_shr, magic_div_s, magic_div_u, magic_s, magic_u, make_egg, pow2_div,
     simplify, simplify_round,
@@ -14,7 +14,10 @@ fn matches_expected(expect: &[&str], r: &str, ok: bool) -> bool {
         return false;
     }
     let rc = ac_canon_infix(r);
-    expect.iter().any(|e| ac_canon_infix(e) == rc)
+    // Expected forms written as `a + -k` print as `a - k`.
+    expect.iter().any(|e| {
+        ac_canon_infix(e) == rc || ac_canon_infix(&egglog_to_infix(&infix_to_egglog(e, true), &|n| n)) == rc
+    })
 }
 
 /// Run a batch of `(expr, [acceptable outputs], iter_limit)` cases at the given
@@ -396,7 +399,7 @@ fn shifts_in_multiply_form() {
         ("i64", "(2 * x) >> 1", "((2 * x) >> 1)"),
         ("u64", "(x & 0xffffffffffffffe0) >> 5", "(x >> 5)"),
         ("u8", "(x & 0x3f) * 4", "(4 * x)"),
-        ("u8", "(x & 0x1f) * 4", "((x & 0x1f) * 4)"),
+        ("u8", "(x & 0x1f) * 4", "(4 * (x & 0x1f))"),
     ]);
 }
 
