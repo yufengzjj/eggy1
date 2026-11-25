@@ -27,11 +27,12 @@ fn simba_in(t: &T, w: &Ctx, split: bool) -> Option<T> {
     leaves(t, w, &mut lv);
     let n = lv.len();
     if n > MAX_LEAVES {
-        let d = stats::pass("drop_unused", t, || drop_unused(t, &lv, w));
-        let c = stats::pass("clustered", t, || clustered(t, w));
+        let d = stats::try_pass("drop_unused", t, || drop_unused(t, &lv, w));
+        let c = stats::try_pass("clustered", t, || clustered(t, w));
         // A region too large to evaluate is peeled in its clustered form. With unused leaves
         // dropped, the rewrite of `d` peels.
-        let p = if d.is_some() { None } else { stats::pass("peel", t, || peel(t, w)).map(|p| (p, "peel")).or_else(|| Some((stats::pass("peel_clustered", c.as_ref()?, || peel(c.as_ref()?, w))?, "peel_clustered"))) };
+        let p = if d.is_some() { None } else { stats::try_pass("peel", t, || peel(t, w)).map(|p| (p, "peel")).or_else(|| Some((stats::try_pass("peel_clustered", c.as_ref()?, || peel(c.as_ref()?, w))?, "peel_clustered"))) };
+        let sizes: Vec<(&str, usize)> = [d.as_ref().map(|d| ("drop_unused", size(d))), c.as_ref().map(|c| ("clustered", size(c))), p.as_ref().map(|p| (p.1, size(&p.0)))].into_iter().flatten().collect();
         let best = match (d, c) {
             (Some(d), Some(c)) if size(&c) >= size(&d) => Some((d, "drop_unused")),
             (d, None) => d.map(|d| (d, "drop_unused")),
@@ -45,7 +46,7 @@ fn simba_in(t: &T, w: &Ctx, split: bool) -> Option<T> {
             w.st.used.fetch_or(CLUSTERED, Relaxed);
         }
         if let Some((_, name)) = &best {
-            stats::won(name);
+            stats::won_among(name, &sizes, size(t));
         }
         return best.map(|b| b.0);
     }
@@ -53,28 +54,28 @@ fn simba_in(t: &T, w: &Ctx, split: bool) -> Option<T> {
         return None;
     }
     let rebuilt = if has_const_bitwise(t, w) {
-        let r = stats::pass("semi_linear", t, || semi_linear(t, &lv, w))?;
-        if size(&r) < size(t) {
-            stats::won("semi_linear");
-        }
+        let r = stats::try_pass("semi_linear", t, || semi_linear(t, &lv, w))?;
+        stats::won_among("semi_linear", &[("semi_linear", size(&r))], size(t));
         r
     } else {
         let prog = Prog::new(t, &lv, w);
         let vals: Vec<u64> = (0..1usize << n).map(|p| prog.at(p, w)).collect();
-        let mut best = ("rebuild_values", stats::pass("rebuild_values", t, || rebuild_values(&vals, &lv, w)));
+        let mut best = ("rebuild_values", stats::try_pass("rebuild_values", t, || rebuild_values(&vals, &lv, w)));
+        let mut sizes = vec![(best.0, size(&best.1))];
         let mut try_one = |name: &'static str, r: Option<T>| {
-            if let Some(r) = r.filter(|r| size(r) < size(&best.1)) {
-                best = (name, r);
+            if let Some(r) = r {
+                sizes.push((name, size(&r)));
+                if size(&r) < size(&best.1) {
+                    best = (name, r);
+                }
             }
         };
-        try_one("common_multiple", stats::pass("common_multiple", t, || common_multiple(&vals, &lv, w)));
-        try_one("related_leaves", stats::pass("related_leaves", t, || related_leaves(t, &lv, w)));
+        try_one("common_multiple", stats::try_pass("common_multiple", t, || common_multiple(&vals, &lv, w)));
+        try_one("related_leaves", stats::try_pass("related_leaves", t, || related_leaves(t, &lv, w)));
         if split {
-            try_one("one_wide_term", stats::pass("one_wide_term", t, || one_wide_term(&vals, &lv, w)));
+            try_one("one_wide_term", stats::try_pass("one_wide_term", t, || one_wide_term(&vals, &lv, w)));
         }
-        if size(&best.1) < size(t) {
-            stats::won(best.0);
-        }
+        stats::won_among(best.0, &sizes, size(t));
         best.1
     };
     Some(rebuilt).filter(|b| size(b) < size(t))

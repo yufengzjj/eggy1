@@ -474,16 +474,16 @@ pub(crate) fn rewrite(t: &T, w: &Ctx) -> T {
     if take_one(&w.st.rewrites_left) == 0 {
         return t.clone();
     }
-    let (r, used) = tracking_clusters(w, || stats::pass("rewrite", t, || rewrite_uncached(t, w)));
+    let (r, used) = tracking_clusters(w, || stats::try_pass("rewrite", t, || rewrite_uncached(t, w)));
     w.st.rewritten.lock().unwrap().insert(key, (r.clone(), used));
     r
 }
 
 fn rewrite_uncached(t: &T, w: &Ctx) -> T {
     let lin = rewrite_linear(t, w);
-    let mut r = match stats::pass("poly_mba", t, || crate::poly_mba::simplify_poly(t, w)) {
+    let mut r = match stats::try_pass("poly_mba", t, || crate::poly_mba::simplify_poly(t, w)) {
         Some(p) if size(&p) < size(&lin) => {
-            stats::won("poly_mba");
+            stats::won_among("poly_mba", &[("poly_mba", size(&p)), ("linear", size(&lin))], size(t));
             p
         }
         _ => lin,
@@ -594,11 +594,14 @@ fn rewrite_linear(t: &T, w: &Ctx) -> T {
     let T::Op(op, args) = t else { return t.clone() };
     if kind(t, w) != Kind::Atom {
         let found = [
-            ("simba", stats::pass("simba", t, || simba(t, w))),
-            ("small_blocks", stats::pass("small_blocks", t, || small_blocks(t, w))),
+            ("simba", stats::try_pass("simba", t, || simba(t, w))),
+            ("small_blocks", stats::try_pass("small_blocks", t, || small_blocks(t, w))),
         ];
+        let mut sizes: Vec<(&str, usize)> = found.iter().filter_map(|(n, x)| Some((*n, size(x.as_ref()?)))).collect();
         let best = found.into_iter().filter_map(|(n, x)| Some((n, x?))).reduce(|b, x| if size(&x.1) < size(&b.1) { x } else { b });
-        let best = match (best, stats::pass("wide_blocks", t, || wide_blocks(t, w))) {
+        let wide = stats::try_pass("wide_blocks", t, || wide_blocks(t, w));
+        sizes.extend(wide.as_ref().map(|x| ("wide_blocks", size(x))));
+        let best = match (best, wide) {
             (Some(b), Some(x)) if size(&x) >= size(&b.1) => Some(b),
             (b, None) => b,
             (_, Some(x)) => {
@@ -607,7 +610,7 @@ fn rewrite_linear(t: &T, w: &Ctx) -> T {
             }
         };
         if let Some((name, best)) = best {
-            stats::won(name);
+            stats::won_among(name, &sizes, size(t));
             return substitute_atoms(&best, w);
         }
     }
@@ -669,7 +672,6 @@ fn cluster_regions(t: &T, w: &Ctx, in_lin: bool) -> T {
     match stats::pass("cluster_regions", &node, || clustered(&node, w)) {
         Some(c) => {
             w.st.used.fetch_or(CLUSTERED, Relaxed);
-            stats::won("cluster_regions");
             c
         }
         None => node,
@@ -800,8 +802,8 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool, p: &Passes) -> (Stri
     let run = |t: &T, related: bool| match stats::pass("tfunc_whole", t, || crate::tfunc::replacement(t, &w)) {
         Some(r) => r,
         None => {
-            let r = stats::pass("rewrite_top", t, || rewrite(t, &w));
-            let r = stats::pass("cluster_top", &r, || cluster_regions(&r, &w, false));
+            let r = stats::try_pass("rewrite_top", t, || rewrite(t, &w));
+            let r = stats::try_pass("cluster_top", &r, || cluster_regions(&r, &w, false));
             let r = if related { stats::pass("relate", &r, || relate(&r, &w)) } else { r };
             stats::pass("tfunc", &r, || crate::tfunc::simplify(&r, &w))
         }
@@ -932,11 +934,13 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool, p: &Passes) -> (Stri
     for (n, t) in &rebuilt {
         if *n != first_name {
             stats::add(&format!("pre/{n}/differs"), 0.0);
+            stats::add_n(&format!("pre/{n}/gain"), size(&rebuilt[0].1).saturating_sub(size(t)) as u64, 0.0);
         }
         stats::label(&show(t), n);
     }
     if let Some(u) = &unclustered {
         stats::add("pre/unclustered/differs", 0.0);
+        stats::add_n("pre/unclustered/gain", size(&rebuilt[0].1).saturating_sub(size(u)) as u64, 0.0);
         stats::label(&show(u), "unclustered");
     }
     if trace {

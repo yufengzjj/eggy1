@@ -835,9 +835,9 @@ pub(crate) fn simplify_poly(t: &T, w: &Ctx) -> Option<T> {
     } else {
         r
     };
-    let r = match stats::pass("poly/masked", t, || masked_poly(t, p.len().min(q.len()), w)) {
+    let r = match stats::try_pass("poly/masked", t, || masked_poly(t, p.len().min(q.len()), w)) {
         Some(m) if size(&m) < size(&r) => {
-            stats::won("poly/masked");
+            stats::won_among("poly/masked", &[("poly/masked", size(&m)), ("poly/build", size(&r))], size(t));
             m
         }
         _ => r,

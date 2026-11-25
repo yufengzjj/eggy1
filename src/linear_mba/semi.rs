@@ -101,8 +101,12 @@ pub(super) fn semi_linear(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
     from.push((cands.len(), "bit_split"));
     // Masks that differ only in bits that cannot matter tie on size; keep the short one.
     let i = (0..cands.len()).min_by_key(|&i| (size(&cands[i]), const_bits(&cands[i])))?;
-    if let Some((_, name)) = from.iter().find(|(end, _)| i < *end).filter(|_| size(&cands[i]) < size(t)) {
-        crate::stats::won(&format!("semi/{name}"));
+    if crate::stats::on() {
+        let source = |j: usize| from.iter().find(|(end, _)| j < *end).map_or("", |f| f.1);
+        let next = (0..cands.len()).filter(|&j| source(j) != source(i)).map(|j| size(&cands[j])).fold(size(t), usize::min);
+        if size(&cands[i]) < size(t) {
+            crate::stats::won(&format!("semi/{}", source(i)), next, size(&cands[i]));
+        }
     }
     let best = cands.swap_remove(i);
     Some(fill_slots(&time("semi/short_consts", || short_consts(best, lv, w)), &real))

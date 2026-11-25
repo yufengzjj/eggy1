@@ -2,12 +2,15 @@
 //! (`--stats`, or `bench` with `EGGY_STATS`); off, every call here returns at once.
 //!
 //! Keys: `pre/NAME/...` pre-pass candidates, `egglog/...` and `round/...` rounds,
-//! `polish/NAME/run|won`, `final/ORIGIN`, and `pass/NAME` for the passes inside a rebuild
-//! (time includes the passes they call), with `pass/NAME/smaller` when the result was
-//! smaller than the pass's input and `pass/NAME/won` when it was the form kept among
-//! alternatives.
+//! `polish/NAME/run|won|gain`, `final/ORIGIN`, and `pass/NAME` for the passes inside a
+//! rebuild: its time includes the passes it calls, `pass/NAME/self` has the time without
+//! them, `pass/NAME/smaller` counts results smaller than the pass's input, `pass/NAME/won`
+//! results kept among alternatives, and `pass/NAME/gain` sums the nodes a pass saved: for
+//! a pass in a chain its input's size less its result's, for one of several alternatives
+//! the next best alternative's size (or the input's) less the kept one's.
 
 use crate::eval::{Term, size};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -19,6 +22,11 @@ static COUNTS: Mutex<BTreeMap<String, (u64, f64)>> = Mutex::new(BTreeMap::new())
 /// Printed form of each pre-pass candidate of the current call → its source.
 static LABELS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
+thread_local! {
+    /// Time spent in nested passes, one entry per pass being run.
+    static NESTED: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
+}
+
 /// Starts collecting.
 pub fn enable() {
     ON.store(true, Relaxed);
@@ -28,15 +36,20 @@ pub fn on() -> bool {
     ON.load(Relaxed)
 }
 
-/// Counts `key` once and adds `secs` to its time.
-pub fn add(key: &str, secs: f64) {
+/// Adds `n` to the count of `key` and `secs` to its time.
+pub fn add_n(key: &str, n: u64, secs: f64) {
     if !on() {
         return;
     }
     let mut c = COUNTS.lock().unwrap();
     let e = c.entry(key.to_string()).or_insert((0, 0.0));
-    e.0 += 1;
+    e.0 += n;
     e.1 += secs;
+}
+
+/// Counts `key` once and adds `secs` to its time.
+pub fn add(key: &str, secs: f64) {
+    add_n(key, 1, secs);
 }
 
 /// Seconds since `start`.
@@ -46,51 +59,93 @@ pub fn since(start: Instant) -> f64 {
 
 /// A pass result whose size can be compared with the pass's input.
 pub trait Out {
-    fn smaller_than(&self, n: usize) -> bool;
+    fn out_size(&self) -> Option<usize>;
 }
 
 impl Out for Term {
-    fn smaller_than(&self, n: usize) -> bool {
-        size(self) < n
+    fn out_size(&self) -> Option<usize> {
+        Some(size(self))
     }
 }
 
 impl Out for Option<Term> {
-    fn smaller_than(&self, n: usize) -> bool {
-        self.as_ref().is_some_and(|t| size(t) < n)
+    fn out_size(&self) -> Option<usize> {
+        self.as_ref().map(size)
     }
 }
 
-/// `f()`, counted and timed under `pass/NAME`, and under `pass/NAME/smaller` when its
-/// result is smaller than `input`.
-pub fn pass<R: Out>(name: &str, input: &Term, f: impl FnOnce() -> R) -> R {
-    if !on() {
-        return f();
-    }
-    let clock = Instant::now();
-    let r = f();
-    add(&format!("pass/{name}"), since(clock));
-    if r.smaller_than(size(input)) {
-        add(&format!("pass/{name}/smaller"), 0.0);
-    }
-    r
-}
-
-/// `f()`, counted and timed under `pass/NAME`.
+/// `f()`, counted and timed under `pass/NAME` and `pass/NAME/self`.
 pub fn time<R>(name: &str, f: impl FnOnce() -> R) -> R {
     if !on() {
         return f();
     }
+    NESTED.with(|n| n.borrow_mut().push(0.0));
     let clock = Instant::now();
     let r = f();
-    add(&format!("pass/{name}"), since(clock));
+    let secs = since(clock);
+    let nested = NESTED.with(|n| {
+        let mut n = n.borrow_mut();
+        let own = n.pop().unwrap_or(0.0);
+        if let Some(parent) = n.last_mut() {
+            *parent += secs;
+        }
+        own
+    });
+    add(&format!("pass/{name}"), secs);
+    add(&format!("pass/{name}/self"), (secs - nested).max(0.0));
     r
 }
 
-/// Counts `pass/NAME/won`: its form was kept among alternatives.
-pub fn won(name: &str) {
+/// `time` for a pass in a chain: also counts `pass/NAME/smaller` and adds the nodes it
+/// saved to `pass/NAME/gain`.
+pub fn pass<R: Out>(name: &str, input: &Term, f: impl FnOnce() -> R) -> R {
+    if !on() {
+        return f();
+    }
+    let r = time(name, f);
+    smaller(name, size(input), r.out_size());
+    if let Some(out) = r.out_size().filter(|&o| o < size(input)) {
+        add_n(&format!("pass/{name}/gain"), (size(input) - out) as u64, 0.0);
+    }
+    r
+}
+
+/// `time` for one of several alternatives: also counts `pass/NAME/smaller`; its gain is
+/// counted by `won` if it is kept.
+pub fn try_pass<R: Out>(name: &str, input: &Term, f: impl FnOnce() -> R) -> R {
+    if !on() {
+        return f();
+    }
+    let r = time(name, f);
+    smaller(name, size(input), r.out_size());
+    r
+}
+
+fn smaller(name: &str, input: usize, out: Option<usize>) {
+    if out.is_some_and(|o| o < input) {
+        add(&format!("pass/{name}/smaller"), 0.0);
+    }
+}
+
+/// Counts `pass/NAME/won`, its form kept among alternatives, of size `kept` where the
+/// next best had `next`.
+pub fn won(name: &str, next: usize, kept: usize) {
     if on() {
         add(&format!("pass/{name}/won"), 0.0);
+        add_n(&format!("pass/{name}/gain"), next.saturating_sub(kept) as u64, 0.0);
+    }
+}
+
+/// `won` for `name` among alternatives of the given sizes, when its form is smaller than
+/// the input of size `input`; the next best is the smallest other one or the input.
+pub fn won_among(name: &str, sizes: &[(&str, usize)], input: usize) {
+    if !on() {
+        return;
+    }
+    let Some(&(_, kept)) = sizes.iter().find(|(n, _)| *n == name) else { return };
+    if kept < input {
+        let next = sizes.iter().filter(|(n, _)| *n != name).map(|(_, s)| *s).fold(input, usize::min);
+        won(name, next, kept);
     }
 }
 
