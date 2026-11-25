@@ -6,26 +6,15 @@ use std::collections::HashMap;
 pub type NodeId = u32;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub enum Node {
+enum Node {
     Num(i64),
     Var(String),
     Op(Op, Vec<NodeId>),
 }
 
-struct Entry {
-    node: Node,
-    /// Tree size, as `eval::size`.
-    size: u64,
-    /// Structural hash, the same in every run.
-    hash: u64,
-    /// Bit width of the value; 0 means the width of the whole run.
-    #[allow(dead_code)]
-    bits: u8,
-}
-
 #[derive(Default)]
 pub struct NodeTable {
-    entries: Vec<Entry>,
+    entries: Vec<Node>,
     ids: HashMap<Node, NodeId>,
 }
 
@@ -34,49 +23,20 @@ impl NodeTable {
         NodeTable::default()
     }
 
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.entries.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+    fn node(&self, id: NodeId) -> &Node {
+        &self.entries[id as usize]
     }
 
-    pub fn node(&self, id: NodeId) -> &Node {
-        &self.entries[id as usize].node
-    }
-
-    pub fn size(&self, id: NodeId) -> u64 {
-        self.entries[id as usize].size
-    }
-
-    pub fn hash(&self, id: NodeId) -> u64 {
-        self.entries[id as usize].hash
-    }
-
-    pub fn add(&mut self, node: Node) -> NodeId {
+    fn add(&mut self, node: Node) -> NodeId {
         if let Some(&id) = self.ids.get(&node) {
             return id;
         }
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        let size = match &node {
-            Node::Num(v) => {
-                (0u8, v).hash(&mut h);
-                1
-            }
-            Node::Var(v) => {
-                (1u8, v).hash(&mut h);
-                1
-            }
-            Node::Op(op, kids) => {
-                (2u8, op).hash(&mut h);
-                kids.iter().for_each(|&k| self.hash(k).hash(&mut h));
-                1 + kids.iter().map(|&k| self.size(k)).sum::<u64>()
-            }
-        };
         let id = self.entries.len() as NodeId;
-        self.entries.push(Entry { node: node.clone(), size, hash: h.finish(), bits: 0 });
+        self.entries.push(node.clone());
         self.ids.insert(node, id);
         id
     }
@@ -90,20 +50,12 @@ impl NodeTable {
         self.add(node)
     }
 
-    pub fn term(&self, id: NodeId) -> Term {
-        match self.node(id) {
-            Node::Num(v) => Term::Num(*v),
-            Node::Var(v) => Term::Var(v.clone()),
-            Node::Op(op, kids) => Term::Op(*op, kids.iter().map(|&k| self.term(k)).collect()),
-        }
-    }
-
     /// The value of every node, as `eval::eval` (`None` below a division by zero); children
     /// come before their parents in the table, so one pass in id order does it.
     pub fn eval_all(&self, ty: NumType, env: &impl Fn(&str) -> u64) -> Vec<Option<u64>> {
         let mut vals: Vec<Option<u64>> = Vec::with_capacity(self.len());
         for e in &self.entries {
-            let v = match &e.node {
+            let v = match e {
                 Node::Num(c) => Some(*c as u64 & ty.mask()),
                 Node::Var(v) => Some(env(v) & ty.mask()),
                 Node::Op(op, kids) => {

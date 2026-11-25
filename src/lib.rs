@@ -6,7 +6,6 @@ mod poly_mba;
 mod lowbits;
 mod minimal;
 mod tfunc;
-pub mod sched;
 
 use crate::expr_convert::{egglog_to_infix, infix_to_egglog};
 use clap::Parser;
@@ -959,24 +958,6 @@ fn init_egg_function(eg: &mut EGraph) {
     add_primitive!(eg, "kz-mul" = |a: i64, b: i64, w: i64| -> i64 { kz_mul(a, b, w) });
     add_primitive!(eg, "all-ones" = |z: i64, w: i64| -?> () { {let m = lowmask(w as u32); (z & m == m).then_some(())} });
 }
-/// One equality-saturation round on a fresh e-graph: insert `s` (unioned with
-/// its linear-MBA rebuild), run the schedule, extract the best term (in egglog
-/// syntax).
-/// One saturate-and-extract round on `s` together with its linear-MBA rebuild, or
-/// on the rebuild alone if `keep_input` is false and the pre-pass changed `s`.
-pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result<String, Error> {
-    simplify_round_with(egg, s, cli, keep_input, &sched_options(cli))
-}
-
-fn sched_options(cli: &Cli) -> sched::Options {
-    sched::Options {
-        on: cli.sched,
-        disable: cli.disable.clone(),
-        trace: cli.trace,
-        deadline: sched::deadline(cli.time_limit),
-    }
-}
-
 /// A fresh e-graph with the primitives and the program `egg` loaded, cloned from one
 /// built once per thread.
 fn rules_egraph(egg: &str) -> Result<EGraph, Error> {
@@ -993,8 +974,10 @@ fn rules_egraph(egg: &str) -> Result<EGraph, Error> {
     Ok(egraph)
 }
 
-fn simplify_round_with(egg: &str, s: &str, cli: &Cli, keep_input: bool, opts: &sched::Options) -> Result<String, Error> {
-    let (alt, other) = linear_mba::simplify_linear_with(s, width_of(&cli.num_type), opts);
+/// One saturate-and-extract round on `s` together with its linear-MBA rebuild, or
+/// on the rebuild alone if `keep_input` is false and the pre-pass changed `s`.
+pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result<String, Error> {
+    let (alt, other) = linear_mba::simplify_linear_with(s, width_of(&cli.num_type), cli.trace);
     let mut roots: Vec<&str> = match alt != s {
         true if !keep_input => vec![&alt],
         true => vec![s, &alt],
@@ -1073,22 +1056,12 @@ fn simplify_round_with(egg: &str, s: &str, cli: &Cli, keep_input: bool, opts: &s
 /// available again.
 pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
     let egg = make_egg(&cli.num_type);
-    let opts = sched_options(cli);
-    sched::take_used();
-    let mut seed = drive(&egg, s, cli, &opts)?;
-    // The rules can finish a smaller pre-pass result worse, so a run whose pre-pass the
-    // scheduler changed is compared with the run without it.
-    if opts.on && sched::take_used() {
-        let legacy = drive(&egg, s, cli, &sched::Options { on: false, ..opts.clone() })?;
-        if eval::size(&eval::parse(&legacy)) <= eval::size(&eval::parse(&seed)) {
-            seed = legacy;
-        }
-    }
+    let seed = drive(&egg, s, cli)?;
     Ok(egglog_to_infix(&seed, &|n| norm_const(n, &cli.num_type)))
 }
 
 /// The restart rounds of `simplify`; returns the last extraction.
-fn drive(egg: &str, s: &str, cli: &Cli, opts: &sched::Options) -> Result<String, Error> {
+fn drive(egg: &str, s: &str, cli: &Cli) -> Result<String, Error> {
     let mut seed = s.to_string();
     // Extraction prefers fewer non-constant nodes, but results are compared by node count,
     // so the forms the pre-pass and the rules give along the way are kept by node count.
@@ -1103,7 +1076,7 @@ fn drive(egg: &str, s: &str, cli: &Cli, opts: &sched::Options) -> Result<String,
     let (mut rounds, mut extra, mut first) = (cli.max_restarts.max(1), 2, true);
     while rounds > 0 {
         rounds -= 1;
-        let (alt, other) = linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), opts);
+        let (alt, other) = linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), cli.trace);
         offer(&alt);
         other.iter().for_each(|o| offer(o));
         // Saturating a large input is most of the run time and rarely beats its
@@ -1111,7 +1084,7 @@ fn drive(egg: &str, s: &str, cli: &Cli, opts: &sched::Options) -> Result<String,
         // that still mix arithmetic or constants into bitwise operations, and
         // inputs with shifts, division or mulhi, unless the rebuild is already tiny.
         let opaque = ["(Shl ", "(Shr ", "(Div ", "(Mod ", "(Mulhi "].iter().any(|o| seed.contains(o))
-            && !(first && eval::size(&eval::parse(&linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), &opts).0)) <= linear_mba::TINY);
+            && !(first && eval::size(&eval::parse(&linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), cli.trace).0)) <= linear_mba::TINY);
         // When no smaller term equals `alt` (or the first extraction, for the rerun with the
         // input), saturation could only pick another term of its size. No rule makes a
         // shift, division or mulhi from a term without one, so without them in the program
@@ -1125,32 +1098,32 @@ fn drive(egg: &str, s: &str, cli: &Cli, opts: &sched::Options) -> Result<String,
         let minimal = is_min(&alt);
         let mut extracted = match minimal {
             true => alt.clone(),
-            false => simplify_round_with(&egg, &seed, cli, first && opaque, &opts)?,
+            false => simplify_round(&egg, &seed, cli, first && opaque)?,
         };
         if first && !opaque && !minimal && mixed(&eval::parse(&extracted)) && !is_min(&extracted) {
-            let full = simplify_round_with(&egg, &seed, cli, true, &opts)?;
+            let full = simplify_round(&egg, &seed, cli, true)?;
             if eval::size(&eval::parse(&full)) <= eval::size(&eval::parse(&extracted)) {
                 extracted = full;
             }
         }
         offer(&extracted);
-        if opts.trace {
+        if cli.trace {
             eprintln!("round: seed {} extracted {}", eval::size(&eval::parse(&seed)), eval::size(&eval::parse(&extracted)));
         }
         first = false;
-        if extracted == seed || opts.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        if extracted == seed {
             seed = extracted;
             break;
         }
         seed = extracted;
         // The last extraction can still hold a linear region the pre-pass rebuilds.
-        if rounds == 0 && extra > 0 && linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), &opts).0 != seed {
+        if rounds == 0 && extra > 0 && linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), cli.trace).0 != seed {
             rounds = 1;
             extra -= 1;
         }
     }
     let (polished, used) = linear_mba::polish(&seed, width_of(&cli.num_type));
-    if opts.trace {
+    if cli.trace {
         eprintln!("polish: {} -> {} by {}", size_of(&seed), size_of(&polished), used.join(","));
     }
     offer(&polished);
@@ -1223,14 +1196,8 @@ pub struct Cli {
         help = "Maximum number of extract-and-restart rounds (each round runs the full iteration schedule on a fresh e-graph seeded with the previous round's result)"
     )]
     pub max_restarts: usize,
-    #[arg(long, help = "Run the pass scheduler after the pre-pass")]
-    pub sched: bool,
-    #[arg(long, value_delimiter = ',', help = "Scheduler passes not to run, comma-separated")]
-    pub disable: Vec<String>,
-    #[arg(long, help = "Print scheduler statistics to stderr")]
+    #[arg(long, help = "Print pre-pass candidates and round sizes to stderr")]
     pub trace: bool,
-    #[arg(long, help = "Stop scheduling and restarting after this many seconds and return the best result so far")]
-    pub time_limit: Option<f64>,
     #[arg(help = "The infix expression to simplify")]
     pub expr: String,
 }
@@ -1243,10 +1210,7 @@ impl Default for Cli {
             num_type: "i64".to_string(),
             iter_limit: 10,
             max_restarts: 2,
-            sched: false,
-            disable: Vec::new(),
             trace: false,
-            time_limit: None,
             expr: String::new(),
         }
     }

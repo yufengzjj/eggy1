@@ -42,13 +42,7 @@ struct Args {
     /// Write one tab-separated line per case to this file (columns in `RESULT_COLUMNS`).
     #[arg(short, long)]
     results: Option<String>,
-    /// Run the pass scheduler after the pre-pass.
-    #[arg(long)]
-    sched: bool,
-    /// Scheduler passes not to run, comma-separated.
-    #[arg(long, default_value = "")]
-    disable: String,
-    /// Print pre-pass and scheduler statistics to stderr (child mode).
+    /// Print pre-pass statistics to stderr (child mode).
     #[arg(long)]
     trace: bool,
     /// Child mode: read input and ground truth from stdin, print one result line.
@@ -239,8 +233,6 @@ fn run_child(args: &Args, case: &Case) -> Outcome {
     let start = Instant::now();
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args(["--one", "-n", &args.num_type, "-i", &args.iter_limit.to_string(), "-m", &args.max_restarts.to_string()])
-        .args(args.sched.then_some("--sched"))
-        .args(["--disable", &args.disable])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -303,9 +295,7 @@ fn run_one(args: &Args) {
         num_type: args.num_type.clone(),
         iter_limit: args.iter_limit,
         max_restarts: args.max_restarts,
-        sched: args.sched,
         trace: args.trace,
-        disable: args.disable.split(',').filter(|d| !d.is_empty()).map(String::from).collect(),
         expr: input.clone(),
         ..Default::default()
     };
