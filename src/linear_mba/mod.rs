@@ -8,6 +8,7 @@
 
 use crate::eval::{Op, Term as T, parse, show, size};
 use crate::sched::Passes;
+use crate::stats;
 use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::Relaxed};
 
@@ -473,15 +474,18 @@ pub(crate) fn rewrite(t: &T, w: &Ctx) -> T {
     if take_one(&w.st.rewrites_left) == 0 {
         return t.clone();
     }
-    let (r, used) = tracking_clusters(w, || rewrite_uncached(t, w));
+    let (r, used) = tracking_clusters(w, || stats::pass("rewrite", t, || rewrite_uncached(t, w)));
     w.st.rewritten.lock().unwrap().insert(key, (r.clone(), used));
     r
 }
 
 fn rewrite_uncached(t: &T, w: &Ctx) -> T {
     let lin = rewrite_linear(t, w);
-    let mut r = match crate::poly_mba::simplify_poly(t, w) {
-        Some(p) if size(&p) < size(&lin) => p,
+    let mut r = match stats::pass("poly_mba", t, || crate::poly_mba::simplify_poly(t, w)) {
+        Some(p) if size(&p) < size(&lin) => {
+            stats::won("poly_mba");
+            p
+        }
         _ => lin,
     };
     // A rebuilt region can expose more: once `9*(A & B) + ...` becomes `2*A - B`
@@ -589,16 +593,21 @@ fn recombine_products(t: &T, w: &Ctx) -> Option<T> {
 fn rewrite_linear(t: &T, w: &Ctx) -> T {
     let T::Op(op, args) = t else { return t.clone() };
     if kind(t, w) != Kind::Atom {
-        let best = [simba(t, w), small_blocks(t, w)].into_iter().flatten().reduce(|b, x| if size(&x) < size(&b) { x } else { b });
-        let best = match (best, wide_blocks(t, w)) {
-            (Some(b), Some(x)) if size(&x) >= size(&b) => Some(b),
+        let found = [
+            ("simba", stats::pass("simba", t, || simba(t, w))),
+            ("small_blocks", stats::pass("small_blocks", t, || small_blocks(t, w))),
+        ];
+        let best = found.into_iter().filter_map(|(n, x)| Some((n, x?))).reduce(|b, x| if size(&x.1) < size(&b.1) { x } else { b });
+        let best = match (best, stats::pass("wide_blocks", t, || wide_blocks(t, w))) {
+            (Some(b), Some(x)) if size(&x) >= size(&b.1) => Some(b),
             (b, None) => b,
             (_, Some(x)) => {
                 w.st.used.fetch_or(WIDE, Relaxed);
-                Some(x)
+                Some(("wide_blocks", x))
             }
         };
-        if let Some(best) = best {
+        if let Some((name, best)) = best {
+            stats::won(name);
             return substitute_atoms(&best, w);
         }
     }
@@ -657,9 +666,10 @@ fn cluster_regions(t: &T, w: &Ctx, in_lin: bool) -> T {
     if lv.len() <= MAX_LEAVES {
         return node;
     }
-    match clustered(&node, w) {
+    match stats::pass("cluster_regions", &node, || clustered(&node, w)) {
         Some(c) => {
             w.st.used.fetch_or(CLUSTERED, Relaxed);
+            stats::won("cluster_regions");
             c
         }
         None => node,
@@ -755,10 +765,11 @@ pub fn simplify_linear_with(egg: &str, w: u32, trace: bool, p: &Passes) -> (Stri
 /// and `shifted_xor`.
 fn finish(t: &T, w: &Ctx) -> T {
     // Products selected by a bit are left whole for `split_bits` in the next round (Hikari).
-    let t = if selectors(t, w).is_empty() { recombine_regions(t, w, false) } else { t.clone() };
-    let t = crate::lowbits::shifted_xor(&crate::lowbits::cut_products(&t, w), w);
+    let t = if selectors(t, w).is_empty() { stats::pass("recombine", t, || recombine_regions(t, w, false)) } else { t.clone() };
+    let t = stats::pass("cut_products", &t, || crate::lowbits::cut_products(&t, w));
+    let t = stats::pass("shifted_xor", &t, || crate::lowbits::shifted_xor(&t, w));
     // Rebuilds can leave bits known by evaluation only (`-(A & B) & 1` with `A & B` even).
-    let low = crate::lowbits::simplify_rebuilt(&t, w);
+    let low = stats::pass("simplify_rebuilt", &t, || crate::lowbits::simplify_rebuilt(&t, w));
     if size(&low) < size(&t) { low } else { t }
 }
 
@@ -778,19 +789,21 @@ fn drop_identities(t: &T, w: &Ctx) -> T {
 
 /// The pre-pass result and the forms to union with it.
 fn simplify_linear_uncached(egg: &str, w: u32, trace: bool, p: &Passes) -> (String, Vec<String>) {
-    use crate::stats;
     let clock = std::time::Instant::now();
     let w = Ctx::new(w);
     let t = parse(egg);
     let t0 = t.clone();
-    let t = unshift(&crate::lowbits::simplify(&t, &w), &w);
+    let t = stats::pass("lowbits", &t, || crate::lowbits::simplify(&t, &w));
+    let t = stats::pass("unshift", &t, || unshift(&t, &w));
     // Subterms are replaced only after the rebuild: earlier, `~(y - 1)` would become
     // `-y`, a leaf the rebuild no longer relates to `y - 1`.
-    let run = |t: &T, related: bool| match crate::tfunc::replacement(t, &w) {
+    let run = |t: &T, related: bool| match stats::pass("tfunc_whole", t, || crate::tfunc::replacement(t, &w)) {
         Some(r) => r,
         None => {
-            let r = cluster_regions(&rewrite(t, &w), &w, false);
-            crate::tfunc::simplify(&if related { relate(&r, &w) } else { r }, &w)
+            let r = stats::pass("rewrite_top", t, || rewrite(t, &w));
+            let r = stats::pass("cluster_top", &r, || cluster_regions(&r, &w, false));
+            let r = if related { stats::pass("relate", &r, || relate(&r, &w)) } else { r };
+            stats::pass("tfunc", &r, || crate::tfunc::simplify(&r, &w))
         }
     };
     let r = run(&t, true);
@@ -800,7 +813,7 @@ fn simplify_linear_uncached(egg: &str, w: u32, trace: bool, p: &Passes) -> (Stri
     // Unified operands let the regions around them share leaves, but the rebuild of the
     // input as written is sometimes smaller. The second rebuild redoes only the regions
     // unification changed, and is dropped once it needs `UNIFIED_REWRITES` rewrites.
-    let unified = if p.pre_on("unified") { unify_operands(&t, &w) } else { t.clone() };
+    let unified = if p.pre_on("unified") { stats::pass("unify_operands", &t, || unify_operands(&t, &w)) } else { t.clone() };
     let r = if unified != t {
         let left = w.st.rewrites_left.load(Relaxed);
         w.limit_rewrites(UNIFIED_REWRITES);

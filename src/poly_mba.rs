@@ -810,9 +810,13 @@ pub(crate) fn simplify_poly(t: &T, w: &Ctx) -> Option<T> {
     if !wide && !has_product(t, w) {
         return None;
     }
+    use crate::stats;
     let mut ctx = Expansion::new(w, Vec::new());
-    let p = ctx.poly(t)?;
-    let q = ctx.reduce_null(&p);
+    let (p, q) = stats::time("poly/expand", || {
+        let p = ctx.poly(t)?;
+        let q = ctx.reduce_null(&p);
+        Some((p, q))
+    })?;
     // Far more monomials than nodes (products of bitwise terms over many leaves)
     // rarely rebuild smaller, and building them is slow.
     if p.len().min(q.len()) > 4 * size(t) {
@@ -821,7 +825,7 @@ pub(crate) fn simplify_poly(t: &T, w: &Ctx) -> Option<T> {
     if p.len().min(q.len()) > MAX_BRANCH_MONOS {
         ctx.builds.set(MAX_BUILDS);
     }
-    let r = ctx.build(if q.len() < p.len() { &q } else { &p }, FACTOR_TRIES);
+    let r = stats::time("poly/build", || ctx.build(if q.len() < p.len() { &q } else { &p }, FACTOR_TRIES));
     // As many monomials, but a null polynomial can have made coefficients huge (`2^63·y` beside
     // a factor that keeps the rest even).
     let huge = |p: &Poly| p.values().any(|&c| w.signed(c).unsigned_abs() >= 1 << (w.w - 2));
@@ -831,8 +835,11 @@ pub(crate) fn simplify_poly(t: &T, w: &Ctx) -> Option<T> {
     } else {
         r
     };
-    let r = match masked_poly(t, p.len().min(q.len()), w) {
-        Some(m) if size(&m) < size(&r) => m,
+    let r = match stats::pass("poly/masked", t, || masked_poly(t, p.len().min(q.len()), w)) {
+        Some(m) if size(&m) < size(&r) => {
+            stats::won("poly/masked");
+            m
+        }
         _ => r,
     };
     (size(&r) < size(t)).then_some(r)

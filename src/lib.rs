@@ -1241,6 +1241,8 @@ pub struct Cli {
     pub passes: sched::Passes,
     #[arg(long, help = "Print the pass pipeline in --passes form and exit")]
     pub show_passes: bool,
+    #[arg(long, help = "Print per-pass counts, times and wins to stderr")]
+    pub stats: bool,
     #[arg(default_value = "", hide_default_value = true, help = "The infix expression to simplify")]
     pub expr: String,
 }
@@ -1256,6 +1258,7 @@ impl Default for Cli {
             trace: false,
             passes: sched::Passes::default(),
             show_passes: false,
+            stats: false,
             expr: String::new(),
         }
     }

@@ -25,7 +25,13 @@ fn main() {
         println!("please enter a valid expression");
         return;
     }
+    if cli.stats {
+        eggy1::stats::enable();
+    }
     let result = simplify(&egg_expr, &cli);
+    if cli.stats {
+        eprint!("{}", eggy1::stats::report(&eggy1::stats::take()));
+    }
     if let Ok(v) = result {
         println!("\n{}", v);
     } else if let Err(v) = result {

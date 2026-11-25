@@ -48,6 +48,10 @@ struct Args {
     /// Pass pipeline changes, as `eggy1 --passes`.
     #[arg(long, default_value = "")]
     passes: String,
+    /// Append each case's per-pass counts and times to this file (`scripts/stats.py`
+    /// summarizes it); the `EGGY_STATS` environment variable does the same.
+    #[arg(long)]
+    stats: Option<String>,
     /// Child mode: read input and ground truth from stdin, print one result line.
     #[arg(long, hide = true)]
     one: bool,
@@ -238,9 +242,14 @@ fn report(cases: &[Case], results: &[Outcome]) {
 
 fn run_child(args: &Args, case: &Case) -> Outcome {
     let start = Instant::now();
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
         .args(["--one", "-n", &args.num_type, "-i", &args.iter_limit.to_string(), "-m", &args.max_restarts.to_string(), "--passes", &args.passes])
-        .env("EGGY_CASE", format!("{}\t{}\t{}\t{}", args.num_type, case.file, case.section, case.index))
+        .env("EGGY_CASE", format!("{}\t{}\t{}\t{}", args.num_type, case.file, case.section, case.index));
+    if let Some(path) = &args.stats {
+        command.env("EGGY_STATS", path);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -308,6 +317,10 @@ fn run_one(args: &Args) {
         expr: input.clone(),
         ..Default::default()
     };
+    let stats_path = std::env::var("EGGY_STATS").ok();
+    if stats_path.is_some() {
+        eggy1::stats::enable();
+    }
     let out = match simplify(&in_egg, &cli) {
         Ok(o) => o,
         Err(e) => {
@@ -331,16 +344,18 @@ fn run_one(args: &Args) {
         "unchanged"
     };
     println!("{status}\tsize in/gt/out {s_in}/{s_gt}/{s_out}: {out}");
-    write_stats(status, (s_in, s_gt, s_out));
+    if let Some(path) = stats_path {
+        write_stats(&path, status, (s_in, s_gt, s_out), &eggy1::stats::features(&t_in));
+    }
 }
 
-/// With `EGGY_STATS` set, appends the case's candidate-source counts to that file as
-/// `type file section index status in gt out key=count:secs;...`.
-fn write_stats(status: &str, (s_in, s_gt, s_out): (usize, usize, usize)) {
+/// Appends the case's per-pass counts to `path` as
+/// `type file section index status in gt out features key=count:secs;...`.
+fn write_stats(path: &str, status: &str, (s_in, s_gt, s_out): (usize, usize, usize), features: &str) {
     let counts = eggy1::stats::take();
-    let (Ok(path), Ok(case)) = (std::env::var("EGGY_STATS"), std::env::var("EGGY_CASE")) else { return };
+    let Ok(case) = std::env::var("EGGY_CASE") else { return };
     let cells: Vec<String> = counts.iter().map(|(k, (n, secs))| format!("{k}={n}:{secs:.4}")).collect();
-    let line = format!("{case}\t{status}\t{s_in}\t{s_gt}\t{s_out}\t{}\n", cells.join(";"));
+    let line = format!("{case}\t{status}\t{s_in}\t{s_gt}\t{s_out}\t{features}\t{}\n", cells.join(";"));
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = f.write_all(line.as_bytes());
     }

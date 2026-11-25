@@ -22,25 +22,30 @@ pub(super) fn simba(t: &T, w: &Ctx) -> Option<T> {
 /// `simba`, with `one_wide_term` tried when `split`: on the linear cofactors of `poly_mba`
 /// it costs more than it gains.
 fn simba_in(t: &T, w: &Ctx, split: bool) -> Option<T> {
+    use crate::stats;
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
     let n = lv.len();
     if n > MAX_LEAVES {
-        let (d, c) = (drop_unused(t, &lv, w), clustered(t, w));
+        let d = stats::pass("drop_unused", t, || drop_unused(t, &lv, w));
+        let c = stats::pass("clustered", t, || clustered(t, w));
         // A region too large to evaluate is peeled in its clustered form. With unused leaves
         // dropped, the rewrite of `d` peels.
-        let p = if d.is_some() { None } else { peel(t, w).map(|p| (p, false)).or_else(|| Some((peel(c.as_ref()?, w)?, true))) };
+        let p = if d.is_some() { None } else { stats::pass("peel", t, || peel(t, w)).map(|p| (p, "peel")).or_else(|| Some((stats::pass("peel_clustered", c.as_ref()?, || peel(c.as_ref()?, w))?, "peel_clustered"))) };
         let best = match (d, c) {
-            (Some(d), Some(c)) if size(&c) >= size(&d) => Some((d, false)),
-            (d, None) => d.map(|d| (d, false)),
-            (_, c) => c.map(|c| (c, true)),
+            (Some(d), Some(c)) if size(&c) >= size(&d) => Some((d, "drop_unused")),
+            (d, None) => d.map(|d| (d, "drop_unused")),
+            (_, c) => c.map(|c| (c, "clustered")),
         };
         let best = match (best, p) {
             (Some(b), Some(p)) if size(&p.0) >= size(&b.0) => Some(b),
             (b, p) => p.or(b),
         };
-        if best.as_ref().is_some_and(|b| b.1) {
+        if best.as_ref().is_some_and(|b| matches!(b.1, "clustered" | "peel_clustered")) {
             w.st.used.fetch_or(CLUSTERED, Relaxed);
+        }
+        if let Some((_, name)) = &best {
+            stats::won(name);
         }
         return best.map(|b| b.0);
     }
@@ -48,26 +53,29 @@ fn simba_in(t: &T, w: &Ctx, split: bool) -> Option<T> {
         return None;
     }
     let rebuilt = if has_const_bitwise(t, w) {
-        semi_linear(t, &lv, w)?
+        let r = stats::pass("semi_linear", t, || semi_linear(t, &lv, w))?;
+        if size(&r) < size(t) {
+            stats::won("semi_linear");
+        }
+        r
     } else {
         let prog = Prog::new(t, &lv, w);
         let vals: Vec<u64> = (0..1usize << n).map(|p| prog.at(p, w)).collect();
-        let rebuilt = rebuild_values(&vals, &lv, w);
-        let rebuilt = match common_multiple(&vals, &lv, w) {
-            Some(r) if size(&r) < size(&rebuilt) => r,
-            _ => rebuilt,
+        let mut best = ("rebuild_values", stats::pass("rebuild_values", t, || rebuild_values(&vals, &lv, w)));
+        let mut try_one = |name: &'static str, r: Option<T>| {
+            if let Some(r) = r.filter(|r| size(r) < size(&best.1)) {
+                best = (name, r);
+            }
         };
-        let rebuilt = match related_leaves(t, &lv, w) {
-            Some(r) if size(&r) < size(&rebuilt) => r,
-            _ => rebuilt,
-        };
-        if !split {
-            return Some(rebuilt).filter(|b| size(b) < size(t));
+        try_one("common_multiple", stats::pass("common_multiple", t, || common_multiple(&vals, &lv, w)));
+        try_one("related_leaves", stats::pass("related_leaves", t, || related_leaves(t, &lv, w)));
+        if split {
+            try_one("one_wide_term", stats::pass("one_wide_term", t, || one_wide_term(&vals, &lv, w)));
         }
-        match one_wide_term(&vals, &lv, w) {
-            Some(r) if size(&r) < size(&rebuilt) => r,
-            _ => rebuilt,
+        if size(&best.1) < size(t) {
+            stats::won(best.0);
         }
+        best.1
     };
     Some(rebuilt).filter(|b| size(b) < size(t))
 }
