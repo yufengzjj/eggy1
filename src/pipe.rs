@@ -153,6 +153,13 @@ impl Cand {
         *self.forms.size.get_or_init(|| size(self.tree()))
     }
 
+    fn into_tree(self) -> Term {
+        match Rc::try_unwrap(self.forms) {
+            Ok(f) => f.tree.into_inner().unwrap_or_else(|| parse(f.text.get().unwrap())),
+            Err(f) => f.tree.get_or_init(|| parse(f.text.get().unwrap())).clone(),
+        }
+    }
+
     fn same(&self, o: &Cand) -> bool {
         if Rc::ptr_eq(&self.forms, &o.forms) {
             return true;
@@ -186,6 +193,9 @@ pub struct Env<'a> {
     moved: Cell<bool>,
     /// Results the `smaller` inside the innermost `wins` took.
     wins: Cell<usize>,
+    /// Set inside a `regions`: the `won` its `best` would count, left for `regions` to count
+    /// with the form it builds.
+    deferred: RefCell<Option<Option<Won>>>,
     /// The smallest candidate each enclosing `smallest` saw, innermost last.
     seen: RefCell<Vec<Option<(usize, Cand)>>>,
     regs: RefCell<HashMap<String, Vec<Cand>>>,
@@ -205,7 +215,7 @@ impl<'a> Env<'a> {
 
     fn with(cli: Option<&'a Cli>, passes: &'a Passes, w: u32, trace: bool, egg: String, input: &str) -> Env<'a> {
         let input = input.to_string();
-        Env { cli, passes, w, trace, egg, input, moved: Cell::new(false), wins: Cell::new(0), seen: Default::default(), regs: Default::default(), ctxs: Default::default() }
+        Env { cli, passes, w, trace, egg, input, moved: Cell::new(false), wins: Cell::new(0), deferred: Default::default(), seen: Default::default(), regs: Default::default(), ctxs: Default::default() }
     }
 
     fn cli(&self, pass: &str) -> &'a Cli {
@@ -337,8 +347,14 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
         }
         Pipe::Best(k, ps) => {
             let mut out = Vec::new();
-            for p in ps {
-                out.extend(go(p, set.clone(), env)?);
+            let mut from = Vec::new();
+            for (i, p) in ps.iter().enumerate() {
+                let o = go(p, set.clone(), env)?;
+                from.extend(std::iter::repeat_n(i, o.len()));
+                out.extend(o);
+            }
+            if stats::on() {
+                count_won(ps, &out, &from, &set, env);
             }
             let mut out = dedup(out);
             out.sort_by_cached_key(|c| c.size());
@@ -457,6 +473,49 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             env.wins.set(env.wins.get() + 1);
             Ok(out)
         }
+        Pipe::Regions(p) => {
+            let w = env.ctx(|c| c.narrow(c.w));
+            let mut out = Vec::with_capacity(set.len());
+            for c in set {
+                let outer = w.swap_used(0);
+                let (mut err, mut won) = (None, None);
+                let r = linear_mba::on_region(c.tree(), &w, || {
+                    let before = env.deferred.replace(Some(None));
+                    let rebuilt = go(p, vec![c.clone()], env);
+                    won = env.deferred.replace(before).flatten();
+                    match rebuilt {
+                        Ok(o) => o.into_iter().next().map(|b| {
+                            w.swap_used(w.swap_used(0) | b.used);
+                            b.tree().clone()
+                        }),
+                        Err(e) => {
+                            err = Some(e);
+                            None
+                        }
+                    }
+                });
+                if let Some(e) = err {
+                    return Err(e);
+                }
+                if let Some((name, sizes, input)) = won {
+                    let sizes: Vec<(&str, usize)> = sizes.iter().map(|(n, s)| (n.as_str(), *s)).collect();
+                    stats::won_among(&name, &sizes, input, &r);
+                }
+                let used = w.swap_used(0);
+                w.swap_used(outer | used);
+                out.push(Cand::of(r, &c, used, 0));
+            }
+            Ok(out)
+        }
+        Pipe::Again(p) => {
+            let mut out = go(p, set.clone(), env)?;
+            if let (Some(m), Some(t)) = (out.first_mut(), set.first()) {
+                if let Some(r) = env.ctx(|w| linear_mba::again(t.tree(), m.tree(), w)) {
+                    *m = Cand::of(r, m, 0, 0);
+                }
+            }
+            Ok(out)
+        }
         Pipe::Wins(n, p) => {
             let (n, outer) = (env.count(n), env.wins.replace(0));
             let mut set = set;
@@ -471,6 +530,42 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             Ok(set)
         }
     }
+}
+
+/// A `won` to count: the winning pass, each pass's size, the input's size.
+type Won = (String, Vec<(String, usize)>, usize);
+
+/// Counts `won` for the pass of `ps` whose candidate `best` keeps, when it is an alternative
+/// pass (`linear_mba::ALTERNATIVES`); inside a `regions`, leaves it for that to count.
+fn count_won(ps: &[Pipe], out: &[Cand], from: &[usize], set: &[Cand], env: &Env) {
+    let name = |i: usize| match &ps[i] {
+        Pipe::Pass(n) if linear_mba::ALTERNATIVES.iter().any(|(a, _)| a == n) => n.clone(),
+        _ => String::new(),
+    };
+    let (Some(input), Some(kept)) = (set.first(), out.iter().enumerate().min_by_key(|(_, c)| c.size())) else { return };
+    let winner = name(from[kept.0]);
+    if winner.is_empty() {
+        return;
+    }
+    let sizes: Vec<(String, usize)> = out.iter().zip(from).map(|(c, &i)| (name(i), c.size())).collect();
+    let mut slot = env.deferred.borrow_mut();
+    match slot.as_mut() {
+        Some(s @ None) => *s = Some((winner, sizes, input.size())),
+        _ => {
+            let sizes: Vec<(&str, usize)> = sizes.iter().map(|(n, s)| (n.as_str(), *s)).collect();
+            stats::won_among(&winner, &sizes, input.size(), kept.1.tree());
+        }
+    }
+}
+
+/// `p` on the term `t`, on the run `w` (no new scope), for `linear_mba::rewrite`: its main
+/// candidate, or `t` when it gives none.
+pub(crate) fn run_term(p: &Pipe, t: &Term, w: &Ctx) -> Term {
+    let passes = crate::sched::current();
+    let env = Env::with(None, &passes, w.w, false, String::new(), "");
+    env.ctxs.borrow_mut().push(w.narrow(w.w));
+    let out = go(p, vec![Cand::of(t.clone(), &Cand::new("", "rewrite"), 0, 0)], &env).expect("a rewrite runs no egglog");
+    out.into_iter().next().map_or_else(|| t.clone(), Cand::into_tree)
 }
 
 /// `Passes::polish` of `p` on the egglog term `egg` at width `w`, and the origin of its
@@ -498,6 +593,9 @@ fn pass(name: &str, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
     }
     if let Some(r) = name.strip_prefix("load/") {
         return Ok(env.regs.borrow().get(r).cloned().unwrap_or_default());
+    }
+    if let Some(f) = linear_mba::term_pass(name) {
+        return Ok(seen(dedup(term_pass(name, f, &set, env)), env));
     }
     let Some(main) = set.first().cloned() else { return Ok(set) };
     let p = env.passes;
@@ -574,36 +672,47 @@ fn pass(name: &str, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             };
             vec![new(e, origin)]
         }
-        _ => {
-            let f = linear_mba::term_pass(name).unwrap_or_else(|| panic!("unknown pass {name}"));
-            env.ctx(|ctx| {
-                set.iter()
-                    .map(|c| {
-                        let t = c.tree();
-                        let (outer, left) = (ctx.swap_used(0), ctx.setting("rewrites").unwrap());
-                        let r: Option<Term> = stats::pass(name, t, || f(t, ctx));
-                        let used = ctx.swap_used(0);
-                        ctx.swap_used(outer | used);
-                        let made = left.saturating_sub(ctx.setting("rewrites").unwrap());
-                        match r {
-                            Some(r) if r != *t => Cand::of(r, c, used, made),
-                            _ => Cand { used: c.used | used, rewrites: c.rewrites + made, ..c.clone() },
-                        }
-                    })
-                    .collect()
-            })
-        }
+        _ => panic!("unknown pass {name}"),
     };
-    // A term a pass over the list gives back keeps the origin it came with; passes over one
-    // term keep each candidate's own.
-    let by_term = linear_mba::term_pass(name).is_some();
+    // A term a pass over the list gives back keeps the origin it came with.
     let out: Vec<Cand> = dedup(out)
         .into_iter()
-        .map(|c| match set.iter().find(|s| !by_term && s.same(&c)) {
+        .map(|c| match set.iter().find(|s| s.same(&c)) {
             Some(s) => s.clone(),
             None => c,
         })
         .collect();
+    Ok(seen(out, env))
+}
+
+/// The pass over one term `f` on each candidate of `set`, which keeps its own origin.
+fn term_pass(name: &str, f: linear_mba::TermPass, set: &[Cand], env: &Env) -> Vec<Cand> {
+    let alt = linear_mba::ALTERNATIVES.iter().find(|(a, _)| *a == name).map(|(_, bit)| *bit);
+    env.ctx(|ctx| {
+        set.iter()
+            .filter_map(|c| {
+                let t = c.tree();
+                let (outer, left) = (ctx.swap_used(0), ctx.setting("rewrites").unwrap());
+                let r: Option<Term> = match alt {
+                    Some(_) => stats::try_pass(name, t, || f.run(t, ctx)),
+                    None => stats::pass(name, t, || f.run(t, ctx)),
+                };
+                let used = ctx.swap_used(0);
+                ctx.swap_used(outer | used);
+                let made = left.saturating_sub(ctx.setting("rewrites").unwrap());
+                match (r, alt) {
+                    (Some(r), Some(bit)) => Some(Cand::of(r, c, used | bit, made)),
+                    (None, Some(_)) => None,
+                    (Some(r), None) if r != *t => Some(Cand::of(r, c, used, made)),
+                    _ => Some(Cand { used: c.used | used, rewrites: c.rewrites + made, ..c.clone() }),
+                }
+            })
+            .collect()
+    })
+}
+
+/// `out`, after the smallest candidate each enclosing `smallest` saw is updated with it.
+fn seen(out: Vec<Cand>, env: &Env) -> Vec<Cand> {
     for scope in env.seen.borrow_mut().iter_mut() {
         for c in &out {
             let n = c.size();
@@ -612,5 +721,5 @@ fn pass(name: &str, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             }
         }
     }
-    Ok(out)
+    out
 }

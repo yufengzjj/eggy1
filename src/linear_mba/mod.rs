@@ -590,26 +590,32 @@ pub(crate) fn rewrite(t: &T, w: &Ctx) -> T {
 }
 
 fn rewrite_uncached(t: &T, w: &Ctx) -> T {
-    let lin = rewrite_linear(t, w);
-    let mut r = match stats::try_pass("poly_mba", t, || crate::poly_mba::simplify_poly(t, w)) {
-        Some(p) if size(&p) < size(&lin) => {
-            stats::won_among("poly_mba", &[("poly_mba", size(&p)), ("linear", size(&lin))], size(t), &p);
-            p
-        }
-        _ => lin,
-    };
-    // A rebuilt region can expose more: once `9*(A & B) + ...` becomes `2*A - B`
-    // with `A = -(x ^ y)`, A's own linear form joins the enclosing region. Only
-    // arithmetic leaves of bitwise operations can do this.
+    crate::pipe::run_term(&crate::sched::current().rewrite, t, w)
+}
+
+/// `t` with its linear region rebuilt by `rebuild` and the atom leaves of that form
+/// rewritten, or, when `t` is not a region or `rebuild` finds no form, with its operands
+/// rewritten (`crate::sched::Pipe::Regions`).
+pub(crate) fn on_region(t: &T, w: &Ctx, rebuild: impl FnOnce() -> Option<T>) -> T {
+    let T::Op(op, args) = t else { return t.clone() };
+    if kind(t, w) != Kind::Atom
+        && let Some(r) = rebuild()
+    {
+        return substitute_atoms(&r, w);
+    }
+    T::Op(*op, args.iter().map(|a| rewrite(a, w)).collect())
+}
+
+/// `r`, a rebuild of `t`, rewritten again when that is smaller and `t` has an arithmetic
+/// leaf of a bitwise operation (`crate::sched::Pipe::Again`): once `9*(A & B) + ...` becomes
+/// `2*A - B` with `A = -(x ^ y)`, A's own linear form joins the enclosing region.
+pub(crate) fn again(t: &T, r: &T, w: &Ctx) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
-    if r != *t && lv.iter().any(|l| kind(l, w) == Kind::Lin) {
-        let again = rewrite(&r, w);
-        if size(&again) < size(&r) {
-            r = again;
-        }
+    if r == t || !lv.iter().any(|l| kind(l, w) == Kind::Lin) {
+        return None;
     }
-    r
+    Some(rewrite(r, w)).filter(|a| size(a) < size(r))
 }
 
 /// The terms `(c, t)` and the constant of the sum `t`, scaled by `c`.
@@ -698,34 +704,6 @@ fn recombine_products(t: &T, w: &Ctx) -> Option<T> {
     }
     let r = build_sum(&terms, konst, w);
     (changed && size(&r) < size(t)).then_some(r)
-}
-
-fn rewrite_linear(t: &T, w: &Ctx) -> T {
-    let T::Op(op, args) = t else { return t.clone() };
-    if kind(t, w) != Kind::Atom {
-        let found = [
-            ("simba", stats::try_pass("simba", t, || simba(t, w))),
-            ("small_blocks", stats::try_pass("small_blocks", t, || small_blocks(t, w))),
-        ];
-        let mut sizes: Vec<(&str, usize)> = found.iter().filter_map(|(n, x)| Some((*n, size(x.as_ref()?)))).collect();
-        let best = found.into_iter().filter_map(|(n, x)| Some((n, x?))).reduce(|b, x| if size(&x.1) < size(&b.1) { x } else { b });
-        let wide = stats::try_pass("wide_blocks", t, || wide_blocks(t, w));
-        sizes.extend(wide.as_ref().map(|x| ("wide_blocks", size(x))));
-        let best = match (best, wide) {
-            (Some(b), Some(x)) if size(&x) >= size(&b.1) => Some(b),
-            (b, None) => b,
-            (_, Some(x)) => {
-                w.st.used.fetch_or(WIDE, Relaxed);
-                Some(("wide_blocks", x))
-            }
-        };
-        if let Some((name, best)) = best {
-            let r = substitute_atoms(&best, w);
-            stats::won_among(name, &sizes, size(t), &r);
-            return r;
-        }
-    }
-    T::Op(*op, args.iter().map(|a| rewrite(a, w)).collect())
 }
 
 /// The terms `(c, t)` and the constant of the linear region `t`, scaled by `c`, with
@@ -984,22 +962,41 @@ pub(crate) const TERM_PASSES: &[(&str, fn(&T, &Ctx) -> Option<T>)] = &[
     ("split_bits", |t, w| Some(split_in(t, w, &|x| rebuild_once(x, w)))),
     ("drop_identities", |t, w| Some(drop_identities(t, w))),
     ("rebuild", |t, w| Some(rebuild_once(t, w))),
-    ("simba", |t, w| on_regions(t, w, simba)),
-    ("small_blocks", |t, w| on_regions(t, w, small_blocks)),
-    ("wide_blocks", |t, w| on_regions(t, w, wide_blocks)),
+    ("simba", simba),
+    ("small_blocks", small_blocks),
+    ("wide_blocks", wide_blocks),
     ("clustered", |t, w| on_regions(t, w, clustered)),
     ("peel", |t, w| on_regions(t, w, peel)),
-    ("poly_mba", |t, w| on_regions(t, w, crate::poly_mba::simplify_poly)),
+    ("poly_mba", crate::poly_mba::simplify_poly),
 ];
+
+/// Passes of `TERM_PASSES` that are alternatives: each runs on the candidate whole and gives
+/// no candidate when it finds no form, and the `State::used` bit its form sets when kept.
+pub(crate) const ALTERNATIVES: [(&str, u8); 4] = [("simba", 0), ("small_blocks", 0), ("wide_blocks", WIDE), ("poly_mba", 0)];
 
 /// The pass over one term named `name`: an entry of `TERM_PASSES`, or `polish/NAME` for a
 /// polish pass.
-pub(crate) fn term_pass(name: &str) -> Option<Box<dyn Fn(&T, &Ctx) -> Option<T>>> {
+pub(crate) fn term_pass(name: &str) -> Option<TermPass> {
     if let Some((_, f)) = TERM_PASSES.iter().find(|(n, _)| *n == name) {
-        return Some(Box::new(*f));
+        return Some(TermPass::Term(*f));
     }
     let (_, f) = POLISH.iter().find(|(n, _)| name.strip_prefix("polish/") == Some(n))?;
-    Some(Box::new(move |t, w| Some(f(t, w))))
+    Some(TermPass::Polish(*f))
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum TermPass {
+    Term(fn(&T, &Ctx) -> Option<T>),
+    Polish(fn(&T, &Ctx) -> T),
+}
+
+impl TermPass {
+    pub(crate) fn run(self, t: &T, w: &Ctx) -> Option<T> {
+        match self {
+            TermPass::Term(f) => f(t, w),
+            TermPass::Polish(f) => Some(f(t, w)),
+        }
+    }
 }
 
 /// Rewrite the egglog term `egg` (W-bit wrapping semantics) with every linear

@@ -121,6 +121,13 @@ thread_local! {
     static SCOPED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Bits of the `INNER` passes asked whether they are off, since the last `swap_touched`.
     static TOUCHED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The passes of the run on this thread (`apply`), the default ones until set.
+    static CURRENT: std::cell::RefCell<Option<std::rc::Rc<Passes>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The passes `apply` last set on this thread.
+pub fn current() -> std::rc::Rc<Passes> {
+    CURRENT.with(|c| c.borrow_mut().get_or_insert_with(|| std::rc::Rc::new(Passes::default())).clone())
 }
 
 /// The `INNER` passes asked whether they are off since the last call, which sets them to `v`.
@@ -152,6 +159,12 @@ fn off_bits(names: &[&str]) -> u64 {
 /// Sets the `INNER` passes `p.off` (and an enclosing `Pipe::Off`) turns off and the limits
 /// of `p` for the runs on this thread that follow.
 pub fn apply(p: &Passes) {
+    CURRENT.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.as_deref() != Some(p) {
+            *c = Some(std::rc::Rc::new(p.clone()));
+        }
+    });
     let bits = off_bits(&p.off) | SCOPED.with(|s| s.get());
     OFF.with(|o| o.set(bits));
     let custom = p.limits.iter().zip(LIMITS).any(|(v, (_, d))| v != d);
@@ -234,6 +247,13 @@ pub enum Pipe {
     /// `p` repeated while the `smaller` inside take a result, until they have taken `n`
     /// (`wins(n,p)`; `n` as in `Fix`).
     Wins(String, Box<Pipe>),
+    /// Each candidate that is a linear region rebuilt by the first candidate of `p`, with the
+    /// atom leaves of that form rewritten by `Passes::rewrite`; otherwise, or when `p` gives
+    /// none, its operands rewritten (`regions(p)`).
+    Regions(Box<Pipe>),
+    /// `p`, then `Passes::rewrite` again on its main candidate, kept when smaller, where it
+    /// changed a term with an arithmetic leaf of a bitwise operation (`again(p)`).
+    Again(Box<Pipe>),
 }
 
 /// A condition on candidates: alternatives separated by `|`, each names of
@@ -341,6 +361,8 @@ impl Pipe {
             }
             ("smallest", 1) => Pipe::Smallest(Box::new(args.next().unwrap())),
             ("scope", 1) => Pipe::Scope(Box::new(args.next().unwrap())),
+            ("regions", 1) => Pipe::Regions(Box::new(args.next().unwrap())),
+            ("again", 1) => Pipe::Again(Box::new(args.next().unwrap())),
             ("tag", 1) => Pipe::Tag(first.to_string(), Box::new(args.next().unwrap())),
             ("cand", 1) => Pipe::Cand(first.to_string(), Box::new(args.next().unwrap())),
             ("smaller", 1) => Pipe::Smaller(first.to_string(), Box::new(args.next().unwrap())),
@@ -359,9 +381,9 @@ impl Pipe {
                 });
                 Pipe::With(set.collect::<Result<_, _>>()?, Box::new(args.next().unwrap()))
             }
-            ("fix" | "off" | "smallest" | "scope" | "tag" | "cand" | "with" | "smaller" | "wins", _) => return Err(format!("{name} takes one pipeline: {s}")),
+            ("fix" | "off" | "smallest" | "scope" | "tag" | "cand" | "with" | "smaller" | "wins" | "regions" | "again", _) => return Err(format!("{name} takes one pipeline: {s}")),
             ("if" | "retry", _) => return Err(format!("{name} takes a condition and two pipelines: {s}")),
-            _ => return Err(format!("unknown combinator {name}; known: seq union best first fix off if retry smallest tag filter cand with scope smaller wins")),
+            _ => return Err(format!("unknown combinator {name}; known: seq union best first fix off if retry smallest tag filter cand with scope smaller wins regions again")),
         };
         Ok((p, rest))
     }
@@ -391,6 +413,8 @@ impl fmt::Display for Pipe {
             Pipe::Cand(n, p) => list(f, "cand", Some(n.clone()), one(p)),
             Pipe::Smaller(n, p) => list(f, "smaller", Some(n.clone()), one(p)),
             Pipe::Wins(n, p) => list(f, "wins", Some(n.clone()), one(p)),
+            Pipe::Regions(p) => list(f, "regions", None, one(p)),
+            Pipe::Again(p) => list(f, "again", None, one(p)),
             Pipe::Filter(c) => write!(f, "filter({c})"),
             Pipe::With(kv, p) => list(f, "with", Some(kv.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("+")), one(p)),
         }
@@ -415,6 +439,11 @@ pub fn pipeline() -> String {
         "seq(smallest(seq(fix(1,{FIRST}),if(moved,fix(restarts,{LATER})),if(moved,fix(extra,if(rebuilds,{LATER}))),polish)),if(printed+!input,tag(rerun_printed,best(1,id,seq(reprint,smallest(seq(fix(1,{FIRST}),if(moved,fix(printed,{LATER})),polish)))))))"
     )
 }
+
+/// The rebuild of one term (`Passes::rewrite`, what `linear_mba::rewrite` memoizes): a linear
+/// region rebuilt by the smallest of `simba`, `small_blocks` and `wide_blocks`, or else its
+/// operands rewritten; `poly_mba` taken instead when strictly smaller.
+pub const REWRITE: &str = "again(best(1,regions(best(1,simba,small_blocks,wide_blocks)),poly_mba))";
 
 /// The final polish (`Passes::polish`), on one candidate: the polish passes `names` in
 /// turn, each kept when smaller, repeated while one is, until 8 are; on one run whose
@@ -576,6 +605,9 @@ pub struct Passes {
     /// The final polish, on each candidate alone (`polish(...)`); a candidate is replaced
     /// by its first result when smaller.
     pub polish: Pipe,
+    /// The rebuild of one term (`REWRITE`), memoized by `linear_mba::rewrite` and used by the
+    /// passes inside it for subterms.
+    pub rewrite: Pipe,
 }
 
 impl Default for Passes {
@@ -604,6 +636,7 @@ impl Default for Passes {
             pipeline: Pipe::parse(&pipeline()).unwrap(),
             prepass: Pipe::parse(&prepass()).unwrap(),
             polish: Pipe::parse(&polish(&crate::linear_mba::POLISH.map(|(n, _)| n))).unwrap(),
+            rewrite: Pipe::parse(REWRITE).unwrap(),
         }
     }
 }
@@ -636,7 +669,7 @@ impl Passes {
     /// `key=value`, and for the lists `pre`, `off`, `gates` and `schedule` also `key+=names`
     /// and `key-=names` (names separated by `,`; schedule steps written `run:`, `once:` or
     /// `sat:` and a ruleset). The `LIMITS` are keys too (`split_runs=8`); `pipeline`,
-    /// `prepass` and `polish` take a `Pipe` (spaces inside its parentheses allowed), and
+    /// `prepass`, `polish` and `rewrite` take a `Pipe` (spaces inside its parentheses allowed), and
     /// `polish` also a list of polish pass names, run as `polish(names)`.
     pub fn parse(spec: &str) -> Result<Passes, String> {
         let mut p = Passes::default();
@@ -661,6 +694,10 @@ impl Passes {
             }
             if let Some(val) = item.strip_prefix("pipeline=") {
                 p.pipeline = Pipe::parse(val)?;
+                continue;
+            }
+            if let Some(val) = item.strip_prefix("rewrite=") {
+                p.rewrite = Pipe::parse(val)?;
                 continue;
             }
             if let Some(val) = item.strip_prefix("polish=") {
@@ -729,7 +766,7 @@ impl Passes {
                     Some(i) => p.limits[i] = num()?,
                     None => {
                         let limits: Vec<&str> = LIMITS.iter().map(|(n, _)| *n).collect();
-                        return Err(format!("unknown key {key}; known: schedule match_limit ban_length pre keep extra rerun_input printed minimal off gates pipeline prepass polish {}", limits.join(" ")));
+                        return Err(format!("unknown key {key}; known: schedule match_limit ban_length pre keep extra rerun_input printed minimal off gates pipeline prepass polish rewrite {}", limits.join(" ")));
                     }
                 },
             }
@@ -768,7 +805,7 @@ impl fmt::Display for Passes {
                 write!(f, " {name}={v}")?;
             }
         }
-        write!(f, " pipeline={} prepass={} polish={}", self.pipeline, self.prepass, self.polish)
+        write!(f, " pipeline={} prepass={} polish={} rewrite={}", self.pipeline, self.prepass, self.polish, self.rewrite)
     }
 }
 
@@ -783,6 +820,9 @@ mod tests {
         assert!(!p.pre_on("unified") && p.pre_on("no_wide"));
         assert_eq!(p.polish, Pipe::parse(&polish(&["factor", "push_not", "factor"])).unwrap());
         assert_eq!(Pipe::parse(&Passes::default().polish.to_string()).unwrap(), Passes::default().polish);
+        let p = Passes::parse("rewrite=regions(best(1,simba,poly_mba))").unwrap();
+        assert_eq!(p.rewrite.to_string(), "regions(best(1,simba,poly_mba))");
+        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("polish+=factor").is_err() && Passes::parse("polish=nope").is_err());
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("pre+=nope").is_err() && Passes::parse("keep+=1").is_err());
