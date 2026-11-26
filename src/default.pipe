@@ -73,11 +73,11 @@ prepass=
         # beside the first rebuild made the rules finish worse as often as better.
         (cand no_wide
           (if used_wide
-            ((load t) | (with off=wide_blocks rebuild_main) | (save n) | (filter (size < (size r))))
+            ((load t) | ((off wide_blocks) | rebuild_main) | (save n) | (filter (size < (size r))))
             none))
         (cand no_wide_abstracted
           (load n)
-          | (with off=wide_blocks (union over_const_bitwise over_shared_bitwise))
+          | ((off wide_blocks) | (union over_const_bitwise over_shared_bitwise))
           | (filter (size < (size r) && size <= (size n) * 3 / 4)))
         (cand split_bits (if fits_split (split_bits | (filter !(same r))) none))
         (cand halve_first halve | (filter !(same r)) | rebuild_plain)
@@ -97,8 +97,8 @@ prepass=
         (if (used_clustered && few_rewrites)
           ((load t)
            | (if !replaceable
-               (with off=clustered relate_leaves=unclustered_relate_leaves rewrites=unclustered_rewrites
-                 rewrite | within | relate | within | tfunc | finish | drop_identities)
+               (with relate_leaves=unclustered_relate_leaves rewrites=unclustered_rewrites
+                 (off clustered) | rewrite | within | relate | within | tfunc | finish | drop_identities)
                none))
           none))
     # An equal-size one can take the extraction from the first rebuild with nothing gained.

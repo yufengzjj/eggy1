@@ -432,8 +432,8 @@ fn past_deadline(secs: f64, env: &Env) -> bool {
     true
 }
 
-/// `f` as a scope, a sequence or a pipeline run: a `(time-limit N)`, `(on NAME)` or
-/// `(off NAME)` inside it ends with it.
+/// `f` as a scope (a sequence, `with`, `scope` or a pipeline run): a `(time-limit N)`,
+/// `(on NAME)` or `(off NAME)` inside it ends with it.
 fn scoped<R>(f: impl FnOnce() -> R) -> R {
     let local = LOCAL.with(|l| l.get());
     let outer = OUTER.with(|o| o.replace(local));
@@ -515,7 +515,6 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             }
             Ok(set)
         }
-        Pipe::Off(names, p) => crate::sched::with_off(names, || go(p, set, env)),
         Pipe::If(c, a, b) => go(if holds(c, &set, env) { a } else { b }, set, env),
         Pipe::Retry(c, a, b) => {
             let out = go(a, set.clone(), env)?;
@@ -569,11 +568,11 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
                     })
                     .collect()
             });
-            let out = go(p, set, env);
+            let out = scoped(|| go(p, set, env));
             env.ctx(|c| {
                 for (k, was, set) in old {
                     // The calls made inside count against the calls left outside.
-                    let back = if k == "rewrites" { was.saturating_sub(set - c.setting(k).unwrap()) } else { was };
+                    let back = if k == "rewrites" { was.saturating_sub(set.saturating_sub(c.setting(k).unwrap())) } else { was };
                     c.set_setting(k, back);
                 }
             });
@@ -581,7 +580,7 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
         }
         Pipe::Scope(p) => {
             env.ctxs.borrow_mut().push(Ctx::typed(env.w, env.signed));
-            let out = go(p, set, env);
+            let out = scoped(|| go(p, set, env));
             env.ctxs.borrow_mut().pop();
             out
         }
@@ -923,6 +922,10 @@ mod tests {
         scoped(|| {
             step("((off relate) | id)");
             assert!(!crate::sched::is_off("relate"), "a group ends its off");
+            step("(with rewrites=8 (off relate))");
+            assert!(!crate::sched::is_off("relate"), "with ends its off");
+            step("(scope (off relate))");
+            assert!(!crate::sched::is_off("relate"), "scope ends its off");
             step("(if true (off relate))");
             assert!(crate::sched::is_off("relate"), "a branch that is no sequence does not");
         });

@@ -325,30 +325,25 @@ impl Parser<'_> {
             }
             "filter" => Pipe::Filter(self.cond()?),
             "with" => {
-                let (mut off, mut set) = (Vec::new(), Vec::new());
+                let mut set = Vec::new();
                 while let Some(Tok::KeyVal(k, v)) = self.peek().cloned() {
                     self.at += 1;
                     if k == "off" {
-                        for n in v.split(',') {
-                            off.push(INNER.iter().find(|k| **k == n).copied().ok_or_else(|| format!("unknown off name {n}; known: {}", INNER.join(",")))?);
-                        }
-                        continue;
+                        return Err(format!("write (off {}) in the body: (with ... (off {}) | p)", v.replace(',', " "), v.replace(',', " ")));
                     }
                     let known = ["rewrites", "semi_leaves", "relate_leaves", "bit_splits"];
                     if !known.contains(&k.as_str()) {
-                        return Err(format!("unknown setting {k}; known: off {}", known.join(" ")));
+                        return Err(format!("unknown setting {k}; known: {}", known.join(" ")));
                     }
                     if !(v.parse::<usize>().is_ok() || LIMITS.iter().any(|(n, _)| *n == v)) {
                         return Err(format!("bad value {v} for {k}"));
                     }
                     set.push((k, v));
                 }
-                if off.is_empty() && set.is_empty() {
+                if set.is_empty() {
                     return Err("with needs KEY=VALUE settings".into());
                 }
-                let p = self.pipe()?;
-                let p = if set.is_empty() { p } else { Pipe::With(set, b(p)) };
-                if off.is_empty() { p } else { Pipe::Off(off, b(p)) }
+                Pipe::With(set, b(self.pipe()?))
             }
             "time-limit" => Pipe::Pass(Pass::TimeLimit(self.count()?)),
             "save" | "load" | "label" | "egglog" => {
@@ -611,13 +606,6 @@ pub fn show(p: &Pipe) -> String {
         Pipe::Cand(n, p) => form("cand", &with(vec![n.clone()], p)),
         Pipe::Smaller(n, p) => form("smaller", &with(vec![n.clone()], p)),
         Pipe::Filter(c) => form("filter", &[show_cond(c)]),
-        Pipe::Off(ns, p) => {
-            let off = format!("off={}", ns.join(","));
-            match &**p {
-                Pipe::With(kv, q) => form("with", &with([vec![off], kv.iter().map(|(k, v)| format!("{k}={v}")).collect()].concat(), q)),
-                q => form("with", &with(vec![off], q)),
-            }
-        }
         Pipe::With(kv, p) => form("with", &with(kv.iter().map(|(k, v)| format!("{k}={v}")).collect(), p)),
     }
 }
@@ -669,17 +657,6 @@ fn pretty_at(p: &Pipe, indent: usize) -> String {
         Pipe::Tag(n, q) => nested("tag", vec![n.clone()], vec![(q, false)]),
         Pipe::Cand(n, q) => nested("cand", vec![n.clone()], vec![(q, false)]),
         Pipe::Smaller(n, q) => nested("smaller", vec![n.clone()], vec![(q, false)]),
-        Pipe::Off(ns, q) => {
-            let mut fixed = vec![format!("off={}", ns.join(","))];
-            let q = match &**q {
-                Pipe::With(kv, r) => {
-                    fixed.extend(kv.iter().map(|(k, v)| format!("{k}={v}")));
-                    &**r
-                }
-                q => q,
-            };
-            nested("with", fixed, vec![(q, false)])
-        }
         Pipe::With(kv, q) => nested("with", kv.iter().map(|(k, v)| format!("{k}={v}")).collect(), vec![(q, false)]),
         Pipe::Pass(_) | Pipe::Filter(_) => one,
     }
@@ -716,7 +693,8 @@ mod tests {
         same("(if mixed rewrite)", "(if mixed rewrite id)");
         same("(if (!minimal || tiny) (rewrite | polish))", "(if (!minimal || (tiny)) (seq rewrite polish) id)");
         same("(filter (mul >= 4 && vars < 3))", "(filter ((mul >= 4) && (vars < 3)))");
-        same("(with off=relate,tfunc rewrites=8 rewrite)", "(with off=relate,tfunc (with rewrites=8 rewrite))");
+        same("(with rewrites=8 semi_leaves=2 rewrite)", "(with rewrites=8 semi_leaves=2 (rewrite))");
+        assert!(parse("(with off=relate rewrite)").unwrap_err().contains("(off relate)"));
         assert_eq!(parse("(off lowbits relate)").unwrap(), Pipe::Pass(Pass::Off(vec!["lowbits", "relate"])));
         same("(fix restarts prepass | egglog)", "(fix restarts (prepass | egglog))");
         same("# comment

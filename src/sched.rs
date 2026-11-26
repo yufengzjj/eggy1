@@ -129,8 +129,6 @@ thread_local! {
     static OFF: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// The limits of the run on this thread, if not the defaults.
     static LIMIT: std::cell::RefCell<Option<Vec<usize>>> = const { std::cell::RefCell::new(None) };
-    /// Bits of the `INNER` passes an enclosing `Pipe::Off` turns off.
-    static SCOPED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Bits of the `INNER` passes `(off NAME)` turned off in the scopes under way.
     static RUN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Bits of the `INNER` passes `(on NAME)` turned on again in the scopes under way.
@@ -174,8 +172,8 @@ fn off_bits(names: &[&str]) -> u64 {
     names.iter().filter_map(|n| INNER.iter().position(|k| k == n)).fold(0u64, |b, i| b | 1 << i)
 }
 
-/// Sets the `INNER` passes `p.off` (and an enclosing `Pipe::Off` or `(off NAME)` of a scope
-/// under way) turns off and the limits of `p` for the runs on this thread that follow.
+/// Sets the `INNER` passes `p.off` (and an `(off NAME)` or `(on NAME)` of a scope under way)
+/// turns off and the limits of `p` for the runs on this thread that follow.
 pub fn apply(p: &Passes) {
     CURRENT.with(|c| {
         let mut c = c.borrow_mut();
@@ -183,7 +181,7 @@ pub fn apply(p: &Passes) {
             *c = Some(std::rc::Rc::new(p.clone()));
         }
     });
-    let bits = (off_bits(&p.off) | SCOPED.with(|s| s.get()) | RUN.with(|r| r.get())) & !RUN_ON.with(|r| r.get());
+    let bits = (off_bits(&p.off) | RUN.with(|r| r.get())) & !RUN_ON.with(|r| r.get());
     OFF.with(|o| o.set(bits));
     let custom = p.limits.iter().zip(LIMITS).any(|(v, (_, d))| v != d);
     LIMIT.with(|l| *l.borrow_mut() = custom.then(|| p.limits.clone()));
@@ -200,16 +198,12 @@ pub fn limit_named(name: &str) -> Option<usize> {
     Some(LIMIT.with(|v| v.borrow().as_ref().map_or(LIMITS[i].1, |v| v[i])))
 }
 
-/// `f()` with the `INNER` passes `names` also turned off.
+/// `f` with the `INNER` passes `names` turned off, as `((off NAMES) | f)` would run it.
 pub fn with_off<R>(names: &[&str], f: impl FnOnce() -> R) -> R {
-    let bits = off_bits(names);
-    let (scoped, off) = (SCOPED.with(|s| s.replace(s.get() | bits)), OFF.with(|o| o.replace(o.get() | bits)));
-    let on = RUN_ON.with(|r| r.replace(r.get() & !bits));
-    let r = f();
-    SCOPED.with(|s| s.set(scoped));
-    OFF.with(|o| o.set(off));
-    RUN_ON.with(|r| r.set(on));
-    r
+    in_scope(|| {
+        names.iter().for_each(|n| turn_off(n));
+        f()
+    })
 }
 
 /// A pass pipeline: every pass maps a list of equivalent candidate terms (the first is the
@@ -231,8 +225,6 @@ pub enum Pipe {
     First(Vec<Pipe>),
     /// Repeated at most `n` times while the main candidate changes (`fix`).
     Fix(Value, Box<Pipe>),
-    /// With the `INNER` passes named also turned off (`with off=...`).
-    Off(Vec<&'static str>, Box<Pipe>),
     /// `a` where the condition holds for the candidates, else `b` (`if`).
     If(Cond, Box<Pipe>, Box<Pipe>),
     /// `a`, and where the condition holds for its candidates, `b` on the same input taken
@@ -870,8 +862,9 @@ impl Passes {
     }
 
     /// Parts of the pipelines that do nothing: a `(save R)` never read in its pipeline or
-    /// saved over before any read on every path, a `(with off=...)` around passes that run
-    /// no pass over a term, and a `(time-limit N)` at the end of its sequence.
+    /// saved over before any read on every path, an `(off NAME)` followed in its sequence by
+    /// no pass over a term, a `with` outside any `scope`, and a `(time-limit N)` at the end of
+    /// its sequence.
     pub fn warnings(&self) -> Vec<String> {
         let mut out = Vec::new();
         for (name, uses) in self.uses() {
@@ -882,7 +875,8 @@ impl Passes {
             dead.dedup();
             out.extend(dead.iter().map(|r| format!("{name}: register {r} is saved again before the earlier save is read")));
             out.extend(uses.idle_limit.iter().map(|t| format!("{name}: {t} ends its sequence and limits nothing")));
-            out.extend(uses.idle_off.iter().map(|o| format!("{name}: (with off={o} ...) runs no pass it could turn off")));
+            out.extend(uses.idle_with.iter().map(|s| format!("{name}: (with {s} ...) is outside any (scope ...), so it changes nothing")));
+            out.extend(uses.idle_off.iter().map(|o| format!("{name}: (off {o}) is followed in its sequence by no pass it could turn off")));
         }
         out
     }
@@ -893,7 +887,7 @@ impl Passes {
         main.into_iter()
             .chain(SUBS.iter().map(|(n, _)| *n).zip(&self.subs))
             .map(|(name, p)| {
-                let mut uses = Uses::default();
+                let mut uses = Uses { scoped: !["pipeline", "prepass", "polish"].contains(&name), ..Uses::default() };
                 uses.walk(p);
                 (name, uses)
             })
@@ -921,8 +915,13 @@ struct Uses {
     unsaved: Option<String>,
     /// Every register read, also by `pre_done` (`t0`, which it may find empty).
     reads: Vec<String>,
-    /// The `off` lists of `(with off=...)` around no pass over a term.
+    /// The names of an `(off NAME)` followed in its sequence by no pass over a term.
+    /// Inside a `scope`, or in a pipeline run on its caller's (`rewrite`, `simba`, `sub/NAME`):
+    /// a `with` outside both changes the settings of no run.
+    scoped: bool,
+    /// The `with` settings outside any `scope`.
     idle_off: Vec<String>,
+    idle_with: Vec<String>,
     /// The `(time-limit N)` that end their sequence, so limit nothing.
     idle_limit: Vec<String>,
     /// The registers saved and not read since on every path that reaches this point, from
@@ -956,6 +955,16 @@ impl Uses {
             Pipe::Pass(Pass::TimeLimit(v)) => self.value(v),
             Pipe::Pass(_) => {}
             Pipe::Seq(ps) => {
+                for (i, p) in ps.iter().enumerate() {
+                    if let Pipe::Pass(Pass::Off(ns)) = p {
+                        let mut rest = Uses::default();
+                        ps[i + 1..].iter().for_each(|q| rest.walk(q));
+                        let passes: Vec<&str> = ns.iter().copied().filter(|n| INNER.contains(n)).collect();
+                        if rest.calls.is_empty() && !passes.is_empty() {
+                            self.idle_off.push(passes.join(" "));
+                        }
+                    }
+                }
                 ps.iter().for_each(|p| self.walk(p));
                 if let Some(Pipe::Pass(Pass::TimeLimit(v))) = ps.last().filter(|_| ps.len() > 1) {
                     self.idle_limit.push(lang::show(&Pipe::Pass(Pass::TimeLimit(v.clone()))));
@@ -995,15 +1004,18 @@ impl Uses {
             }
             Pipe::Cand(_, p) => self.maybe(p),
             Pipe::Filter(c) => self.cond(c),
-            Pipe::Off(names, p) => {
-                let mut body = Uses::default();
-                body.walk(p);
-                if body.calls.is_empty() {
-                    self.idle_off.push(names.join(","));
+            Pipe::With(kv, p) => {
+                if !self.scoped {
+                    self.idle_with.push(kv.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" "));
                 }
                 self.walk(p);
             }
-            Pipe::Smallest(p) | Pipe::Tag(_, p) | Pipe::With(_, p) | Pipe::Scope(p) | Pipe::Smaller(_, p) => self.walk(p),
+            Pipe::Scope(p) => {
+                let outer = std::mem::replace(&mut self.scoped, true);
+                self.walk(p);
+                self.scoped = outer;
+            }
+            Pipe::Smallest(p) | Pipe::Tag(_, p) | Pipe::Smaller(_, p) => self.walk(p),
             // Both rebuild with `Passes::rewrite`.
             Pipe::Regions(p) => {
                 self.calls.push("inner");
@@ -1183,8 +1195,8 @@ mod tests {
         assert_eq!((limit(Limit::SplitRuns), limit(Limit::PolyBuilds), limit(Limit::SplitDepth)), (4, 64, 2));
         apply(&Passes::default());
         assert_eq!(limit(Limit::SplitRuns), 16);
-        let p = Passes::parse("keep=1 pipeline=lowbits | (best 2 rewrite (with off=relate,tfunc rebuild)) | (fix 3 egglog) | polish/factor extra=0").unwrap();
-        assert_eq!(p.pipeline.to_string(), "lowbits | (best 2 rewrite (with off=relate,tfunc rebuild)) | (fix 3 egglog) | polish/factor");
+        let p = Passes::parse("keep=1 pipeline=lowbits | (best 2 rewrite ((off relate tfunc) | rebuild)) | (fix 3 egglog) | polish/factor extra=0").unwrap();
+        assert_eq!(p.pipeline.to_string(), "lowbits | (best 2 rewrite ((off relate tfunc) | rebuild)) | (fix 3 egglog) | polish/factor");
         assert_eq!((p.keep, p.extra), (1, 0));
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         let p = Passes::parse("pipeline=(smallest (fix restarts (retry (mixed && !minimal) prepass (egglog later))) | (if !input (tag t polish) id))").unwrap();
@@ -1242,9 +1254,9 @@ prepass=lowbits | r2
         let mut lets = Lets::default();
         Passes::base().apply(include_str!("default.pipe"), &mut lang::Defs::new(), &mut lets).unwrap();
         assert!(lets.defined.iter().all(|n| lets.used.contains(n)), "{:?} {:?}", lets.defined, lets.used);
-        let (_, w) = Passes::parse_noting("(let foo rewrite) (let bar lowbits) prepass=bar | (save t) | (save q) | (load t) | (with off=relate (save x) | id) | (with off=relate rewrite)").unwrap();
+        let (_, w) = Passes::parse_noting("(let foo rewrite) (let bar lowbits) prepass=bar | (save t) | (save q) | (load t) | ((off relate) | (save x) | id) | ((off relate) | rewrite)").unwrap();
         assert_eq!(w.len(), 4, "{w:?}");
-        assert!(w[0].contains("let foo") && w[1].contains("register q") && w[2].contains("register x") && w[3].contains("off=relate"), "{w:?}");
+        assert!(w[0].contains("let foo") && w[1].contains("register q") && w[2].contains("register x") && w[3].contains("(off relate)"), "{w:?}");
         let (_, w) = Passes::parse_noting("prepass=(save t) | rewrite | (save t) | (load t)").unwrap();
         assert!(w.len() == 1 && w[0].contains("saved again"), "{w:?}");
         for ok in ["prepass=(save t) | (if mixed (save t)) | (load t)", "prepass=(save t) | (cand unified (save t)) | (load t)", "prepass=(fix 3 (save t) | rewrite) | (load t)", "prepass=(save t) | (filter (size < (size t))) | (save t) | (load t)", "prepass=(save t) | (first rewrite (save t)) | (load t)", "prepass=(if mixed (save t) (save t)) | (load t)"] {
@@ -1265,10 +1277,14 @@ prepass=lowbits | r2
         assert_eq!(p.prepass.to_string(), "(off relate tfunc) | (on relate cut) | rewrite");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("prepass=(on nope)").is_err() && Passes::parse("prepass=(on)").is_err() && Passes::parse("prepass=on/relate").is_err());
-        assert!(Passes::parse("prepass=(with off=cut rewrite)").is_err(), "with off= takes passes only");
+        assert!(Passes::parse("prepass=(with off=relate rewrite)").unwrap_err().contains("(off relate)"), "with takes no off=");
+        let (_, w) = Passes::parse_noting("prepass=rewrite | (scope (with rewrites=8 (off relate) | id)) | (off cut) | lowbits").unwrap();
+        assert!(w.len() == 1 && w[0].contains("(off relate) is followed"), "{w:?}");
+        let (_, w) = Passes::parse_noting("prepass=(with semi_leaves=2 rewrite) polish=(scope (with semi_leaves=2 rewrite)) rewrite=(with semi_leaves=2 simba)").unwrap();
+        assert!(w.len() == 1 && w[0].starts_with("prepass: (with semi_leaves=2 ...) is outside"), "{w:?}");
         let e = Passes::parse("prepass=save/t").unwrap_err();
         assert!(e.contains("(save t)"), "{e}");
-        for bad in ["pipeline=nope", "pipeline=(seq rewrite", "pipeline=(best x rewrite)", "pipeline=(fix 2 a b)", "pipeline=(with off=nope rewrite)", "pipeline=(loop rewrite)", "pipeline=(fix many id)", "pipeline=(if nope id)", "pipeline=(if mixed id id id)", "pipeline=(retry mixed id)"] {
+        for bad in ["pipeline=nope", "pipeline=(seq rewrite", "pipeline=(best x rewrite)", "pipeline=(fix 2 a b)", "pipeline=(with nope=1 rewrite)", "pipeline=(loop rewrite)", "pipeline=(fix many id)", "pipeline=(if nope id)", "pipeline=(if mixed id id id)", "pipeline=(retry mixed id)"] {
             assert!(Passes::parse(bad).is_err(), "{bad}");
         }
         with_off(&["relate"], || {

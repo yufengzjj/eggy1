@@ -81,7 +81,7 @@ eggy1 --passes "file=my.pipe" "expr"                      # items from a file
 ```
 
 A pipeline maps a list of equivalent candidates to another: `a | b` runs in sequence,
-`(union a b)`, `(best K a b)`, `(first a b)`, `(fix N p)`, `(if COND a b)`, `(with off=NAME p)`,
+`(union a b)`, `(best K a b)`, `(first a b)`, `(fix N p)`, `(if COND a b)`, `(with KEY=V p)`, `(on NAME)`/`(off NAME)`,
 `(save R)`/`(load R)` registers, conditions such as `(mul >= 4 && !mixed)`, and
 `(let NAME p)` definitions (those of `src/default.pipe` can be reused). Pipelines are checked
 when read (unknown names, wrong arguments, register reads before any save, passes outside the

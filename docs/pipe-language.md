@@ -26,7 +26,8 @@ eggy1 的化简流程由几条管线描述，默认的写在 `src/default.pipe` 
 - 空白只用来分隔；`#` 到行尾是注释。
 - **名字**以字母或 `_` 开头，可以含字母、数字、`_`、`/`，以及后面紧跟字母或 `_` 的 `-`：`polish/factor`、`semi/bit_split`、`time-limit`。所以 `/` 两边是名字时必须留空格：`x / 2`；`3/4` 是三个记号 `3` `/` `4`，只有在两边都是数时才不必留空格。`-` 后面是数时是减号（`restarts-1`），后面是名字时要留空格（`size - mul`，`size-mul` 是一个名字，报未知名字）。
 - **数**是十进制非负整数。
-- 其他记号：`( ) | || && ! + - * / < <= > >= == !=`，以及 `KEY=VALUE`（中间无空格，只出现在 `with` 里）。
+- 其他记号：`( ) | || && ! + - * / < <= > >= == !=`。
+- **设置** `KEY=VALUE`：一个名字紧跟 `=`（不是 `==`），再紧跟一个值，中间都不能有空格；值一直读到空白或括号为止。它只用在 `with` 里，`KEY` 和 `VALUE` 见第 7.1 节。语言里没有别的赋值：开关写成 `(on NAME)`、`(off NAME)`，寄存器写成 `(save R)`。`--passes` 的各项（`extra=0`、`prepass=...`）是在语言之外分项的（第 8 节），不是这里的设置。
 
 ## 3. 语法
 
@@ -34,7 +35,9 @@ eggy1 的化简流程由几条管线描述，默认的写在 `src/default.pipe` 
 pipe   := stage ('|' stage)*               # 依次执行
 stage  := NAME                             # 不带参数的 pass，或 let 定义的名字
         | '(' FORM arg* ')'                # 形式
+        | '(' 'with' SETTING+ pipe ')'     # 设置，第 7.1 节
         | '(' pipe ')'                     # 分组
+SETTING := KEY '=' VALUE                   # 中间无空格
 cond   := NAME | '!' cond | '(' expr ')'
 expr   := expr '||' expr | expr '&&' expr | '!' expr
         | value CMP value | NAME
@@ -70,9 +73,8 @@ CMP    := '<' | '<=' | '>' | '>=' | '==' | '!='
 | `(wins N p)` | 重复 `p`，直到其中的 `smaller` 不再采用结果，或一共采用了 `N` 次 |
 | `(tag NAME p)` | 运行 `p`，记时间 `NAME/run`；主候选变了时记 `NAME/won/来源`，来源改为 `NAME` |
 | `(cand NAME p)` | 一个预处理候选：`NAME` 是 `pre` 列表（第 8 节）里的名字且被关掉时给出空组；否则运行 `p`（`bit_splits` 从 `bit_split_budget` 重新开始），结果来源改为 `NAME`，记 `pre/NAME/made` |
-| `(scope p)` | `p` 里对同一个项的各 pass 共用一个运行上下文：缓存和 `with` 设置 |
-| `(with KEY=V ... p)` | 第 7 节的设置，`p` 结束后恢复 |
-| `(with off=A,B p)` | `p` 运行期间关掉内部 pass `A`、`B`（第 5.5 节）；可以和设置写在同一个 `with` 里 |
+| `(scope p)` | `p` 里对同一个项的各 pass 共用一个运行上下文：缓存和 `with` 设置。也是作用域（第 4.1 节） |
+| `(with KEY=V ... p)` | 第 7.1 节的设置，`p` 结束后恢复；只在某个 `scope` 之内（或在 `rewrite`、`simba`、`sub/NAME` 里）才有效。也是作用域，所以要在里面关掉 pass 就写 `(with rewrites=8 (off relate) \| p)` |
 | `(regions p)` | 对每个候选：如果它是一个线性区域，叶子先用 `rewrite` 重建，整体用 `p` 的主候选；否则对它的操作数用 `rewrite` |
 | `(again p)` | 运行 `p`；主候选在"位运算的算术叶子"处有变化时，对它再做一次 `rewrite`，变小才保留 |
 | `(save R)` | 把当前候选组存进寄存器 `R`，原样往下传 |
@@ -87,7 +89,7 @@ CMP    := '<' | '<=' | '>' | '>=' | '==' | '!='
 
 ### 4.1 作用域：`(time-limit N)`、`(on NAME)`、`(off NAME)`
 
-语言里只有 **seq** 是作用域：`a | b | ...` 形成的一条序列，包括括号里的 `( ... )`、`(seq ...)`，以及每条管线的一次运行。`(time-limit N)`、`(on NAME)`、`(off NAME)` 都从写下的位置起，作用到它所在的最内层 seq 结束；这期间调用的管线（`prepass`、`polish`、`rewrite`……）也受它们影响。`on`/`off` 就是这样；`(time-limit N)` 的细节如下：
+**作用域**有四种：seq（`a | b | ...` 形成的一条序列，包括括号里的 `( ... )`、`(seq ...)`），`with`，`scope`，以及每条管线的一次运行。其他形式（`if`、`fix`、`union`、`best`、`first`、`retry`……）都不是作用域。`(time-limit N)`、`(on NAME)`、`(off NAME)` 都从写下的位置起，作用到它所在的最内层 seq 结束；这期间调用的管线（`prepass`、`polish`、`rewrite`……）也受它们影响。`on`/`off` 就是这样；`(time-limit N)` 的细节如下：
 
 - 从这一步起，这条 seq 剩下的步骤共有 `N` 毫秒；到期后剩下干活的步骤都被跳过（计入 `time-limit/skipped`），这条 seq 很快结束，外面的步骤照常运行。
 - `(time-limit 0)` 清除本 seq 里设的时限，回到进入这条 seq 时的时限（外层设的仍然有效）。
@@ -97,7 +99,7 @@ CMP    := '<' | '<=' | '>' | '>=' | '==' | '!='
 - 时限到期时开关 `cut` 开着，就算整次运行被截断：`eggy1` 打印提示，bench 把没解出的用例记作 `cut`。默认 `pipeline` 开头是 `(time-limit time_limit) | (on cut)`，所以 `--passes time_limit=MS` 设的总时限到期时算截断。`cut` 会被内层继承，所以里面再设的时限到期也算；不想算的地方写 `(off cut)`。
 - 截断后得到的结果不进缓存。
 
-不是 seq 的形式参数不形成作用域：`(if C (time-limit 100))` 那一支只有一个 pass，时限作用到 `if` 所在的 seq；`(if C ((time-limit 100) | x))` 那一支是一条 seq，时限只限 `x`。`(off NAME)` 同理：`default.pipe` 的 `gates` 写成 `(if (mul < 1) (off poly_mba)) | ...`，平铺进 `prepass` 的顶层 seq，所以一直关到这次预处理结束。
+不是 seq 的形式参数（`with`、`scope` 的除外）不形成作用域：`(if C (time-limit 100))` 那一支只有一个 pass，时限作用到 `if` 所在的 seq；`(if C ((time-limit 100) | x))` 那一支是一条 seq，时限只限 `x`。`(off NAME)` 同理：`default.pipe` 的 `gates` 写成 `(if (mul < 1) (off poly_mba)) | ...`，平铺进 `prepass` 的顶层 seq，所以一直关到这次预处理结束。
 
 ```
 a | (time-limit 1000) | b | (time-limit 0) | c    # 只限 b
@@ -106,7 +108,7 @@ a | (time-limit 1000) | b | c                    # b、c 共用 1000 ms
 a | (if big (time-limit 200)) | b | c            # 输入大时 b、c 共用 200 ms
 ```
 
-其他设置：`with`、`(with off=...)`、`scope` 只在包住的管线里有效，也包括其间调用的管线；寄存器属于整条管线的一次运行，不受 seq 限制。
+`with` 的设置和 `scope` 的运行上下文只在包住的管线里有效，也包括其间调用的管线；寄存器属于整条管线的一次运行，不受作用域限制。
 
 ## 5. Pass
 
@@ -177,7 +179,7 @@ a | (if big (time-limit 200)) | b | c            # 输入大时 b、c 共用 200
 
 ### 5.5 内部 pass 名与开关（`off`、`on`）
 
-`(with off=...)`、`(off ...)`、`(on ...)` 和 `--passes` 的 `off=` 接受下列名字。关掉之后，它在一串步骤里时返回输入，作为 alternative 时不给出形式。它们大多同时也是 pass 名；`poly/masked`、`semi/*` 只是内部步骤：
+`(off ...)`、`(on ...)` 和 `--passes` 的 `off=` 接受下列名字。关掉之后，它在一串步骤里时返回输入，作为 alternative 时不给出形式。它们大多同时也是 pass 名；`poly/masked`、`semi/*` 只是内部步骤：
 
 `lowbits unshift tfunc_whole relate tfunc unify_operands recombine cut_products shifted_xor simplify_rebuilt cluster_regions simba small_blocks wide_blocks poly_mba poly/masked rebuild_values common_multiple related_leaves one_wide_term semi_linear drop_unused clustered peel peel_clustered semi/grouped semi/peel_grouped semi/shapes semi/pairs semi/peel_shapes semi/semi_split semi/scaled semi/bit_split semi/short_consts`
 
@@ -242,7 +244,7 @@ a | (if big (time-limit 200)) | b | c            # 输入大时 b、c 共用 200
 | `relate_leaves` | 16 | `relate` 只处理叶子不多于此的区域 |
 | `bit_splits` | `bit_split_budget` | 剩下的 `bit_split` 次数 |
 
-值是数，或限值的名字（`(with rewrites=polish_rewrites p)`）。
+写作 `KEY=VALUE`，中间无空格；一个 `with` 可以有多个设置，至少一个。值是数，或限值的名字（`(with rewrites=polish_rewrites p)`）。没有 `off=`：在 `with` 里写 `off=X` 会报错，并提示改成 `(with ... (off X) | p)`。
 
 ### 7.2 限值
 
@@ -325,7 +327,7 @@ a | (if big (time-limit 200)) | b | c            # 输入大时 b、c 共用 200
 
 读完 `--passes` 后检查，出错时拒绝整个设置：
 
-- 名字：未知的 pass、条件、数、`off` 名、`with` 的键、`sub/NAME`、规则集，都报错并列出已知的名字。
+- 名字：未知的 pass、条件、数、`on`/`off` 名、`with` 的键、`sub/NAME`、规则集，都报错并列出已知的名字。`with` 里写 `off=`，报错并提示 `(off NAME)` 的写法。
 - 形式的参数：个数、种类（条件、数、管线）不对。
 - 旧的单名写法 `save/t`、`off/NAME`、`egglog/LABEL`，报错并提示括号写法；旧的 `seq(a,b)` 语法报错并提示新写法。
 - `egglog`、`reprint` 和次数 `restarts` 只能出现在 `pipeline` 里：只有 `simplify` 的运行才有 e-graph。
@@ -337,7 +339,8 @@ a | (if big (time-limit 200)) | b | c            # 输入大时 b、c 共用 200
 - `--passes` 里定义了却没用到的 `let`。
 - 存了却从不读的寄存器。
 - 死存储：同一层又 `save` 了一次，中间没读。写在 `if`、`cand`、`first` 的后几支、`retry` 的 `b` 或循环体里的 `save` 不和外面的比较，所以 `(save t) | (if c (save t))` 这种先存默认值再覆盖的写法不算。
-- 里面没有任何单项 pass 的 `(with off=...)`，什么也关不掉。
+- `(off NAME)` 在所在的 seq 里后面没有任何单项 pass，什么也关不掉（只看直接写在 seq 里的 `off`；开关不算）。
+- `pipeline`、`prepass`、`polish` 里不在任何 `scope` 之内的 `with`：没有运行上下文可改，什么也不起作用。
 - 写在 seq 最后一步的 `(time-limit N)`，什么也限制不了。
 
 默认管线没有警告，`default.pipe` 的 `let` 都用到了（有测试检查）。
@@ -349,7 +352,7 @@ a | (if big (time-limit 200)) | b | c            # 输入大时 b、c 共用 200
 (if (mul < 1) (off poly_mba))
 
 # 从同一个起点做两种重建，取小的
-(save t) | (best 1 rewrite ((load t) | (with off=clustered rewrite)))
+(save t) | (best 1 rewrite ((load t) | (off clustered) | rewrite))
 
 # 另一种重建，只在它确实不同且更小时作为候选
 (save t) | (union id (cand halve_input (load t) | halve | (filter (!(same t) && size < (size t))) | rebuild))
