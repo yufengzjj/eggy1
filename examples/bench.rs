@@ -81,9 +81,13 @@ struct Outcome {
 
 fn main() {
     let args = Args::parse();
-    if let Err(e) = eggy1::sched::Passes::parse(&args.passes) {
-        eprintln!("--passes: {e}");
-        std::process::exit(2);
+    match eggy1::sched::Passes::parse_noting(&args.passes) {
+        Err(e) => {
+            eprintln!("--passes: {e}");
+            std::process::exit(2);
+        }
+        Ok((_, warnings)) if !args.one => warnings.iter().for_each(|w| eprintln!("--passes: warning: {w}")),
+        Ok(_) => {}
     }
     if args.one {
         run_one(&args);

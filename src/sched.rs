@@ -527,7 +527,7 @@ pub struct Passes {
 static DEFAULT: std::sync::LazyLock<(Passes, lang::Defs)> = std::sync::LazyLock::new(|| {
     let mut p = Passes::base();
     let mut defs = lang::Defs::new();
-    p.apply(include_str!("default.pipe"), &mut defs).and_then(|()| p.finish()).unwrap_or_else(|e| panic!("src/default.pipe: {e}"));
+    p.apply(include_str!("default.pipe"), &mut defs, &mut Lets::default()).and_then(|()| p.finish()).unwrap_or_else(|e| panic!("src/default.pipe: {e}"));
     (p, defs)
 });
 
@@ -604,17 +604,27 @@ impl Passes {
     /// or by white space before a `key=` or `(let` (so a pipeline may contain spaces); `#`
     /// starts a comment to the end of the line.
     pub fn parse(spec: &str) -> Result<Passes, String> {
+        Passes::parse_noting(spec).map(|(p, _)| p)
+    }
+
+    /// `parse`, and warnings about parts of `spec` that do nothing: a `let` it defines and
+    /// never uses, and what `Passes::warnings` finds.
+    pub fn parse_noting(spec: &str) -> Result<(Passes, Vec<String>), String> {
         let (mut p, mut defs) = DEFAULT.clone();
-        p.apply(spec, &mut defs)?;
+        let mut lets = Lets::default();
+        p.apply(spec, &mut defs, &mut lets)?;
         p.finish()?;
-        Ok(p)
+        let mut notes: Vec<String> = lets.defined.iter().filter(|n| !lets.used.contains(n)).map(|n| format!("(let {n} ...) is never used: a name is expanded only where a later item writes it")).collect();
+        notes.extend(p.warnings());
+        notes.dedup();
+        Ok((p, notes))
     }
 
     /// The items of `spec` applied in turn.
-    fn apply(&mut self, spec: &str, defs: &mut lang::Defs) -> Result<(), String> {
+    fn apply(&mut self, spec: &str, defs: &mut lang::Defs, lets: &mut Lets) -> Result<(), String> {
         let p = self;
-        let read = |val: &str, defs: &lang::Defs| {
-            lang::parse_with(val, defs).map_err(|e| match lang::is_old_syntax(val) {
+        let read = |val: &str, defs: &lang::Defs, used: &mut Vec<String>| {
+            lang::parse_with(val, defs, used).map_err(|e| match lang::is_old_syntax(val) {
                 true => format!("{e} (the old seq(a,b) syntax is no longer read: write a | b, (best 1 a b), (if c a))"),
                 false => e,
             })
@@ -651,41 +661,42 @@ impl Passes {
         }
         for item in items.iter().map(String::as_str) {
             if item.starts_with("(let") {
-                let (name, pipe) = lang::parse_let(item, defs)?;
+                let (name, pipe) = lang::parse_let(item, defs, &mut lets.used)?;
+                lets.defined.push(name.clone());
                 defs.insert(name, pipe);
                 continue;
             }
             if let Some(path) = item.strip_prefix("file=") {
                 let text = std::fs::read_to_string(path).map_err(|e| format!("file={path}: {e}"))?;
-                p.apply(&text, defs).map_err(|e| format!("{path}: {e}"))?;
+                p.apply(&text, defs, lets).map_err(|e| format!("{path}: {e}"))?;
                 continue;
             }
             if let Some(val) = item.strip_prefix("prepass=") {
-                p.prepass = read(val, defs)?;
+                p.prepass = read(val, defs, &mut lets.used)?;
                 continue;
             }
             if let Some(val) = item.strip_prefix("pipeline=") {
-                p.pipeline = read(val, defs)?;
+                p.pipeline = read(val, defs, &mut lets.used)?;
                 continue;
             }
             if let Some(val) = item.strip_prefix("rewrite=") {
-                p.rewrite = read(val, defs)?;
+                p.rewrite = read(val, defs, &mut lets.used)?;
                 continue;
             }
             if let Some(val) = item.strip_prefix("simba=") {
-                p.simba = read(val, defs)?;
+                p.simba = read(val, defs, &mut lets.used)?;
                 continue;
             }
             if let Some((name, val)) = item.strip_prefix("sub/").and_then(|s| s.split_once('=')) {
                 let names: Vec<&str> = SUBS.iter().map(|(n, _)| *n).collect();
                 let i = names.iter().position(|n| *n == name).ok_or_else(|| format!("unknown sub/{name}; known: {}", names.join(" ")))?;
-                p.subs[i] = read(val, defs)?;
+                p.subs[i] = read(val, defs, &mut lets.used)?;
                 continue;
             }
             if let Some(val) = item.strip_prefix("polish=") {
                 let names: Vec<&str> = val.split(',').filter(|s| !s.is_empty()).collect();
                 let all_polish = names.iter().all(|n| crate::linear_mba::POLISH.iter().any(|(m, _)| m == n));
-                p.polish = if all_polish { lang::parse(&polish(&names))? } else { read(val, defs)? };
+                p.polish = if all_polish { lang::parse(&polish(&names))? } else { read(val, defs, &mut lets.used)? };
                 continue;
             }
             let (key, op, val) = ["+=", "-=", "="]
@@ -768,24 +779,19 @@ impl Passes {
     /// outside `pipeline` (only a `simplify` run has them), and `prepass` or `polish` that
     /// reach themselves.
     fn check(&self) -> Result<(), String> {
-        let mut inner = vec![("rewrite", &self.rewrite), ("simba", &self.simba)];
-        inner.extend(SUBS.iter().map(|(n, _)| *n).zip(&self.subs));
-        let all: Vec<(&str, &Pipe)> = [("pipeline", &self.pipeline), ("prepass", &self.prepass), ("polish", &self.polish)].into_iter().chain(inner.iter().copied()).collect();
         // The pipelines each reaches: `prepass`, `polish`, or the rebuilds of one term
         // (`inner`), which any pass over one term may run.
         let mut reach = std::collections::HashMap::new();
-        for (name, p) in &all {
-            let mut uses = Uses::default();
-            uses.walk(p);
+        for (name, uses) in self.uses() {
             if let Some(r) = uses.unsaved {
                 return Err(format!("{name} reads register {r} before any (save {r})"));
             }
-            if *name != "pipeline" {
+            if name != "pipeline" {
                 if let Some(what) = uses.needs_run.first() {
                     return Err(format!("{what} needs a simplify run and cannot be in {name}"));
                 }
             }
-            let node = if ["pipeline", "prepass", "polish"].contains(name) { *name } else { "inner" };
+            let node = if ["pipeline", "prepass", "polish"].contains(&name) { name } else { "inner" };
             let e: &mut Vec<&str> = reach.entry(node).or_default();
             e.extend(uses.calls);
         }
@@ -803,9 +809,46 @@ impl Passes {
         }
         Ok(())
     }
+
+    /// Parts of the pipelines that do nothing: a `(save R)` never read in its pipeline or
+    /// saved over before any read on every path, and a `(with off=...)` around passes that
+    /// run no pass over a term.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (name, uses) in self.uses() {
+            let mut unread: Vec<&String> = uses.saved.iter().filter(|r| !uses.reads.contains(r)).collect();
+            unread.dedup();
+            out.extend(unread.into_iter().map(|r| format!("{name}: register {r} is saved and never read")));
+            let mut dead = uses.dead.clone();
+            dead.dedup();
+            out.extend(dead.iter().map(|r| format!("{name}: register {r} is saved again before the earlier save is read")));
+            out.extend(uses.idle_off.iter().map(|o| format!("{name}: (with off={o} ...) runs no pass it could turn off")));
+        }
+        out
+    }
+
+    /// Each pipeline by name, with what it uses.
+    fn uses(&self) -> Vec<(&'static str, Uses)> {
+        let main = [("pipeline", &self.pipeline), ("prepass", &self.prepass), ("polish", &self.polish), ("rewrite", &self.rewrite), ("simba", &self.simba)];
+        main.into_iter()
+            .chain(SUBS.iter().map(|(n, _)| *n).zip(&self.subs))
+            .map(|(name, p)| {
+                let mut uses = Uses::default();
+                uses.walk(p);
+                (name, uses)
+            })
+            .collect()
+    }
 }
 
-/// What a pipeline uses, for `Passes::check`.
+/// The `let` names a spec defines and those its items expand, for `Passes::parse_noting`.
+#[derive(Default)]
+struct Lets {
+    defined: Vec<String>,
+    used: Vec<String>,
+}
+
+/// What a pipeline uses, for `Passes::check` and `Passes::warnings`.
 #[derive(Default)]
 struct Uses {
     /// The passes and counts in it that need a `simplify` run.
@@ -816,6 +859,15 @@ struct Uses {
     saved: Vec<String>,
     /// The first register read where no `(save R)` can have run before.
     unsaved: Option<String>,
+    /// Every register read, also by `pre_done` (`t0`, which it may find empty).
+    reads: Vec<String>,
+    /// The `off` lists of `(with off=...)` around no pass over a term.
+    idle_off: Vec<String>,
+    /// The registers saved and not read since on every path that reaches this point, from
+    /// saves at the same level of `if`s and other parts that may not run.
+    pending: Vec<String>,
+    /// The registers saved again where they are `pending`: the earlier save is never read.
+    dead: Vec<String>,
 }
 
 impl Uses {
@@ -826,13 +878,25 @@ impl Uses {
                 "reprint" => self.needs_run.push("reprint".into()),
                 "prepass" => self.calls.push("prepass"),
                 "polish" => self.calls.push("polish"),
+                "pre_done" => self.seen("t0"),
                 _ => {}
             },
             Pipe::Pass(Pass::Term { .. }) => self.calls.push("inner"),
-            Pipe::Pass(Pass::Save(r)) => self.saved.push(r.clone()),
+            Pipe::Pass(Pass::Save(r)) => {
+                self.saved.push(r.clone());
+                if self.pending.contains(r) {
+                    self.dead.push(r.clone());
+                } else {
+                    self.pending.push(r.clone());
+                }
+            }
             Pipe::Pass(Pass::Load(r) | Pass::Label(r)) => self.read(r),
             Pipe::Pass(_) => {}
-            Pipe::Seq(ps) | Pipe::Union(ps) | Pipe::First(ps) => ps.iter().for_each(|p| self.walk(p)),
+            Pipe::Seq(ps) | Pipe::Union(ps) => ps.iter().for_each(|p| self.walk(p)),
+            Pipe::First(ps) => {
+                self.walk(&ps[0]);
+                ps[1..].iter().for_each(|p| self.maybe(p));
+            }
             Pipe::Best(v, ps) => {
                 ps.iter().for_each(|p| self.walk(p));
                 self.value(v);
@@ -843,16 +907,34 @@ impl Uses {
             }
             Pipe::If(c, a, b) => {
                 self.cond(c);
+                let (before, n) = (std::mem::take(&mut self.pending), self.reads.len());
                 self.walk(a);
+                let after_a = std::mem::take(&mut self.pending);
                 self.walk(b);
+                let both: Vec<String> = self.pending.drain(..).filter(|r| after_a.contains(r)).collect();
+                self.pending = before.into_iter().filter(|r| !self.reads[n..].contains(r)).collect();
+                for r in both {
+                    if !self.pending.contains(&r) {
+                        self.pending.push(r);
+                    }
+                }
             }
             Pipe::Retry(c, a, b) => {
                 self.walk(a);
                 self.cond(c);
-                self.walk(b);
+                self.maybe(b);
             }
+            Pipe::Cand(_, p) => self.maybe(p),
             Pipe::Filter(c) => self.cond(c),
-            Pipe::Off(_, p) | Pipe::Smallest(p) | Pipe::Tag(_, p) | Pipe::Cand(_, p) | Pipe::With(_, p) | Pipe::Scope(p) | Pipe::Smaller(_, p) => self.walk(p),
+            Pipe::Off(names, p) => {
+                let mut body = Uses::default();
+                body.walk(p);
+                if body.calls.is_empty() {
+                    self.idle_off.push(names.join(","));
+                }
+                self.walk(p);
+            }
+            Pipe::Smallest(p) | Pipe::Tag(_, p) | Pipe::With(_, p) | Pipe::Scope(p) | Pipe::Smaller(_, p) => self.walk(p),
             // Both rebuild with `Passes::rewrite`.
             Pipe::Regions(p) => {
                 self.calls.push("inner");
@@ -870,10 +952,24 @@ impl Uses {
         let mut body = Uses::default();
         body.walk(p);
         self.saved.extend(body.saved);
+        self.maybe(p);
+    }
+
+    /// `p` run or not. A save in `p` does not make an earlier one dead (`(save t) | (if c
+    /// (save t))` keeps a default), and only what is pending either way stays pending.
+    fn maybe(&mut self, p: &Pipe) {
+        let (before, n) = (std::mem::take(&mut self.pending), self.reads.len());
         self.walk(p);
+        self.pending = before.into_iter().filter(|r| !self.reads[n..].contains(r)).collect();
+    }
+
+    fn seen(&mut self, r: &str) {
+        self.reads.push(r.to_string());
+        self.pending.retain(|s| s != r);
     }
 
     fn read(&mut self, r: &str) {
+        self.seen(r);
         if self.unsaved.is_none() && !self.saved.iter().any(|s| s == r) {
             self.unsaved = Some(r.to_string());
         }
@@ -1051,6 +1147,18 @@ prepass=lowbits | r2
         }
         for good in ["prepass=(if mixed (save t)) | (load t)", "prepass=(fix 3 (union (load t) id) | (save t))", "pipeline=(retry (size < (size t)) (save t) (load t))", "prepass=(best (size t) (save t) id)"] {
             assert!(Passes::parse(good).is_ok(), "{good}");
+        }
+        assert_eq!(Passes::default().warnings(), Vec::<String>::new());
+        let mut lets = Lets::default();
+        Passes::base().apply(include_str!("default.pipe"), &mut lang::Defs::new(), &mut lets).unwrap();
+        assert!(lets.defined.iter().all(|n| lets.used.contains(n)), "{:?} {:?}", lets.defined, lets.used);
+        let (_, w) = Passes::parse_noting("(let foo rewrite) (let bar lowbits) prepass=bar | (save t) | (save q) | (load t) | (with off=relate (save x) | id) | (with off=relate rewrite)").unwrap();
+        assert_eq!(w.len(), 4, "{w:?}");
+        assert!(w[0].contains("let foo") && w[1].contains("register q") && w[2].contains("register x") && w[3].contains("off=relate"), "{w:?}");
+        let (_, w) = Passes::parse_noting("prepass=(save t) | rewrite | (save t) | (load t)").unwrap();
+        assert!(w.len() == 1 && w[0].contains("saved again"), "{w:?}");
+        for ok in ["prepass=(save t) | (if mixed (save t)) | (load t)", "prepass=(save t) | (cand unified (save t)) | (load t)", "prepass=(fix 3 (save t) | rewrite) | (load t)", "prepass=(save t) | (filter (size < (size t))) | (save t) | (load t)", "prepass=(save t) | (first rewrite (save t)) | (load t)", "prepass=(if mixed (save t) (save t)) | (load t)"] {
+            assert_eq!(Passes::parse_noting(ok).unwrap().1, Vec::<String>::new(), "{ok}");
         }
         let e = Passes::parse("prepass=save/t").unwrap_err();
         assert!(e.contains("(save t)"), "{e}");

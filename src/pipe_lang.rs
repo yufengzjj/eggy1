@@ -152,6 +152,8 @@ struct Parser<'a> {
     toks: Vec<Tok>,
     at: usize,
     defs: &'a Defs,
+    /// The names of `defs` expanded.
+    used: Vec<String>,
 }
 
 impl Parser<'_> {
@@ -203,7 +205,11 @@ impl Parser<'_> {
     fn stage(&mut self) -> Result<Pipe, String> {
         match self.next() {
             Some(Tok::Name(n)) if FORMS.contains(&n.as_str()) && n != "egglog" => Err(format!("{n} needs parentheses: ({n} ...)")),
-            Some(Tok::Name(n)) if self.defs.contains_key(&n) => Ok(self.defs[&n].clone()),
+            Some(Tok::Name(n)) if self.defs.contains_key(&n) => {
+                let p = self.defs[&n].clone();
+                self.used.push(n);
+                Ok(p)
+            }
             Some(Tok::Name(n)) if n.split_once('/').is_some_and(|(h, _)| crate::pipe::FORM_PASSES.contains(&h)) => {
                 let (h, r) = n.split_once('/').unwrap();
                 Err(format!("write {n} as ({h} {r})"))
@@ -451,21 +457,23 @@ fn show_tok(t: Option<&Tok>) -> String {
 
 /// Parses `s` in the pipeline language.
 pub fn parse(s: &str) -> Result<Pipe, String> {
-    parse_with(s, &Defs::new())
+    parse_with(s, &Defs::new(), &mut Vec::new())
 }
 
-/// Parses `s`, where the names of `defs` stand for their pipelines.
-pub fn parse_with(s: &str, defs: &Defs) -> Result<Pipe, String> {
-    let mut p = Parser { toks: lex(s)?, at: 0, defs };
+/// Parses `s`, where the names of `defs` stand for their pipelines; the names expanded are
+/// added to `used`.
+pub fn parse_with(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Pipe, String> {
+    let mut p = Parser { toks: lex(s)?, at: 0, defs, used: Vec::new() };
     let pipe = p.pipe()?;
     p.end()?;
+    used.extend(p.used);
     Ok(pipe)
 }
 
 /// Parses the definition `(let NAME p)`: `NAME` then stands for `p`, which is expanded where
-/// it is used.
-pub fn parse_let(s: &str, defs: &Defs) -> Result<(String, Pipe), String> {
-    let mut p = Parser { toks: lex(s)?, at: 0, defs };
+/// it is used; the names of `defs` it expands are added to `used`.
+pub fn parse_let(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<(String, Pipe), String> {
+    let mut p = Parser { toks: lex(s)?, at: 0, defs, used: Vec::new() };
     p.expect(Tok::Open, "(let")?;
     if p.name("let")? != "let" {
         return Err(format!("expected (let NAME pipeline): {s}"));
@@ -477,6 +485,7 @@ pub fn parse_let(s: &str, defs: &Defs) -> Result<(String, Pipe), String> {
     let pipe = p.pipe()?;
     p.expect(Tok::Close, ")")?;
     p.end()?;
+    used.extend(p.used);
     Ok((name, pipe))
 }
 

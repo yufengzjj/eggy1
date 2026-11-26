@@ -1,9 +1,15 @@
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use eggy1::expr_convert::infix_to_egglog;
 use eggy1::{simplify, Cli};
 
 fn main() {
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    if let Some(spec) = matches.get_raw("passes").and_then(|mut v| v.next()) {
+        for w in eggy1::sched::Passes::parse_noting(&spec.to_string_lossy()).map(|(_, w)| w).unwrap_or_default() {
+            eprintln!("--passes: warning: {w}");
+        }
+    }
     if cli.show_passes {
         println!("{:#}", cli.passes);
         return;
