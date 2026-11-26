@@ -946,14 +946,16 @@ fn rules_egraph(egg: &str) -> Result<EGraph, Error> {
 /// One saturate-and-extract round on `s` together with its linear-MBA rebuild, or
 /// on the rebuild alone if `keep_input` is false and the pre-pass changed `s`.
 pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result<String, Error> {
-    let (alt, other) = linear_mba::simplify_linear_with(s, width_of(&cli.num_type), crate::eval::NumType::from_name(&cli.num_type).map(|t| t.signed), cli.trace, &cli.passes);
-    let mut roots: Vec<&str> = match alt != s {
-        true if !keep_input => vec![&alt],
-        true => vec![s, &alt],
-        false => vec![s],
-    };
-    roots.extend(other.iter().map(String::as_str));
-    egglog_round(egg, &roots, cli)
+    pipe::in_run(&cli.passes, Some(cli), || pipe::Cand::new(s, "input"), || {
+        let (alt, other) = linear_mba::simplify_linear_with(s, width_of(&cli.num_type), crate::eval::NumType::from_name(&cli.num_type).map(|t| t.signed), cli.trace, &cli.passes);
+        let mut roots: Vec<&str> = match alt != s {
+            true if !keep_input => vec![&alt],
+            true => vec![s, &alt],
+            false => vec![s],
+        };
+        roots.extend(other.iter().map(String::as_str));
+        egglog_round(egg, &roots, cli)
+    })
 }
 
 /// The extraction of a saturation round on the e-graph with the terms `roots` unioned.
@@ -969,7 +971,7 @@ pub(crate) fn egglog_round(egg: &str, roots: &[&str], cli: &Cli) -> Result<Strin
     thread_local! {
         static RUNS: std::cell::RefCell<Vec<(String, String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
     }
-    let schedule = cli.passes.egglog_schedule(cli.iter_limit);
+    let schedule = cli.passes.egglog_schedule();
     let key = format!("{schedule}\n{lets}\n{s}\n{union}");
     let hit = |(e, k, _): &&(String, String, String)| e == egg && *k == key;
     if let Some(r) = RUNS.with(|c| c.borrow().iter().find(hit).map(|(_, _, r)| r.clone())) {
@@ -1030,7 +1032,7 @@ pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
 }
 
 /// Whether the last `simplify` on this thread was cut short: a step skipped past a
-/// `time_limit` with the switch `cut` on (the default `pipeline` with `time_limit=MS`).
+/// `time_limit` with the switch `cut` on (the default `pipeline` with `--passes time_limit=MS`).
 pub fn last_run_cut() -> bool {
     pipe::cut()
 }
@@ -1074,14 +1076,14 @@ pub struct Cli {
         short,
         long,
         default_value_t = 10,
-        help = "Maximum number of simplification iterations"
+        help = "Maximum number of simplification iterations (the variable iter_limit)"
     )]
     pub iter_limit: usize,
     #[arg(
         short,
         long,
         default_value_t = 2,
-        help = "Maximum number of extract-and-restart rounds (each round runs the full iteration schedule on a fresh e-graph seeded with the previous round's result)"
+        help = "Maximum number of extract-and-restart rounds (each round runs the full iteration schedule on a fresh e-graph seeded with the previous round's result; the variable restarts)"
     )]
     pub max_restarts: usize,
     #[arg(long, help = "Print pre-pass candidates and round sizes to stderr")]

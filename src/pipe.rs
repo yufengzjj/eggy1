@@ -37,10 +37,10 @@ pub const SET_PASSES: [&str; 9] = [
 
 /// The named conditions of `if`, `retry` and `filter`, on the candidates they see; the
 /// others (`(same R)`, comparisons) are `sched::Cond` forms.
-pub const CONDS: [&str; 20] = [
+pub const CONDS: [&str; 18] = [
     // The main candidate has a shift, division or mulhi and its rebuild is not tiny.
     "opaque",
-    // A candidate is proved minimal: no smaller term equals it (`Passes::minimal`).
+    // A candidate is proved minimal: no smaller term equals it (with `prove_minimal` on).
     "minimal",
     // The main candidate has arithmetic or a constant directly under a bitwise operation.
     "mixed",
@@ -50,10 +50,6 @@ pub const CONDS: [&str; 20] = [
     "moved",
     // The main candidate is the input of `simplify`.
     "input",
-    // `Passes::rerun_input`.
-    "rerun_input",
-    // `Passes::printed` is not 0.
-    "printed",
     // The main candidate has at most `linear_mba::TINY` nodes.
     "tiny",
     // The main candidate has at most `split_size` nodes.
@@ -98,11 +94,6 @@ fn feature(s: &stats::Shape, i: usize) -> usize {
         name => unreachable!("feature {name}"),
     }
 }
-
-/// The names a `fix` or `best` count can take: `restarts` (`Cli::max_restarts` less the
-/// first round), `extra` (`Passes::extra`), `printed` (`Passes::printed` less the first
-/// round), `keep` (`Passes::keep`).
-pub const COUNTS: [&str; 4] = ["restarts", "extra", "printed", "keep"];
 
 /// The passes as a pipeline writes them, for error messages.
 pub fn names() -> Vec<String> {
@@ -275,23 +266,11 @@ impl<'a> Env<'a> {
         self.regs.borrow().get(r).and_then(|s| s.first().cloned())
     }
 
-    fn count(&self, i: usize) -> usize {
-        let p = self.passes;
-        match COUNTS[i] {
-            "restarts" => self.cli("restarts").max_restarts.max(1) - 1,
-            "extra" => p.extra,
-            "printed" => p.printed.saturating_sub(1),
-            "keep" => p.keep,
-            n => unreachable!("count {n}"),
-        }
-    }
-
     /// `v` for the candidates `set`; `None` where it reads a candidate or register that is
     /// not there, or divides by 0.
     fn value(&self, v: &Value, set: &[Cand]) -> Option<u64> {
         Some(match v {
             Value::Num(n) => *n,
-            Value::Count(i) => self.count(*i) as u64,
             Value::Feature(0) => set.first()?.size() as u64,
             Value::Feature(i) => feature(&stats::shape(set.first()?.tree()), *i) as u64,
             Value::Size(r) => self.reg_main(r)?.size() as u64,
@@ -299,6 +278,7 @@ impl<'a> Env<'a> {
                 crate::sched::NONE => crate::sched::NONE,
                 at => at.saturating_sub(crate::sched::epoch_ns()) / 1_000_000,
             },
+            Value::Var(i) if *i == crate::sched::KEEP => crate::sched::read(*i).max(1),
             Value::Var(i) => crate::sched::read(*i),
             Value::Bin(op, a, b) => {
                 let (a, b) = (self.value(a, set)?, self.value(b, set)?);
@@ -344,7 +324,7 @@ fn opaque(t: &Term) -> bool {
 /// candidates, only smaller terms without them need ruling out: no rule makes one.
 fn proved_minimal<'s>(set: &'s [Cand], env: &Env) -> Option<&'s Cand> {
     let cli = env.cli?;
-    if !cli.passes.minimal {
+    if crate::sched::get(crate::sched::PROVE_MINIMAL) == 0 {
         return None;
     }
     let t_only = !set.iter().any(|c| opaque(c.tree()));
@@ -357,7 +337,6 @@ fn proved_minimal<'s>(set: &'s [Cand], env: &Env) -> Option<&'s Cand> {
 
 fn cond(i: usize, set: &[Cand], env: &Env) -> bool {
     let Some(main) = set.first() else { return false };
-    let p = env.passes;
     match CONDS[i] {
         "opaque" => opaque(main.tree()) && size_of(&env.prepass_of(main.term()).0) > linear_mba::TINY,
         "minimal" => proved_minimal(set, env).is_some(),
@@ -365,8 +344,6 @@ fn cond(i: usize, set: &[Cand], env: &Env) -> bool {
         "rebuilds" => env.prepass_of(main.term()).0 != main.term(),
         "moved" => env.moved.get(),
         "input" => main.term() == env.input,
-        "rerun_input" => p.rerun_input,
-        "printed" => p.printed > 0,
         "tiny" => main.size() <= linear_mba::TINY,
         "fits_split" => main.size() <= limit(Limit::SplitSize),
         "used_wide" => set.iter().any(|c| c.used & WIDE != 0),
@@ -386,6 +363,7 @@ fn cond(i: usize, set: &[Cand], env: &Env) -> bool {
 fn holds(c: &Cond, set: &[Cand], env: &Env) -> bool {
     match c {
         Cond::Is(i) => cond(*i, set, env),
+        Cond::Var(i) => env.value(&Value::Var(*i), set) != Some(0),
         Cond::Same(r) => set.first().zip(env.reg_main(r)).is_some_and(|(m, c)| c.same(m)),
         Cond::Not(c) => !holds(c, set, env),
         Cond::And(cs) => cs.iter().all(|c| holds(c, set, env)),
@@ -437,22 +415,47 @@ fn scoped<R>(f: impl FnOnce() -> R) -> R {
     crate::sched::in_scope(f)
 }
 
-/// The candidates `p` gives for `set`. A `simplify` run starts with `time_limit = MS` of
-/// `Passes::time_limit`, which the runs it calls only read.
-pub fn run(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
-    scoped(|| {
-        crate::sched::apply(env.passes);
-        if env.cli.is_some() {
-            assign_time_limit(env.passes.time_limit as u64);
+thread_local! {
+    static IN_RUN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `f` as part of a run of `p`: when no run is under way on this thread, as the outermost
+/// scope of one, after its entry assignments (`Passes::entry_steps`, with `restarts` and
+/// `iter_limit` of `cli`) evaluated on the candidate `input` gives; they all end with it.
+pub fn in_run<R>(p: &Passes, cli: Option<&Cli>, input: impl FnOnce() -> Cand, f: impl FnOnce() -> R) -> R {
+    if IN_RUN.with(Cell::get) {
+        return f();
+    }
+    crate::sched::set_current(p);
+    struct Out;
+    impl Drop for Out {
+        fn drop(&mut self) {
+            IN_RUN.with(|r| r.set(false));
         }
-        go(p, set, env)
+    }
+    scoped(|| {
+        IN_RUN.with(|r| r.set(true));
+        let _out = Out;
+        let env = Env::with(cli, p, cli.map_or(64, |c| width_of(&c.num_type)), None, false, String::new(), "");
+        let set = vec![input()];
+        for step in p.entry_steps(cli.map(|c| (c.max_restarts, c.iter_limit))) {
+            pass(&step, set.clone(), &env).expect("an assignment runs no egglog");
+        }
+        f()
     })
 }
 
-/// `time_limit = ms` in the scope under way; 0 is `none`.
+/// The candidates `p` gives for `set`.
+pub fn run(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
+    let first = set.first().cloned();
+    let input = || first.unwrap_or_else(|| Cand::new(&env.input, "input"));
+    in_run(env.passes, env.cli, input, || scoped(|| go(p, set, env)))
+}
+
+/// `time_limit = ms` in the scope under way.
 fn assign_time_limit(ms: u64) {
     let at = match ms {
-        0 | crate::sched::NONE => crate::sched::NONE,
+        crate::sched::NONE => crate::sched::NONE,
         _ => crate::sched::epoch_ns().saturating_add(ms.saturating_mul(1_000_000)),
     };
     crate::sched::bind(crate::sched::DEADLINE, at);
@@ -693,7 +696,8 @@ fn run_on(p: &Pipe, t: &Term, w: &Ctx, cofactor: bool) -> Option<Cand> {
     let mut env = Env::with(None, &passes, w.w, w.signed, false, String::new(), "");
     env.cofactor = cofactor;
     env.ctxs.borrow_mut().push(w.narrow(w.w));
-    let out = scoped(|| go(p, vec![Cand::of(t.clone(), &Cand::new("", "input"), 0, 0)], &env)).expect("a rewrite runs no egglog");
+    let input = || Cand::of(t.clone(), &Cand::new("", "input"), 0, 0);
+    let out = in_run(&passes, None, input, || scoped(|| go(p, vec![input()], &env))).expect("a rewrite runs no egglog");
     out.into_iter().next()
 }
 
@@ -701,16 +705,13 @@ fn run_on(p: &Pipe, t: &Term, w: &Ctx, cofactor: bool) -> Option<Cand> {
 /// `linear_mba::Ctx`), and the origin of its result when that is smaller.
 pub fn polish(egg: &str, w: u32, signed: Option<bool>, p: &Passes) -> (String, Option<String>) {
     let env = Env::prepass(p, w, signed, false, egg);
-    polish_one(&Cand::new(egg, "input"), &env).map_or((egg.to_string(), None), |c| (c.term().to_string(), Some(c.origin)))
+    let input = || Cand::new(egg, "input");
+    in_run(p, None, input, || polish_one(&input(), &env)).map_or((egg.to_string(), None), |c| (c.term().to_string(), Some(c.origin)))
 }
 
 /// `Passes::polish` on `c` alone, when it makes it smaller.
 fn polish_one(c: &Cand, env: &Env) -> Option<Cand> {
-    let out = scoped(|| {
-        crate::sched::apply(env.passes);
-        go(&env.passes.polish, vec![c.clone()], env)
-    })
-    .expect("polish runs no egglog");
+    let out = scoped(|| go(&env.passes.polish, vec![c.clone()], env)).expect("polish runs no egglog");
     out.into_iter().next().filter(|r| r.size() < c.size())
 }
 
@@ -908,7 +909,6 @@ mod tests {
         let passes = Passes::default();
         let env = Env::prepass(&passes, 32, None, false, "(Var \"x\")");
         let step = |p: &str| go(&lang::parse(p).unwrap(), vec![Cand::new("(Var \"x\")", "input")], &env).unwrap();
-        crate::sched::apply(&passes);
         scoped(|| {
             step("((off relate) | id)");
             assert!(!crate::sched::is_off("relate"), "a group ends its off");
@@ -928,14 +928,13 @@ mod tests {
         let env = Env::prepass(&passes, 32, None, false, "(Var \"x\")");
         let step = |p: &str| go(&lang::parse(p).unwrap(), vec![Cand::new("(Var \"x\")", "input")], &env).unwrap();
         use crate::sched::{is_off, is_on};
-        crate::sched::apply(&passes);
         scoped(|| {
             step("(off relate tfunc)");
             assert!(is_off("relate") && is_off("tfunc"), "several names in one off");
             step("(on relate)");
             assert!(!is_off("relate") && is_off("tfunc"), "the later switch counts");
-            crate::sched::apply(&passes);
-            assert!(!is_off("relate") && is_off("tfunc"), "a run started here keeps them");
+            let x = || Cand::new("(Var \"x\")", "input");
+            assert!(in_run(&passes, None, x, || !is_off("relate") && is_off("tfunc")), "a run started here keeps them");
             crate::sched::with_off(&["relate"], || {
                 assert!(is_off("relate"));
                 step("(on relate)");
@@ -955,7 +954,6 @@ mod tests {
         let passes = Passes::default();
         let env = Env::prepass(&passes, 32, None, false, "(Sub (Var \"x\") (Var \"y\"))");
         let step = |p: &str| go(&lang::parse(p).unwrap(), vec![Cand::new("(Sub (Var \"x\") (Var \"y\"))", "input")], &env).unwrap();
-        crate::sched::apply(&passes);
         scoped(|| {
             step("split_runs = vars * 3");
             assert_eq!(limit(Limit::SplitRuns), 6, "the right side is evaluated on the candidates");
@@ -976,6 +974,53 @@ mod tests {
         });
         assert_eq!(limit(Limit::SplitRuns), 16);
         assert!(!is_off("relate") && !is_on("cut"));
+    }
+
+    #[test]
+    fn run_settings_are_variables() {
+        use crate::sched::{KEEP, NONE, RESTARTS, get, var_index};
+        let passes = Passes::default();
+        let x = "(Sub (Var \"x\") (Var \"y\"))";
+        let env = Env::prepass(&passes, 32, None, false, x);
+        let input = || Cand::new(x, "input");
+        let step = |p: &str| go(&lang::parse(p).unwrap(), vec![input()], &env).unwrap();
+        let extra = var_index("extra").unwrap();
+        in_run(&passes, None, input, || {
+            assert_eq!((get(KEEP), get(extra), get(RESTARTS)), (2, 2, NONE), "a run without -m leaves restarts none");
+            step("keep = 0 | extra = keep + 3 | (if (extra == 3 && keep == 1) (save ok)) | (load ok)");
+            assert_eq!(get(extra), 2, "assignments end with their sequence");
+            assert_eq!(step("keep = 0 | (best keep id (union id rewrite))").len(), 1, "keep reads as at least 1");
+            step("extra = 0");
+            assert_eq!(get(extra), 0);
+            assert!(step("(if extra none)").len() == 1 && step("(if !extra none)").is_empty(), "a number variable holds where it is not 0");
+            step("rerun_input = 0");
+            assert!(step("(if rerun_input none)").len() == 1);
+            assert!(step("(if (time_limit && prove_minimal) none)").is_empty(), "none holds");
+        });
+        assert_eq!(get(extra), NONE, "the entry bindings end with the run");
+        let mut cli = Cli { max_restarts: 4, iter_limit: 7, ..Default::default() };
+        let counts = |cli: &Cli| in_run(&cli.passes, Some(cli), input, || (get(RESTARTS), get(crate::sched::ITER_LIMIT), get(extra)));
+        assert_eq!(counts(&cli), (4, 7, 2));
+        cli.passes = Passes::parse("extra=9 restarts=restarts+1").unwrap();
+        assert_eq!(counts(&cli), (5, 7, 9), "--passes items come after -m and -i");
+        cli.passes = Passes::default();
+        assert_eq!(counts(&cli), (4, 7, 2), "nothing leaks between runs");
+    }
+
+    #[test]
+    fn restarts_less_one_counts_the_later_rounds() {
+        let passes = Passes::default();
+        let x = "(Var \"x\")";
+        let env = Env::prepass(&passes, 32, None, false, x);
+        let input = || Cand::new(x, "input");
+        let Pipe::Fix(count, _) = lang::parse("(fix (restarts - 1) id)").unwrap() else { unreachable!() };
+        let rounds = |m: usize| {
+            let cli = Cli { max_restarts: m, ..Default::default() };
+            in_run(&cli.passes, Some(&cli), input, || env.times(&count, &[input()]))
+        };
+        for m in [0, 1, 2, 5] {
+            assert_eq!(rounds(m), m.max(1) - 1, "-m {m}: the later rounds, as when restarts read as -m less 1");
+        }
     }
 
     #[test]
@@ -1008,7 +1053,6 @@ mod tests {
             go(&lang::parse(p).unwrap(), set, &env).unwrap().iter().map(|c| c.term().to_string()).collect()
         };
         let input = || vec![Cand::new(x, "input")];
-        crate::sched::apply(&passes);
         scoped(|| {
             assert_eq!(step("rewrite", input()), ["(Xor (Var \"x\") (Var \"y\"))"]);
             step("(save t)", input());

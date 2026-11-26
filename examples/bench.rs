@@ -304,6 +304,14 @@ fn run_child(args: &Args, case: &Case) -> Outcome {
     }
 }
 
+/// The `time_limit` of a case: `--time-limit` of `--timeout` in ms, `none` when it is 0.
+fn time_limit_ms(args: &Args) -> String {
+    match args.time_limit > 0.0 {
+        true => ((args.time_limit * args.timeout * 1000.0) as u64).to_string(),
+        false => "none".into(),
+    }
+}
+
 /// Child mode. Prints `status<TAB>detail`.
 fn run_one(args: &Args) {
     let mut lines = std::io::stdin().lock().lines();
@@ -321,7 +329,7 @@ fn run_one(args: &Args) {
         iter_limit: args.iter_limit,
         max_restarts: args.max_restarts,
         trace: args.trace,
-        passes: eggy1::sched::Passes::parse(&format!("time_limit={} {}", (args.time_limit.max(0.0) * args.timeout * 1000.0) as u64, args.passes)).expect("bad --passes"),
+        passes: eggy1::sched::Passes::parse(&format!("time_limit={} {}", time_limit_ms(args), args.passes)).expect("bad --passes"),
         expr: input.clone(),
         ..Default::default()
     };

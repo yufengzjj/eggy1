@@ -11,7 +11,7 @@ fn main() {
         }
     }
     if cli.show_passes {
-        println!("{:#}", cli.passes);
+        println!("{}", cli.passes.show_run(cli.max_restarts, cli.iter_limit));
         return;
     }
     if cli.expr.is_empty() {

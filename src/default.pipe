@@ -1,6 +1,11 @@
 # The default pass pipelines (docs/pipe-language.md), read by `sched::Passes::default`.
 # `--passes` items come after these and can use the names defined here.
 
+# The settings every run starts with (its entry assignments; `-m`, `-i` and the
+# assignments of `--passes` follow).
+keep=2 extra=2 printed=2 rerun_input=1 prove_minimal=1 match_limit=64 ban_length=3
+semi/peel_shapes=0
+
 # A later round: the pre-pass rebuilds, then their extraction, or the one proved minimal.
 (let later prepass | (if minimal take_minimal (egglog later)))
 
@@ -25,7 +30,7 @@ pipeline=
   cut = 1
   | (smallest
     (fix 1 first_round)
-    | (if moved (fix restarts later))
+    | (if moved (fix (restarts - 1) later))
     | (if moved (fix extra (if rebuilds later)))
     | polish)
   | (if (printed && !input)
@@ -34,7 +39,7 @@ pipeline=
           (reprint
            | (smallest
                (fix 1 first_round)
-               | (if moved (fix printed later))
+               | (if moved (fix (printed - 1) later))
                | polish)))))
 
 # A rebuild of the main candidate: the whole term replaced by a T-function lookup, or its

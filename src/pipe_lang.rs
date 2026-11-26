@@ -3,7 +3,7 @@
 //! variable, conditions are expressions (`(if (mul >= 4 && shift < 1) (off small_blocks))`).
 //! Parsed into `sched::Pipe`.
 
-use crate::pipe::{CONDS, COUNTS, FEATURES, resolve};
+use crate::pipe::{CONDS, FEATURES, resolve};
 use crate::sched::{Cmp, Cond, INNER, NVARS, Pass, Pipe, Value, is_switch, var, var_index};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -110,7 +110,10 @@ fn to_cond(e: E) -> Result<Cond, String> {
         E::Name(n) => match CONDS.iter().position(|c| *c == n) {
             Some(i) => Cond::Is(i),
             None if FEATURES.contains(&n.as_str()) => return Err(format!("{n} is a number: compare it, as in ({n} >= 1)")),
-            None => return Err(format!("unknown condition {n}; known: {}", CONDS.join(" "))),
+            None => match var_index(&n) {
+                Some(i) => Cond::Var(i),
+                None => return Err(format!("unknown condition {n}; known: {} and the variables", CONDS.join(" "))),
+            },
         },
         E::Same(r) => Cond::Same(r),
         E::Quant(any, c) => {
@@ -131,14 +134,12 @@ fn to_value(e: E) -> Result<Value, String> {
         E::Name(n) => {
             if let Some(i) = FEATURES.iter().position(|f| *f == n) {
                 Value::Feature(i)
-            } else if let Some(i) = COUNTS.iter().position(|c| *c == n) {
-                Value::Count(i)
-            } else if let Some(i) = var_index(&n).filter(|i| !is_switch(*i)) {
+            } else if let Some(i) = var_index(&n) {
                 Value::Var(i)
             } else if n == "none" {
                 return Err("none stands only alone on the right of =: NAME = none".into());
             } else {
-                return Err(format!("unknown number {n}; known: {} {} and the variables", FEATURES.join(" "), COUNTS.join(" ")));
+                return Err(format!("unknown number {n}; known: {} and the variables", FEATURES.join(" ")));
             }
         }
         E::Size(r) => Value::Size(r),
@@ -505,15 +506,26 @@ fn assignable(n: &str) -> Result<usize, String> {
     if let Some(i) = var_index(n) {
         return Ok(i);
     }
-    Err(if FEATURES.contains(&n) || CONDS.contains(&n) {
+    Err(if n == "minimal" {
+        "minimal is a condition and cannot be assigned; the setting is prove_minimal".into()
+    } else if FEATURES.contains(&n) || CONDS.contains(&n) {
         format!("{n} is computed from the candidates and cannot be assigned")
-    } else if n == "restarts" {
-        "restarts cannot be assigned in a pipeline; set it with -m N".into()
-    } else if COUNTS.contains(&n) {
-        format!("{n} cannot be assigned in a pipeline; set it with --passes {n}=N")
     } else {
         format!("unknown variable {n}; known: {}", (0..NVARS).map(|i| var(i).name).collect::<Vec<_>>().join(" "))
     })
+}
+
+/// The assignment `name = val`, a `--passes` item `name=val`.
+pub fn parse_assign(name: &str, val: &str) -> Result<Pass, String> {
+    let mut p = Parser { toks: lex(val)?, at: 0, defs: &Defs::new(), used: Vec::new() };
+    let Pipe::Pass(a) = p.assign(name)? else { unreachable!() };
+    p.end()?;
+    Ok(a)
+}
+
+/// The right side of an assignment: `none` for `None`.
+pub fn show_assigned(v: &Option<Value>) -> String {
+    v.as_ref().map_or("none".into(), |v| show_value(v, 1))
 }
 
 /// Parses `s` in the pipeline language.
@@ -563,7 +575,6 @@ pub fn is_old_syntax(s: &str) -> bool {
 fn show_value(v: &Value, need: u8) -> String {
     match v {
         Value::Num(n) => n.to_string(),
-        Value::Count(i) => COUNTS[*i].to_string(),
         Value::Feature(i) => FEATURES[*i].to_string(),
         Value::Size(r) => format!("(size {r})"),
         Value::Var(i) => var(*i).name.to_string(),
@@ -580,6 +591,7 @@ fn show_value(v: &Value, need: u8) -> String {
 fn show_expr(c: &Cond, need: u8) -> String {
     let (s, prec) = match c {
         Cond::Is(i) => (CONDS[*i].to_string(), 5),
+        Cond::Var(i) => (var(*i).name.to_string(), 5),
         Cond::Same(r) => (format!("(same {r})"), 5),
         Cond::Any(c) => (format!("(any {})", show_expr(c, 1)), 5),
         Cond::All(c) => (format!("(all {})", show_expr(c, 1)), 5),
@@ -618,7 +630,7 @@ fn form(head: &str, args: &[String]) -> String {
 
 fn show_pass(p: &Pass) -> String {
     if let Pass::Assign(i, v) = p {
-        return format!("{} = {}", var(*i).name, v.as_ref().map_or("none".into(), |v| show_value(v, 1)));
+        return format!("{} = {}", var(*i).name, show_assigned(v));
     }
     let n = p.name();
     match n.split_once('/') {
@@ -816,6 +828,9 @@ mod tests {
             "(if mixed semi_leaves = 2 (time_limit = none | rewrite))",
             "(best 1 (bit_split_budget = cand_bit_splits | rewrite) (time_limit = time_limit / 2 | rewrite))",
             "semi/shapes = 0 | rewrite",
+            "keep = 1 | restarts = restarts - 1 | iter_limit = 3 | match_limit = 8 | prove_minimal = 0 | rewrite",
+            "(if (rerun_input && printed && !relate) id)",
+            "split_runs = relate + cut | rewrite",
         ] {
             let p = parse(ok).unwrap();
             assert_eq!(parse(&show(&p)).unwrap(), p, "{ok}: {}", show(&p));
@@ -837,11 +852,11 @@ mod tests {
             ("nope = 1", "unknown variable nope"),
             ("size = 1", "cannot be assigned"),
             ("mixed = 1", "cannot be assigned"),
-            ("keep = 1", "--passes keep=N"),
-            ("restarts = 1", "-m N"),
+            ("minimal = 1", "prove_minimal"),
             ("relate = none", "switch"),
             ("split_runs = none + 1", "none stands only alone"),
             ("split_runs = on", "unknown number on"),
+            ("(if nope id)", "unknown condition nope"),
             ("split_runs = mixed", "unknown number mixed"),
             ("split_runs =", "found the end"),
         ] {

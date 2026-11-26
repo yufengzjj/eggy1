@@ -2,13 +2,21 @@
 
 eggy1 的化简流程由几条管线描述，默认的写在 `src/default.pipe` 里，`--passes` 可以替换或改写它们，`--show-passes` 打印当前的全部设置。本文是这门语言的参考：数据模型、语法、形式、赋值、pass、条件、变量、`--passes` 的写法、静态检查。
 
+一次运行执行一个**入口程序**：
+
+```
+<default.pipe 的赋值> | restarts = M | iter_limit = I | <--passes 的赋值> | pipeline
+```
+
+`default.pipe` 和 `--passes` 里的 `NAME=VALUE` 项、`off` 项（第 8 节）按出现的顺序成为赋值步骤，`-m M`、`-i I` 是其中的 `restarts = M`、`iter_limit = I`。它们在最外层运行的最外层作用域里执行，所以运行结束时全部撤销，下一次运行（下一个表达式）重新从头执行。从 Rust 直接进入别的管线时（测试和 `fuzz --prepass` 调用 `simplify_linear_with` 即 `prepass`、`polish`，不在任何运行里的 `rewrite`），前面接同一段赋值（没有 `-m`、`-i` 那两步），入口换成那条管线。已经在一次运行里时，嵌套的运行不再执行它们。
+
 ## 1. 数据模型
 
 - 管线处理一组**候选**：彼此等价的项，第一个是**主候选**。每一步拿到一组候选，给出另一组，所以任何 pass 都能接在任何 pass 后面。
 - 候选记着**来源**（origin，产生它的 pass 或 `cand` 名，`--stats` 按它计数）、哪些 pass 给过它被保留的形式（`used_wide`、`used_clustered`），以及产生它用了多少次未缓存的 `rewrite`（`few_rewrites`）。
 - 一组候选可以是空的。空组照常往下传：大多数 pass 对空组什么也不做，条件在空组上为假。
 - 每条管线的一次运行有自己的一套**寄存器**（`save`/`load`），运行之间、管线之间不共享。
-- 超过时限（第 4.2 节的 `time_limit = N`；`--passes time_limit=MS` 给整次运行设一个，见第 7.1 节）后，干活的步骤原样返回输入，所以任何时候停下来结果都正确。只搬动候选的步骤照常执行：`seq` 本身、赋值（包括 `on`、`off`）、`save`、`load`、`label`、`filter`、`id`、`none`、`within`、`pre_done`，所以寄存器照常可用，清除时限后管线能接着往下走。时限只在步骤之间检查，打断不了正在运行的单个步骤（一轮 egglog、一次大的 `poly_mba` 展开）。
+- 超过时限（第 4.2 节的 `time_limit = N`；`--passes time_limit=MS` 是入口程序里的这一步，给整次运行设一个）后，干活的步骤原样返回输入，所以任何时候停下来结果都正确。只搬动候选的步骤照常执行：`seq` 本身、赋值（包括 `on`、`off`）、`save`、`load`、`label`、`filter`、`id`、`none`、`within`、`pre_done`，所以寄存器照常可用，清除时限后管线能接着往下走。时限只在步骤之间检查，打断不了正在运行的单个步骤（一轮 egglog、一次大的 `poly_mba` 展开）。
 
 ### 管线
 
@@ -81,7 +89,7 @@ CMP    := '<' | '<=' | '>' | '>=' | '==' | '!='
 | `(label R)` | 只做统计：每个候选记 `stats::label`，与寄存器 `R` 的主候选来源不同时记 `pre/来源/differs` 和 `pre/来源/gain`；`--trace` 时打印候选 |
 | `(off NAME ...)` | `NAME = 0 \| ...` 的简写：关掉内部 pass 或开关（第 5.5 节），直到所在的 seq 结束，见第 4.1 节 |
 | `(on NAME ...)` | `NAME = 1 \| ...` 的简写：重新打开内部 pass，或打开开关 |
-| `(egglog LABEL)`、`egglog` | 一轮 egglog：所有候选合并进一个 e-graph，饱和，提取。统计计在 `egglog/LABEL` 下，默认用 `first`、`later`、`rerun_input` |
+| `(egglog LABEL)`、`egglog` | 一轮 egglog：所有候选合并进一个 e-graph，饱和，提取。调度重复 `iter_limit` 次，back-off 调度用当时的 `match_limit`、`ban_length`。统计计在 `egglog/LABEL` 下，默认用 `first`、`later`、`rerun_input` |
 
 `(let NAME p)` 不是形式，而是 `--passes` 的一项（第 8 节）：之后写到 `NAME` 的地方展开成 `p`。定义体直接写成 `a | b` 时，展开后平铺进所在的 seq，和直接写出来一样；定义体整个包在括号里，写成 `(a | b)` 时，展开成一条嵌套的 seq，于是它里面的赋值只在这里面有效。
 
@@ -90,9 +98,9 @@ CMP    := '<' | '<=' | '>' | '>=' | '==' | '!='
 `NAME = VALUE` 是一个步骤：它在**当前作用域**里给变量 `NAME`（第 7 节）绑定一个值，原样传下候选，作用到所在作用域结束；同一作用域里再赋值就覆盖这个绑定。这期间调用的管线（`prepass`、`polish`、`rewrite`……）和新的 `scope` 也读到这个值（按调用链动态绑定）。
 
 - 右边是第 6.3 节的数，一直读到 `|`、`)` 或结尾：`split_runs = vars * 2 | split_bits`。执行到这一步时对当时的候选求值，没有值时（空组、空寄存器、除以 0）为 0。
-- 开关（内部 pass、`cut`，第 5.5 节）的值也是数：0 是关，其他是开。`relate = 0` 关掉 `relate`，`cut = 1` 打开 `cut`。`(off A B)` 是 `A = 0 | B = 0` 的简写，`(on A B)` 是 `A = 1 | B = 1` 的简写，同一作用域里以后写的为准。
+- 开关（内部 pass、`cut`、`rerun_input`、`prove_minimal`，第 5.5 节）的值也是数：0 是关，其他是开。`relate = 0` 关掉 `relate`，`cut = 1` 打开 `cut`。`(off A B)` 是 `A = 0 | B = 0` 的简写，`(on A B)` 是 `A = 1 | B = 1` 的简写，同一作用域里以后写的为准。
 - `none` 只能单独写在右边，表示不限：预算（`rewrites = none`）、限值、时限（`time_limit = none`）都可以；开关不收 `none`。
-- 不能赋值的名字：特征、条件名、计数（`keep extra printed` 用 `--passes` 设，`restarts` 用 `-m`），写了报错。
+- 不能赋值的名字：特征、条件名，写了报错。其他变量（包括运行设置 `keep`、`extra`、`printed`、`match_limit`、`ban_length` 和 `restarts`、`iter_limit`）都能在任何地方赋值，下次读到时生效。
 - 赋值属于只搬动候选的步骤：过了时限照常执行。
 
 **作用域**有三种：seq（`a | b | ...` 形成的一条序列，包括括号里的 `( ... )`、`(seq ...)`），`scope`，以及每条管线的一次运行。其他形式（`if`、`fix`、`union`、`best`、`first`、`retry`……）都不是作用域：`(if C split_runs = 4)` 那一支只有一步，绑定落在 `if` 所在的 seq 里；`(if C (split_runs = 4 | x))` 那一支是一条 seq，绑定只在里面有效。`default.pipe` 的 `gates` 写成 `(if (mul < 1) (off poly_mba)) | ...`，平铺进 `prepass` 的顶层 seq，所以一直关到这次预处理结束。
@@ -102,10 +110,10 @@ CMP    := '<' | '<=' | '>' | '>=' | '==' | '!='
 ### 4.2 时限：`time_limit = N`
 
 - 从这一步起，这条 seq 剩下的步骤共有 `N` 毫秒；到期后剩下干活的步骤都被跳过（计入 `time-limit/skipped`），这条 seq 很快结束，外面的步骤照常运行。
-- `time_limit = none`（或 0）回到进入这条 seq 时的时限（外层设的仍然有效）。
+- `time_limit = none` 回到进入这条 seq 时的时限（外层设的仍然有效）。`time_limit = 0` 是 0 毫秒：从此刻起就已到期。
 - 时限叠加：外层 seq、外层管线的时限同时有效，取最早到期的。内层不能把时限延长到外层之后。
 - 在数里读 `time_limit`，得到剩下的毫秒数：`time_limit = time_limit / 2`。
-- `--passes time_limit=MS` 是一次 `simplify` 运行开始时的赋值：从那一刻起计时，`prepass`、`polish` 这些嵌套的运行只读到同一个截止时刻，不重新计时。
+- `--passes time_limit=MS` 是入口程序里的一步赋值，在最外层运行开始时执行：从那一刻起计时，`prepass`、`polish` 这些嵌套的运行只读到同一个截止时刻，不重新计时。`time_limit=none` 不设截止。
 - 时限到期时开关 `cut` 开着，就算整次运行被截断：`eggy1` 打印提示，bench 把没解出的用例记作 `cut`。默认 `pipeline` 开头是 `cut = 1`，所以 `--passes time_limit=MS` 设的总时限到期时算截断。`cut` 会被内层继承，所以里面再设的时限到期也算；不想算的地方写 `cut = 0`。
 - 截断后得到的结果不进缓存。
 
@@ -193,25 +201,31 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 
 默认关掉的是 `semi/peel_shapes`。
 
-另外有**开关** `cut`，默认是关的：开着时，时限到期而跳过的步骤会把整次运行记为截断（第 4.2 节）。
+另外有这些**开关**：
+
+| 名字 | 默认 | 含义 |
+|---|---|---|
+| `cut` | 0 | 开着时，时限到期而跳过的步骤会把整次运行记为截断（第 4.2 节） |
+| `rerun_input` | 1 | 默认 `pipeline` 的第一轮：结果是 `mixed` 时带上原输入重跑（`(retry (rerun_input && ...) ...)`） |
+| `prove_minimal` | 1 | 尝试证明候选最小（条件 `minimal`、pass `take_minimal`）；0 时什么都不证明 |
+
+`semi/peel_shapes = 0`、`rerun_input = 1`、`prove_minimal = 1` 写在 `default.pipe` 开头，是入口程序的赋值；`cut` 的默认值在 Rust 里。
 
 ## 6. 条件与数
 
 ### 6.1 条件名
 
-除另有说明外看主候选。所有条件在空组上为假（`!` 照常取反）。
+除另有说明外看主候选。下面的条件名在空组上为假（`!` 照常取反）。条件里也可以写变量名（第 5.5 节的开关和第 7 节的变量）：值不为 0 时成立，`none` 也成立，与候选无关，空组上也一样：`(if rerun_input ...)`、`(if (printed && !input) ...)`、`(if !relate ...)`。
 
 | 名字 | 成立时 |
 |---|---|
 | `true` | 总是（有候选时） |
 | `opaque` | 有移位、除法或 `mulhi`，且它的重建不是很小（会运行 `prepass`） |
 | `rebuilds` | 预处理会改变它（会运行 `prepass`） |
-| `minimal` | 某个候选被证明最小：没有更小的项与它相等 |
+| `minimal` | 某个候选被证明最小：没有更小的项与它相等（`prove_minimal` 开着时才证明） |
 | `mixed` | 位运算下直接有算术或常数 |
 | `moved` | 上一个 `fix` 停在次数上，主候选还在变 |
 | `input` | 它就是 `simplify` 的输入 |
-| `rerun_input` | 设置 `rerun_input` 开着 |
-| `printed` | 设置 `printed` 不为 0 |
 | `tiny` | 至多 3 个节点 |
 | `fits_split` | 至多 `split_size` 个节点 |
 | `used_wide`、`used_clustered` | 产生某个候选的 pass 里，`wide_blocks`/`clustered` 给过被保留的形式（看整组） |
@@ -234,28 +248,41 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 
 - **特征**（主候选的形状）：`size`（节点数）、`vars`、`depth`、`mul`（乘积数）、`bitconst`（与常数的位运算数）、`arith_in_bit`（位运算下的算术数）、`shift`、`div`。
 - `(size R)`：寄存器 `R` 主候选的大小。
-- **计数**：`restarts`（`-m` 减去第一轮）、`extra`、`printed`（减去第一轮）、`keep`，即第 8 节的同名设置。
-- **变量**：第 7 节表里的任一名字（开关除外），取当前的绑定；`time_limit` 取剩下的毫秒数。
+- **变量**：第 5.5 节的开关和第 7 节表里的任一名字，取当前的绑定（开关是 0 或 1），存的是什么就读到什么；只有 `time_limit` 取剩下的毫秒数，`keep` 至少读作 1。默认 `pipeline` 的第一轮单独写出，所以写 `(fix (restarts - 1) later)`、`(fix (printed - 1) later)`。
 - 算术在非负整数上：`-` 小于 0 时取 0，`/` 向下取整，除以 0 没有值。`size <= (size f) * 3 / 4` 就是 `4·size ≤ 3·(size f)`，因为 `size` 是整数。
 - `fix`、`best`、`wins` 的次数在进入形式时对当时的候选求值（`best` 在各支运行之后），没有值时为 0。
 
 ## 7. 变量
 
-变量在管线里用 `NAME = VALUE` 赋值（第 4.1 节），在数里读（第 6.3 节）。开关见第 5.5 节。
+变量在管线里用 `NAME = VALUE` 赋值（第 4.1 节），在数和条件里读（第 6 节），在 `--passes` 里写成 `NAME=VALUE` 项（第 8 节）。开关见第 5.5 节。
 
-### 7.1 预算、时限和设置
+### 7.1 运行设置
+
+默认值写在 `default.pipe` 开头（入口程序的赋值）；`restarts`、`iter_limit` 来自命令行。没有赋值时是 `none`。
+
+| 名字 | 默认 | 含义 |
+|---|---|---|
+| `restarts` | `-m`（2） | 总轮数；默认 `pipeline` 写 `(fix (restarts - 1) later)`，因为第一轮单独写出 |
+| `iter_limit` | `-i`（10） | 每轮 egglog 重复调度几次 |
+| `keep` | 2 | 预处理保留几个候选（至少读作 1） |
+| `extra` | 2 | 预处理还在改变结果时，额外跑几轮 |
+| `printed` | 2 | 从打印结果再跑几轮（0 不跑）；默认 `pipeline` 写 `(fix (printed - 1) later)` |
+| `match_limit` | 64 | back-off 调度：一条规则每次运行最多匹配几次，超过就被禁用；下一轮 egglog 起生效 |
+| `ban_length` | 3 | back-off 调度：被禁用的规则先停几次运行；下一轮 egglog 起生效 |
+
+### 7.2 预算、时限和设置
 
 | 名字 | 默认 | 含义 |
 |---|---|---|
 | `rewrites` | 不限 | 预算：剩下的未缓存 `rewrite` 调用次数，用完后 `rewrite` 原样返回；里面用掉的次数也从外层扣除 |
 | `bit_split_budget` | 不限 | 预算：剩下的 `bit_split` 拆分对数；每个 `cand` 设成 `cand_bit_splits`，同 `rewrites` 也从外层扣除 |
-| `time_limit` | 不限 | 时限，赋值时从此刻起计毫秒（第 4.2 节）。`--passes time_limit=MS` 在 `simplify` 运行开始时赋值（0 不限）；bench 用 `-t` 乘以它的 `--time-limit` 比例（默认 0.8）设置，写在 `--passes` 里的 `time_limit=` 优先 |
+| `time_limit` | 不限 | 时限，赋值时从此刻起计毫秒（第 4.2 节），`none` 不限。`--passes time_limit=MS` 是入口程序里的赋值；bench 用 `-t` 乘以它的 `--time-limit` 比例（默认 0.8，0 时传 `none`）设置，写在 `--passes` 里的 `time_limit=` 在它之后，所以优先 |
 | `semi_leaves` | 6 | 半线性区域最多几个叶子才重建 |
 | `relate_leaves` | 16 | `relate` 只处理叶子不多于此的区域 |
 
-### 7.2 限值
+### 7.3 限值
 
-也用 `--passes` 的 `NAME=数` 设置整次运行的值。
+默认值在 Rust 里；`--passes` 的 `NAME=VALUE` 项在入口程序里给整次运行赋值。
 
 | 名字 | 默认 | 含义 |
 |---|---|---|
@@ -278,7 +305,7 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `poly_branch_monos` | 128 | 展开的单项式多于此时，从一开始就每层只取第一种 |
 | `polish_rewrites` | 2000 | 一次 `polish` 最多几次未缓存的 `rewrite` |
 
-### 7.3 `sub/NAME`
+### 7.4 `sub/NAME`
 
 单项 pass 重建子项时调用的管线，默认是 `rewrite`（带缓存）或 `rebuild`（直接一次重建）。
 
@@ -300,7 +327,7 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 
 ## 8. `--passes`
 
-`--passes` 的值是若干**项**，依次作用在 `src/default.pipe` 之上（`default.pipe` 本身也是这样一串项）。
+`--passes` 的值是若干**项**，依次作用在 `src/default.pipe` 之上（`default.pipe` 本身也是这样一串项）。项分两种：赋值项（`NAME=VALUE`、`off` 项）按出现的顺序排进入口程序，每次运行时执行（见开头）；其他的是定义，读到时生效。
 
 ### 8.1 分项
 
@@ -317,16 +344,9 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `(let NAME P)` | 定义名字，之后的项里写到 `NAME` 的地方展开为 `P`（`a | b` 平铺，`(a | b)` 嵌套，见第 4 节）。`default.pipe` 定义的名字（`first_round`、`later`、`gates`、`rebuild_main`……）也能用 |
 | `file=PATH` | 在此处读入文件里的各项 |
 | `pre=a,b`、`pre+=`、`pre-=` | 造哪些预处理候选：`unified no_wide split_bits halve_first over_products over_const_bitwise over_shared_bitwise halve_input unclustered` |
-| `off=a,b`、`off+=`、`off-=` | 整个运行里关掉的内部 pass（第 5.5 节） |
+| `off=a,b`、`off+=a`、`off-=a` | 内部 pass 的赋值（第 5.5 节）：`off+=a,b` 是 `(off a b)`，`off-=a` 是 `(on a)`，`off=a,b` 先把所有内部 pass 打开（`(on ...)`），再关掉 `a`、`b`；`off=` 只是全部打开 |
 | `schedule=...`、`schedule+=`、`schedule-=` | 每轮 egglog 的步骤，逗号分隔的 `run:RS`（back-off 调度）、`once:RS`、`sat:RS`（饱和），`RS` 是 `default-ruleset canonicalization constant-folding analysis identity-zero-element simplify` 之一 |
-| `match_limit=N`、`ban_length=N` | back-off 调度的参数 |
-| `keep=N` | 预处理保留几个候选（至少 1） |
-| `extra=N` | 预处理还在改变结果时，额外跑几轮 |
-| `printed=N` | 从打印结果再跑几轮（0 不跑） |
-| `rerun_input=0/1` | 结果是 `mixed` 时是否带上原输入重跑第一轮 |
-| `minimal=0/1` | 是否尝试证明最小 |
-| `NAME=N` | 第 7.2 节的限值 |
-| `time_limit=MS` | 一次 `simplify` 的毫秒数，运行开始时赋给 `time_limit`（第 4.2 节）；0 不限 |
+| `NAME=VALUE` | 入口程序里的赋值 `NAME = VALUE`：任一变量或开关（第 5.5、7 节），如 `extra=0`、`prove_minimal=0`、`split_runs=8`、`time_limit=2000`、`time_limit=none`。值同管线里的写法（第 4.1 节），可以是表达式，对输入求值：`split_runs=vars*2`；后面的项可以读前面赋的值：`keep=keep+1`。同一个变量写两次，后一次为准 |
 
 注意名字是**在读到那一项时展开**的：重新定义 `gates` 不会改变已经读好的 `prepass`，要再写一次 `prepass=...`。
 
@@ -335,10 +355,10 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 读完 `--passes` 后检查，出错时拒绝整个设置：
 
 - 名字：未知的 pass、条件、数、变量、`on`/`off` 名、`with` 的键、`sub/NAME`、规则集，都报错并列出已知的名字。`with` 里写 `off=`，报错并提示 `(off NAME)` 的写法。
-- 赋值：给特征、条件名、计数赋值；开关赋 `none`；`none` 不是单独写在右边；条件或次数里写 `=`（提示比较用 `==`）。
+- 赋值：给特征、条件名赋值（`minimal=` 提示运行设置叫 `prove_minimal`）；开关赋 `none`；`none` 不是单独写在右边；条件或次数里写 `=`（提示比较用 `==`）。
 - 形式的参数：个数、种类（条件、数、管线）不对。
 - 旧的单名写法 `save/t`、`off/NAME`、`egglog/LABEL`，报错并提示括号写法；旧的 `seq(a,b)` 语法报错并提示新写法。
-- `egglog`、`reprint` 和次数 `restarts` 只能出现在 `pipeline` 里：只有 `simplify` 的运行才有 e-graph。
+- `egglog`、`reprint` 只能出现在 `pipeline` 里：只有 `simplify` 的运行才有 e-graph。
 - `prepass` 和 `polish` 不能经过别的管线回到自己。调用关系：`prepass` pass 和条件 `opaque`、`rebuilds` 调用 `prepass`；`polish` pass 调用 `polish`；单项 pass、`regions`、`again` 调用 `rewrite`、`simba`、`sub/NAME` 这一组（这一组内部本来就是递归的）。
 - 寄存器的读（`load`、`label`、`size`、`same`）前面必须有可能先执行的同名 `save`。按执行顺序算：`if` 的两支都算，`retry` 的条件在 `a` 之后，`best` 的次数在各支之后；`fix`、`wins`、`regions` 的体会重复执行，体里任何地方的 `save` 对整个体都算。这条检查找的是写错名字和顺序，不保证运行时一定有值。
 
@@ -383,7 +403,7 @@ lowbits | time_limit = 500 | relate | tfunc | time_limit = none | finish
 命令行上：
 
 ```bash
-eggy1 --show-passes                                         # 当前的全部设置
+eggy1 --show-passes                                         # 入口程序（注释行）和当前的全部设置
 eggy1 --passes "extra=0 off=relate" -n u32 "expr"
 eggy1 --passes "prepass=lowbits | (if mixed rewrite)" -n u32 "expr"
 eggy1 --passes "prepass=lowbits | relate=0 | rewrite time_limit=2000" -n u32 "expr"   # 前一项里的赋值，后一项是时限

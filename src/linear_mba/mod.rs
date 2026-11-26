@@ -1010,18 +1010,19 @@ pub fn simplify_linear_with(egg: &str, w: u32, signed: Option<bool>, trace: bool
     thread_local! {
         static LAST: std::cell::RefCell<Last> = const { std::cell::RefCell::new(None) };
     }
-    crate::sched::apply(p);
-    // A variable bound where it is called (an assignment, `(off NAME)`) changes the result as `p` does.
-    let vars = crate::sched::key();
-    let hit = |(e, bits, s, t, q, v, _): &&(String, u32, Option<bool>, bool, Passes, Vec<u64>, Result)| e == egg && *bits == w && *s == signed && *t == trace && q == p && *v == vars;
-    match LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.6.clone())) {
-        Some(r) => r,
-        None => {
-            let r = simplify_linear_uncached(egg, w, signed, trace, p);
-            LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, signed, trace, p.clone(), vars, r.clone())));
-            r
+    crate::pipe::in_run(p, None, || crate::pipe::Cand::new(egg, "input"), || {
+        // A variable bound where it is called (an assignment, `(off NAME)`) changes the result as `p` does.
+        let vars = crate::sched::key();
+        let hit = |(e, bits, s, t, q, v, _): &&(String, u32, Option<bool>, bool, Passes, Vec<u64>, Result)| e == egg && *bits == w && *s == signed && *t == trace && q == p && *v == vars;
+        match LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.6.clone())) {
+            Some(r) => r,
+            None => {
+                let r = simplify_linear_uncached(egg, w, signed, trace, p);
+                LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, signed, trace, p.clone(), vars, r.clone())));
+                r
+            }
         }
-    }
+    })
 }
 
 /// Rewrites of a rebuilt candidate that would break subterms the rebuild relates if done

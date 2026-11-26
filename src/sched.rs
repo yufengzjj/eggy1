@@ -57,9 +57,11 @@ pub const INNER: [&str; 34] = [
     "semi/short_consts",
 ];
 
-/// Switches that are off unless turned on: `cut`, a step skipped past a `time_limit`
-/// makes the run cut (`crate::pipe::cut`).
-pub const FLAGS: [&str; 1] = ["cut"];
+/// Switches besides the `INNER` passes: `cut` (off unless turned on: a step skipped past a
+/// `time_limit` makes the run cut, `crate::pipe::cut`), `rerun_input` (rerun the first round
+/// with the input when its result still mixes arithmetic into bitwise operations),
+/// `prove_minimal` (take a rebuild proved minimal as the extraction without saturating).
+pub const FLAGS: [&str; 3] = ["cut", "rerun_input", "prove_minimal"];
 
 /// The `INNER` pass or `FLAGS` switch named `name`, which `(on NAME)` and `(off NAME)` take.
 pub fn switch(name: &str) -> Option<&'static str> {
@@ -128,6 +130,13 @@ limits! {
 /// `relate` tries), `bit_split_budget` (`bit_split` pairs left).
 pub const SETTINGS: [&str; 4] = ["rewrites", "semi_leaves", "relate_leaves", "bit_split_budget"];
 
+/// Settings of a run, `none` until its entry assignments (`Passes::entry_steps`) set them:
+/// `keep` (pre-pass rebuilds unioned into a round, read as at least 1), `extra` (rounds added
+/// while the pre-pass still changes the extraction), `printed` (rounds of the run from the
+/// printed result), `match_limit` and `ban_length` (the back-off scheduler of the next egglog
+/// round), `restarts` (`-m`) and `iter_limit` (`-i`, schedule repetitions of an egglog round).
+pub const RUN: [&str; 7] = ["keep", "extra", "printed", "match_limit", "ban_length", "restarts", "iter_limit"];
+
 /// How a binding of a variable combines with the outer ones.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum VarKind {
@@ -137,7 +146,7 @@ pub enum VarKind {
     Flag,
     /// An entry of `LIMITS`.
     Limit,
-    /// `semi_leaves`, `relate_leaves`.
+    /// `semi_leaves`, `relate_leaves` and the `RUN` settings.
     Setting,
     /// `rewrites`, `bit_split_budget`: a binding is at most what the outer one has left, and
     /// what is used inside is used up outside too.
@@ -148,7 +157,7 @@ pub enum VarKind {
 }
 
 /// A variable of the runs on this thread, by its position in `VARS`: an `INNER` pass, a
-/// `FLAGS` switch, a `LIMITS` entry, a `SETTINGS` entry or the deadline.
+/// `FLAGS` switch, a `LIMITS` entry, a `SETTINGS` entry, a `RUN` setting or the deadline.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Var {
     pub name: &'static str,
@@ -162,7 +171,16 @@ pub const REWRITES: usize = SETTING0;
 pub const SEMI_LEAVES: usize = SETTING0 + 1;
 pub const RELATE_LEAVES: usize = SETTING0 + 2;
 pub const BIT_SPLIT_BUDGET: usize = SETTING0 + 3;
-pub const DEADLINE: usize = SETTING0 + SETTINGS.len();
+const RUN0: usize = SETTING0 + SETTINGS.len();
+pub const CUT: usize = FLAG0;
+pub const RERUN_INPUT: usize = FLAG0 + 1;
+pub const PROVE_MINIMAL: usize = FLAG0 + 2;
+pub const KEEP: usize = RUN0;
+pub const MATCH_LIMIT: usize = RUN0 + 3;
+pub const BAN_LENGTH: usize = RUN0 + 4;
+pub const RESTARTS: usize = RUN0 + 5;
+pub const ITER_LIMIT: usize = RUN0 + 6;
+pub const DEADLINE: usize = RUN0 + RUN.len();
 pub const NVARS: usize = DEADLINE + 1;
 const _: () = assert!(NVARS <= 128, "the read variables are a u128");
 
@@ -176,7 +194,8 @@ pub const fn var(i: usize) -> Var {
         _ if i < LIMIT0 => Var { name: FLAGS[i - FLAG0], kind: VarKind::Flag },
         _ if i < SETTING0 => Var { name: LIMITS[i - LIMIT0].0, kind: VarKind::Limit },
         _ if i == SEMI_LEAVES || i == RELATE_LEAVES => Var { name: SETTINGS[i - SETTING0], kind: VarKind::Setting },
-        _ if i < DEADLINE => Var { name: SETTINGS[i - SETTING0], kind: VarKind::Budget },
+        _ if i < RUN0 => Var { name: SETTINGS[i - SETTING0], kind: VarKind::Budget },
+        _ if i < DEADLINE => Var { name: RUN[i - RUN0], kind: VarKind::Setting },
         _ => Var { name: "time_limit", kind: VarKind::Deadline },
     }
 }
@@ -197,11 +216,11 @@ const DEFAULTS: [u64; NVARS] = {
     while i < NVARS {
         a[i] = match var(i).kind {
             VarKind::Pass => 1,
-            VarKind::Flag => 0,
+            VarKind::Flag if i == CUT => 0,
             VarKind::Limit => LIMITS[i - LIMIT0].1 as u64,
-            VarKind::Budget | VarKind::Deadline => NONE,
             VarKind::Setting if i == SEMI_LEAVES => crate::linear_mba::MAX_LEAVES as u64,
-            VarKind::Setting => crate::linear_mba::MAX_WIDE_LEAVES as u64,
+            VarKind::Setting if i == RELATE_LEAVES => crate::linear_mba::MAX_WIDE_LEAVES as u64,
+            _ => NONE,
         };
         i += 1;
     }
@@ -227,13 +246,23 @@ thread_local! {
     static FRAMES: std::cell::RefCell<Vec<Vec<(usize, u64, u64)>>> = const { std::cell::RefCell::new(Vec::new()) };
     /// Bits of the variables read since the last `swap_read`.
     static READ: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
-    /// The passes of the run on this thread (`apply`), the default ones until set.
+    /// The passes of the run on this thread (`set_current`), the default ones until set.
     static CURRENT: std::cell::RefCell<Option<std::rc::Rc<Passes>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// The passes `apply` last set on this thread.
+/// The passes `set_current` last set on this thread.
 pub fn current() -> std::rc::Rc<Passes> {
     CURRENT.with(|c| c.borrow_mut().get_or_insert_with(|| std::rc::Rc::new(Passes::default())).clone())
+}
+
+/// Makes `p` the passes of the runs on this thread that follow (`current`).
+pub fn set_current(p: &Passes) {
+    CURRENT.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.as_deref() != Some(p) {
+            *c = Some(std::rc::Rc::new(p.clone()));
+        }
+    });
 }
 
 /// The value of variable `i`, not recorded as read.
@@ -349,31 +378,6 @@ pub fn epoch_ns() -> u64 {
     EPOCH.elapsed().as_nanos() as u64
 }
 
-fn off_bits(names: &[&str]) -> u64 {
-    names.iter().filter_map(|n| INNER.iter().position(|k| k == n)).fold(0u64, |b, i| b | 1 << i)
-}
-
-/// Sets the `INNER` passes and limits that no scope under way binds to those of `p`
-/// (`p.off`, `p.limits`) for the runs on this thread that follow.
-pub fn apply(p: &Passes) {
-    CURRENT.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.as_deref() != Some(p) {
-            *c = Some(std::rc::Rc::new(p.clone()));
-        }
-    });
-    let bound = FRAMES.with(|f| f.borrow().iter().flatten().fold(0u128, |b, e| b | 1 << e.0));
-    let off = off_bits(&p.off);
-    VARS.with(|a| {
-        for i in (0..FLAG0).filter(|i| bound >> i & 1 == 0) {
-            a[i].set((off >> i & 1 == 0) as u64);
-        }
-        for (j, v) in p.limits.iter().enumerate().filter(|(j, _)| bound >> (LIMIT0 + j) & 1 == 0) {
-            a[LIMIT0 + j].set(*v as u64);
-        }
-    });
-}
-
 /// The value of `l` on this thread.
 pub fn limit(l: Limit) -> usize {
     read(LIMIT0 + l as usize) as usize
@@ -457,7 +461,7 @@ pub enum Pass {
     On(Vec<&'static str>),
     /// `NAME = VALUE`: binds the variable at this position of `VARS` in the enclosing scope
     /// to the value, evaluated on the candidates; `None` is `none` (no limit). A switch is on
-    /// for any value but 0; `time_limit` takes milliseconds from now, 0 is `none`.
+    /// for any value but 0; `time_limit` takes milliseconds from now.
     Assign(usize, Option<Value>),
     /// A pass over one term; `alt` is the used bit of an alternative
     /// (`crate::linear_mba::ALTERNATIVES`).
@@ -496,14 +500,11 @@ impl Pass {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Num(u64),
-    /// An entry of `crate::pipe::COUNTS`.
-    Count(usize),
     /// The main candidate's entry of `crate::pipe::FEATURES` (`size` is its node count).
     Feature(usize),
     /// The size of the main candidate of register `R` (`(size R)`).
     Size(String),
-    /// A variable of `VARS` that holds a number (not a switch); `time_limit` reads as the
-    /// milliseconds left.
+    /// A variable of `VARS`; `time_limit` reads as the milliseconds left, `keep` as at least 1.
     Var(usize),
     /// `+ - * /` of two values.
     Bin(char, Box<Value>, Box<Value>),
@@ -545,6 +546,8 @@ impl Cmp {
 pub enum Cond {
     /// An entry of `crate::pipe::CONDS`.
     Is(usize),
+    /// A variable of `VARS`, true when not 0 (`none` too).
+    Var(usize),
     /// The main candidate is the term of register `R`'s (`(same R)`).
     Same(String),
     Not(Box<Cond>),
@@ -649,7 +652,7 @@ pub fn turn_on(name: &str) {
 
 /// Whether the `FLAGS` switch `name` is on on this thread.
 pub fn is_on(name: &str) -> bool {
-    FLAGS.iter().position(|k| *k == name).is_some_and(|i| read(FLAG0 + i) == 1)
+    FLAGS.iter().position(|k| *k == name).is_some_and(|i| read(FLAG0 + i) != 0)
 }
 
 /// Whether the pass `name` is turned off on this thread.
@@ -701,29 +704,12 @@ const STEPS: [(Step, &str); 3] = [(Step::Run, "run"), (Step::Once, "once"), (Ste
 pub struct Passes {
     /// The steps each of a round's `iter_limit` repetitions runs, in order.
     pub schedule: Vec<(Step, &'static str)>,
-    /// Back-off scheduler: matches a rule may make per run before it is banned.
-    pub match_limit: usize,
-    /// Back-off scheduler: runs a banned rule sits out at first.
-    pub ban_length: usize,
     /// Enabled entries of `PRE`.
     pub pre: Vec<&'static str>,
-    /// Pre-pass rebuilds unioned into a round, smallest first (`unclustered` comes on top).
-    pub keep: usize,
-    /// Rounds added after the last one while the pre-pass still changes its extraction.
-    pub extra: usize,
-    /// Rerun the first round with the input when its result still mixes arithmetic into
-    /// bitwise operations.
-    pub rerun_input: bool,
-    /// Rounds of the second run from the printed result (0: none).
-    pub printed: usize,
-    /// Take a rebuild proved minimal as the extraction without saturating.
-    pub minimal: bool,
-    /// Entries of `INNER` turned off.
-    pub off: Vec<&'static str>,
-    /// Values of the `LIMITS`, in order.
-    pub limits: Vec<usize>,
-    /// Milliseconds a `simplify` run has (`time_limit = MS` when it starts); 0: no limit.
-    pub time_limit: usize,
+    /// The assignments (`Pass::Assign`, `Pass::On`, `Pass::Off`) a run starts with, in order:
+    /// the first `defaults` from `default.pipe`, the rest from `--passes` (`entry_steps`).
+    pub entry: Vec<Pass>,
+    pub defaults: usize,
     /// The passes `simplify` runs on its input.
     pub pipeline: Pipe,
     /// The pre-pass on one term: its first candidate is the main rebuild, the others are
@@ -746,6 +732,7 @@ static DEFAULT: std::sync::LazyLock<(Passes, lang::Defs)> = std::sync::LazyLock:
     let mut p = Passes::base();
     let mut defs = lang::Defs::new();
     p.apply(include_str!("default.pipe"), &mut defs, &mut Lets::default()).and_then(|()| p.finish()).unwrap_or_else(|e| panic!("src/default.pipe: {e}"));
+    p.defaults = p.entry.len();
     (p, defs)
 });
 
@@ -769,17 +756,9 @@ impl Passes {
                 (Saturate, "identity-zero-element"),
                 (Run, "simplify"),
             ],
-            match_limit: 64,
-            ban_length: 3,
             pre: PRE.to_vec(),
-            keep: 2,
-            extra: 2,
-            rerun_input: true,
-            printed: 2,
-            minimal: true,
-            off: vec!["semi/peel_shapes"],
-            limits: LIMITS.iter().map(|(_, d)| *d).collect(),
-            time_limit: 0,
+            entry: Vec::new(),
+            defaults: 0,
             pipeline: id.clone(),
             prepass: id.clone(),
             polish: id.clone(),
@@ -795,8 +774,27 @@ impl Passes {
         self.pre.contains(&name)
     }
 
-    /// The `run-schedule` command of a round with `iter` repetitions.
-    pub fn egglog_schedule(&self, iter: usize) -> String {
+    /// The assignments a run starts with: those of `default.pipe`, then `restarts = m` and
+    /// `iter_limit = i` of the command line (`cli`), then those of `--passes`.
+    pub fn entry_steps(&self, cli: Option<(usize, usize)>) -> Vec<Pass> {
+        let (base, spec) = self.entry.split_at(self.defaults);
+        let num = |i: usize, n: usize| Pass::Assign(i, Some(Value::Num(n as u64)));
+        let cli = cli.map(|(m, i)| [num(RESTARTS, m), num(ITER_LIMIT, i)]);
+        base.iter().cloned().chain(cli.into_iter().flatten()).chain(spec.iter().cloned()).collect()
+    }
+
+    /// `{:#}` after a comment line with the run it describes: `entry_steps` for `-m m -i i`,
+    /// then `pipeline` (`--show-passes`).
+    pub fn show_run(&self, m: usize, i: usize) -> String {
+        let steps: Vec<String> = self.entry_steps(Some((m, i))).into_iter().map(|p| lang::show(&Pipe::Pass(p))).collect();
+        format!("# A run: {} | pipeline
+{self:#}", steps.join(" | "))
+    }
+
+    /// The `run-schedule` command of an egglog round: `iter_limit` repetitions, the back-off
+    /// scheduler with `match_limit` and `ban_length`.
+    pub fn egglog_schedule(&self) -> String {
+        let iter = get(ITER_LIMIT);
         let steps: String = self
             .schedule
             .iter()
@@ -808,16 +806,18 @@ impl Passes {
             .collect();
         format!(
             "(run-schedule\n    (let-scheduler babibo (back-off :match-limit {} :ban-length {}))\n    (repeat {iter}\n        (seq{steps}\n        )\n    )\n)",
-            self.match_limit, self.ban_length
+            get(MATCH_LIMIT),
+            get(BAN_LENGTH)
         )
     }
 
     /// The default pipeline changed by `spec`: items `key=value`, and for the lists `pre`,
     /// `off` and `schedule` also `key+=names` and `key-=names` (names separated by `,`;
-    /// schedule steps written `run:`, `once:` or `sat:` and a ruleset). The `LIMITS` are keys
-    /// too (`split_runs=8`); `pipeline`, `prepass`, `polish`, `rewrite`, `simba` and
-    /// `sub/NAME` (`SUBS`) take a pipeline (`crate::pipe_lang`), and `polish` also a list
-    /// of polish pass names, run as `polish(names)`.
+    /// schedule steps written `run:`, `once:` or `sat:` and a ruleset). `pipeline`,
+    /// `prepass`, `polish`, `rewrite`, `simba` and `sub/NAME` (`SUBS`) take a pipeline
+    /// (`crate::pipe_lang`), and `polish` also a list of polish pass names, run as
+    /// `polish(names)`. Any other key is a variable: the item is an entry assignment
+    /// (`entry`), as are the `off` items.
     /// `(let NAME p)` defines a name for the items after it (those of `default.pipe` come
     /// first), and `file=PATH` reads the items of a file there. Items are separated by `;`,
     /// or by white space before a `key=` or `(let` outside parentheses that does not follow
@@ -929,16 +929,23 @@ impl Passes {
             let names = |known: &[&'static str]| -> Result<Vec<&'static str>, String> {
                 val.split(',').filter(|s| !s.is_empty()).map(|n| known.iter().find(|k| **k == n).copied().ok_or_else(|| format!("unknown {key} name {n}; known: {}", known.join(",")))).collect()
             };
-            let list = match key {
-                "pre" => Some((&mut p.pre, names(&PRE)?)),
-                "off" => Some((&mut p.off, names(&INNER)?)),
-                _ => None,
-            };
-            if let Some((list, ns)) = list {
+            if key == "pre" {
+                let ns = names(&PRE)?;
                 match op {
-                    "=" => *list = ns,
-                    "+=" => list.extend(ns),
-                    _ => list.retain(|n| !ns.contains(n)),
+                    "=" => p.pre = ns,
+                    "+=" => p.pre.extend(ns),
+                    _ => p.pre.retain(|n| !ns.contains(n)),
+                }
+                continue;
+            }
+            // `off=a,b` turns every `INNER` pass on and then `a`, `b` off.
+            if key == "off" {
+                let ns = names(&INNER)?;
+                if op == "=" {
+                    p.entry.push(Pass::On(INNER.to_vec()));
+                }
+                if !ns.is_empty() {
+                    p.entry.push(if op == "-=" { Pass::On(ns) } else { Pass::Off(ns) });
                 }
                 continue;
             }
@@ -963,29 +970,7 @@ impl Passes {
             if op != "=" {
                 return Err(format!("{key} is not a list: {item}"));
             }
-            let num = || val.parse::<usize>().map_err(|_| format!("expected a number: {item}"));
-            let flag = || match val {
-                "1" | "true" | "on" => Ok(true),
-                "0" | "false" | "off" => Ok(false),
-                _ => Err(format!("expected 0 or 1: {item}")),
-            };
-            match key {
-                "keep" => p.keep = num()?.max(1),
-                "extra" => p.extra = num()?,
-                "rerun_input" => p.rerun_input = flag()?,
-                "printed" => p.printed = num()?,
-                "minimal" => p.minimal = flag()?,
-                "match_limit" => p.match_limit = num()?,
-                "ban_length" => p.ban_length = num()?,
-                "time_limit" => p.time_limit = num()?,
-                _ => match LIMITS.iter().position(|(n, _)| *n == key) {
-                    Some(i) => p.limits[i] = num()?,
-                    None => {
-                        let limits: Vec<&str> = LIMITS.iter().map(|(n, _)| *n).collect();
-                        return Err(format!("unknown key {key}; known: schedule match_limit ban_length pre keep extra rerun_input printed minimal off time_limit pipeline prepass polish rewrite simba sub/NAME file {}", limits.join(" ")));
-                    }
-                },
-            }
+            p.entry.push(lang::parse_assign(key, val).map_err(|e| format!("{item}: {e}"))?);
         }
         Ok(())
     }
@@ -994,14 +979,11 @@ impl Passes {
     fn finish(&mut self) -> Result<(), String> {
         self.pre.sort_by_key(|n| PRE.iter().position(|k| k == n));
         self.pre.dedup();
-        self.off.sort_by_key(|n| INNER.iter().position(|k| k == n));
-        self.off.dedup();
         self.check()
     }
 
-    /// Rejects pipelines that cannot run: an egglog round, `reprint` or the count `restarts`
-    /// outside `pipeline` (only a `simplify` run has them), and `prepass` or `polish` that
-    /// reach themselves.
+    /// Rejects pipelines that cannot run: an egglog round or `reprint` outside `pipeline`
+    /// (only a `simplify` run has them), and `prepass` or `polish` that reach themselves.
     fn check(&self) -> Result<(), String> {
         // The pipelines each reaches: `prepass`, `polish`, or the rebuilds of one term
         // (`inner`), which any pass over one term may run.
@@ -1080,7 +1062,7 @@ struct Lets {
 /// What a pipeline uses, for `Passes::check` and `Passes::warnings`.
 #[derive(Default)]
 struct Uses {
-    /// The passes and counts in it that need a `simplify` run.
+    /// The passes in it that need a `simplify` run.
     needs_run: Vec<String>,
     /// The pipelines it runs: `prepass`, `polish`, `inner`.
     calls: Vec<&'static str>,
@@ -1233,7 +1215,7 @@ impl Uses {
     fn cond(&mut self, c: &Cond) {
         match c {
             Cond::Is(i) if ["opaque", "rebuilds"].contains(&crate::pipe::CONDS[*i]) => self.calls.push("prepass"),
-            Cond::Is(_) => {}
+            Cond::Is(_) | Cond::Var(_) => {}
             Cond::Same(r) => self.read(r),
             Cond::Not(c) | Cond::Any(c) | Cond::All(c) => self.cond(c),
             Cond::And(cs) | Cond::Or(cs) => cs.iter().for_each(|c| self.cond(c)),
@@ -1246,7 +1228,6 @@ impl Uses {
 
     fn value(&mut self, v: &Value) {
         match v {
-            Value::Count(i) if crate::pipe::COUNTS[*i] == "restarts" => self.needs_run.push("restarts".into()),
             Value::Size(r) => self.read(r),
             Value::Bin(_, a, b) => {
                 self.value(a);
@@ -1271,27 +1252,25 @@ fn reads_var(v: &Value, i: usize) -> bool {
 impl fmt::Display for Passes {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let steps: Vec<String> = self.schedule.iter().map(|(s, rs)| format!("{}:{rs}", STEPS.iter().find(|(k, _)| k == s).unwrap().1)).collect();
-        write!(
-            f,
-            "schedule={} match_limit={} ban_length={} pre={} keep={} extra={} rerun_input={} printed={} minimal={} off={}",
-            steps.join(","),
-            self.match_limit,
-            self.ban_length,
-            self.pre.join(","),
-            self.keep,
-            self.extra,
-            self.rerun_input as u8,
-            self.printed,
-            self.minimal as u8,
-            self.off.join(",")
-        )?;
-        for ((name, default), v) in LIMITS.iter().zip(&self.limits) {
-            if v != default {
-                write!(f, " {name}={v}")?;
+        write!(f, "schedule={} pre={}", steps.join(","), self.pre.join(","))?;
+        let spec = &self.entry[self.defaults..];
+        let mut i = 0;
+        while i < spec.len() {
+            let names = |ns: &[&str]| ns.join(",");
+            match &spec[i] {
+                Pass::On(ns) if *ns == INNER => match spec.get(i + 1) {
+                    Some(Pass::Off(off)) if off.iter().all(|n| INNER.contains(n)) => {
+                        write!(f, " off={}", names(off))?;
+                        i += 1;
+                    }
+                    _ => write!(f, " off=")?,
+                },
+                Pass::Off(ns) => write!(f, " off+={}", names(ns))?,
+                Pass::On(ns) => write!(f, " off-={}", names(ns))?,
+                Pass::Assign(v, val) => write!(f, " {}={}", var(*v).name, lang::show_assigned(val))?,
+                p => unreachable!("entry step {p:?}"),
             }
-        }
-        if self.time_limit != 0 {
-            write!(f, " time_limit={}", self.time_limit)?;
+            i += 1;
         }
         let show = if f.alternate() { lang::pretty } else { lang::show };
         let sep = if f.alternate() { "\n" } else { " " };
@@ -1311,29 +1290,76 @@ impl fmt::Display for Passes {
 mod tests {
     use super::*;
 
+    fn x() -> crate::pipe::Cand {
+        crate::pipe::Cand::new("(Sub (Var \"x\") (Var \"y\"))", "input")
+    }
+
+    /// The value of variable `name` after the entry assignments of `p`.
+    fn after_entry(p: &Passes, name: &str) -> u64 {
+        crate::pipe::in_run(p, None, x, || get(var_index(name).unwrap()))
+    }
+
     #[test]
     fn off_ends_with_its_scope() {
-        let p = Passes::default();
-        apply(&p);
-        in_scope(|| {
-            turn_off("relate");
+        let p = Passes::parse("off+=relate").unwrap();
+        crate::pipe::in_run(&p, None, x, || {
+            assert!(is_off("relate") && is_off("semi/peel_shapes"), "the entry assignments run first");
             in_scope(|| {
-                apply(&p);
-                assert!(is_off("relate"), "a run inherits the passes turned off where it is called");
+                turn_on("relate");
+                crate::pipe::in_run(&p, None, x, || assert!(!is_off("relate"), "a run inside a run keeps the bindings of its caller"));
                 turn_off("tfunc");
             });
-            assert!(!is_off("tfunc"), "a pass turned off in a scope is on again after it");
-            apply(&p);
-            assert!(is_off("relate"));
+            assert!(!is_off("tfunc") && is_off("relate"), "a pass turned off in a scope is on again after it");
         });
-        apply(&p);
-        assert!(!is_off("relate"));
+        assert!(!is_off("relate") && !is_off("semi/peel_shapes"), "the entry bindings end with the run");
+    }
+
+    #[test]
+    fn entry_assignments() {
+        let p = Passes::parse("extra=5 split_runs=vars*3 extra=extra+1 off=relate,tfunc off+=simba off-=tfunc").unwrap();
+        assert_eq!(after_entry(&p, "extra"), 6, "items run in order, a later one reading an earlier");
+        assert_eq!(after_entry(&p, "split_runs"), 6, "a value is evaluated on the input");
+        assert_eq!(after_entry(&p, "keep"), 2, "default.pipe comes first");
+        crate::pipe::in_run(&p, None, x, || {
+            assert!(is_off("relate") && is_off("simba") && !is_off("tfunc"));
+            assert!(!is_off("semi/peel_shapes"), "off= turns every other pass on");
+        });
+        assert!(!is_off("relate") && get(var_index("extra").unwrap()) == NONE, "nothing leaks out of a run");
+        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
+        assert!(p.to_string().contains(" extra=5 split_runs=vars * 3 extra=extra + 1 off=relate,tfunc off+=simba off-=tfunc "), "{p}");
+        let p = Passes::parse("off-=semi/peel_shapes keep=0 prove_minimal=0 restarts=7 match_limit=9").unwrap();
+        assert!(crate::pipe::in_run(&p, None, x, || !is_off("semi/peel_shapes")));
+        assert_eq!([after_entry(&p, "keep"), after_entry(&p, "prove_minimal"), after_entry(&p, "restarts")], [0, 0, 7]);
+        assert!(crate::pipe::in_run(&p, None, x, || p.egglog_schedule().contains(":match-limit 9 :ban-length 3")));
+        let p = Passes::parse("off=").unwrap();
+        assert_eq!(p.entry[p.defaults..], [Pass::On(INNER.to_vec())]);
+        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
+        let cli = crate::Cli { max_restarts: 5, iter_limit: 3, passes: Passes::parse("iter_limit=iter_limit*2").unwrap(), ..Default::default() };
+        let (m, i) = crate::pipe::in_run(&cli.passes, Some(&cli), x, || (get(RESTARTS), get(ITER_LIMIT)));
+        assert_eq!((m, i), (5, 6), "-m and -i come before the --passes items");
+        let shown = cli.passes.show_run(5, 3);
+        assert!(shown.starts_with("# A run: keep = 2 | ") && shown.contains("| restarts = 5 | iter_limit = 3 | iter_limit = iter_limit * 2 | pipeline\n"), "{shown}");
+        assert_eq!(Passes::parse(&shown).unwrap(), cli.passes);
+        for bad in ["minimal=0", "relate=none", "nope=1", "split_runs=4 | rewrite", "keep+=1", "size=3"] {
+            assert!(Passes::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn time_limit_zero_is_a_deadline() {
+        let at = |spec: &str| crate::pipe::in_run(&Passes::parse(spec).unwrap(), None, x, || (get(DEADLINE), epoch_ns()));
+        assert_eq!(at("time_limit=none").0, NONE);
+        let (deadline, now) = at("time_limit=0");
+        assert!(deadline <= now, "0 is a deadline now");
+        let (deadline, now) = at("time_limit=2000");
+        assert!(deadline > now + 1_000_000_000 && deadline <= now + 2_000_000_000);
+        assert_eq!(at("time_limit=1000 time_limit=none").0, NONE, "a later item wins");
     }
 
     #[test]
     fn spec_round_trip() {
         assert_eq!(Passes::parse("").unwrap(), Passes::default());
-        let p = Passes::parse("pre-=halve_input,unified;polish=factor,push_not,factor extra=0 keep=3 minimal=off").unwrap();
+        let p = Passes::parse("pre-=halve_input,unified;polish=factor,push_not,factor extra=0 keep=3 prove_minimal=0").unwrap();
         assert!(!p.pre_on("unified") && p.pre_on("no_wide"));
         assert_eq!(p.polish, lang::parse(&polish(&["factor", "push_not", "factor"])).unwrap());
         assert_eq!(lang::parse(&Passes::default().polish.to_string()).unwrap(), Passes::default().polish);
@@ -1350,17 +1376,14 @@ mod tests {
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("pre+=nope").is_err() && Passes::parse("keep+=1").is_err());
         let p = Passes::parse("off=semi/bit_split,relate").unwrap();
-        assert_eq!(p.off, ["relate", "semi/bit_split"]);
+        assert_eq!(p.entry[p.defaults..], [Pass::On(INNER.to_vec()), Pass::Off(vec!["semi/bit_split", "relate"])]);
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
-        apply(&p);
-        assert!(is_off("relate") && !is_off("simba"));
-        apply(&Passes::default());
+        assert!(crate::pipe::in_run(&p, None, x, || is_off("relate") && !is_off("simba")));
         assert!(!is_off("relate"));
         in_scope(|| {
             turn_off("poly_mba");
             assert!(is_off("poly_mba") && !is_off("lowbits"));
         });
-        apply(&Passes::default());
         assert!(!is_off("poly_mba"));
         let p = Passes::parse("prepass=(if (mul < 1 && size >= 10 || vars >= 3) (off lowbits)) | lowbits").unwrap();
         assert_eq!(p.prepass.to_string(), "(if (mul < 1 && size >= 10 || vars >= 3) (off lowbits)) | lowbits");
@@ -1377,13 +1400,12 @@ mod tests {
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("split_runs+=1").is_err() && Passes::parse("split_runs=x").is_err());
         assert_eq!(limit(Limit::SplitRuns), 16);
-        apply(&p);
-        assert_eq!((limit(Limit::SplitRuns), limit(Limit::PolyBuilds), limit(Limit::SplitDepth)), (4, 64, 2));
-        apply(&Passes::default());
+        let got = crate::pipe::in_run(&p, None, x, || (limit(Limit::SplitRuns), limit(Limit::PolyBuilds), limit(Limit::SplitDepth)));
+        assert_eq!(got, (4, 64, 2));
         assert_eq!(limit(Limit::SplitRuns), 16);
         let p = Passes::parse("keep=1 pipeline=lowbits | (best 2 rewrite ((off relate tfunc) | rebuild)) | (fix 3 egglog) | polish/factor extra=0").unwrap();
         assert_eq!(p.pipeline.to_string(), "lowbits | (best 2 rewrite ((off relate tfunc) | rebuild)) | (fix 3 egglog) | polish/factor");
-        assert_eq!((p.keep, p.extra), (1, 0));
+        assert_eq!((after_entry(&p, "keep"), after_entry(&p, "extra")), (1, 0));
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         let p = Passes::parse("pipeline=(smallest (fix restarts (retry (mixed && !minimal) prepass (egglog later))) | (if !input (tag t polish) id))").unwrap();
         assert_eq!(p.pipeline.to_string(), "(smallest (fix restarts (retry (mixed && !minimal) prepass (egglog later))) | (if !input (tag t polish)))");
@@ -1394,7 +1416,7 @@ mod tests {
         assert_eq!(Passes::parse(&d.to_string()).unwrap(), d);
         assert_eq!(Passes::parse(&format!("{d:#}")).unwrap(), d);
         let p = Passes::parse("extra=0 prepass=lowbits | (if mixed rewrite) # a comment\n| polish keep=3;pipeline=(fix 2 prepass | egglog)").unwrap();
-        assert_eq!((p.extra, p.keep), (0, 3));
+        assert_eq!((after_entry(&p, "extra"), after_entry(&p, "keep")), (0, 3));
         assert_eq!(p.prepass, lang::parse("(seq lowbits (if mixed rewrite id) polish)").unwrap());
         assert_eq!(p.pipeline, lang::parse("(fix 2 (seq prepass egglog))").unwrap());
         assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
@@ -1421,10 +1443,11 @@ extra=1
 prepass=lowbits | r2
 ").unwrap();
         let p = Passes::parse(&format!("file={} keep=3", f.display())).unwrap();
-        assert_eq!((p.extra, p.keep), (1, 3));
+        assert_eq!((after_entry(&p, "extra"), after_entry(&p, "keep")), (1, 3));
         assert_eq!(p.prepass, lang::parse("lowbits | rewrite | rewrite").unwrap());
         std::fs::remove_dir_all(&dir).unwrap();
-        for bad in ["prepass=egglog", "rewrite=(fix restarts rewrite)", "simba=reprint", "sub/cluster=(egglog first)", "prepass=lowbits | prepass", "polish=polish", "rewrite=(again polish)", "prepass=(if rebuilds id)"] {
+        assert!(Passes::parse("rewrite=(fix (restarts - 1) rewrite)").is_ok(), "restarts is a variable");
+        for bad in ["prepass=egglog", "simba=reprint", "sub/cluster=(egglog first)", "prepass=lowbits | prepass", "polish=polish", "rewrite=(again polish)", "prepass=(if rebuilds id)"] {
             let e = Passes::parse(bad).unwrap_err();
             assert!(e.contains("simplify run") || e.contains("reaches itself"), "{bad}: {e}");
         }
@@ -1475,10 +1498,8 @@ prepass=lowbits | r2
             assert!(Passes::parse(bad).is_err(), "{bad}");
         }
         with_off(&["relate"], || {
-            apply(&Passes::default());
-            assert!(is_off("relate"));
+            assert!(crate::pipe::in_run(&Passes::default(), None, x, || is_off("relate")));
         });
-        apply(&Passes::default());
         assert!(!is_off("relate"));
     }
 
@@ -1486,16 +1507,16 @@ prepass=lowbits | r2
     fn assignment_items_and_warnings() {
         let p = Passes::parse("prepass=lowbits | split_runs=4 | rewrite").unwrap();
         assert_eq!(p.prepass.to_string(), "lowbits | split_runs = 4 | rewrite");
-        assert_eq!(p.limits, Passes::default().limits, "an assignment after | stays in the pipeline");
+        assert_eq!(p.entry, Passes::default().entry, "an assignment after | stays in the pipeline");
         let p = Passes::parse("prepass=lowbits split_runs=4").unwrap();
-        assert_eq!((p.prepass.to_string().as_str(), p.limits[Limit::SplitRuns as usize]), ("lowbits", 4));
+        assert_eq!((p.prepass.to_string().as_str(), after_entry(&p, "split_runs")), ("lowbits", 4));
         let p = Passes::parse("prepass=lowbits | split_runs = vars * 2 | rewrite extra=0").unwrap();
-        assert_eq!((p.prepass.to_string().as_str(), p.extra), ("lowbits | split_runs = vars * 2 | rewrite", 0));
+        assert_eq!((p.prepass.to_string().as_str(), after_entry(&p, "extra")), ("lowbits | split_runs = vars * 2 | rewrite", 0));
         let p = Passes::parse("time_limit=2000 cand_bit_splits=3").unwrap();
-        assert_eq!((p.time_limit, p.limits[Limit::CandBitSplits as usize]), (2000, 3));
-        assert!(p.to_string().contains(" cand_bit_splits=3 time_limit=2000"), "{p}");
+        assert_eq!(after_entry(&p, "cand_bit_splits"), 3);
+        assert!(p.to_string().contains(" time_limit=2000 cand_bit_splits=3 "), "{p}");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
-        assert!(Passes::parse("bit_split_budget=8").is_err(), "the budget is no --passes item");
+        assert_eq!(after_entry(&Passes::parse("bit_split_budget=8").unwrap(), "bit_split_budget"), 8, "any variable is an item");
         let warn = |s: &str| Passes::parse_noting(s).unwrap().1;
         assert!(warn("prepass=rewrite | split_runs = 4").iter().any(|w| w.contains("split_runs = 4 ends its sequence")));
         assert!(warn("prepass=(off relate)").iter().any(|w| w.contains("(off relate) ends")), "a pipeline is a sequence too");
