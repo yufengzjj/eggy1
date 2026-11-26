@@ -24,8 +24,6 @@ fn matches_expected(expect: &[&str], r: &str, ok: bool) -> bool {
 /// numeric type, accepting any AC-equivalent of an expected form.
 fn check(num_type: &str, cases: &[(&str, &[&str], usize)]) {
     let mut cli = Cli {
-        rule_compile: false,
-        expr_compile: false,
         num_type: num_type.to_string(),
         iter_limit: 10,
         max_restarts: 2,
@@ -58,8 +56,6 @@ fn check(num_type: &str, cases: &[(&str, &[&str], usize)]) {
 /// match (used for magic-number division recognition).
 fn check_exact(cases: &[(&str, &str, &str)]) {
     let mut cli = Cli {
-        rule_compile: false,
-        expr_compile: false,
         num_type: "i32".to_string(),
         iter_limit: 12,
         max_restarts: 2,
@@ -1554,8 +1550,6 @@ fn complex_misc() {
 #[test]
 fn extract_restart() {
     let cli = Cli {
-        rule_compile: false,
-        expr_compile: false,
         num_type: "i64".to_string(),
         iter_limit: 2,
         max_restarts: 2,

@@ -1064,20 +1064,6 @@ pub struct Cli {
     #[arg(
         short,
         long,
-        default_value_t = false,
-        help = "Output expression in egglog format instead of simplifying"
-    )]
-    pub rule_compile: bool,
-    #[arg(
-        short,
-        long,
-        default_value_t = false,
-        help = "Output expression in egglog rule format instead of simplifying"
-    )]
-    pub expr_compile: bool,
-    #[arg(
-        short,
-        long,
         default_value = "i64",
         value_parser=["i64","u64","i32","u32","i16","u16","i8","u8"],
         help = "Numeric type to use"
@@ -1120,8 +1106,6 @@ pub struct Cli {
 impl Default for Cli {
     fn default() -> Cli {
         Cli {
-            rule_compile: false,
-            expr_compile: false,
             num_type: "i64".to_string(),
             iter_limit: 10,
             max_restarts: 2,

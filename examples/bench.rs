@@ -316,8 +316,6 @@ fn run_one(args: &Args) {
         return;
     }
     let cli = Cli {
-        rule_compile: false,
-        expr_compile: false,
         num_type: args.num_type.clone(),
         iter_limit: args.iter_limit,
         max_restarts: args.max_restarts,
