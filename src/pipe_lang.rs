@@ -476,15 +476,11 @@ pub fn parse_let(s: &str, defs: &Defs) -> Result<(String, Pipe), String> {
     Ok((name, pipe))
 }
 
-/// Whether `s` is written in the old `seq(a,b)` syntax: a name directly followed by `(`.
+/// Whether `s` looks like the old `seq(a,b)` syntax, for an error message: a name directly
+/// followed by `(`.
 pub fn is_old_syntax(s: &str) -> bool {
     let cs: Vec<char> = s.chars().collect();
     cs.windows(2).any(|w| name_char(w[0]) && w[1] == '(')
-}
-
-/// Parses `s` in either syntax, `defs` as in `parse_with`.
-pub fn parse_any(s: &str, defs: &Defs) -> Result<Pipe, String> {
-    if is_old_syntax(s) { Pipe::parse(s) } else { parse_with(s, defs) }
 }
 
 /// `v` where an operand of precedence `need` stands: `+ -` are 1, `* /` 2, the rest 3.
@@ -673,41 +669,32 @@ mod tests {
     use super::*;
     use crate::sched::Passes;
 
-    /// The default pipelines as written in the old syntax before they were rewritten.
-    const OLD_PIPELINE: &str = "seq(smallest(seq(fix(1,if(opaque,seq(union(id,prepass),if(minimal,take_minimal,egglog/first)),retry(rerun_input+mixed+!minimal,seq(prepass,if(minimal,take_minimal,egglog/first)),seq(union(id,prepass),egglog/rerun_input)))),if(moved,fix(restarts,seq(prepass,if(minimal,take_minimal,egglog/later)))),if(moved,fix(extra,if(rebuilds,seq(prepass,if(minimal,take_minimal,egglog/later))))),polish)),if(printed+!input,tag(rerun_printed,best(1,id,seq(reprint,smallest(seq(fix(1,if(opaque,seq(union(id,prepass),if(minimal,take_minimal,egglog/first)),retry(rerun_input+mixed+!minimal,seq(prepass,if(minimal,take_minimal,egglog/first)),seq(union(id,prepass),egglog/rerun_input)))),if(moved,fix(printed,seq(prepass,if(minimal,take_minimal,egglog/later)))),polish)))))))";
-    const OLD_PREPASS: &str = "scope(seq(save/t0,if(!mul:1,off/poly_mba),if(!mul:1+!shift:1+!bitconst:1,off/lowbits),if(mul:4+!shift:1,off/small_blocks),lowbits,unshift,save/t,cand(first,first(tfunc_whole,seq(rewrite_top,cluster_top,relate,tfunc))),best(1,id,cand(unified,seq(load/t,unify_operands,filter(!eq:t),with(rewrites=unified_rewrites,first(tfunc_whole,seq(rewrite,within,cluster_regions,relate,within,tfunc)))))),save/r,union(id,cand(no_wide,if(used_wide,seq(load/t,off(wide_blocks,first(tfunc_whole,seq(rewrite_top,cluster_top,relate,tfunc))),save/n,filter(lt:r)),none)),cand(no_wide_abstracted,seq(load/n,off(wide_blocks,union(over_const_bitwise,over_shared_bitwise)),filter(lt:r+le:3/4:n))),cand(split_bits,if(fits_split,seq(split_bits,filter(!eq:r)),none)),cand(halve_first,seq(halve,filter(!eq:r),first(tfunc_whole,seq(rewrite_top,cluster_top,tfunc)))),cand(over_products,seq(over_products,filter(!eq:r))),cand(over_const_bitwise,seq(over_const_bitwise,filter(!eq:r))),cand(over_shared_bitwise,seq(over_shared_bitwise,filter(!eq:r))),cand(halve_input,with(semi_leaves=2,if(tiny,none,seq(load/t,halve,filter(!eq:t),first(tfunc_whole,seq(rewrite_top,cluster_top,tfunc))))))),finish,save/f,filter(!abstracted|le:3/4:f),save/b,label/b,cand(unclustered,if(used_clustered+few_rewrites,seq(load/t,if(!replaceable,off(clustered,with(relate_leaves=unclustered_relate_leaves+rewrites=unclustered_rewrites,seq(rewrite,within,relate,within,tfunc,finish,drop_identities))),none)),none)),label/b,save/u,load/b,best(keep,id),save/m,union(seq(load/u,filter(lt:m)),load/m,seq(load/u,filter(gt:m+lt:t0))),pre_done))";
-    const OLD_POLISH: &str = "scope(with(rewrites=polish_rewrites,wins(8,seq(smaller(polish/push_not,seq(polish/push_not,drop_identities)),smaller(polish/join_constants,seq(polish/join_constants,drop_identities)),smaller(polish/join_linear,with(semi_leaves=2,seq(polish/join_linear,drop_identities))),smaller(polish/over_const_bitwise,seq(polish/over_const_bitwise,drop_identities)),smaller(polish/over_shared_bitwise,seq(polish/over_shared_bitwise,drop_identities)),smaller(polish/over_products,seq(polish/over_products,drop_identities)),smaller(polish/recombine,seq(polish/recombine,drop_identities)),smaller(polish/shift_cases,seq(polish/shift_cases,drop_identities)),smaller(polish/decompose,seq(polish/decompose,drop_identities)),smaller(polish/factor,seq(polish/factor,drop_identities))))))";
-    const OLD_REWRITE: &str = "again(best(1,regions(best(1,simba,small_blocks,wide_blocks)),poly_mba))";
-    const OLD_SIMBA: &str = "if(no_leaves,none,if(wide,seq(save/in,best(1,seq(drop_unused,save/d),seq(clustered,save/c),seq(load/d,if(true,none,seq(load/in,first(peel,seq(load/c,peel_clustered)),filter(!eq:in)))))),seq(save/in,if(const_bitwise,best(1,semi_linear),best(1,rebuild_values,common_multiple,related_leaves,if(!cofactor,one_wide_term,none))),filter(lt:in))))";
-
     #[test]
-    fn defaults_match_old_syntax() {
+    fn defaults_read_back() {
         let d = Passes::default();
-        for (old, p) in [(OLD_PIPELINE, &d.pipeline), (OLD_PREPASS, &d.prepass), (OLD_POLISH, &d.polish), (OLD_REWRITE, &d.rewrite), (OLD_SIMBA, &d.simba)] {
-            assert_eq!(&Pipe::parse(old).unwrap(), p);
+        for p in [&d.pipeline, &d.prepass, &d.polish, &d.rewrite, &d.simba] {
             assert_eq!(&parse(&show(p)).unwrap(), p, "{}", show(p));
             assert_eq!(&parse(&pretty(p)).unwrap(), p, "{}", pretty(p));
-            assert_eq!(&parse_any(old, &Defs::new()).unwrap(), p);
         }
     }
 
     #[test]
     fn forms_and_conditions() {
-        let same = |new: &str, old: &str| assert_eq!(parse(new).unwrap(), Pipe::parse(old).unwrap(), "{new}");
-        same("lowbits | rewrite | polish", "seq(lowbits,rewrite,polish)");
-        same("(seq rewrite)", "seq(rewrite)");
-        same("(if mixed rewrite)", "if(mixed,rewrite,id)");
-        same("(if (!minimal || tiny) (rewrite | polish) id)", "if(!minimal|tiny,seq(rewrite,polish),id)");
-        same("(filter (mul >= 4 && vars < 3))", "filter(mul:4+!vars:3)");
-        same("(filter (size >= (size t) || (same r)))", "filter(!lt:t|eq:r)");
-        same("(filter !(same r))", "filter(!eq:r)");
-        same("(filter (size > (size f) * 3/4))", "filter(!le:3/4:f)");
-        same("(with off=relate,tfunc rewrites=8 rewrite)", "off(relate+tfunc,with(rewrites=8,rewrite))");
-        same("(with rewrites=8 (with off=relate rewrite))", "with(rewrites=8,off(relate,rewrite))");
-        same("(off lowbits relate) | (save t) | (egglog first) | egglog", "seq(seq(off/lowbits,off/relate),save/t,egglog/first,egglog)");
-        same("(fix restarts prepass | egglog)", "fix(restarts,seq(prepass,egglog))");
+        let same = |a: &str, b: &str| assert_eq!(parse(a).unwrap(), parse(b).unwrap(), "{a}");
+        same("lowbits | rewrite | polish", "(seq lowbits rewrite polish)");
+        same("(if mixed rewrite)", "(if mixed rewrite id)");
+        same("(if (!minimal || tiny) (rewrite | polish))", "(if (!minimal || (tiny)) (seq rewrite polish) id)");
+        same("(filter (mul >= 4 && vars < 3))", "(filter ((mul >= 4) && (vars < 3)))");
+        same("(with off=relate,tfunc rewrites=8 rewrite)", "(with off=relate,tfunc (with rewrites=8 rewrite))");
+        same("(off lowbits relate) | (save t)", "((off lowbits) | (off relate)) | (save t)");
+        same("(fix restarts prepass | egglog)", "(fix restarts (prepass | egglog))");
         same("# comment
-(best 2 rewrite (scope relate)) # more", "best(2,rewrite,scope(relate))");
+(best 2 rewrite (scope relate)) # more", "(best 2 rewrite (scope relate))");
+        let p = parse("(filter (size > (size f) * 3/4 || (same r)))").unwrap();
+        let Pipe::Filter(Cond::Or(cs)) = &p else { panic!("{p:?}") };
+        assert_eq!(cs[1], Cond::Same("r".into()));
+        let three_quarters = Value::Bin('/', Box::new(Value::Bin('*', Box::new(Value::Size("f".into())), Box::new(Value::Num(3)))), Box::new(Value::Num(4)));
+        assert_eq!(cs[0], Cond::Cmp(Cmp::Gt, Value::Feature(0), three_quarters));
         for ok in [
             "(if !(minimal && tiny) id)",
             "(filter (any (mul >= 2)))",
@@ -716,6 +703,7 @@ mod tests {
             "(best (keep + 1) id)",
             "(if (size < split_size) id)",
             "(wins (2 * 4) id)",
+            "(filter !(same r))",
         ] {
             let p = parse(ok).unwrap();
             assert_eq!(parse(&show(&p)).unwrap(), p, "{ok}: {}", show(&p));
@@ -736,6 +724,7 @@ mod tests {
             "seq",
             "(retry mixed id)",
             "rewrite)",
+            "seq(rewrite,polish)",
         ] {
             assert!(parse(bad).is_err(), "{bad}");
         }
