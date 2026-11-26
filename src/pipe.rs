@@ -50,7 +50,7 @@ pub const CONDS: [&str; 17] = [
     "moved",
     // The main candidate is the input of `simplify`.
     "input",
-    // The main candidate has at most `linear_mba::TINY` nodes.
+    // The main candidate has at most `tiny_size` nodes.
     "tiny",
     // The main candidate has at most `split_size` nodes.
     "fits_split",
@@ -68,7 +68,7 @@ pub const CONDS: [&str; 17] = [
     "abstracted",
     // The main candidate is a linear region without leaves.
     "no_leaves",
-    // The main candidate is a linear region of more than `linear_mba::MAX_LEAVES` leaves.
+    // The main candidate is a linear region of more than `max_leaves` leaves.
     "wide",
     // The main candidate has a bitwise operation with a constant operand.
     "const_bitwise",
@@ -336,13 +336,13 @@ fn proved_minimal<'s>(set: &'s [Cand], env: &Env) -> Option<&'s Cand> {
 fn cond(i: usize, set: &[Cand], env: &Env) -> bool {
     let Some(main) = set.first() else { return false };
     match CONDS[i] {
-        "opaque" => opaque(main.tree()) && size_of(&env.prepass_of(main.term()).0) > linear_mba::TINY,
+        "opaque" => opaque(main.tree()) && size_of(&env.prepass_of(main.term()).0) > limit(Limit::TinySize),
         "minimal" => proved_minimal(set, env).is_some(),
         "mixed" => crate::mixed(main.tree()),
         "rebuilds" => env.prepass_of(main.term()).0 != main.term(),
         "moved" => env.moved.get(),
         "input" => main.term() == env.input,
-        "tiny" => main.size() <= linear_mba::TINY,
+        "tiny" => main.size() <= limit(Limit::TinySize),
         "fits_split" => main.size() <= limit(Limit::SplitSize),
         "used_wide" => set.iter().any(|c| c.used & WIDE != 0),
         "used_clustered" => set.iter().any(|c| c.used & CLUSTERED != 0),
@@ -350,7 +350,7 @@ fn cond(i: usize, set: &[Cand], env: &Env) -> bool {
         "replaceable" => env.ctx(|c| crate::tfunc::replacement(main.tree(), c).is_some()),
         "abstracted" => linear_mba::ABSTRACTED.contains(&main.origin.as_str()),
         "no_leaves" => env.ctx(|w| linear_mba::leaf_count(main.tree(), w) == 0),
-        "wide" => env.ctx(|w| linear_mba::leaf_count(main.tree(), w) > linear_mba::MAX_LEAVES),
+        "wide" => env.ctx(|w| linear_mba::leaf_count(main.tree(), w) > limit(Limit::MaxLeaves)),
         "const_bitwise" => env.ctx(|w| linear_mba::const_bitwise(main.tree(), w)),
         "cofactor" => env.cofactor,
         name => unreachable!("condition {name}"),
@@ -415,6 +415,20 @@ fn scoped<R>(f: impl FnOnce() -> R) -> R {
 
 thread_local! {
     static IN_RUN: Cell<bool> = const { Cell::new(false) };
+    /// The first error of the run under way that a nested run could not return.
+    static FAILED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Records `e` as the run's error: every later step and `run` give it.
+pub(crate) fn fail(e: &Error) {
+    FAILED.with(|f| {
+        f.borrow_mut().get_or_insert_with(|| e.to_string());
+    });
+}
+
+/// The error recorded by `fail` in the run under way.
+pub(crate) fn failed() -> Option<Error> {
+    FAILED.with(|f| f.borrow().clone()).map(Error::BackendError)
 }
 
 /// `f` as part of a run of `p`: when no run is under way on this thread, as the outermost
@@ -425,6 +439,7 @@ pub fn in_run<R>(p: &Passes, cli: Option<&Cli>, input: impl FnOnce() -> Cand, f:
         return f();
     }
     crate::sched::set_current(p);
+    FAILED.with(|f| f.borrow_mut().take());
     struct Out;
     impl Drop for Out {
         fn drop(&mut self) {
@@ -437,7 +452,9 @@ pub fn in_run<R>(p: &Passes, cli: Option<&Cli>, input: impl FnOnce() -> Cand, f:
         let env = Env::with(cli, p, cli.map_or(64, |c| width_of(&c.num_type)), None, false, String::new(), "");
         let set = vec![input()];
         for step in p.entry_steps(cli.map(|c| (c.max_restarts, c.iter_limit))) {
-            pass(&step, set.clone(), &env).expect("an assignment runs no egglog");
+            if let Err(e) = pass(&step, set.clone(), &env) {
+                fail(&e);
+            }
         }
         f()
     })
@@ -447,7 +464,7 @@ pub fn in_run<R>(p: &Passes, cli: Option<&Cli>, input: impl FnOnce() -> Cand, f:
 pub fn run(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
     let first = set.first().cloned();
     let input = || first.unwrap_or_else(|| Cand::new(&env.input, "input"));
-    in_run(env.passes, env.cli, input, || scoped(|| go(p, set, env)))
+    in_run(env.passes, env.cli, input, || scoped(|| go(p, set, env)).and_then(|out| failed().map_or(Ok(out), Err)))
 }
 
 /// `time_limit = ms` in the scope under way.
@@ -472,6 +489,9 @@ fn bookkeeping(p: &Pipe) -> bool {
 
 fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
     // Every candidate equals the input, so stopping anywhere keeps the result right.
+    if let Some(e) = failed() {
+        return Err(e);
+    }
     if !bookkeeping(p) && past_deadline(0.0, env) {
         return Ok(set);
     }
@@ -695,8 +715,8 @@ fn run_on(p: &Pipe, t: &Term, w: &Ctx, cofactor: bool) -> Option<Cand> {
     env.cofactor = cofactor;
     env.ctxs.borrow_mut().push(w.narrow(w.w));
     let input = || Cand::of(t.clone(), &Cand::new("", "input"), 0, 0);
-    let out = in_run(&passes, None, input, || scoped(|| go(p, vec![input()], &env))).expect("a rewrite runs no egglog");
-    out.into_iter().next()
+    let out = in_run(&passes, None, input, || scoped(|| go(p, vec![input()], &env)));
+    out.inspect_err(fail).ok()?.into_iter().next()
 }
 
 /// `Passes::polish` of `p` on the egglog term `egg` at width `w` (`signed` as in
@@ -709,8 +729,8 @@ pub fn polish(egg: &str, w: u32, signed: Option<bool>, p: &Passes) -> (String, O
 
 /// `Passes::polish` on `c` alone, when it makes it smaller.
 fn polish_one(c: &Cand, env: &Env) -> Option<Cand> {
-    let out = scoped(|| go(&env.passes.polish, vec![c.clone()], env)).expect("polish runs no egglog");
-    out.into_iter().next().filter(|r| r.size() < c.size())
+    let out = scoped(|| go(&env.passes.polish, vec![c.clone()], env));
+    out.inspect_err(fail).ok()?.into_iter().next().filter(|r| r.size() < c.size())
 }
 
 fn pre(e: &str) -> String {
@@ -737,7 +757,13 @@ fn pass(p: &Pass, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             match *i {
                 crate::sched::DEADLINE => assign_time_limit(v),
                 i if crate::sched::is_switch(i) => crate::sched::bind(i, (v != 0) as u64),
-                i => crate::sched::bind(i, v),
+                i => match crate::sched::check_cap(i, v) {
+                    Ok(v) => crate::sched::bind(i, v),
+                    Err(e) => {
+                        env.ctx(|c| c.mark_cut());
+                        return Err(Error::BackendError(e));
+                    }
+                },
             }
             return Ok(set);
         }
@@ -882,7 +908,7 @@ mod tests {
         let env = Env::prepass(&passes, 32, None, false, "(Var \"x\")");
         let limit = |ms| Pass::Assign(crate::sched::DEADLINE, Some(Value::Num(ms)).filter(|_| ms > 0));
         let wait = || std::thread::sleep(std::time::Duration::from_millis(5));
-        scoped(|| {
+        crate::sched::in_default_run(|| {
             pass(&limit(1), vec![], &env).unwrap();
             wait();
             assert!(past_deadline(0.0, &env));
@@ -907,7 +933,7 @@ mod tests {
         let passes = Passes::default();
         let env = Env::prepass(&passes, 32, None, false, "(Var \"x\")");
         let step = |p: &str| go(&lang::parse(p).unwrap(), vec![Cand::new("(Var \"x\")", "input")], &env).unwrap();
-        scoped(|| {
+        crate::sched::in_default_run(|| {
             step("((off relate) | id)");
             assert!(!crate::sched::is_off("relate"), "a group ends its off");
             step("(rewrites = 8 | (off relate))");
@@ -926,7 +952,7 @@ mod tests {
         let env = Env::prepass(&passes, 32, None, false, "(Var \"x\")");
         let step = |p: &str| go(&lang::parse(p).unwrap(), vec![Cand::new("(Var \"x\")", "input")], &env).unwrap();
         use crate::sched::{is_off, is_on};
-        scoped(|| {
+        crate::sched::in_default_run(|| {
             step("(off relate tfunc)");
             assert!(is_off("relate") && is_off("tfunc"), "several names in one off");
             step("(on relate)");
@@ -943,7 +969,7 @@ mod tests {
             step("(on cut)");
             assert!(is_on("cut"));
         });
-        assert!(!is_on("cut") && !is_off("tfunc"));
+        assert!(crate::sched::get(crate::sched::CUT) == crate::sched::NONE && !is_off("tfunc"));
     }
 
     #[test]
@@ -952,7 +978,7 @@ mod tests {
         let passes = Passes::default();
         let env = Env::prepass(&passes, 32, None, false, "(Sub (Var \"x\") (Var \"y\"))");
         let step = |p: &str| go(&lang::parse(p).unwrap(), vec![Cand::new("(Sub (Var \"x\") (Var \"y\"))", "input")], &env).unwrap();
-        scoped(|| {
+        crate::sched::in_default_run(|| {
             step("split_runs = vars * 3");
             assert_eq!(limit(Limit::SplitRuns), 6, "the right side is evaluated on the candidates");
             step("(split_runs = 1 | id)");
@@ -970,8 +996,8 @@ mod tests {
             step("(cand x (bit_split_budget = bit_split_budget + 1))");
             assert_eq!(get(BIT_SPLIT_BUDGET), NONE, "cand is a scope");
         });
-        assert_eq!(limit(Limit::SplitRuns), 16);
-        assert!(!is_off("relate") && !is_on("cut"));
+        assert_eq!(get(crate::sched::var_index("split_runs").unwrap()), NONE);
+        assert!(!is_off("relate") && get(crate::sched::CUT) == NONE);
     }
 
     #[test]
@@ -1028,7 +1054,7 @@ mod tests {
         let step = |p: &str| go(&lang::parse(p).unwrap(), vec![Cand::new("(Var \"x\")", "input")], &env).unwrap();
         for on in [false, true] {
             start();
-            scoped(|| {
+            crate::sched::in_default_run(|| {
                 if on {
                     step("(on cut)");
                 }
@@ -1051,7 +1077,7 @@ mod tests {
             go(&lang::parse(p).unwrap(), set, &env).unwrap().iter().map(|c| c.term().to_string()).collect()
         };
         let input = || vec![Cand::new(x, "input")];
-        scoped(|| {
+        crate::sched::in_default_run(|| {
             assert_eq!(step("rewrite", input()), ["(Xor (Var \"x\") (Var \"y\"))"]);
             step("(save t)", input());
             step("time_limit = 1", input());

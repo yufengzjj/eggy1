@@ -270,12 +270,17 @@ impl Parser<'_> {
             if is_switch(i) {
                 return Err(format!("{n} is a switch: assign it 0 (off) or 1 (on)"));
             }
+            crate::sched::check_cap(i, crate::sched::NONE)?;
             self.at += 1;
             return Ok(Pipe::Pass(Pass::Assign(i, None)));
         }
         let e = self.or()?;
         self.no_assign()?;
-        Ok(Pipe::Pass(Pass::Assign(i, Some(to_value(e)?))))
+        let v = to_value(e)?;
+        if let Value::Num(k) = v {
+            crate::sched::check_cap(i, k)?;
+        }
+        Ok(Pipe::Pass(Pass::Assign(i, Some(v))))
     }
 
     /// An error where a comparison was meant and `=` written.

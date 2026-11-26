@@ -8,26 +8,35 @@
 use crate::eval::{Op, Term as T, size};
 use crate::known_bits::{self as kb, lowmask};
 use crate::linear_mba::Ctx;
+use crate::sched::{Limit, limit, limit_u32};
 
-/// Most leaf bits enumerated for one subterm, and for a proof in context.
-const MAX_BITS: u32 = 18;
-const MAX_CONTEXT_BITS: u32 = 18;
-/// Proofs over more leaf bits than this also draw on `WIDE_BUDGET`.
-const NARROW_CONTEXT_BITS: u32 = 12;
-const MAX_TRY: usize = 256;
-const MAX_VALUES: usize = 4;
-/// Without a variable shift, only subterms with a product whose value is fixed by
-/// this many low bits of the leaves are enumerated.
-const MAX_PRODUCT_BITS: u32 = 4;
-/// Evaluation steps per call, over all enumerations.
-const BUDGET: u64 = 1 << 26;
-const WIDE_BUDGET: u64 = 1 << 23;
-/// Largest product factor `shorter_low` rebuilds after cutting its constants.
-const MAX_LOW_REBUILD: usize = 64;
-/// Low bits `refine_low` enumerates past the known ones, at most `MAX_REFINE_BITS` leaf bits in all.
-const REFINE_BITS: u32 = 2;
-const MAX_REFINE_BITS: u32 = 12;
-const REFINE_BUDGET: u64 = 1 << 22;
+/// The limits a `Pass` reads (`crate::sched::Limit`), read once when it starts.
+#[derive(Clone, Copy)]
+struct Lims {
+    max_bits: u32,
+    max_context_bits: u32,
+    narrow_context_bits: u32,
+    max_try: usize,
+    max_values: usize,
+    max_product_bits: u32,
+    refine_bits: u32,
+    max_refine_bits: u32,
+}
+
+impl Lims {
+    fn read() -> Lims {
+        Lims {
+            max_bits: limit_u32(Limit::LowbitsMaxBits),
+            max_context_bits: limit_u32(Limit::LowbitsMaxContextBits),
+            narrow_context_bits: limit_u32(Limit::LowbitsNarrowContextBits),
+            max_try: limit(Limit::LowbitsMaxTry),
+            max_values: limit(Limit::LowbitsMaxValues),
+            max_product_bits: limit_u32(Limit::LowbitsMaxProductBits),
+            refine_bits: limit_u32(Limit::LowbitsRefineBits),
+            max_refine_bits: limit_u32(Limit::LowbitsMaxRefineBits),
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Info {
@@ -100,7 +109,7 @@ fn combine(op: Op, args: &[Info], square: bool, w: &Ctx) -> Info {
             kb::shl(bx, s, w.w)
         }
         Op::Shl => {
-            let mut i = Info { k0: kb::shl_any(bx, w.w).k0, k1: 0, need: need.max(y.full), full, det: y.full <= MAX_BITS, shift: true };
+            let mut i = Info { k0: kb::shl_any(bx, w.w).k0, k1: 0, need: need.max(y.full), full, det: y.full <= limit_u32(Limit::LowbitsMaxBits), shift: true };
             i.full = i.full.min(i.need.max(high(&i, w)));
             return i;
         }
@@ -212,15 +221,15 @@ fn assignments(n: usize, m: u32) -> impl Iterator<Item = Vec<u64>> {
 
 /// `Pass::values` results of one pre-pass run, with the budget each one cost.
 #[derive(Default)]
-pub(crate) struct ValuesMemo(std::sync::Mutex<crate::eval::FastMap<(u32, T, u32), (u64, Option<Vec<u64>>, Prog)>>);
+pub(crate) struct ValuesMemo(std::sync::Mutex<crate::eval::FastMap<(u32, T, u32, u64), (u64, Option<Vec<u64>>, Prog)>>);
 
-fn distinct_values(prog: &Prog, n: usize, m: u32) -> Option<Vec<u64>> {
+fn distinct_values(prog: &Prog, n: usize, m: u32, max_values: usize) -> Option<Vec<u64>> {
     let mut out = Vec::new();
     let mut stack = Vec::new();
     for low in assignments(n, m) {
         let v = prog.run(&low, &mut stack);
         if !out.contains(&v) {
-            if out.len() == MAX_VALUES {
+            if out.len() == max_values {
                 return None;
             }
             out.push(v);
@@ -237,6 +246,7 @@ struct Cand {
 
 struct Pass<'a> {
     w: &'a Ctx,
+    lim: Lims,
     cands: crate::eval::FastMap<T, Cand>,
     budget: u64,
     wide: u64,
@@ -246,10 +256,15 @@ struct Pass<'a> {
     cut: bool,
 }
 
-impl Pass<'_> {
-    /// Distinct values of a `det` subterm whose bits from `m` up are known, if at most `MAX_VALUES`.
+impl<'a> Pass<'a> {
+    fn new(w: &'a Ctx, cut: bool) -> Pass<'a> {
+        let budget = |l| limit(l) as u64;
+        Pass { w, lim: Lims::read(), cands: Default::default(), budget: budget(Limit::LowbitsBudget), wide: budget(Limit::LowbitsWideBudget), refine: budget(Limit::LowbitsRefineBudget), cut }
+    }
+
+    /// Distinct values of a `det` subterm whose bits from `m` up are known, if at most `max_values`.
     fn values(&mut self, t: &T, m: u32) -> Option<(Vec<u64>, Prog)> {
-        let key = (self.w.w, t.clone(), m);
+        let key = (self.w.w, t.clone(), m, crate::sched::limits_key());
         // A hit draws the same budget as computing it again, so later calls see the same budget.
         if let Some((cost, vals, prog)) = self.w.low_values().0.lock().unwrap().get(&key) {
             self.budget = self.budget.checked_sub(*cost)?;
@@ -257,12 +272,12 @@ impl Pass<'_> {
         }
         let prog = Prog::new(t, self.w);
         let n = prog.leaves.len();
-        let (cost, vals) = if n as u32 * m > MAX_BITS {
+        let (cost, vals) = if n as u32 * m > self.lim.max_bits {
             (0, None)
         } else {
             let cost = (1u64 << (n as u32 * m)) * prog.ops.len() as u64;
             self.budget = self.budget.checked_sub(cost)?;
-            (cost, distinct_values(&prog, n, m))
+            (cost, distinct_values(&prog, n, m, self.lim.max_values))
         };
         self.w.low_values().0.lock().unwrap().insert(key, (cost, vals.clone(), prog.clone()));
         vals.map(|v| (v, prog))
@@ -302,7 +317,7 @@ impl Pass<'_> {
             return (T::Op(Op::Add, a.clone()), i);
         }
         let node = masked_add_as_or(node, w);
-        if i.det && (i.shift || i.full <= MAX_PRODUCT_BITS && has_product(&node)) && size(&node) <= MAX_TRY {
+        if i.det && (i.shift || i.full <= self.lim.max_product_bits && has_product(&node)) && size(&node) <= self.lim.max_try {
             let m = i.full;
             if let Some((values, prog)) = self.values(&node, m) {
                 if values.len() == 1 {
@@ -321,12 +336,12 @@ impl Pass<'_> {
     fn refine_low(&mut self, t: &T, i: Info) -> Info {
         let w = self.w;
         let b = (i.k0 | i.k1).trailing_ones();
-        if !i.det || b >= w.w || !small(t, MAX_TRY) || !has_product(t) {
+        if !i.det || b >= w.w || !small(t, self.lim.max_try) || !has_product(t) {
             return i;
         }
         let prog = Prog::new(t, w);
         let n = prog.leaves.len() as u32;
-        let m = (b + REFINE_BITS).min(w.w).min(MAX_REFINE_BITS / n.max(1));
+        let m = b.saturating_add(self.lim.refine_bits).min(w.w).min(self.lim.max_refine_bits / n.max(1));
         if m <= b || m < i.need {
             return i;
         }
@@ -347,7 +362,7 @@ impl Pass<'_> {
     fn cut_multiplier(&mut self, op: Op, node: &T, infos: &mut [Info]) -> Option<T> {
         let w = self.w;
         let a = a_of(node);
-        if op != Op::Mul || a.len() != 2 || !small(node, MAX_TRY) {
+        if op != Op::Mul || a.len() != 2 || !small(node, self.lim.max_try) {
             return None;
         }
         let mut fs = Vec::new();
@@ -405,7 +420,7 @@ impl Pass<'_> {
         crate::tfunc::var_names(t, &mut vars);
         let n = vars.len();
         let m = found.iter().map(|c| self.cands[c].m).max().unwrap();
-        let mut unknown = n as u32 * m > MAX_CONTEXT_BITS || size(t) > MAX_TRY;
+        let mut unknown = n as u32 * m > self.lim.max_context_bits || size(t) > self.lim.max_try;
         if !unknown {
             let names: Vec<String> = (0..found.len()).map(|i| format!("\u{4}{i}")).collect();
             let holes: Vec<T> = names.iter().map(|s| T::Var(s.clone())).collect();
@@ -423,7 +438,7 @@ impl Pass<'_> {
             let cost = (1u64 << (n as u32 * m)) * size(t) as u64;
             for (i, c) in found.iter().enumerate() {
                 for &v in &self.cands[c].values {
-                    let wide = if n as u32 * m > NARROW_CONTEXT_BITS { self.wide.checked_sub(cost) } else { Some(self.wide) };
+                    let wide = if n as u32 * m > self.lim.narrow_context_bits { self.wide.checked_sub(cost) } else { Some(self.wide) };
                     let (Some(budget), Some(wide)) = (self.budget.checked_sub(cost), wide) else {
                         unknown = true;
                         break;
@@ -608,7 +623,7 @@ fn shorter_low(q: &T, r: u32, w: &Ctx) -> Option<T> {
     if size(&folded) < size(q) {
         return Some(folded);
     }
-    if size(q) > MAX_LOW_REBUILD {
+    if size(q) > limit(Limit::LowbitsMaxLowRebuild) {
         return None;
     }
     let low = crate::linear_mba::sub_index("low_factor");
@@ -778,13 +793,10 @@ pub(crate) fn simplify_rebuilt(t: &T, w: &Ctx) -> T {
 }
 
 fn simplify_with(t: &T, w: &Ctx, cut: bool) -> T {
-    let mut p = Pass { w, cands: Default::default(), budget: BUDGET, wide: WIDE_BUDGET, refine: REFINE_BUDGET, cut };
+    let mut p = Pass::new(w, cut);
     let (r, _) = p.fold(t);
     if p.cands.is_empty() { r } else { p.context(&r) }
 }
-
-/// Most terms of a factor that `over_products` multiplies out.
-const MAX_FACTOR_TERMS: usize = 4;
 
 /// `rebuild` applied with each product of two non-constant factors first replaced by a
 /// fresh variable: an identity that holds for every value of the variable holds for the
@@ -793,7 +805,7 @@ const MAX_FACTOR_TERMS: usize = 4;
 /// `x*y`. The result is kept when smaller.
 pub(crate) fn over_products(t: &T, w: &Ctx, rebuild: impl Fn(&T) -> T) -> T {
     let mut monos = Vec::new();
-    let a = abstract_products(t, w, &mut monos);
+    let a = abstract_products(t, w, limit(Limit::LowbitsMaxFactorTerms), &mut monos);
     if monos.is_empty() {
         return t.clone();
     }
@@ -819,10 +831,11 @@ fn product_var(i: usize) -> T {
 }
 
 /// `t` with products of non-constant factors replaced by `product_var`s; `monos[i]` is
-/// the product variable `i` stands for, its factors in a fixed order.
-fn abstract_products(t: &T, w: &Ctx, monos: &mut Vec<T>) -> T {
+/// the product variable `i` stands for, its factors in a fixed order. Factors of at most
+/// `most` terms are multiplied out.
+fn abstract_products(t: &T, w: &Ctx, most: usize, monos: &mut Vec<T>) -> T {
     let T::Op(op, a) = t else { return t.clone() };
-    let a: Vec<T> = a.iter().map(|x| abstract_products(x, w, monos)).collect();
+    let a: Vec<T> = a.iter().map(|x| abstract_products(x, w, most, monos)).collect();
     if *op != Op::Mul || a.iter().any(|x| matches!(x, T::Num(_))) {
         return T::Op(*op, a);
     }
@@ -838,7 +851,7 @@ fn abstract_products(t: &T, w: &Ctx, monos: &mut Vec<T>) -> T {
     let (mut ta, mut ka, mut tb, mut kb) = (Vec::new(), 0, Vec::new(), 0);
     crate::linear_mba::sum_terms(&a[0], 1, w, &mut ta, &mut ka);
     crate::linear_mba::sum_terms(&a[1], 1, w, &mut tb, &mut kb);
-    if ta.len() > MAX_FACTOR_TERMS || tb.len() > MAX_FACTOR_TERMS {
+    if ta.len() > most || tb.len() > most {
         return var(&a[0], &a[1]);
     }
     let mut terms: Vec<(u64, T)> = Vec::new();
@@ -911,18 +924,20 @@ mod tests {
 
     #[test]
     fn known_bits_match_evaluation() {
-        let mut h = 0x2545_f491_4f6c_dd1du64;
-        for k in 0..600 {
-            let ty = NumType { bits: 8, signed: k % 2 == 1 };
-            let t = random_term(&mut h, 4);
-            for w in [Ctx::new(8), Ctx::typed(8, Some(ty.signed))] {
-                let i = info(&t, &w);
-                for p in 0u64..1 << 16 {
-                    let v = eval(&t, ty, &|n: &str| if n == "x" { p & 0xff } else { p >> 8 }).unwrap() & 0xff;
-                    assert!(v & i.k0 == 0 && !v & i.k1 & 0xff == 0, "{t:?} at {p:#x}: {v:#x}");
+        crate::sched::in_default_run(|| {
+            let mut h = 0x2545_f491_4f6c_dd1du64;
+            for k in 0..600 {
+                let ty = NumType { bits: 8, signed: k % 2 == 1 };
+                let t = random_term(&mut h, 4);
+                for w in [Ctx::new(8), Ctx::typed(8, Some(ty.signed))] {
+                    let i = info(&t, &w);
+                    for p in 0u64..1 << 16 {
+                        let v = eval(&t, ty, &|n: &str| if n == "x" { p & 0xff } else { p >> 8 }).unwrap() & 0xff;
+                        assert!(v & i.k0 == 0 && !v & i.k1 & 0xff == 0, "{t:?} at {p:#x}: {v:#x}");
+                    }
                 }
             }
-        }
+        })
     }
 
     /// Known zeros as the egglog `kz` rules derive them: every rule that matches, joined by `|`.
@@ -952,48 +967,52 @@ mod tests {
     /// The `kz` rules and `info` agree with evaluation, and `info` knows every zero `kz` knows.
     #[test]
     fn known_bits_refine_egglog_kz() {
-        let mut h = 0x6a09_e667_f3bc_c908u64;
-        let mut finer = 0;
-        for k in 0..600 {
-            let signed = k % 2 == 1;
-            let ty = NumType { bits: 8, signed };
-            let t = random_term(&mut h, 4);
-            let z = kz(&t, 8, signed) as u64 & 0xff;
-            for p in 0u64..1 << 16 {
-                let v = eval(&t, ty, &|n: &str| if n == "x" { p & 0xff } else { p >> 8 }).unwrap() & 0xff;
-                assert!(v & z == 0, "{t:?} at {p:#x}: {v:#x}, kz {z:#x}");
+        crate::sched::in_default_run(|| {
+            let mut h = 0x6a09_e667_f3bc_c908u64;
+            let mut finer = 0;
+            for k in 0..600 {
+                let signed = k % 2 == 1;
+                let ty = NumType { bits: 8, signed };
+                let t = random_term(&mut h, 4);
+                let z = kz(&t, 8, signed) as u64 & 0xff;
+                for p in 0u64..1 << 16 {
+                    let v = eval(&t, ty, &|n: &str| if n == "x" { p & 0xff } else { p >> 8 }).unwrap() & 0xff;
+                    assert!(v & z == 0, "{t:?} at {p:#x}: {v:#x}, kz {z:#x}");
+                }
+                let i = info(&t, &Ctx::typed(8, Some(signed)));
+                assert!(z & !i.k0 == 0, "{t:?}: kz {z:#x}, k0 {:#x}", i.k0);
+                finer += (i.k0 != z) as u32;
             }
-            let i = info(&t, &Ctx::typed(8, Some(signed)));
-            assert!(z & !i.k0 == 0, "{t:?}: kz {z:#x}, k0 {:#x}", i.k0);
-            finer += (i.k0 != z) as u32;
-        }
-        assert!(finer > 15, "finer {finer}");
+            assert!(finer > 15, "finer {finer}");
+        })
     }
 
     #[test]
     fn matches_exhaustive_check_at_8_bits() {
-        let w = Ctx::new(8);
-        let mut h = 0x9e37_79b9_7f4a_7c15u64;
-        let (mut changed, mut in_context) = (0, 0);
-        for k in 0..500 {
-            let ty = NumType { bits: 8, signed: k % 2 == 1 };
-            let t = if k < 200 { random_term(&mut h, 4) } else { context_term(&mut h) };
-            let mut p = Pass { w: &w, cands: Default::default(), budget: BUDGET, wide: WIDE_BUDGET, refine: REFINE_BUDGET, cut: true };
-            let folded = p.fold(&t).0;
-            let r = p.context(&folded);
-            if r == t {
-                continue;
-            }
-            changed += 1;
-            in_context += (r != folded) as u32;
-            for x in 0..256u64 {
-                for y in 0..256u64 {
-                    let env = |v: &str| if v == "x" { x } else { y };
-                    assert_eq!(eval(&t, ty, &env), eval(&r, ty, &env), "{t:?}\n{r:?}");
+        crate::sched::in_default_run(|| {
+            let w = Ctx::new(8);
+            let mut h = 0x9e37_79b9_7f4a_7c15u64;
+            let (mut changed, mut in_context) = (0, 0);
+            for k in 0..500 {
+                let ty = NumType { bits: 8, signed: k % 2 == 1 };
+                let t = if k < 200 { random_term(&mut h, 4) } else { context_term(&mut h) };
+                let mut p = Pass::new(&w, true);
+                let folded = p.fold(&t).0;
+                let r = p.context(&folded);
+                if r == t {
+                    continue;
+                }
+                changed += 1;
+                in_context += (r != folded) as u32;
+                for x in 0..256u64 {
+                    for y in 0..256u64 {
+                        let env = |v: &str| if v == "x" { x } else { y };
+                        assert_eq!(eval(&t, ty, &env), eval(&r, ty, &env), "{t:?}\n{r:?}");
+                    }
                 }
             }
-        }
-        assert!(changed > 100 && in_context > 5, "changed {changed}, in context {in_context}");
+            assert!(changed > 100 && in_context > 5, "changed {changed}, in context {in_context}");
+        })
     }
 
     /// Polynomials of `x` and `y` under a small mask or a multiplier with trailing zeros.
@@ -1020,31 +1039,33 @@ mod tests {
 
     #[test]
     fn product_noise_matches_evaluation() {
-        let mut h = 0x3c6e_f372_fe94_f82bu64;
-        let mut changed = 0;
-        for k in 0..400 {
-            let t = noise_term(&mut h);
-            for (bits, signed) in [(8, k % 2 == 1), (64, k % 2 == 1)] {
-                let (w, ty) = (Ctx::new(bits), NumType { bits, signed });
-                let r = simplify(&t, &w);
-                changed += (r != t) as u32;
-                let check = |x: u64, y: u64| {
-                    let env = |v: &str| if v == "x" { x } else { y };
-                    assert_eq!(eval(&t, ty, &env), eval(&r, ty, &env), "{t:?}\n{r:?}");
-                };
-                if bits == 8 {
-                    (0..1u64 << 16).for_each(|p| check(p & 0xff, p >> 8));
-                } else {
-                    for _ in 0..256 {
-                        h ^= h << 13;
-                        h ^= h >> 7;
-                        h ^= h << 17;
-                        check(h, h.rotate_left(29));
+        crate::sched::in_default_run(|| {
+            let mut h = 0x3c6e_f372_fe94_f82bu64;
+            let mut changed = 0;
+            for k in 0..400 {
+                let t = noise_term(&mut h);
+                for (bits, signed) in [(8, k % 2 == 1), (64, k % 2 == 1)] {
+                    let (w, ty) = (Ctx::new(bits), NumType { bits, signed });
+                    let r = simplify(&t, &w);
+                    changed += (r != t) as u32;
+                    let check = |x: u64, y: u64| {
+                        let env = |v: &str| if v == "x" { x } else { y };
+                        assert_eq!(eval(&t, ty, &env), eval(&r, ty, &env), "{t:?}\n{r:?}");
+                    };
+                    if bits == 8 {
+                        (0..1u64 << 16).for_each(|p| check(p & 0xff, p >> 8));
+                    } else {
+                        for _ in 0..256 {
+                            h ^= h << 13;
+                            h ^= h >> 7;
+                            h ^= h << 17;
+                            check(h, h.rotate_left(29));
+                        }
                     }
                 }
             }
-        }
-        assert!(changed > 200, "changed {changed}");
+            assert!(changed > 200, "changed {changed}");
+        })
     }
 
     /// A sum of a small product term `p`, used both alone and inside a larger candidate.
@@ -1072,66 +1093,70 @@ mod tests {
 
     #[test]
     fn nested_candidates_match_exhaustive_check_at_8_bits() {
-        let w = Ctx::new(8);
-        let mut h = 0x6a09_e667_f3bc_c908u64;
-        let mut changed = 0;
-        for k in 0..3000 {
-            let ty = NumType { bits: 8, signed: k % 2 == 1 };
-            let t = nested_term(&mut h);
-            let r = simplify(&t, &w);
-            if r == t {
-                continue;
+        crate::sched::in_default_run(|| {
+            let w = Ctx::new(8);
+            let mut h = 0x6a09_e667_f3bc_c908u64;
+            let mut changed = 0;
+            for k in 0..3000 {
+                let ty = NumType { bits: 8, signed: k % 2 == 1 };
+                let t = nested_term(&mut h);
+                let r = simplify(&t, &w);
+                if r == t {
+                    continue;
+                }
+                changed += 1;
+                for p in 0..1u64 << 16 {
+                    let env = |v: &str| if v == "x" { p & 0xff } else { p >> 8 };
+                    assert_eq!(eval(&t, ty, &env), eval(&r, ty, &env), "{t:?}\n{r:?}");
+                }
             }
-            changed += 1;
-            for p in 0..1u64 << 16 {
-                let env = |v: &str| if v == "x" { p & 0xff } else { p >> 8 };
-                assert_eq!(eval(&t, ty, &env), eval(&r, ty, &env), "{t:?}\n{r:?}");
-            }
-        }
-        assert!(changed > 300, "changed {changed}");
+            assert!(changed > 300, "changed {changed}");
+        })
     }
 
     /// Products whose low bits are fixed only by evaluation, under constant masks,
     /// constant multipliers and negated xors, at 8 bits on every input.
     #[test]
     fn evaluated_low_bits_match_exhaustive_check() {
-        let w = Ctx::new(8);
-        let op = |o: Op, a: T, b: T| T::Op(o, vec![a, b]);
-        let mut h = 0x5851_f42d_4c95_7f2du64;
-        let mut changed = 0;
-        for k in 0..600 {
-            let mut next = || {
-                h ^= h << 13;
-                h ^= h >> 7;
-                h ^= h << 17;
-                h
-            };
-            let r = next();
-            let var = |r: u64| T::Var(if r & 1 == 0 { "x" } else { "y" }.into());
-            let lin = |r: u64| op([Op::Add, Op::Sub, Op::Xor, Op::And][(r >> 3) as usize % 4], var(r), op(Op::Mul, T::Num((r >> 8) as i64 % 5 - 2), var(r >> 1)));
-            let p = op(Op::Mul, lin(next()), lin(next()));
-            let p = if r >> 4 & 1 == 0 { p } else { op(Op::And, p, lin(next())) };
-            let c = T::Num((next() >> 20) as i64 % 256 - 128);
-            let t = match r >> 6 & 7 {
-                0 => op(Op::And, T::Op(Op::Neg, vec![p]), T::Num(-2)),
-                1 => op(Op::Xor, op(Op::Add, p, T::Num(1)), T::Num(1)),
-                2 => op(Op::Mul, c, p),
-                3 => op(Op::Mul, op(Op::Mul, c, lin(next())), p),
-                4 => T::Op(Op::Neg, vec![op(Op::Xor, op(Op::Mul, T::Num(1 << (r >> 9) % 4), p), c)]),
-                5 => op(Op::Or, p, T::Num(1)),
-                _ => op(Op::Add, var(r >> 12), op(Op::Mul, c, op(Op::And, p, T::Num(-2)))),
-            };
-            let ty = NumType { bits: 8, signed: k % 2 == 1 };
-            let s = simplify_rebuilt(&t, &w);
-            if s == t {
-                continue;
+        crate::sched::in_default_run(|| {
+            let w = Ctx::new(8);
+            let op = |o: Op, a: T, b: T| T::Op(o, vec![a, b]);
+            let mut h = 0x5851_f42d_4c95_7f2du64;
+            let mut changed = 0;
+            for k in 0..600 {
+                let mut next = || {
+                    h ^= h << 13;
+                    h ^= h >> 7;
+                    h ^= h << 17;
+                    h
+                };
+                let r = next();
+                let var = |r: u64| T::Var(if r & 1 == 0 { "x" } else { "y" }.into());
+                let lin = |r: u64| op([Op::Add, Op::Sub, Op::Xor, Op::And][(r >> 3) as usize % 4], var(r), op(Op::Mul, T::Num((r >> 8) as i64 % 5 - 2), var(r >> 1)));
+                let p = op(Op::Mul, lin(next()), lin(next()));
+                let p = if r >> 4 & 1 == 0 { p } else { op(Op::And, p, lin(next())) };
+                let c = T::Num((next() >> 20) as i64 % 256 - 128);
+                let t = match r >> 6 & 7 {
+                    0 => op(Op::And, T::Op(Op::Neg, vec![p]), T::Num(-2)),
+                    1 => op(Op::Xor, op(Op::Add, p, T::Num(1)), T::Num(1)),
+                    2 => op(Op::Mul, c, p),
+                    3 => op(Op::Mul, op(Op::Mul, c, lin(next())), p),
+                    4 => T::Op(Op::Neg, vec![op(Op::Xor, op(Op::Mul, T::Num(1 << (r >> 9) % 4), p), c)]),
+                    5 => op(Op::Or, p, T::Num(1)),
+                    _ => op(Op::Add, var(r >> 12), op(Op::Mul, c, op(Op::And, p, T::Num(-2)))),
+                };
+                let ty = NumType { bits: 8, signed: k % 2 == 1 };
+                let s = simplify_rebuilt(&t, &w);
+                if s == t {
+                    continue;
+                }
+                changed += 1;
+                for q in 0..1u64 << 16 {
+                    let env = |v: &str| if v == "x" { q & 0xff } else { q >> 8 };
+                    assert_eq!(eval(&t, ty, &env), eval(&s, ty, &env), "{t:?}\n{s:?}");
+                }
             }
-            changed += 1;
-            for q in 0..1u64 << 16 {
-                let env = |v: &str| if v == "x" { q & 0xff } else { q >> 8 };
-                assert_eq!(eval(&t, ty, &env), eval(&s, ty, &env), "{t:?}\n{s:?}");
-            }
-        }
-        assert!(changed > 100, "changed {changed}");
+            assert!(changed > 100, "changed {changed}");
+        })
     }
 }

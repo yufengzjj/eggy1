@@ -222,7 +222,7 @@ fn rebuild_table(gp: &[u64], lv: &[T], konst: u64, w: &Ctx) -> (Vec<(u64, T)>, u
     // one-node placeholders (`Op::LeafOperand` for the operand of a `~` leaf) whose sizes
     // `rebuild_table_uncached` takes from `shape`.
     let shape: Vec<(usize, bool)> = lv.iter().map(|l| (size(l), matches!(l, T::Op(op, _) if *op == Op::Not))).collect();
-    let key = (gp.to_vec(), shape, konst, w.w);
+    let key = (gp.to_vec(), shape, konst, w.w, crate::sched::limits_key());
     fn fill(t: &T, lv: &[T]) -> T {
         match t {
             T::Op(Op::Leaf(i), _) => lv[*i].clone(),

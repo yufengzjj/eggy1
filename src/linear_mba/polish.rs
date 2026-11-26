@@ -3,7 +3,7 @@
 use super::*;
 
 /// Most leaves of two groups together that `join_constant` rebuilds with the region's
-/// constant (one group: `MAX_LEAVES`), and most such rebuilds per region.
+/// constant (one group: `max_leaves`), and most such rebuilds per region.
 const MAX_JOINED_LEAVES: usize = 3;
 const MAX_JOINED_SETS: usize = 10;
 
@@ -44,7 +44,8 @@ fn join_constant(t: &T, w: &Ctx) -> Option<T> {
         leaves.len()
     };
     let mut sets: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).chain((0..n).flat_map(|i| (i + 1..n).map(move |j| vec![i, j]))).collect();
-    sets.retain(|s| joined(s) <= if s.len() == 1 { MAX_LEAVES } else { MAX_JOINED_LEAVES });
+    let most = max_leaves();
+    sets.retain(|s| joined(s) <= if s.len() == 1 { most } else { MAX_JOINED_LEAVES });
     // Each rebuild searches a semi-linear region with a constant, which is slow.
     sets.sort_by_key(|s| joined(s));
     sets.truncate(MAX_JOINED_SETS);

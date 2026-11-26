@@ -287,7 +287,7 @@ pub(super) fn pair_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: 
     if !(1..=3).contains(&n) || !(2..=MAX_PAIR_GROUPS).contains(&groups.len()) {
         return;
     }
-    let key = (w.w, groups.to_vec(), e0, lv.to_vec(), limit);
+    let key = (w.w, groups.to_vec(), e0, lv.to_vec(), limit, crate::sched::limits_key());
     if let Some(r) = w.st.pairs.lock().unwrap().get(&key) {
         cands.extend(r.iter().cloned());
         return;

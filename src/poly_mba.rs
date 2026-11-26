@@ -6,7 +6,7 @@
 //! reverse.
 
 use crate::eval::{Op, Term as T, size};
-use crate::linear_mba::{Kind, MAX_LEAVES, Ctx, build_sum, Prog, const_shift, kind, leaves, simba_memo};
+use crate::linear_mba::{Kind, max_leaves, Ctx, build_sum, Prog, const_shift, kind, leaves, simba_memo};
 use crate::sched::{Limit, limit};
 use std::collections::BTreeMap;
 
@@ -83,7 +83,7 @@ impl<'a> Expansion<'a> {
         let mut lv = Vec::new();
         leaves(t, self.w, &mut lv);
         let n = lv.len();
-        if n > MAX_LEAVES {
+        if n > max_leaves() {
             return self.leaf_poly(t);
         }
         let prog = Prog::new(t, &lv, self.w);
@@ -221,7 +221,7 @@ impl<'a> Expansion<'a> {
         let mut lv = Vec::new();
         leaves(t, self.w, &mut lv);
         let n = lv.len();
-        if n > MAX_LEAVES {
+        if n > max_leaves() {
             return self.leaf_poly(t);
         }
         let prog = Prog::new(t, &lv, self.w);
@@ -786,7 +786,7 @@ fn has_product(t: &T, w: &Ctx) -> bool {
 }
 
 /// Rebuilt form of the polynomial region rooted at `t`, if it has a product of
-/// non-constant terms or is a linear region with more than `MAX_LEAVES` leaves,
+/// non-constant terms or is a linear region with more than `max_leaves` leaves,
 /// and the rebuilt form is smaller.
 /// Number of monomials in the expansion of `t`, after the null polynomials are reduced
 /// if that leaves fewer.
@@ -801,7 +801,7 @@ pub(crate) fn simplify_poly(t: &T, w: &Ctx) -> Option<T> {
     let wide = kind(t, w) == Kind::Lin && {
         let mut lv = Vec::new();
         leaves(t, w, &mut lv);
-        lv.len() > MAX_LEAVES
+        lv.len() > max_leaves()
     };
     if !wide && !has_product(t, w) {
         return None;
@@ -958,90 +958,96 @@ mod tests {
 
     #[test]
     fn products_of_linear_mbas() {
-        let mut r = Rng(0x7f4a7c15_9e3779b9);
-        for bits in [8u32, 64] {
-            let w = Ctx::new(bits);
-            let ty = NumType { bits, signed: false };
-            for _ in 0..300 {
-                let t = op(Op::Add, vec![op(Op::Mul, vec![linear(&mut r), linear(&mut r)]), linear(&mut r)]);
-                let alt = rewrite(&t, &w);
-                for _ in 0..32 {
-                    let (x, y, z) = (r.next(), r.next(), r.next());
-                    let env = |v: &str| match v {
-                        "x" => x,
-                        "y" => y,
-                        _ => z,
-                    };
-                    assert_eq!(eval(&t, ty, &env), eval(&alt, ty, &env), "w={bits}\n  {t:?}\n  {alt:?}");
+        crate::sched::in_default_run(|| {
+            let mut r = Rng(0x7f4a7c15_9e3779b9);
+            for bits in [8u32, 64] {
+                let w = Ctx::new(bits);
+                let ty = NumType { bits, signed: false };
+                for _ in 0..300 {
+                    let t = op(Op::Add, vec![op(Op::Mul, vec![linear(&mut r), linear(&mut r)]), linear(&mut r)]);
+                    let alt = rewrite(&t, &w);
+                    for _ in 0..32 {
+                        let (x, y, z) = (r.next(), r.next(), r.next());
+                        let env = |v: &str| match v {
+                            "x" => x,
+                            "y" => y,
+                            _ => z,
+                        };
+                        assert_eq!(eval(&t, ty, &env), eval(&alt, ty, &env), "w={bits}\n  {t:?}\n  {alt:?}");
+                    }
+                    let zero = op(Op::Sub, vec![t.clone(), swapped(&t)]);
+                    assert_eq!(rewrite(&zero, &w), T::Num(0), "w={bits}: {t:?}");
                 }
-                let zero = op(Op::Sub, vec![t.clone(), swapped(&t)]);
-                assert_eq!(rewrite(&zero, &w), T::Num(0), "w={bits}: {t:?}");
             }
-        }
+        })
     }
 
     #[test]
     fn cubes_of_linear_mbas() {
-        let mut r = Rng(0x2545_f491_4f6c_dd1d);
-        let mut factored = 0;
-        for bits in [8u32, 64] {
-            let w = Ctx::new(bits);
-            let ty = NumType { bits, signed: false };
-            for k in 0..200 {
-                let (a, b) = (linear(&mut r), linear(&mut r));
-                let c = if k % 2 == 0 { a.clone() } else { linear(&mut r) };
-                let t = op(Op::Mul, vec![op(Op::Mul, vec![a.clone(), b]), c]);
-                let mut ctx = Expansion::new(&w, Vec::new());
-                let Some(p) = ctx.poly(&t) else { continue };
-                let built = ctx.build(&p, FACTOR_TRIES);
-                factored += (size(&built) <= size(&t)) as u32;
-                for _ in 0..32 {
-                    let (x, y, z) = (r.next(), r.next(), r.next());
-                    let env = |v: &str| match v {
-                        "x" => x,
-                        "y" => y,
-                        _ => z,
-                    };
-                    assert_eq!(eval(&t, ty, &env), eval(&built, ty, &env), "w={bits}\n  {t:?}\n  {built:?}");
+        crate::sched::in_default_run(|| {
+            let mut r = Rng(0x2545_f491_4f6c_dd1d);
+            let mut factored = 0;
+            for bits in [8u32, 64] {
+                let w = Ctx::new(bits);
+                let ty = NumType { bits, signed: false };
+                for k in 0..200 {
+                    let (a, b) = (linear(&mut r), linear(&mut r));
+                    let c = if k % 2 == 0 { a.clone() } else { linear(&mut r) };
+                    let t = op(Op::Mul, vec![op(Op::Mul, vec![a.clone(), b]), c]);
+                    let mut ctx = Expansion::new(&w, Vec::new());
+                    let Some(p) = ctx.poly(&t) else { continue };
+                    let built = ctx.build(&p, FACTOR_TRIES);
+                    factored += (size(&built) <= size(&t)) as u32;
+                    for _ in 0..32 {
+                        let (x, y, z) = (r.next(), r.next(), r.next());
+                        let env = |v: &str| match v {
+                            "x" => x,
+                            "y" => y,
+                            _ => z,
+                        };
+                        assert_eq!(eval(&t, ty, &env), eval(&built, ty, &env), "w={bits}\n  {t:?}\n  {built:?}");
+                    }
                 }
             }
-        }
-        assert!(factored > 50, "factored {factored}");
+            assert!(factored > 50, "factored {factored}");
+        })
     }
 
     /// Products of bitwise terms with constants over one or two leaves, rebuilt with the
     /// masked expansion, keep their value.
     #[test]
     fn masked_products_keep_value() {
-        let mut r = Rng(0x94d0_49bb_1331_11eb);
-        let mut built = 0;
-        for bits in [8u32, 64] {
-            let w = Ctx::new(bits);
-            let ty = NumType { bits, signed: false };
-            let masks = [1i64, 2, 3, -3, -4, 0x30];
-            for _ in 0..300 {
-                let factor = |r: &mut Rng| {
-                    let v = bitwise(r, 1);
-                    let k = T::Num(masks[(r.next() % masks.len() as u64) as usize]);
-                    let f = op([Op::And, Op::Or, Op::Xor][(r.next() % 3) as usize], vec![v, k]);
-                    if r.next() % 3 == 0 { op(Op::Not, vec![f]) } else { f }
-                };
-                let p1 = op(Op::Mul, vec![factor(&mut r), factor(&mut r)]);
-                let p2 = op(Op::Mul, vec![factor(&mut r), factor(&mut r)]);
-                let t = op(Op::Add, vec![p1, p2]);
-                let Some(m) = masked_poly(&t, 0, &w) else { continue };
-                built += 1;
-                for _ in 0..32 {
-                    let (x, y, z) = (r.next(), r.next(), r.next());
-                    let env = |v: &str| match v {
-                        "x" => x,
-                        "y" => y,
-                        _ => z,
+        crate::sched::in_default_run(|| {
+            let mut r = Rng(0x94d0_49bb_1331_11eb);
+            let mut built = 0;
+            for bits in [8u32, 64] {
+                let w = Ctx::new(bits);
+                let ty = NumType { bits, signed: false };
+                let masks = [1i64, 2, 3, -3, -4, 0x30];
+                for _ in 0..300 {
+                    let factor = |r: &mut Rng| {
+                        let v = bitwise(r, 1);
+                        let k = T::Num(masks[(r.next() % masks.len() as u64) as usize]);
+                        let f = op([Op::And, Op::Or, Op::Xor][(r.next() % 3) as usize], vec![v, k]);
+                        if r.next() % 3 == 0 { op(Op::Not, vec![f]) } else { f }
                     };
-                    assert_eq!(eval(&t, ty, &env), eval(&m, ty, &env), "w={bits}\n  {t:?}\n  {m:?}");
+                    let p1 = op(Op::Mul, vec![factor(&mut r), factor(&mut r)]);
+                    let p2 = op(Op::Mul, vec![factor(&mut r), factor(&mut r)]);
+                    let t = op(Op::Add, vec![p1, p2]);
+                    let Some(m) = masked_poly(&t, 0, &w) else { continue };
+                    built += 1;
+                    for _ in 0..32 {
+                        let (x, y, z) = (r.next(), r.next(), r.next());
+                        let env = |v: &str| match v {
+                            "x" => x,
+                            "y" => y,
+                            _ => z,
+                        };
+                        assert_eq!(eval(&t, ty, &env), eval(&m, ty, &env), "w={bits}\n  {t:?}\n  {m:?}");
+                    }
                 }
             }
-        }
-        assert!(built > 100, "built {built}");
+            assert!(built > 100, "built {built}");
+        })
     }
 }

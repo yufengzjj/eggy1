@@ -784,7 +784,7 @@ fn half_flips(groups: &[(Vec<u64>, u64)], w: &Ctx) -> Vec<Vec<(Vec<u64>, u64)>> 
 /// The first smallest of `grouped_candidates_all`, memoized: callers only keep the first
 /// smallest candidate, and semi-linear searches repeat the same groups.
 fn grouped_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, cands: &mut Vec<T>) {
-    let key = (groups.to_vec(), lv.to_vec(), e0, w.w);
+    let key = (groups.to_vec(), lv.to_vec(), e0, w.w, crate::sched::limits_key());
     let known = w.st.grouped.lock().unwrap().get(&key).cloned();
     if let Some(t) = known {
         cands.push(t);
@@ -979,7 +979,7 @@ fn masked_groups(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx) -> T {
 fn const_leaf_groups(groups: &[(Vec<u64>, u64)], shifts: &[Vec<u64>], lv: &[T], e0: u64, w: &Ctx) -> Vec<T> {
     let (n, r) = (lv.len(), groups.len());
     let p = (usize::BITS - (r - 1).leading_zeros()) as usize;
-    if r < 2 || r > 4 || n + p > MAX_LEAVES {
+    if r < 2 || r > 4 || n + p > max_leaves() {
         return Vec::new();
     }
     let m = w.mask;

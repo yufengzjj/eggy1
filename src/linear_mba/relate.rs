@@ -29,7 +29,7 @@ pub(super) fn related_leaves(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
             }
         }
     }
-    if ext.len() > MAX_LEAVES {
+    if ext.len() > max_leaves() {
         return None;
     }
     let pts = 1usize << ext.len();
@@ -127,9 +127,7 @@ pub(super) fn relate_region(t: &T, w: &Ctx) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
     if lv.len() > w.relate_leaves() {
-        // Not in the rebuild with fewer leaves related, where parts can leave it the first
-        // rebuild's form and so nothing to union.
-        let parts = w.relate_leaves() == MAX_WIDE_LEAVES;
+        let parts = crate::sched::is_on("relate_parts");
         return relate_abstracted(t, w).or_else(|| if parts { relate_parts(t, &lv, w) } else { None });
     }
     relate_complemented(t, &lv, w)
@@ -369,7 +367,7 @@ fn relate_in(t: &T, w: &Ctx) -> Option<T> {
     let derive_all = |reg: &T, l: &T| -> Vec<(i64, usize)> {
         let mut rl = Vec::new();
         leaves(reg, w, &mut rl);
-        if rl.len() > MAX_WIDE_LEAVES {
+        if rl.len() > max_wide_leaves() {
             return Vec::new();
         }
         let region = Prog::new(reg, &rl, w);
@@ -410,7 +408,7 @@ fn relate_in(t: &T, w: &Ctx) -> Option<T> {
     for k in 0..arith.len() {
         // Also when `L` is written out as a term of a wide region, where `Prog` takes it for the
         // leaf too (in smaller ones the rebuild finds that).
-        if !same[k].is_empty() || (lv.len() > MAX_LEAVES && in_sum(t, &lv[arith[k]])) {
+        if !same[k].is_empty() || (lv.len() > max_leaves() && in_sum(t, &lv[arith[k]])) {
             combos.push(vec![(k, 0)]);
         }
         for mu in [1, -1, 2, -2].into_iter().chain(derived[k]).chain(cancel[k]) {
@@ -446,7 +444,7 @@ fn relate_in(t: &T, w: &Ctx) -> Option<T> {
         let used = used_leaves(t, &lv, w)?.1;
         Some(lv.into_iter().zip(used).filter(|p| p.1).map(|p| p.0).collect())
     };
-    let (semi, wide) = (has_const_bitwise(t, w), lv.len() > MAX_LEAVES);
+    let (semi, wide) = (has_const_bitwise(t, w), lv.len() > max_leaves());
     let base_used = semi_used(t);
     let base_count = base_used.as_ref().map_or(lv.len(), |u| u.len());
     let base_monos = if semi { None } else { crate::poly_mba::monomials(t, w) };
@@ -498,7 +496,7 @@ fn relate_in(t: &T, w: &Ctx) -> Option<T> {
     for (_, _, by_terms, combo, s) in tried.into_iter().filter(lowest) {
         let mut slv = Vec::new();
         leaves(&s, w, &mut slv);
-        let dropped = if wide && slv.len() > MAX_LEAVES { drop_leaves(&s, &slv, w) } else { None };
+        let dropped = if wide && slv.len() > max_leaves() { drop_leaves(&s, &slv, w) } else { None };
         let r = dropped.unwrap_or_else(|| sub(sub_index("relate"), &s, w));
         let back: Vec<T> = combo.iter().map(|&(k, _)| lv[arith[k]].clone()).collect();
         let used: Vec<T> = combo.iter().map(|&(k, _)| ph[k].clone()).collect();
@@ -548,7 +546,7 @@ fn merged_terms(t: &T, w: &Ctx) -> usize {
             let mut bl = Vec::new();
             leaves(b, w, &mut bl);
             let Some(i) = bl.iter().position(|l| l == x) else { return false };
-            if bl.len() > MAX_LEAVES {
+            if bl.len() > max_leaves() {
                 return false;
             }
             let prog = Prog::new(b, &bl, w);

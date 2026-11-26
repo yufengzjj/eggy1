@@ -34,7 +34,6 @@ pub use polish::polish;
 pub(crate) use polish::POLISH;
 pub(crate) use linear::simba_memo;
 pub(crate) use split::low_consts;
-pub(crate) use wide::MAX_WIDE_LEAVES;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Kind {
@@ -184,9 +183,10 @@ const MEMO_CONTEXTS: usize = 4;
 /// Bits of `State::used`.
 pub(crate) const CLUSTERED: u8 = 1;
 pub(crate) const WIDE: u8 = 2;
-type RebuiltKey = (Vec<u64>, Vec<(usize, bool)>, u64, u32);
-type GroupedKey = (Vec<(Vec<u64>, u64)>, Vec<T>, u64, u32);
-type PairKey = (u32, Vec<(Vec<u64>, u64)>, u64, Vec<T>, usize);
+// The memos below record no reads, so their keys hold `crate::sched::limits_key`.
+type RebuiltKey = (Vec<u64>, Vec<(usize, bool)>, u64, u32, u64);
+type GroupedKey = (Vec<(Vec<u64>, u64)>, Vec<T>, u64, u32, u64);
+type PairKey = (u32, Vec<(Vec<u64>, u64)>, u64, Vec<T>, usize, u64);
 
 struct State {
     simba_memo: Memo<(u32, T), Option<T>>,
@@ -450,8 +450,18 @@ impl Prog {
     }
 }
 
-/// Largest region (in leaves) that gets rebuilt; truth tables are `u64`.
-pub(crate) const MAX_LEAVES: usize = 6;
+/// Most leaves of a truth table in a `u64`: the cap of `max_leaves`.
+pub(crate) const TABLE_LEAVES: usize = 6;
+
+/// `max_leaves`: the largest region (in leaves) rebuilt from its values.
+pub(crate) fn max_leaves() -> usize {
+    limit(Limit::MaxLeaves)
+}
+
+/// `max_wide_leaves`: the most leaves of a wide region evaluated whole.
+pub(crate) fn max_wide_leaves() -> usize {
+    limit(Limit::MaxWideLeaves)
+}
 
 /// `Σ coef·term + konst`, using Sub/Neg for negative coefficients.
 pub(crate) fn build_sum(terms: &[(u64, T)], konst: u64, w: &Ctx) -> T {
@@ -722,7 +732,7 @@ fn region_terms(t: &T, w: &Ctx) -> (Vec<(u64, T)>, u64) {
     (terms, konst)
 }
 
-/// `t` with `clustered` applied to each linear region of more than `MAX_LEAVES` leaves,
+/// `t` with `clustered` applied to each linear region of more than `max_leaves` leaves,
 /// innermost first.
 fn cluster_regions(t: &T, w: &Ctx, in_lin: bool) -> T {
     let T::Op(op, a) = t else { return t.clone() };
@@ -733,7 +743,7 @@ fn cluster_regions(t: &T, w: &Ctx, in_lin: bool) -> T {
     }
     let mut lv = Vec::new();
     leaves(&node, w, &mut lv);
-    if lv.len() <= MAX_LEAVES {
+    if lv.len() <= max_leaves() {
         return node;
     }
     match stats::pass("cluster_regions", &node, || clustered(&node, w)) {
@@ -838,7 +848,7 @@ fn memo_compute<K: std::hash::Hash + Eq, V: Clone>(memo: &Memo<K, V>, key: K, w:
     // `clustered` and `wide_blocks` are alternatives: a result neither gave holds without them.
     for (bit, name) in [(CLUSTERED, "clustered"), (WIDE, "wide_blocks")] {
         let i = crate::sched::inner_index(name);
-        if used & bit == 0 && crate::sched::get(i) == 1 {
+        if used & bit == 0 && crate::sched::get(i) != 0 {
             read &= !(1u128 << i);
         }
     }
@@ -881,10 +891,6 @@ fn substitute_atoms(t: &T, w: &Ctx) -> T {
         _ => t.clone(),
     }
 }
-
-/// Rebuilds of at most this size are not searched further: the input is not halved, and
-/// the driver does not saturate the input beside them.
-pub const TINY: usize = 3;
 
 /// Pre-pass candidates rebuilt with subterms abstracted to variables, kept only when at most
 /// 3/4 the size of the first rebuild.
@@ -1018,6 +1024,9 @@ pub fn simplify_linear_with(egg: &str, w: u32, signed: Option<bool>, trace: bool
             Some(r) => r,
             None => {
                 let r = simplify_linear_uncached(egg, w, signed, trace, p);
+                if crate::pipe::failed().is_some() {
+                    return r;
+                }
                 LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, signed, trace, p.clone(), vars, r.clone())));
                 r
             }
@@ -1056,7 +1065,8 @@ fn drop_identities(t: &T, w: &Ctx) -> T {
 fn simplify_linear_uncached(egg: &str, w: u32, signed: Option<bool>, trace: bool, p: &Passes) -> (String, Vec<String>) {
     let env = crate::pipe::Env::prepass(p, w, signed, trace, egg);
     let input = crate::pipe::Cand::new(egg, "input");
-    let mut out = crate::pipe::run(&p.prepass, vec![input], &env).expect("the pre-pass runs no egglog").into_iter().map(|c| c.term().to_string());
+    let out = crate::pipe::run(&p.prepass, vec![input], &env).inspect_err(crate::pipe::fail).unwrap_or_default();
+    let mut out = out.into_iter().map(|c| c.term().to_string());
     let main = out.next().unwrap_or_else(|| egg.to_string());
     (main, out.collect())
 }

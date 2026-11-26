@@ -60,8 +60,9 @@ pub const INNER: [&str; 34] = [
 /// Switches besides the `INNER` passes: `cut` (off unless turned on: a step skipped past a
 /// `time_limit` makes the run cut, `crate::pipe::cut`), `rerun_input` (rerun the first round
 /// with the input when its result still mixes arithmetic into bitwise operations),
-/// `prove_minimal` (take a rebuild proved minimal as the extraction without saturating).
-pub const FLAGS: [&str; 3] = ["cut", "rerun_input", "prove_minimal"];
+/// `prove_minimal` (take a rebuild proved minimal as the extraction without saturating),
+/// `relate_parts` (`relate` on parts of a region wider than `relate_leaves`).
+pub const FLAGS: [&str; 4] = ["cut", "rerun_input", "prove_minimal", "relate_parts"];
 
 /// The `INNER` pass or `FLAGS` switch named `name`, which `(on NAME)` and `(off NAME)` take.
 pub fn switch(name: &str) -> Option<&'static str> {
@@ -69,60 +70,96 @@ pub fn switch(name: &str) -> Option<&'static str> {
 }
 
 macro_rules! limits {
-    ($($(#[doc = $doc:literal])* $id:ident $name:literal = $default:expr;)*) => {
-        /// Numeric limits of the passes inside a rebuild; `--passes` sets them as `NAME=value`.
+    ($($(#[doc = $doc:literal])* $id:ident $name:literal $(<= $cap:expr)?;)*) => {
+        /// Numeric limits and constants of the passes, `none` until `default.pipe` assigns them.
         #[derive(Clone, Copy, Debug, PartialEq)]
         pub enum Limit {
             $($(#[doc = $doc])* $id,)*
         }
-        /// Names and defaults of the `Limit`s, in order.
-        pub const LIMITS: &[(&str, usize)] = &[$(($name, $default),)*];
+        /// Names and caps (`NONE`: no cap) of the `Limit`s, in order.
+        pub const LIMITS: &[(&str, u64)] = &[$(($name, { let _c = NONE; $(let _c = $cap;)? _c }),)*];
     };
 }
 
 limits! {
     /// `relate` in the rebuild without `clustered` only on regions of at most this many
     /// leaves; wider ones take seconds there.
-    UnclusteredRelateLeaves "unclustered_relate_leaves" = 10;
+    UnclusteredRelateLeaves "unclustered_relate_leaves";
     /// Most `rewrite` calls the rebuild without `clustered` makes; past them it is dropped.
-    UnclusteredRewrites "unclustered_rewrites" = 256;
+    UnclusteredRewrites "unclustered_rewrites";
     /// Most `rewrite` calls of the other rebuilds after which the one without `clustered`
     /// is still tried: inputs that need more are slow to rebuild without it.
-    UnclusteredAfter "unclustered_after" = 1024;
+    UnclusteredAfter "unclustered_after";
     /// Most `rewrite` calls the rebuild of the input with unified operands makes; past them
     /// it is dropped.
-    UnifiedRewrites "unified_rewrites" = 128;
+    UnifiedRewrites "unified_rewrites";
     /// Most combinations `related_leaves` rebuilds.
-    RelatedRebuilds "related_rebuilds" = 8;
+    RelatedRebuilds "related_rebuilds";
     /// Most arithmetic leaves `relate_region` tries.
-    Related "related" = 4;
+    Related "related";
     /// Most leaf splits `bit_split` rebuilds per region.
-    BitSplits "bit_splits" = 4;
+    BitSplits "bit_splits";
     /// Most `P op Q` pairs `bit_split` rebuilds per pre-pass candidate: `Pipe::Cand` sets
     /// the budget `bit_split_budget` to it.
-    CandBitSplits "cand_bit_splits" = 8;
+    CandBitSplits "cand_bit_splits";
     /// Most variable bits `split_bits` tries on one term.
-    Splits "splits" = 4;
+    Splits "splits";
     /// How deep `split_bits` nests.
-    SplitDepth "split_depth" = 2;
+    SplitDepth "split_depth";
     /// Most rebuilds one `split_bits` call runs.
-    SplitRuns "split_runs" = 16;
+    SplitRuns "split_runs";
     /// Largest first rebuild `split_bits` runs on.
-    SplitSize "split_size" = 64;
+    SplitSize "split_size";
     /// Most leaves `small_blocks` handles.
-    BlockLeaves "block_leaves" = 12;
+    BlockLeaves "block_leaves";
     /// Most combinations of block choices `small_blocks` tries exhaustively, and steps of
     /// the `wide_blocks` search.
-    BlockCombos "block_combos" = 1 << 15;
+    BlockCombos "block_combos";
     /// Most `clustered` calls nested inside each other.
-    ClusterDepth "cluster_depth" = 2;
+    ClusterDepth "cluster_depth";
     /// Most products `poly_mba` builds with every choice before it keeps to the first.
-    PolyBuilds "poly_builds" = 512;
+    PolyBuilds "poly_builds";
     /// Expansions with more monomials than this keep to the first choice at each level
     /// from the start, as after `poly_builds` products.
-    PolyBranchMonos "poly_branch_monos" = 128;
+    PolyBranchMonos "poly_branch_monos";
     /// Uncached `rewrite` calls one `polish` call may make.
-    PolishRewrites "polish_rewrites" = 2000;
+    PolishRewrites "polish_rewrites";
+    /// Rebuilds of at most this size are not searched further: the input is not halved, and
+    /// the driver does not saturate the input beside them (the conditions `tiny`, `opaque`).
+    TinySize "tiny_size";
+    /// Most leaves of a linear region rebuilt from its values on {0,1}^n; truth tables are
+    /// `u64`.
+    MaxLeaves "max_leaves" <= crate::linear_mba::TABLE_LEAVES as u64;
+    /// Most leaves of a wide region evaluated whole (`used_leaves`, `relate`, `peel`); the
+    /// used leaves are a `u64` mask.
+    MaxWideLeaves "max_wide_leaves" <= 64;
+    /// `lowbits`: most leaf bits enumerated for one subterm.
+    LowbitsMaxBits "lowbits_max_bits" <= 63;
+    /// `lowbits`: most leaf bits enumerated for a proof in context.
+    LowbitsMaxContextBits "lowbits_max_context_bits" <= 63;
+    /// `lowbits`: proofs over more leaf bits than this also draw on `lowbits_wide_budget`.
+    LowbitsNarrowContextBits "lowbits_narrow_context_bits";
+    /// `lowbits`: largest subterm enumerated or proved in context.
+    LowbitsMaxTry "lowbits_max_try";
+    /// `lowbits`: most distinct values of a subterm replaced by one of them in context.
+    LowbitsMaxValues "lowbits_max_values";
+    /// `lowbits`: without a variable shift, only subterms with a product whose value is
+    /// fixed by this many low bits of the leaves are enumerated.
+    LowbitsMaxProductBits "lowbits_max_product_bits";
+    /// `lowbits`: evaluation steps per call, over all enumerations.
+    LowbitsBudget "lowbits_budget";
+    /// `lowbits`: evaluation steps of the proofs over more than `lowbits_narrow_context_bits` bits.
+    LowbitsWideBudget "lowbits_wide_budget";
+    /// `lowbits`: largest product factor `shorter_low` rebuilds after cutting its constants.
+    LowbitsMaxLowRebuild "lowbits_max_low_rebuild";
+    /// `lowbits`: low bits `refine_low` enumerates past the known ones.
+    LowbitsRefineBits "lowbits_refine_bits";
+    /// `lowbits`: most leaf bits `refine_low` enumerates in all.
+    LowbitsMaxRefineBits "lowbits_max_refine_bits" <= 63;
+    /// `lowbits`: evaluation steps of `refine_low` per call.
+    LowbitsRefineBudget "lowbits_refine_budget";
+    /// `lowbits`: most terms of a factor that `over_products` multiplies out.
+    LowbitsMaxFactorTerms "lowbits_max_factor_terms";
 }
 
 /// Variables besides the limits: `rewrites` (uncached `rewrite` calls left), `semi_leaves`
@@ -140,9 +177,9 @@ pub const RUN: [&str; 7] = ["keep", "extra", "printed", "match_limit", "ban_leng
 /// How a binding of a variable combines with the outer ones.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum VarKind {
-    /// An `INNER` pass: 1 on, 0 off.
+    /// An `INNER` pass: 0 off, any other value (also `none`) on.
     Pass,
-    /// A `FLAGS` switch: 1 on, 0 off.
+    /// A `FLAGS` switch: 0 off, any other value (also `none`) on.
     Flag,
     /// An entry of `LIMITS`.
     Limit,
@@ -162,6 +199,8 @@ pub enum VarKind {
 pub struct Var {
     pub name: &'static str,
     pub kind: VarKind,
+    /// The largest value it may be assigned (`NONE`: no cap; a capped one cannot be `none`).
+    pub cap: u64,
 }
 
 const FLAG0: usize = INNER.len();
@@ -182,22 +221,25 @@ pub const RESTARTS: usize = RUN0 + 5;
 pub const ITER_LIMIT: usize = RUN0 + 6;
 pub const DEADLINE: usize = RUN0 + RUN.len();
 pub const NVARS: usize = DEADLINE + 1;
-const _: () = assert!(NVARS <= 128, "the read variables are a u128");
+/// The bit of the read variables (`read`) that stands for all the `LIMITS` (`limits_key`).
+const LIMITS_BIT: usize = 127;
+const _: () = assert!(NVARS <= LIMITS_BIT, "the read variables are a u128");
 
-/// No limit: the value of an unbound budget or deadline.
+/// `none`, no limit: the value of every variable until it is assigned.
 pub const NONE: u64 = u64::MAX;
 
 /// The variable at position `i` of `VARS`.
 pub const fn var(i: usize) -> Var {
-    match i {
-        _ if i < FLAG0 => Var { name: INNER[i], kind: VarKind::Pass },
-        _ if i < LIMIT0 => Var { name: FLAGS[i - FLAG0], kind: VarKind::Flag },
-        _ if i < SETTING0 => Var { name: LIMITS[i - LIMIT0].0, kind: VarKind::Limit },
-        _ if i == SEMI_LEAVES || i == RELATE_LEAVES => Var { name: SETTINGS[i - SETTING0], kind: VarKind::Setting },
-        _ if i < RUN0 => Var { name: SETTINGS[i - SETTING0], kind: VarKind::Budget },
-        _ if i < DEADLINE => Var { name: RUN[i - RUN0], kind: VarKind::Setting },
-        _ => Var { name: "time_limit", kind: VarKind::Deadline },
-    }
+    let (name, kind, cap) = match i {
+        _ if i < FLAG0 => (INNER[i], VarKind::Pass, NONE),
+        _ if i < LIMIT0 => (FLAGS[i - FLAG0], VarKind::Flag, NONE),
+        _ if i < SETTING0 => (LIMITS[i - LIMIT0].0, VarKind::Limit, LIMITS[i - LIMIT0].1),
+        _ if i == SEMI_LEAVES || i == RELATE_LEAVES => (SETTINGS[i - SETTING0], VarKind::Setting, NONE),
+        _ if i < RUN0 => (SETTINGS[i - SETTING0], VarKind::Budget, NONE),
+        _ if i < DEADLINE => (RUN[i - RUN0], VarKind::Setting, NONE),
+        _ => ("time_limit", VarKind::Deadline, NONE),
+    };
+    Var { name, kind, cap }
 }
 
 /// The position in `VARS` of the variable `name`.
@@ -210,37 +252,22 @@ pub fn is_switch(i: usize) -> bool {
     matches!(var(i).kind, VarKind::Pass | VarKind::Flag)
 }
 
-const DEFAULTS: [u64; NVARS] = {
-    let mut a = [0u64; NVARS];
-    let mut i = 0;
-    while i < NVARS {
-        a[i] = match var(i).kind {
-            VarKind::Pass => 1,
-            VarKind::Flag if i == CUT => 0,
-            VarKind::Limit => LIMITS[i - LIMIT0].1 as u64,
-            VarKind::Setting if i == SEMI_LEAVES => crate::linear_mba::MAX_LEAVES as u64,
-            VarKind::Setting if i == RELATE_LEAVES => crate::linear_mba::MAX_WIDE_LEAVES as u64,
-            _ => NONE,
-        };
-        i += 1;
+/// `v` checked against the cap of variable `i`: an error naming the cap when it is more.
+pub fn check_cap(i: usize, v: u64) -> Result<u64, String> {
+    let Var { name, cap, .. } = var(i);
+    match v {
+        _ if v <= cap => Ok(v),
+        NONE => Err(format!("{name} is at most {cap}; none is more")),
+        _ => Err(format!("{name} = {v}: {name} is at most {cap}")),
     }
-    a
-};
-
-const fn initial_vars() -> [std::cell::Cell<u64>; NVARS] {
-    let mut a = [const { std::cell::Cell::new(0) }; NVARS];
-    let mut i = 0;
-    while i < NVARS {
-        a[i] = std::cell::Cell::new(DEFAULTS[i]);
-        i += 1;
-    }
-    a
 }
 
 thread_local! {
     /// The current value of each variable. Shallow binding: `bind` keeps the outer value in
     /// the innermost scope of `FRAMES`, which puts it back when it ends.
-    static VARS: [std::cell::Cell<u64>; NVARS] = const { initial_vars() };
+    static VARS: [std::cell::Cell<u64>; NVARS] = const { [const { std::cell::Cell::new(NONE) }; NVARS] };
+    /// A hash of the values of the `LIMITS`, kept up to date by `set`.
+    static LIMITS_HASH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// The scopes under way, innermost last: each variable bound there, its value outside and
     /// the value bound.
     static FRAMES: std::cell::RefCell<Vec<Vec<(usize, u64, u64)>>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -278,7 +305,15 @@ pub fn read(i: usize) -> u64 {
 
 /// Sets variable `i` outside any binding: a scope that binds it later restores this value.
 pub fn set(i: usize, v: u64) {
-    VARS.with(|a| a[i].set(v));
+    VARS.with(|a| {
+        a[i].set(v);
+        if (LIMIT0..SETTING0).contains(&i) {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            a[LIMIT0..SETTING0].iter().for_each(|c| c.get().hash(&mut h));
+            LIMITS_HASH.with(|c| c.set(h.finish()));
+        }
+    });
 }
 
 /// Binds variable `i` to `v` in the innermost scope (`in_scope`) until it ends; a budget is
@@ -342,12 +377,16 @@ pub fn swap_read(v: u128) -> u128 {
 
 /// The values of the variables in `bits`, in order.
 pub fn values(bits: u128) -> Vec<u64> {
-    VARS.with(|a| ones(bits).map(|i| a[i].get()).collect())
+    VARS.with(|a| ones(bits).map(|i| value_at(a, i)).collect())
 }
 
 /// Whether the variables in `bits` have the values `vals` (`values`).
 pub fn same_values(bits: u128, vals: &[u64]) -> bool {
-    VARS.with(|a| ones(bits).zip(vals).all(|(i, v)| a[i].get() == *v))
+    VARS.with(|a| ones(bits).zip(vals).all(|(i, v)| value_at(a, i) == *v))
+}
+
+fn value_at(a: &[std::cell::Cell<u64>; NVARS], i: usize) -> u64 {
+    if i == LIMITS_BIT { LIMITS_HASH.with(|c| c.get()) } else { a[i].get() }
 }
 
 fn ones(mut bits: u128) -> impl Iterator<Item = usize> {
@@ -364,12 +403,11 @@ pub fn key() -> Vec<u64> {
     VARS.with(|a| (0..NVARS).filter(|i| !matches!(var(*i).kind, VarKind::Budget | VarKind::Deadline)).map(|i| a[i].get()).collect())
 }
 
-/// A hash of the limits on this thread.
+/// A hash of the `LIMITS` on this thread, for the key of a memo that may depend on any of
+/// them; recorded as a read of all of them.
 pub fn limits_key() -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    VARS.with(|a| a[LIMIT0..SETTING0].iter().for_each(|c| c.get().hash(&mut h)));
-    h.finish()
+    READ.with(|r| r.set(r.get() | 1 << LIMITS_BIT));
+    LIMITS_HASH.with(|c| c.get())
 }
 
 /// Nanoseconds since the first call in the process, the unit of `DEADLINE`.
@@ -378,9 +416,21 @@ pub fn epoch_ns() -> u64 {
     EPOCH.elapsed().as_nanos() as u64
 }
 
-/// The value of `l` on this thread.
+/// The value of `l` on this thread; `none` is `usize::MAX`.
 pub fn limit(l: Limit) -> usize {
     read(LIMIT0 + l as usize) as usize
+}
+
+/// `limit` as a `u32`, `none` and values past it `u32::MAX`.
+pub fn limit_u32(l: Limit) -> u32 {
+    read(LIMIT0 + l as usize).min(u32::MAX as u64) as u32
+}
+
+/// `f` as part of a run of the default passes, for code called outside any pipeline: there
+/// every variable is `none`.
+#[cfg(test)]
+pub(crate) fn in_default_run<R>(f: impl FnOnce() -> R) -> R {
+    crate::pipe::in_run(&Passes::default(), None, || crate::pipe::Cand::new("(Var \"x\")", "input"), f)
 }
 
 /// `f` with the `INNER` passes `names` turned off, as `((off NAMES) | f)` would run it.
@@ -1348,6 +1398,53 @@ mod tests {
     }
 
     #[test]
+    fn default_pipe_assigns_every_variable() {
+        let p = Passes::default();
+        let cli = crate::Cli::default();
+        let unset: Vec<&str> = crate::pipe::in_run(&p, None, x, || (0..NVARS).filter(|&i| var(i).kind != VarKind::Pass && get(i) == NONE).map(|i| var(i).name).collect());
+        assert_eq!(unset, ["rewrites", "bit_split_budget", "restarts", "iter_limit", "time_limit"]);
+        let unset: Vec<&str> = crate::pipe::in_run(&p, Some(&cli), x, || (0..NVARS).filter(|&i| get(i) == NONE && var(i).kind != VarKind::Pass).map(|i| var(i).name).collect());
+        assert_eq!(unset, ["rewrites", "bit_split_budget", "time_limit"], "-m and -i set restarts and iter_limit");
+        assert_eq!(get(var_index("max_leaves").unwrap()), NONE, "outside a run every variable is none");
+    }
+
+    #[test]
+    fn caps_reject_larger_values() {
+        assert_eq!(after_entry(&Passes::parse("max_leaves=5 max_wide_leaves=64").unwrap(), "max_leaves"), 5);
+        for (bad, msg) in [("max_leaves=7", "max_leaves is at most 6"), ("max_leaves=none", "none is more"), ("max_wide_leaves=65", "at most 64"), ("prepass=lowbits_max_bits = 64 | lowbits", "lowbits_max_bits is at most 63")] {
+            let e = Passes::parse(bad).unwrap_err();
+            assert!(e.contains(msg), "{bad}: {e}");
+        }
+        let p = Passes::parse("prepass=max_leaves = vars * 4 | lowbits").unwrap();
+        let input = crate::pipe::Cand::new("(Sub (Var \"x\") (Var \"y\"))", "input");
+        let r = crate::pipe::run(&p.prepass, vec![input.clone()], &crate::pipe::Env::prepass(&p, 64, None, false, input.term()));
+        assert_eq!(r.err().map(|e| e.to_string()).as_deref(), Some("max_leaves = 8: max_leaves is at most 6"));
+        let cli = crate::Cli { passes: p, ..crate::Cli::default() };
+        let r = crate::simplify(input.term(), &cli);
+        assert_eq!(r.err().map(|e| e.to_string()).as_deref(), Some("max_leaves = 8: max_leaves is at most 6"), "a pre-pass run inside the pipeline gives its error");
+    }
+
+    #[test]
+    fn moved_constants_bind_in_their_scope() {
+        let input = "(Mul (Var \"x\") (Mul (Var \"x\") (Var \"x\")))";
+        let t = || crate::pipe::Cand::new(&format!("(And (Add {input} (Var \"x\")) (Num 1))"), "input");
+        let plain = Passes::parse("prepass=(scope lowbits)").unwrap();
+        let scoped = Passes::parse("prepass=(scope (lowbits_max_try = 1 | lowbits) | lowbits)").unwrap();
+        let none = Passes::parse("prepass=(scope (lowbits_max_try = 1 | id) | lowbits)").unwrap();
+        let run = |p: &Passes| crate::pipe::run(&p.prepass, vec![t()], &crate::pipe::Env::prepass(p, 8, None, false, t().term())).unwrap()[0].term().to_string();
+        assert_eq!(run(&plain), "(Num 0)", "x*x*x + x is even");
+        assert_eq!(run(&none), "(Num 0)", "the assignment ends with its sequence");
+        let inner = Passes::parse("prepass=(scope lowbits_max_try = 1 | lowbits)").unwrap();
+        assert_ne!(run(&inner), "(Num 0)", "with nothing enumerated nothing folds");
+        assert_eq!(run(&scoped), "(Num 0)");
+        crate::pipe::in_run(&plain, None, t, || {
+            assert_eq!(limit(Limit::LowbitsMaxTry), 256);
+            crate::pipe::run(&lang::parse("lowbits_max_try = 1 | id").unwrap(), vec![t()], &crate::pipe::Env::prepass(&plain, 8, None, false, t().term())).unwrap();
+            assert_eq!(limit(Limit::LowbitsMaxTry), 256, "a run ends the bindings made in it");
+        });
+    }
+
+    #[test]
     fn time_limit_zero_is_a_deadline() {
         let at = |spec: &str| crate::pipe::in_run(&Passes::parse(spec).unwrap(), None, x, || (get(DEADLINE), epoch_ns()));
         assert_eq!(at("time_limit=none").0, NONE);
@@ -1401,10 +1498,10 @@ mod tests {
         assert!(p.to_string().contains(" split_runs=4 poly_builds=64 "));
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("split_runs+=1").is_err() && Passes::parse("split_runs=x").is_err());
-        assert_eq!(limit(Limit::SplitRuns), 16);
+        assert_eq!(limit(Limit::SplitRuns), usize::MAX, "outside a run every variable is none");
         let got = crate::pipe::in_run(&p, None, x, || (limit(Limit::SplitRuns), limit(Limit::PolyBuilds), limit(Limit::SplitDepth)));
         assert_eq!(got, (4, 64, 2));
-        assert_eq!(limit(Limit::SplitRuns), 16);
+        assert_eq!(limit(Limit::SplitRuns), usize::MAX);
         let p = Passes::parse("keep=1 pipeline=lowbits | (best 2 rewrite ((off relate tfunc) | rebuild)) | (fix 3 egglog) | polish/factor extra=0").unwrap();
         assert_eq!(p.pipeline.to_string(), "lowbits | (best 2 rewrite ((off relate tfunc) | rebuild)) | (fix 3 egglog) | polish/factor");
         assert_eq!((after_entry(&p, "keep"), after_entry(&p, "extra")), (1, 0));

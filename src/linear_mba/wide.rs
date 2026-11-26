@@ -1,13 +1,11 @@
-//! Regions of more than `MAX_LEAVES` leaves: unused leaves, `peel`, `small_blocks`, `wide_blocks` and `clustered`.
+//! Regions of more than `max_leaves` leaves: unused leaves, `peel`, `small_blocks`, `wide_blocks` and `clustered`.
 
 use super::*;
 
-/// Most leaves `drop_unused` evaluates a region on.
-pub(crate) const MAX_WIDE_LEAVES: usize = 16;
 /// Most instructions times points `drop_unused` runs.
 const WIDE_BUDGET: usize = 1 << 25;
 
-/// A region with more than `MAX_LEAVES` leaves, rewritten with the leaves its values on
+/// A region with more than `max_leaves` leaves, rewritten with the leaves its values on
 /// {0,1}^n do not depend on set to 0, as in opaque predicates over many variables.
 pub(super) fn drop_unused(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
     if has_const_bitwise(t, w) {
@@ -46,7 +44,7 @@ pub(super) fn drop_leaves(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
 
 /// `e(0)` and the leaves the region's value depends on, from its values on {0,1}^n,
 /// or per bit position for a semi-linear region (see `semi_linear`); `None` past
-/// `MAX_WIDE_LEAVES` leaves or `WIDE_BUDGET`.
+/// `max_wide_leaves` leaves or `WIDE_BUDGET`.
 pub(super) fn used_leaves(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<bool>)> {
     let n = lv.len();
     let (e0, _, tables) = bit_tables(t, lv, w)?;
@@ -56,10 +54,10 @@ pub(super) fn used_leaves(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<bool>)> 
 
 /// `e(0)`, the table index of each bit position, and the tables `g_j(q)` with
 /// `e(q·2^j) = e(0) + 2^j·g_j(q)`, taken modulo `2^(w-j)` for every bit `j` that shares
-/// table `g_b` with a lower `b`; `None` past `MAX_WIDE_LEAVES` leaves or `WIDE_BUDGET`.
+/// table `g_b` with a lower `b`; `None` past `max_wide_leaves` leaves or `WIDE_BUDGET`.
 fn bit_tables(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<usize>, Vec<Vec<u64>>)> {
     let n = lv.len();
-    if n > MAX_WIDE_LEAVES {
+    if n > max_wide_leaves() {
         return None;
     }
     // Bit `j`'s table agrees modulo `2^(w-j)` with that of any lower bit with the same bits
@@ -110,7 +108,7 @@ fn bit_tables(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<usize>, Vec<Vec<u64>
 /// Least size per leaf of a region `peel` tries.
 const MIN_PEEL_SIZE: usize = 16;
 
-/// A region with more than `MAX_LEAVES` leaves whose value is a bitwise function of its
+/// A region with more than `max_leaves` leaves whose value is a bitwise function of its
 /// leaves, with one leaf `v` that is not arithmetic peeled off: `v | r`, `~v & r` or `v ^ r`
 /// with `r` the region at `v = 0`, or `v & r`, `~v | r` with `r` at `v = -1`; `r` is
 /// rebuilt by `simba`, which peels again until few enough leaves are left.
@@ -119,7 +117,8 @@ pub(super) fn peel(t: &T, w: &Ctx) -> Option<T> {
     leaves(t, w, &mut lv);
     let n = lv.len();
     // Small regions seldom rebuild smaller, but the rest costs a full semi-linear search.
-    if !(MAX_LEAVES + 1..=MAX_WIDE_LEAVES).contains(&n) || size(t) < MIN_PEEL_SIZE * n || w.peel_depth() >= MAX_WIDE_LEAVES - MAX_LEAVES {
+    let (narrow, wide) = (max_leaves(), max_wide_leaves());
+    if !(narrow + 1..=wide).contains(&n) || size(t) < MIN_PEEL_SIZE * n || w.peel_depth() >= wide.saturating_sub(narrow) {
         return None;
     }
     // Most regions fail; at points of 0s and 1s a bitwise value differs from e(0) in bit 0 only.
@@ -216,7 +215,7 @@ fn bit_degree(t: &T, w: &Ctx) -> usize {
 /// set by the block's top coefficient, plus the lower-degree monomials still left
 /// over. The choice per block that gives the smallest sum wins, so `c·(x & y)` may
 /// come back as `x + y - (x | y)` or `-(x ^ y)` when the single terms absorb the rest.
-/// Not limited to `MAX_LEAVES`.
+/// Not limited to `max_leaves`.
 pub(super) fn small_blocks(t: &T, w: &Ctx) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
@@ -414,7 +413,7 @@ struct BlockTerm {
     adds: Vec<(usize, u64)>,
 }
 
-/// A linear region of more than `MAX_LEAVES` leaves rebuilt from its conjunction-basis
+/// A linear region of more than `max_leaves` leaves rebuilt from its conjunction-basis
 /// expansion (summed over its terms, each expanded over its own leaves): one term `c·f` per
 /// block (maximal leaf set with a non-zero coefficient), with `f` matching the coefficient
 /// of every set of two or more leaves that no other block contains; what is left of the
@@ -428,7 +427,7 @@ pub(super) fn wide_blocks(t: &T, w: &Ctx) -> Option<T> {
     }
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
-    if !(MAX_LEAVES + 1..=64).contains(&lv.len()) {
+    if !(max_leaves() + 1..=64).contains(&lv.len()) {
         return None;
     }
     // Regions with products are left to `poly_mba`, which expands them across terms, and
@@ -521,7 +520,7 @@ fn wide_blocks_uncached(t: &T, lv: Vec<T>, w: &Ctx) -> Option<T> {
     for (e, (vars, g)) in points.iter().enumerate() {
         let k = vars.len();
         // Tables over more than 6 leaves are split by `wide_bool_expr`, which is slow.
-        let limit = if k > MAX_LEAVES { MAX_WIDE_TABLES } else { MAX_BLOCK_TABLES };
+        let limit = if k > TABLE_LEAVES { MAX_WIDE_TABLES } else { MAX_BLOCK_TABLES };
         let mut found: Vec<(usize, u64, Vec<u64>, B)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         // The top coefficient of a read-once function is ±2^(number of `^`).
@@ -752,7 +751,7 @@ fn block_functions(q: usize, f: &mut Vec<u64>, k: usize, target: &[Option<u64>],
 /// `g(A) op h(B)` over disjoint variable sets, `g` and `h` split again, which finds every
 /// read-once function; `None` for other functions over more than 6 variables.
 fn wide_bool_expr(f: &[u64], k: usize) -> Option<B> {
-    let neg = if k > MAX_LEAVES {
+    let neg = if k > TABLE_LEAVES {
         let g: Vec<u64> = f.iter().map(|x| !x).collect();
         wide_bool_cost(&g, k).map(|(c, b)| (c + 1, B::Not(Arc::new(b))))
     } else {
@@ -762,7 +761,7 @@ fn wide_bool_expr(f: &[u64], k: usize) -> Option<B> {
 }
 
 fn wide_bool_cost(f: &[u64], k: usize) -> Option<(usize, B)> {
-    if k <= MAX_LEAVES {
+    if k <= TABLE_LEAVES {
         return match bool_expr_canon(f[0] & table_full(k), k) {
             BE::E(c, b) => Some((c, b)),
             _ => None,
@@ -790,7 +789,7 @@ fn wide_bool_cost(f: &[u64], k: usize) -> Option<(usize, B)> {
         let kk = set.count_ones() as usize;
         let direct = wide_bool_cost(&pack(v), kk);
         let neg: Vec<bool> = v.iter().map(|x| !x).collect();
-        let negated = if kk > MAX_LEAVES { wide_bool_cost(&pack(&neg), kk).map(|(c, b)| (c + 1, not(b))) } else { None };
+        let negated = if kk > TABLE_LEAVES { wide_bool_cost(&pack(&neg), kk).map(|(c, b)| (c + 1, not(b))) } else { None };
         let best = [direct, negated].into_iter().flatten().min_by_key(|x| x.0)?;
         Some((best.0, remap(&best.1, &vars(set))))
     };
@@ -870,9 +869,9 @@ fn fill_placeholders(t: &T, ph: &[T], lv: &[T]) -> T {
 }
 
 
-/// A region with more than `MAX_LEAVES` leaves rebuilt in parts: its terms grouped by the
+/// A region with more than `max_leaves` leaves rebuilt in parts: its terms grouped by the
 /// leaves they use, a group whose leaves are a subset of another's joining the smallest
-/// such, and each group of at most `MAX_LEAVES` leaves rewritten on its own, which is
+/// such, and each group of at most `max_leaves` leaves rewritten on its own, which is
 /// exact since the parts add up to the region. Splits such as `7·(a & 0xffff) +
 /// 7·(a & -0x10000)` and constants spread over the region then come together.
 pub(super) fn clustered(t: &T, w: &Ctx) -> Option<T> {
@@ -909,9 +908,10 @@ fn clustered_in(t: &T, w: &Ctx) -> Option<T> {
         return None;
     }
     let mut parts = Vec::new();
+    let most = max_leaves();
     for (key, g) in &groups {
         let sum = build_sum(g, 0, w);
-        let r = if key.len() <= MAX_LEAVES && g.len() > 1 { sub(sub_index("cluster"), &sum, w) } else { sum.clone() };
+        let r = if key.len() <= most && g.len() > 1 { sub(sub_index("cluster"), &sum, w) } else { sum.clone() };
         if size(&r) < size(&sum) {
             parts.push((1, r));
         } else {
@@ -948,7 +948,7 @@ fn clustered_in(t: &T, w: &Ctx) -> Option<T> {
 }
 
 /// The terms of a region grouped by the leaves they use, a group whose leaves are a subset
-/// of another's (of at most `MAX_LEAVES` leaves) joining the smallest such; each group with
+/// of another's (of at most `max_leaves` leaves) joining the smallest such; each group with
 /// the hashes of its leaves, fewest leaves first.
 pub(super) fn leaf_groups(terms: Vec<(u64, T)>, w: &Ctx) -> Vec<(Vec<u64>, Vec<(u64, T)>)> {
     let mut groups: Vec<(Vec<u64>, Vec<(u64, T)>)> = Vec::new();
@@ -964,10 +964,11 @@ pub(super) fn leaf_groups(terms: Vec<(u64, T)>, w: &Ctx) -> Vec<(Vec<u64>, Vec<(
         }
     }
     groups.sort_by_key(|(k, _)| k.len());
+    let most = max_leaves();
     let mut i = 0;
     while i < groups.len() {
         let sup = (i + 1..groups.len())
-            .filter(|&j| groups[j].0.len() > groups[i].0.len() && groups[j].0.len() <= MAX_LEAVES && groups[i].0.iter().all(|h| groups[j].0.contains(h)))
+            .filter(|&j| groups[j].0.len() > groups[i].0.len() && groups[j].0.len() <= most && groups[i].0.iter().all(|h| groups[j].0.contains(h)))
             .min_by_key(|&j| groups[j].0.len());
         match sup {
             Some(j) => {

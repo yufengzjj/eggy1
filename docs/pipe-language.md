@@ -98,7 +98,8 @@ CMP    := '<' | '<=' | '>' | '>=' | '==' | '!='
 
 - 右边是第 6.3 节的数，一直读到 `|`、`)` 或结尾：`split_runs = vars * 2 | split_bits`。执行到这一步时对当时的候选求值，没有值时（空组、空寄存器、除以 0）为 0。
 - 开关（内部 pass、`cut`、`rerun_input`、`prove_minimal`，第 5.5 节）的值也是数：0 是关，其他是开。`relate = 0` 关掉 `relate`，`cut = 1` 打开 `cut`。`(off A B)` 是 `A = 0 | B = 0` 的简写，`(on A B)` 是 `A = 1 | B = 1` 的简写，同一作用域里以后写的为准。
-- `none` 只能单独写在右边，表示不限：预算（`rewrites = none`）、限值、时限（`time_limit = none`）都可以；开关不收 `none`。
+- `none` 只能单独写在右边，表示不限：预算（`rewrites = none`）、限值、时限（`time_limit = none`）都可以；开关不收 `none`。每个变量在赋值之前都是 `none`（开关为开）。
+- 有上限的变量（第 7.3 节表里写了上限的，如 `max_leaves` 最多 6，因为真值表是 `u64`）赋更大的值或 `none` 时报错，报错信息写明上限；右边是数字时解析时就报，是表达式时执行到这一步时报（这次运行停下，返回这个错误，如 `max_leaves = 8: max_leaves is at most 6`）。
 - 不能赋值的名字：特征、条件名，写了报错。其他变量（包括运行设置 `keep`、`extra`、`printed`、`match_limit`、`ban_length` 和 `restarts`、`iter_limit`）都能在任何地方赋值，下次读到时生效。
 - 赋值属于只搬动候选的步骤：过了时限照常执行。
 
@@ -207,8 +208,9 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `cut` | 0 | 开着时，时限到期而跳过的步骤会把整次运行记为截断（第 4.2 节） |
 | `rerun_input` | 1 | 默认 `pipeline` 的第一轮：结果是 `mixed` 时带上原输入重跑（`(retry (rerun_input && ...) ...)`） |
 | `prove_minimal` | 1 | 尝试证明候选最小（条件 `minimal`、pass `take_minimal`）；0 时什么都不证明 |
+| `relate_parts` | 1 | `relate` 对叶子多于 `relate_leaves` 的区域也按部分处理；不带 `clustered` 的重建里设成 0 |
 
-`semi/peel_shapes = 0`、`rerun_input = 1`、`prove_minimal = 1` 写在 `default.pipe` 开头，是入口程序的赋值；`cut` 的默认值在 Rust 里。
+这些默认值和 `semi/peel_shapes = 0` 都写在 `default.pipe` 开头，是入口程序的赋值。
 
 ## 6. 条件与数
 
@@ -218,13 +220,13 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 
 | 名字 | 成立时 |
 |---|---|
-| `opaque` | 有移位、除法或 `mulhi`，且它的重建不是很小（会运行 `prepass`） |
+| `opaque` | 有移位、除法或 `mulhi`，且它的重建大于 `tiny_size`（会运行 `prepass`） |
 | `rebuilds` | 预处理会改变它（会运行 `prepass`） |
 | `minimal` | 某个候选被证明最小：没有更小的项与它相等（`prove_minimal` 开着时才证明） |
 | `mixed` | 位运算下直接有算术或常数 |
 | `moved` | 上一个 `fix` 停在次数上，主候选还在变 |
 | `input` | 它就是 `simplify` 的输入 |
-| `tiny` | 至多 3 个节点 |
+| `tiny` | 至多 `tiny_size`（3）个节点 |
 | `fits_split` | 至多 `split_size` 个节点 |
 | `used_wide`、`used_clustered` | 产生某个候选的 pass 里，`wide_blocks`/`clustered` 给过被保留的形式（看整组） |
 | `few_rewrites` | 产生它的 pass 至多做了 `unclustered_after` 次未缓存的 `rewrite` |
@@ -275,12 +277,12 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `rewrites` | 不限 | 预算：剩下的未缓存 `rewrite` 调用次数，用完后 `rewrite` 原样返回；里面用掉的次数也从外层扣除 |
 | `bit_split_budget` | 不限 | 预算：剩下的 `bit_split` 拆分对数；每个 `cand` 设成 `cand_bit_splits`，同 `rewrites` 也从外层扣除 |
 | `time_limit` | 不限 | 时限，赋值时从此刻起计毫秒（第 4.2 节），`none` 不限。`--passes time_limit=MS` 是入口程序里的赋值；bench 用 `-t` 乘以它的 `--time-limit` 比例（默认 0.8，0 时传 `none`）设置，写在 `--passes` 里的 `time_limit=` 在它之后，所以优先 |
-| `semi_leaves` | 6 | 半线性区域最多几个叶子才重建 |
-| `relate_leaves` | 16 | `relate` 只处理叶子不多于此的区域 |
+| `semi_leaves` | `max_leaves` | 半线性区域最多几个叶子才重建 |
+| `relate_leaves` | `max_wide_leaves` | `relate` 只处理叶子不多于此的区域 |
 
 ### 7.3 限值
 
-默认值在 Rust 里；`--passes` 的 `NAME=VALUE` 项在入口程序里给整次运行赋值。
+默认值写在 `default.pipe` 开头（入口程序的赋值），Rust 里只有名字和上限；`--passes` 的 `NAME=VALUE` 项排在它们之后，所以覆盖默认值。`default.pipe` 漏写的变量是 `none`，测试 `default_pipe_assigns_every_variable` 检查执行完入口赋值后仍是 `none` 的只有 `rewrites`、`bit_split_budget`、`time_limit`（和没有命令行时的 `restarts`、`iter_limit`）。
 
 | 名字 | 默认 | 含义 |
 |---|---|---|
@@ -302,6 +304,22 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `poly_builds` | 512 | `poly_mba` 穷举选择时最多构造几个乘积，之后每层只取第一种 |
 | `poly_branch_monos` | 128 | 展开的单项式多于此时，从一开始就每层只取第一种 |
 | `polish_rewrites` | 2000 | 一次 `polish` 最多几次未缓存的 `rewrite` |
+| `tiny_size` | 3 | 不大于此的重建不再细找：条件 `tiny`，`opaque` 要求重建大于它 |
+| `max_leaves` | 6，上限 6 | 线性区域最多几个叶子才按 {0,1}^n 上的值重建（真值表是 `u64`） |
+| `max_wide_leaves` | 16，上限 64 | 宽区域最多几个叶子才整体求值（`drop_unused`、`relate`、`peel`；用到的叶子是 `u64` 掩码） |
+| `lowbits_max_bits` | 18，上限 63 | `lowbits`：一个子项最多枚举几个叶子位 |
+| `lowbits_max_context_bits` | 18，上限 63 | `lowbits`：在上下文里证明时最多枚举几个叶子位 |
+| `lowbits_narrow_context_bits` | 12 | `lowbits`：多于这么多叶子位的证明还要用 `lowbits_wide_budget` |
+| `lowbits_max_try` | 256 | `lowbits`：枚举或在上下文里证明的子项最大多大 |
+| `lowbits_max_values` | 4 | `lowbits`：子项最多几个不同的值时，才试着在上下文里换成其中之一 |
+| `lowbits_max_product_bits` | 4 | `lowbits`：没有变量移位时，只枚举值由叶子低这么多位决定的含乘积子项 |
+| `lowbits_budget` | 67108864 | `lowbits`：一次调用所有枚举的求值步数 |
+| `lowbits_wide_budget` | 8388608 | `lowbits`：多于 `lowbits_narrow_context_bits` 位的证明的求值步数 |
+| `lowbits_max_low_rebuild` | 64 | `cut_products`：截断常数后重建的乘积因子最大多大 |
+| `lowbits_refine_bits` | 2 | `lowbits`：`refine_low` 在已知位之外多枚举几位 |
+| `lowbits_max_refine_bits` | 12，上限 63 | `lowbits`：`refine_low` 总共最多枚举几个叶子位 |
+| `lowbits_refine_budget` | 4194304 | `lowbits`：`refine_low` 一次调用的求值步数 |
+| `lowbits_max_factor_terms` | 4 | `over_products`：多于这么多项的因子不展开 |
 
 ### 7.4 `sub/NAME`
 

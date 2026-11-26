@@ -2,9 +2,26 @@
 # `--passes` items come after these and can use the names defined here.
 
 # The settings every run starts with (its entry assignments; `-m`, `-i` and the
-# assignments of `--passes` follow).
+# assignments of `--passes` follow). Every variable is `none` until assigned; only the
+# budgets `rewrites`, `bit_split_budget` and `time_limit` stay so.
 keep=2 extra=2 printed=2 rerun_input=1 prove_minimal=1 match_limit=64 ban_length=3
+cut=0 relate_parts=1
 semi/peel_shapes=0
+
+# Limits of the passes.
+unclustered_relate_leaves=10 unclustered_rewrites=256 unclustered_after=1024
+unified_rewrites=128 related_rebuilds=8 related=4 bit_splits=4 cand_bit_splits=8
+splits=4 split_depth=2 split_runs=16 split_size=64 block_leaves=12 block_combos=32768
+cluster_depth=2 poly_builds=512 poly_branch_monos=128 polish_rewrites=2000
+
+# Sizes of the linear regions rebuilt.
+tiny_size=3 max_leaves=6 max_wide_leaves=16
+semi_leaves=max_leaves relate_leaves=max_wide_leaves
+
+# `lowbits`.
+lowbits_max_bits=18 lowbits_max_context_bits=18 lowbits_narrow_context_bits=12 lowbits_max_try=256 lowbits_max_values=4
+lowbits_max_product_bits=4 lowbits_budget=67108864 lowbits_wide_budget=8388608 lowbits_max_low_rebuild=64
+lowbits_refine_bits=2 lowbits_max_refine_bits=12 lowbits_refine_budget=4194304 lowbits_max_factor_terms=4
 
 # A later round: the pre-pass rebuilds, then their extraction, or the one proved minimal.
 (let later prepass | (if minimal take_minimal (egglog later)))
@@ -103,6 +120,7 @@ prepass=
           ((load t)
            | (if !replaceable
                (relate_leaves = unclustered_relate_leaves
+                | relate_parts = 0
                 | rewrites = unclustered_rewrites
                 | clustered = 0
                 | rewrite | within | relate | within | tfunc | finish | drop_identities)
@@ -140,7 +158,7 @@ polish=
 # rewritten; `poly_mba` taken instead when strictly smaller.
 rewrite=(again (best 1 (regions (best 1 simba small_blocks wide_blocks)) poly_mba))
 
-# The rebuild of one linear region, the `simba` pass. Past `MAX_LEAVES` leaves: the
+# The rebuild of one linear region, the `simba` pass. Past `max_leaves` leaves: the
 # smallest of the region with unused leaves dropped, clustered, and peeled (only when no
 # leaf is unused: then the rewrite of the dropped form peels), the region itself or else
 # its clustered form, which a region too large to evaluate needs. Otherwise the
