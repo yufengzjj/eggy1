@@ -1050,11 +1050,11 @@ pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
     let egg = make_egg(&cli.num_type);
     stats::set_width(width_of(&cli.num_type));
     let env = pipe::Env::new(cli, egg, s);
-    let input = pipe::Cand { term: s.to_string(), origin: "input".into() };
+    let input = pipe::Cand::new(s, "input");
     let out = pipe::run(&cli.passes.pipeline, vec![input.clone()], &env)?;
     let r = out.into_iter().next().unwrap_or(input);
     stats::add(&format!("final/{}", r.origin), 0.0);
-    let r = r.term;
+    let r = r.term().to_string();
     stats::settle(&eval::parse(&r));
     Ok(egglog_to_infix(&r, &|n| norm_const(n, &cli.num_type)))
 }

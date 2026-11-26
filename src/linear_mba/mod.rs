@@ -70,6 +70,35 @@ impl Ctx {
     pub(crate) fn narrow(&self, w: u32) -> Ctx {
         Ctx { st: self.st.clone(), ..Ctx::new(w) }
     }
+    /// The run settings `crate::pipe` changes by name (`Pipe::With`): `rewrites` (calls
+    /// left), `semi_leaves`, `relate_leaves`, `bit_splits` (splits left), `exclude` (bits of
+    /// `CLUSTERED`, `WIDE`).
+    pub(crate) fn setting(&self, key: &str) -> Option<usize> {
+        let st = &self.st;
+        Some(match key {
+            "rewrites" => st.rewrites_left.load(Relaxed),
+            "semi_leaves" => st.semi_leaves.load(Relaxed),
+            "relate_leaves" => st.relate_leaves.load(Relaxed),
+            "bit_splits" => st.bit_splits.load(Relaxed),
+            "exclude" => st.excluded.load(Relaxed) as usize,
+            _ => return None,
+        })
+    }
+    pub(crate) fn set_setting(&self, key: &str, v: usize) {
+        let st = &self.st;
+        match key {
+            "rewrites" => st.rewrites_left.store(v, Relaxed),
+            "semi_leaves" => st.semi_leaves.store(v, Relaxed),
+            "relate_leaves" => st.relate_leaves.store(v, Relaxed),
+            "bit_splits" => st.bit_splits.store(v, Relaxed),
+            "exclude" => st.excluded.store(v as u8, Relaxed),
+            _ => panic!("unknown setting {key}"),
+        }
+    }
+    /// Whether `clustered` (`CLUSTERED`) or `wide_blocks` (`WIDE`) gave a kept form in this run.
+    pub(crate) fn used(&self, bit: u8) -> bool {
+        self.st.used.load(Relaxed) & bit != 0
+    }
     pub(crate) fn low_values(&self) -> &crate::lowbits::ValuesMemo {
         &self.st.low_values
     }
@@ -81,8 +110,8 @@ impl Ctx {
 
 type Memo<K, V> = std::sync::Mutex<crate::eval::FastMap<K, (V, u8)>>;
 /// Bits of `State::used` and `State::excluded`.
-pub(super) const CLUSTERED: u8 = 1;
-pub(super) const WIDE: u8 = 2;
+pub(crate) const CLUSTERED: u8 = 1;
+pub(crate) const WIDE: u8 = 2;
 type RebuiltKey = (Vec<u64>, Vec<(usize, bool)>, u64, u32);
 type GroupedKey = (Vec<(Vec<u64>, u64)>, Vec<T>, u64, u32);
 type PairKey = (u32, Vec<(Vec<u64>, u64)>, u64, Vec<T>, usize);
@@ -710,9 +739,9 @@ fn substitute_atoms(t: &T, w: &Ctx) -> T {
 /// the driver does not saturate the input beside them.
 pub const TINY: usize = 3;
 
-/// Candidates of `simplify_linear_uncached` rebuilt with subterms abstracted to variables,
-/// kept only when at most 3/4 the size of the first rebuild.
-const ABSTRACTED: [&str; 2] = ["over_const_bitwise", "over_shared_bitwise"];
+/// Pre-pass candidates rebuilt with subterms abstracted to variables, kept only when at most
+/// 3/4 the size of the first rebuild.
+pub(crate) const ABSTRACTED: [&str; 2] = ["over_const_bitwise", "over_shared_bitwise"];
 
 /// The rebuild `simplify_linear` applies to its input, without `relate`.
 fn rebuild_once(t: &T, w: &Ctx) -> T {
@@ -740,7 +769,9 @@ pub(crate) const TERM_PASSES: &[(&str, fn(&T, &Ctx) -> Option<T>)] = &[
     ("unshift", |t, w| Some(unshift(t, w))),
     ("tfunc_whole", |t, w| crate::tfunc::replacement(t, w)),
     ("rewrite", |t, w| Some(rewrite(t, w))),
+    ("rewrite_top", |t, w| Some(rewrite(t, w))),
     ("cluster_regions", |t, w| Some(cluster_regions(t, w, false))),
+    ("cluster_top", |t, w| Some(cluster_regions(t, w, false))),
     ("relate", |t, w| Some(relate(t, w))),
     ("tfunc", |t, w| Some(crate::tfunc::simplify(t, w))),
     ("unify_operands", |t, w| Some(unify_operands(t, w))),
@@ -836,183 +867,11 @@ fn drop_identities(t: &T, w: &Ctx) -> T {
     }
 }
 
-/// The pre-pass result and the forms to union with it.
+/// The pre-pass result and the forms to union with it: `Passes::prepass` on `egg`.
 fn simplify_linear_uncached(egg: &str, w: u32, trace: bool, p: &Passes) -> (String, Vec<String>) {
-    let clock = std::time::Instant::now();
-    let w = Ctx::new(w);
-    let t = parse(egg);
-    crate::sched::set_gates(p, &stats::shape(&t));
-    let t0 = t.clone();
-    let t = stats::pass("lowbits", &t, || crate::lowbits::simplify(&t, &w));
-    let t = stats::pass("unshift", &t, || unshift(&t, &w));
-    // Subterms are replaced only after the rebuild: earlier, `~(y - 1)` would become
-    // `-y`, a leaf the rebuild no longer relates to `y - 1`.
-    let run = |t: &T, related: bool| match stats::pass("tfunc_whole", t, || crate::tfunc::replacement(t, &w)) {
-        Some(r) => r,
-        None => {
-            let r = stats::try_pass("rewrite_top", t, || rewrite(t, &w));
-            let r = stats::try_pass("cluster_top", &r, || cluster_regions(&r, &w, false));
-            let r = if related { stats::pass("relate", &r, || relate(&r, &w)) } else { r };
-            stats::pass("tfunc", &r, || crate::tfunc::simplify(&r, &w))
-        }
-    };
-    let r = run(&t, true);
-    stats::add("pre/first/made", stats::since(clock));
-    let clock = std::time::Instant::now();
-    let mut first_name = "first";
-    // Unified operands let the regions around them share leaves, but the rebuild of the
-    // input as written is sometimes smaller. The second rebuild redoes only the regions
-    // unification changed, and is dropped once it needs `unified_rewrites` rewrites.
-    let unified = if p.pre_on("unified") { stats::pass("unify_operands", &t, || unify_operands(&t, &w)) } else { t.clone() };
-    let r = if unified != t {
-        let left = w.st.rewrites_left.load(Relaxed);
-        w.limit_rewrites(limit(Limit::UnifiedRewrites));
-        let within = || w.st.rewrites_left.load(Relaxed) > 0;
-        let u = match crate::tfunc::replacement(&unified, &w) {
-            Some(u) => Some(u),
-            None => Some(rewrite(&unified, &w))
-                .filter(|_| within())
-                .map(|u| relate(&cluster_regions(&u, &w, false), &w))
-                .filter(|_| within())
-                .map(|u| crate::tfunc::simplify(&u, &w)),
-        };
-        let used = limit(Limit::UnifiedRewrites) - w.st.rewrites_left.load(Relaxed);
-        w.limit_rewrites(left.saturating_sub(used));
-        stats::add("pre/unified/made", stats::since(clock));
-        match u {
-            Some(u) if size(&u) < size(&r) => {
-                first_name = "unified";
-                u
-            }
-            _ => r,
-        }
-    } else {
-        r
-    };
-    let mut rebuilt: Vec<(&str, T)> = vec![(first_name, r.clone())];
-    let mut clock = std::time::Instant::now();
-    let made_by = |name: &str, clock: &mut std::time::Instant| {
-        stats::add(&format!("pre/{name}/made"), stats::since(*clock));
-        *clock = std::time::Instant::now();
-    };
-    // A region rebuilt by `wide_blocks` is smaller there, but the other rebuilds can leave
-    // subterms the abstracted rebuilds share across terms. Only smaller ones are kept: a
-    // larger one unioned beside the first rebuild made the rules finish worse as often as better.
-    if p.pre_on("no_wide") && w.st.used.load(Relaxed) & WIDE != 0 {
-        w.st.excluded.store(WIDE, Relaxed);
-        let n = run(&t, true);
-        let abstracted = [over_const_bitwise(&n, &w), over_shared_bitwise(&n, &w)];
-        w.st.excluded.store(0, Relaxed);
-        made_by("no_wide", &mut clock);
-        for (name, o) in [("no_wide", n.clone())].into_iter().chain(abstracted.map(|o| ("no_wide_abstracted", o))) {
-            if size(&o) < size(&r) && (name == "no_wide" || 4 * size(&o) <= 3 * size(&n)) {
-                rebuilt.push((name, o));
-            }
-        }
-    }
-    if p.pre_on("split_bits") && size(&r) <= limit(Limit::SplitSize) {
-        let s = split_in(&r, &w, &|t| run(&unshift(&crate::lowbits::simplify(t, &w), &w), false));
-        if s != r {
-            rebuilt.push(("split_bits", s));
-        }
-        made_by("split_bits", &mut clock);
-    }
-    if p.pre_on("halve_first") {
-        let hr = halve(&r, &w);
-        if hr != r {
-            rebuilt.push(("halve_first", run(&hr, false)));
-        }
-        made_by("halve_first", &mut clock);
-    }
-    if p.pre_on("over_products") {
-        let pr = crate::lowbits::over_products(&r, &w, |t| rebuild_once(t, &w));
-        if pr != r {
-            rebuilt.push(("over_products", pr));
-        }
-        made_by("over_products", &mut clock);
-    }
-    let over: [(&str, fn(&T, &Ctx) -> T); 2] = [("over_const_bitwise", over_const_bitwise), ("over_shared_bitwise", over_shared_bitwise)];
-    if over.iter().any(|(n, _)| p.pre_on(n)) {
-        for (name, f) in over.into_iter().filter(|(n, _)| p.pre_on(n)) {
-            let o = f(&r, &w);
-            if o != r {
-                rebuilt.push((name, o));
-            }
-        }
-        made_by("over_bitwise", &mut clock);
-    }
-    if p.pre_on("halve_input") {
-        // Halving the whole input can give semi-linear regions that are slow to search,
-        // so only small ones are rebuilt there, also inside `halve`.
-        w.st.semi_leaves.store(2, Relaxed);
-        let ht = if size(&r) <= TINY { t.clone() } else { halve(&t, &w) };
-        if ht != t {
-            rebuilt.push(("halve_input", run(&ht, false)));
-        }
-        made_by("halve_input", &mut clock);
-        w.st.semi_leaves.store(MAX_LEAVES, Relaxed);
-    }
-    let mut rebuilt: Vec<(&str, T)> = rebuilt.into_iter().map(|(n, t)| (n, finish(&t, &w))).collect();
-    // A form from abstracted subterms only a little smaller than the first rebuild, or
-    // larger, made the rules finish worse at least as often as better (Ensia, LLVM Pluto);
-    // much smaller ones mostly win.
-    let first = size(&rebuilt[0].1);
-    let dropped: Vec<String> = rebuilt.iter().filter(|(n, t)| ABSTRACTED.contains(n) && 4 * size(t) > 3 * first).map(|(n, t)| format!("{n} {}", size(t))).collect();
-    rebuilt.retain(|(n, t)| !ABSTRACTED.contains(n) || 4 * size(t) <= 3 * first);
-    // A region rebuilt in clusters is smaller there but can leave the rules a worse
-    // start than rebuilding it whole, so the rebuild without clusters is kept too.
-    let made = usize::MAX - w.st.rewrites_left.load(Relaxed);
-    let unclustered = if p.pre_on("unclustered") && w.st.used.load(Relaxed) & CLUSTERED != 0 && made <= limit(Limit::UnclusteredAfter) && crate::tfunc::replacement(&t, &w).is_none() {
-        w.st.bit_splits.store(limit(Limit::BitSplitBudget), Relaxed);
-        w.st.excluded.store(CLUSTERED, Relaxed);
-        w.st.relate_leaves.store(limit(Limit::UnclusteredRelateLeaves), Relaxed);
-        w.st.rewrites_left.store(limit(Limit::UnclusteredRewrites), Relaxed);
-        let within = || w.st.rewrites_left.load(Relaxed) > 0;
-        let r = Some(rewrite(&t, &w)).filter(|_| within());
-        let r = r.map(|r| relate(&r, &w)).filter(|_| within());
-        let u = r.map(|r| drop_identities(&finish(&crate::tfunc::simplify(&r, &w), &w), &w));
-        w.st.rewrites_left.store(usize::MAX, Relaxed);
-        w.st.relate_leaves.store(MAX_WIDE_LEAVES, Relaxed);
-        w.st.excluded.store(0, Relaxed);
-        made_by("unclustered", &mut clock);
-        u
-    } else {
-        None
-    };
-    for (n, t) in &rebuilt {
-        if *n != first_name {
-            stats::add(&format!("pre/{n}/differs"), 0.0);
-            stats::add_n(&format!("pre/{n}/gain"), size(&rebuilt[0].1).saturating_sub(size(t)) as u64, 0.0);
-        }
-        stats::label(&show(t), n);
-    }
-    if let Some(u) = &unclustered {
-        stats::add("pre/unclustered/differs", 0.0);
-        stats::add_n("pre/unclustered/gain", size(&rebuilt[0].1).saturating_sub(size(u)) as u64, 0.0);
-        stats::label(&show(u), "unclustered");
-    }
-    if trace {
-        let all: Vec<String> = rebuilt.iter().map(|(n, t)| format!("{n} {}", size(t))).chain(unclustered.iter().map(|u| format!("unclustered {}", size(u)))).collect();
-        eprintln!("prepass: input {} candidates: {}; dropped: {}", size(&t0), all.join(", "), dropped.join(", "));
-    }
-    rebuilt.sort_by_key(|(_, t)| size(t));
-    rebuilt.dedup_by(|a, b| a.1 == b.1);
-    rebuilt.truncate(p.keep);
-    // An equal-size one can take the extraction from the first rebuild with nothing gained.
-    match unclustered {
-        Some(u) if size(&u) < size(&rebuilt[0].1) => rebuilt.insert(0, ("unclustered", u)),
-        Some(u) if size(&u) > size(&rebuilt[0].1) && size(&u) < size(&t0) && !rebuilt.iter().any(|(_, t)| *t == u) => rebuilt.push(("unclustered", u)),
-        _ => {}
-    }
-    if trace {
-        let kept: Vec<String> = rebuilt.iter().map(|(n, t)| format!("{n} {}", size(t))).collect();
-        eprintln!("prepass: chosen {}", kept.join(", then "));
-    }
-    for (i, (n, _)) in rebuilt.iter().enumerate() {
-        stats::add(&format!("pre/{n}/{}", if i == 0 { "main" } else { "kept" }), 0.0);
-    }
-    let others: Vec<T> = rebuilt.split_off(1).into_iter().map(|(_, t)| t).collect();
-    let r = rebuilt.swap_remove(0).1;
-    let r = if r == t0 { egg.to_string() } else { show(&r) };
-    (r, others.iter().map(show).collect())
+    let env = crate::pipe::Env::prepass(p, w, trace, egg);
+    let input = crate::pipe::Cand::new(egg, "input");
+    let mut out = crate::pipe::run(&p.prepass, vec![input], &env).expect("the pre-pass runs no egglog").into_iter().map(|c| c.term().to_string());
+    let main = out.next().unwrap_or_else(|| egg.to_string());
+    (main, out.collect())
 }

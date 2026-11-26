@@ -3,15 +3,20 @@
 //! polish passes as `polish/NAME`) runs on each candidate and replaces it by its result; the
 //! other passes take the list whole.
 
-use crate::eval::{parse, show, size};
-use crate::sched::{Cond, Pipe};
+use crate::eval::{Op, Term, parse, show, size};
+use crate::linear_mba::{CLUSTERED, Ctx, WIDE};
+use crate::sched::{Cond, Limit, Passes, Pipe, limit};
 use crate::{Cli, Error, linear_mba, minimal, stats, width_of};
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
+use std::rc::Rc;
+use std::collections::HashMap;
 
-/// Passes that take the candidate list whole.
-const SET_PASSES: [&str; 6] = [
+/// Passes that take the candidate list whole, besides `save/R`, `load/R` and `label/R`.
+const SET_PASSES: [&str; 10] = [
     // The candidates unchanged.
     "id",
+    // No candidates.
+    "none",
     // The main candidate's pre-pass rebuilds: the main one, then those to union with it.
     "prepass",
     // One egglog round on all candidates unioned: its extraction (`egglog/LABEL` times it
@@ -23,10 +28,19 @@ const SET_PASSES: [&str; 6] = [
     "polish",
     // The main candidate printed and read back.
     "reprint",
+    // Turns off the `sched::GATES` the main candidate does not need (`sched::set_gates`).
+    "gates",
+    // No candidates once `rewrite` has used up its calls in the enclosing `with`.
+    "within",
+    // The end of the pre-pass: counts the kept candidates, names their origins `pre/NAME`
+    // and gives the main one as the input was written when it equals it (register `t0`).
+    "pre_done",
 ];
 
-/// The conditions of `if` and `retry`, on the candidates they see.
-pub const CONDS: [&str; 8] = [
+/// The conditions of `if`, `retry` and `filter`, on the candidates they see; also `lt:R`,
+/// `gt:R` (main candidate smaller, larger than register `R`'s), `eq:R` (equal),
+/// `le:P/Q:R` (at most `P/Q` its size).
+pub const CONDS: [&str; 16] = [
     // The main candidate has a shift, division or mulhi and its rebuild is not tiny.
     "opaque",
     // A candidate is proved minimal: no smaller term equals it (`Passes::minimal`).
@@ -43,57 +57,175 @@ pub const CONDS: [&str; 8] = [
     "rerun_input",
     // `Passes::printed` is not 0.
     "printed",
+    // The main candidate has at most `linear_mba::TINY` nodes.
+    "tiny",
+    // The main candidate has at most `split_size` nodes.
+    "fits_split",
+    // `wide_blocks` gave a kept form in the enclosing `scope`.
+    "used_wide",
+    // `clustered` gave a kept form in the enclosing `scope`.
+    "used_clustered",
+    // The enclosing `scope` made at most `unclustered_after` `rewrite` calls.
+    "few_rewrites",
+    // The main candidate as a whole has a smaller T-function form (`tfunc::replacement`).
+    "replaceable",
+    // The main candidate comes from a rebuild with abstracted subterms
+    // (`linear_mba::ABSTRACTED`).
+    "abstracted",
+    // Always.
+    "true",
 ];
 
-/// The names a `fix` count can take: `restarts` (`Cli::max_restarts` less the first
-/// round), `extra` (`Passes::extra`), `printed` (`Passes::printed` less the first round).
-pub const COUNTS: [&str; 3] = ["restarts", "extra", "printed"];
+/// The names a `fix` or `best` count can take: `restarts` (`Cli::max_restarts` less the
+/// first round), `extra` (`Passes::extra`), `printed` (`Passes::printed` less the first
+/// round), `keep` (`Passes::keep`).
+pub const COUNTS: [&str; 4] = ["restarts", "extra", "printed", "keep"];
 
-/// The names a `Pipe::Pass` can take.
+const REGISTER_PASSES: [&str; 3] = ["save/", "load/", "label/"];
+
+/// The names a `Pipe::Pass` can take, registers written `R`.
 pub fn names() -> Vec<String> {
     let polish = linear_mba::POLISH.iter().map(|(n, _)| format!("polish/{n}"));
     let egglog = ["first", "later", "rerun_input"].iter().map(|l| format!("egglog/{l}"));
-    SET_PASSES.iter().map(|n| n.to_string()).chain(egglog).chain(linear_mba::TERM_PASSES.iter().map(|(n, _)| n.to_string())).chain(polish).collect()
+    let regs = REGISTER_PASSES.iter().map(|p| format!("{p}R"));
+    SET_PASSES.iter().map(|n| n.to_string()).chain(egglog).chain(regs).chain(linear_mba::TERM_PASSES.iter().map(|(n, _)| n.to_string())).chain(polish).collect()
 }
 
-/// A candidate term and the pass it came from, for `stats` (`final/ORIGIN`).
-#[derive(Clone, Debug, PartialEq)]
+/// Whether `name` is a pass.
+pub fn is_pass(name: &str) -> bool {
+    REGISTER_PASSES.iter().any(|p| name.strip_prefix(p).is_some_and(|r| !r.is_empty())) || name.starts_with("egglog/") || names().iter().any(|n| n == name)
+}
+
+/// Whether `name` is a condition.
+pub fn is_cond(name: &str) -> bool {
+    if CONDS.contains(&name) {
+        return true;
+    }
+    match name.split(':').collect::<Vec<_>>().as_slice() {
+        ["lt" | "gt" | "eq", r] => !r.is_empty(),
+        ["le", pq, r] => !r.is_empty() && pq.split_once('/').is_some_and(|(p, q)| p.parse::<usize>().is_ok() && q.parse::<usize>().is_ok_and(|q| q > 0)),
+        _ => false,
+    }
+}
+
+/// A candidate term and the pass it came from, for `stats` (`final/ORIGIN`). The egglog
+/// text, the tree and the size are each made once, when first needed: large inputs spend
+/// more time printing and parsing than in the passes.
+#[derive(Clone, Debug)]
 pub struct Cand {
-    pub term: String,
+    forms: Rc<Forms>,
     pub origin: String,
 }
 
-/// What the passes of one `simplify` call share.
+#[derive(Debug, Default)]
+struct Forms {
+    text: OnceCell<String>,
+    tree: OnceCell<Term>,
+    size: OnceCell<usize>,
+}
+
+impl Cand {
+    pub fn new(text: &str, origin: &str) -> Cand {
+        Cand { forms: Rc::new(Forms { text: OnceCell::from(text.to_string()), ..Default::default() }), origin: origin.to_string() }
+    }
+
+    fn of(tree: Term, origin: &str) -> Cand {
+        Cand { forms: Rc::new(Forms { tree: OnceCell::from(tree), ..Default::default() }), origin: origin.to_string() }
+    }
+
+    /// The egglog text.
+    pub fn term(&self) -> &str {
+        self.forms.text.get_or_init(|| show(self.tree()))
+    }
+
+    fn tree(&self) -> &Term {
+        self.forms.tree.get_or_init(|| parse(self.forms.text.get().unwrap()))
+    }
+
+    fn size(&self) -> usize {
+        *self.forms.size.get_or_init(|| size(self.tree()))
+    }
+
+    fn same(&self, o: &Cand) -> bool {
+        if Rc::ptr_eq(&self.forms, &o.forms) {
+            return true;
+        }
+        if let (Some(a), Some(b)) = (self.forms.text.get(), o.forms.text.get())
+            && a == b
+        {
+            return true;
+        }
+        self.size() == o.size() && self.tree() == o.tree()
+    }
+}
+
+impl PartialEq for Cand {
+    fn eq(&self, o: &Cand) -> bool {
+        self.origin == o.origin && self.same(o)
+    }
+}
+
+/// What the passes of one run share.
 pub struct Env<'a> {
-    pub cli: &'a Cli,
+    /// Set for a `simplify` run; egglog rounds, minimality proofs and `reprint` need it.
+    cli: Option<&'a Cli>,
+    passes: &'a Passes,
+    w: u32,
+    trace: bool,
     /// The egglog program of the numeric type.
-    pub egg: String,
-    /// The input of `simplify`.
-    pub input: String,
+    egg: String,
+    /// The input of the run.
+    input: String,
     moved: Cell<bool>,
     /// The smallest candidate each enclosing `smallest` saw, innermost last.
     seen: RefCell<Vec<Option<(usize, Cand)>>>,
+    regs: RefCell<HashMap<String, Vec<Cand>>>,
+    /// The runs of the enclosing `scope`s, innermost last.
+    ctxs: RefCell<Vec<Ctx>>,
 }
 
 impl<'a> Env<'a> {
     pub fn new(cli: &'a Cli, egg: String, input: &str) -> Env<'a> {
-        Env { cli, egg, input: input.to_string(), moved: Cell::new(false), seen: RefCell::new(Vec::new()) }
+        Env::with(Some(cli), &cli.passes, width_of(&cli.num_type), cli.trace, egg, input)
     }
 
-    fn w(&self) -> u32 {
-        width_of(&self.cli.num_type)
+    /// A pre-pass run on `input` at width `w`.
+    pub fn prepass(p: &'a Passes, w: u32, trace: bool, input: &str) -> Env<'a> {
+        Env::with(None, p, w, trace, String::new(), input)
     }
 
-    fn prepass(&self, s: &str) -> (String, Vec<String>) {
-        linear_mba::simplify_linear_with(s, self.w(), self.cli.trace, &self.cli.passes)
+    fn with(cli: Option<&'a Cli>, passes: &'a Passes, w: u32, trace: bool, egg: String, input: &str) -> Env<'a> {
+        let input = input.to_string();
+        Env { cli, passes, w, trace, egg, input, moved: Cell::new(false), seen: Default::default(), regs: Default::default(), ctxs: Default::default() }
+    }
+
+    fn cli(&self, pass: &str) -> &'a Cli {
+        self.cli.unwrap_or_else(|| panic!("{pass} needs a simplify run"))
+    }
+
+    fn prepass_of(&self, s: &str) -> (String, Vec<String>) {
+        linear_mba::simplify_linear_with(s, self.w, self.trace, self.passes)
+    }
+
+    /// `f` on the run of the innermost `scope`, or on a fresh one.
+    fn ctx<R>(&self, f: impl FnOnce(&Ctx) -> R) -> R {
+        match self.ctxs.borrow().last() {
+            Some(c) => f(c),
+            None => f(&Ctx::new(self.w)),
+        }
+    }
+
+    fn reg_main(&self, r: &str) -> Option<Cand> {
+        self.regs.borrow().get(r).and_then(|s| s.first().cloned())
     }
 
     fn count(&self, n: &str) -> usize {
-        let p = &self.cli.passes;
+        let p = self.passes;
         match n {
-            "restarts" => self.cli.max_restarts.max(1) - 1,
+            "restarts" => self.cli("restarts").max_restarts.max(1) - 1,
             "extra" => p.extra,
             "printed" => p.printed.saturating_sub(1),
+            "keep" => p.keep,
             _ => n.parse().unwrap(),
         }
     }
@@ -102,7 +234,7 @@ impl<'a> Env<'a> {
 fn dedup(set: Vec<Cand>) -> Vec<Cand> {
     let mut out: Vec<Cand> = Vec::with_capacity(set.len());
     for c in set {
-        if !out.iter().any(|o| o.term == c.term) {
+        if !out.iter().any(|o| o.same(&c)) {
             out.push(c);
         }
     }
@@ -113,43 +245,73 @@ fn size_of(s: &str) -> usize {
     size(&parse(s))
 }
 
-const OPAQUE: [&str; 5] = ["(Shl ", "(Shr ", "(Div ", "(Mod ", "(Mulhi "];
+/// Whether `t` has a shift, division or mulhi.
+fn opaque(t: &Term) -> bool {
+    match t {
+        Term::Op(Op::Shl | Op::Shr | Op::Div | Op::Mod | Op::Mulhi, _) => true,
+        Term::Op(_, a) => a.iter().any(opaque),
+        _ => false,
+    }
+}
 
 /// The first candidate of `set` proved minimal. Without a shift, division or mulhi in the
 /// candidates, only smaller terms without them need ruling out: no rule makes one.
 fn proved_minimal<'s>(set: &'s [Cand], env: &Env) -> Option<&'s Cand> {
-    if !env.cli.passes.minimal {
+    let cli = env.cli?;
+    if !cli.passes.minimal {
         return None;
     }
-    let t_only = !OPAQUE.iter().any(|o| set.iter().any(|c| c.term.contains(o)));
-    let ty = crate::eval::NumType::from_name(&env.cli.num_type);
+    let t_only = !set.iter().any(|c| opaque(c.tree()));
+    let ty = crate::eval::NumType::from_name(&cli.num_type);
     set.iter().find(|c| {
-        let t = parse(&c.term);
-        minimal::is_tidy(&t) && (ty.is_some_and(|ty| minimal::is_minimal(&t, ty)) || t_only && minimal::is_t_minimal(&t))
+        let t = c.tree();
+        minimal::is_tidy(t) && (ty.is_some_and(|ty| minimal::is_minimal(t, ty)) || t_only && minimal::is_t_minimal(t))
     })
 }
 
-fn holds(c: &Cond, set: &[Cand], env: &Env) -> bool {
+fn cond(name: &str, set: &[Cand], env: &Env) -> bool {
     let Some(main) = set.first() else { return false };
-    c.0.iter().all(|(neg, name)| {
-        let v = match name.as_str() {
-            "opaque" => OPAQUE.iter().any(|o| main.term.contains(o)) && size_of(&env.prepass(&main.term).0) > linear_mba::TINY,
-            "minimal" => proved_minimal(set, env).is_some(),
-            "mixed" => crate::mixed(&parse(&main.term)),
-            "rebuilds" => env.prepass(&main.term).0 != main.term,
-            "moved" => env.moved.get(),
-            "input" => main.term == env.input,
-            "rerun_input" => env.cli.passes.rerun_input,
-            "printed" => env.cli.passes.printed > 0,
-            _ => unreachable!("condition {name}"),
-        };
-        v != *neg
-    })
+    let p = env.passes;
+    let reg = |r: &str, f: &dyn Fn(&Cand) -> bool| env.reg_main(r).is_some_and(|c| f(&c));
+    match name.split(':').collect::<Vec<_>>().as_slice() {
+        ["lt", r] => return reg(r, &|c| main.size() < c.size()),
+        ["gt", r] => return reg(r, &|c| main.size() > c.size()),
+        ["eq", r] => return reg(r, &|c| c.same(main)),
+        ["le", pq, r] => {
+            let (a, b) = pq.split_once('/').unwrap();
+            let (a, b): (usize, usize) = (a.parse().unwrap(), b.parse().unwrap());
+            return reg(r, &|c| b * main.size() <= a * c.size());
+        }
+        _ => {}
+    }
+    match name {
+        "opaque" => opaque(main.tree()) && size_of(&env.prepass_of(main.term()).0) > linear_mba::TINY,
+        "minimal" => proved_minimal(set, env).is_some(),
+        "mixed" => crate::mixed(main.tree()),
+        "rebuilds" => env.prepass_of(main.term()).0 != main.term(),
+        "moved" => env.moved.get(),
+        "input" => main.term() == env.input,
+        "rerun_input" => p.rerun_input,
+        "printed" => p.printed > 0,
+        "tiny" => main.size() <= linear_mba::TINY,
+        "fits_split" => main.size() <= limit(Limit::SplitSize),
+        "used_wide" => env.ctx(|c| c.used(WIDE)),
+        "used_clustered" => env.ctx(|c| c.used(CLUSTERED)),
+        "few_rewrites" => env.ctx(|c| usize::MAX - c.setting("rewrites").unwrap() <= limit(Limit::UnclusteredAfter)),
+        "replaceable" => env.ctx(|c| crate::tfunc::replacement(main.tree(), c).is_some()),
+        "abstracted" => linear_mba::ABSTRACTED.contains(&main.origin.as_str()),
+        "true" => true,
+        _ => unreachable!("condition {name}"),
+    }
+}
+
+fn holds(c: &Cond, set: &[Cand], env: &Env) -> bool {
+    c.0.iter().any(|alt| alt.iter().all(|(neg, name)| cond(name, set, env) != *neg))
 }
 
 /// The candidates `p` gives for `set`.
 pub fn run(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
-    crate::sched::apply(&env.cli.passes);
+    crate::sched::apply(env.passes);
     go(p, set, env)
 }
 
@@ -170,8 +332,8 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
                 out.extend(go(p, set.clone(), env)?);
             }
             let mut out = dedup(out);
-            out.sort_by_cached_key(|c| size_of(&c.term));
-            out.truncate((*k).max(1));
+            out.sort_by_cached_key(|c| c.size());
+            out.truncate(env.count(k).max(1));
             Ok(out)
         }
         Pipe::First(ps) => {
@@ -187,7 +349,10 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             let mut set = set;
             for _ in 0..env.count(n) {
                 let out = go(p, set.clone(), env)?;
-                let same = out.first().map(|c| &c.term) == set.first().map(|c| &c.term);
+                let same = match (out.first(), set.first()) {
+                    (Some(a), Some(b)) => a.same(b),
+                    (a, b) => a.is_none() && b.is_none(),
+                };
                 env.moved.set(!same);
                 set = out;
                 if same {
@@ -204,7 +369,7 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
                 return Ok(out);
             }
             let again = go(b, set, env)?;
-            let n = |s: &[Cand]| s.first().map(|c| size_of(&c.term));
+            let n = |s: &[Cand]| s.first().map(Cand::size);
             Ok(if n(&again) <= n(&out) { again } else { out })
         }
         Pipe::Smallest(p) => {
@@ -213,20 +378,62 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             let seen = env.seen.borrow_mut().pop().flatten();
             let out = out?;
             match seen {
-                Some((n, c)) if out.first().is_some_and(|m| n < size_of(&m.term)) => Ok(dedup(std::iter::once(c).chain(out).collect())),
+                Some((n, c)) if out.first().is_some_and(|m| n < m.size()) => Ok(dedup(std::iter::once(c).chain(out).collect())),
                 _ => Ok(out),
             }
         }
         Pipe::Tag(name, p) => {
             let clock = std::time::Instant::now();
-            let before = set.first().map(|c| c.term.clone());
+            let before = set.first().cloned();
             let mut out = go(p, set, env)?;
             stats::add(&format!("{name}/run"), stats::since(clock));
-            if let Some(m) = out.first_mut().filter(|m| Some(&m.term) != before.as_ref()) {
+            if let Some(m) = out.first_mut().filter(|m| !before.as_ref().is_some_and(|b| b.same(m))) {
                 stats::add(&format!("{name}/won/{}", m.origin), 0.0);
                 m.origin = name.clone();
             }
             Ok(out)
+        }
+        Pipe::Filter(c) => Ok(set.into_iter().filter(|x| holds(c, std::slice::from_ref(x), env)).collect()),
+        Pipe::Cand(name, p) => {
+            if crate::sched::PRE.contains(&name.as_str()) && !env.passes.pre_on(name) {
+                return Ok(Vec::new());
+            }
+            let clock = std::time::Instant::now();
+            let out = go(p, set, env)?;
+            stats::add(&format!("pre/{name}/made"), stats::since(clock));
+            Ok(out.into_iter().map(|c| Cand { origin: name.clone(), ..c }).collect())
+        }
+        Pipe::With(kv, p) => {
+            let value = |k: &str, v: &str| match (k, v) {
+                ("exclude", "clustered") => CLUSTERED as usize,
+                ("exclude", "wide") => WIDE as usize,
+                ("exclude", _) => 0,
+                _ => v.parse().unwrap_or_else(|_| crate::sched::limit_named(v).unwrap()),
+            };
+            let old: Vec<(&str, usize, usize)> = env.ctx(|c| {
+                kv.iter()
+                    .map(|(k, v)| {
+                        let (was, now) = (c.setting(k).unwrap(), value(k, v));
+                        c.set_setting(k, now);
+                        (k.as_str(), was, now)
+                    })
+                    .collect()
+            });
+            let out = go(p, set, env);
+            env.ctx(|c| {
+                for (k, was, set) in old {
+                    // The calls made inside count against the calls left outside.
+                    let back = if k == "rewrites" { was.saturating_sub(set - c.setting(k).unwrap()) } else { was };
+                    c.set_setting(k, back);
+                }
+            });
+            out
+        }
+        Pipe::Scope(p) => {
+            env.ctxs.borrow_mut().push(Ctx::new(env.w));
+            let out = go(p, set, env);
+            env.ctxs.borrow_mut().pop();
+            out
         }
     }
 }
@@ -236,14 +443,59 @@ fn pre(e: &str) -> String {
 }
 
 fn pass(name: &str, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
-    let cli = env.cli;
-    let w = env.w();
+    if let Some(r) = name.strip_prefix("save/") {
+        env.regs.borrow_mut().insert(r.to_string(), set.clone());
+        return Ok(set);
+    }
+    if let Some(r) = name.strip_prefix("load/") {
+        return Ok(env.regs.borrow().get(r).cloned().unwrap_or_default());
+    }
     let Some(main) = set.first().cloned() else { return Ok(set) };
-    let new = |term: String, origin: String| Cand { term, origin };
+    let w = env.w;
+    let p = env.passes;
+    let new = |term: String, origin: String| Cand::new(&term, &origin);
     let out = match name {
         "id" => return Ok(set),
+        "none" => return Ok(Vec::new()),
+        "within" => return Ok(if env.ctx(|c| c.setting("rewrites").unwrap()) > 0 { set } else { Vec::new() }),
+        "gates" => {
+            crate::sched::apply(p);
+            crate::sched::set_gates(p, &stats::shape(main.tree()));
+            return Ok(set);
+        }
+        _ if name.starts_with("label/") => {
+            let first = env.reg_main(&name["label/".len()..]);
+            for c in set.iter().filter(|_| stats::on()) {
+                if let Some(f) = first.as_ref().filter(|f| f.origin != c.origin) {
+                    stats::add(&format!("pre/{}/differs", c.origin), 0.0);
+                    stats::add_n(&format!("pre/{}/gain", c.origin), f.size().saturating_sub(c.size()) as u64, 0.0);
+                }
+                stats::label(&show(c.tree()), &c.origin);
+            }
+            if env.trace {
+                let all: Vec<String> = set.iter().map(|c| format!("{} {}", c.origin, c.size())).collect();
+                eprintln!("prepass: candidates: {}", all.join(", "));
+            }
+            return Ok(set);
+        }
+        "pre_done" => {
+            if env.trace {
+                let kept: Vec<String> = set.iter().map(|c| format!("{} {}", c.origin, c.size())).collect();
+                eprintln!("prepass: input {} chosen {}", size_of(&env.input), kept.join(", then "));
+            }
+            let t0 = env.reg_main("t0").unwrap_or_else(|| Cand::new(&env.input, "input"));
+            return Ok(set
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    stats::add(&format!("pre/{}/{}", c.origin, if i == 0 { "main" } else { "kept" }), 0.0);
+                    let term = if i == 0 && c.same(&t0) { t0.term().to_string() } else { show(c.tree()) };
+                    new(term, format!("pre/{}", c.origin))
+                })
+                .collect());
+        }
         "prepass" => {
-            let (alt, other) = env.prepass(&main.term);
+            let (alt, other) = env.prepass_of(main.term());
             std::iter::once(alt).chain(other).map(|e| new(e.clone(), pre(&e))).collect()
         }
         "take_minimal" => match proved_minimal(&set, env) {
@@ -255,27 +507,29 @@ fn pass(name: &str, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
         },
         "polish" => set
             .iter()
-            .map(|c| match linear_mba::polish_with(&c.term, w, &cli.passes) {
-                (p, used) if !used.is_empty() && size_of(&p) < size_of(&c.term) => {
-                    if cli.trace {
-                        eprintln!("polish: {} -> {} by {}", size_of(&c.term), size_of(&p), used.join(","));
+            .map(|c| match linear_mba::polish_with(c.term(), w, p) {
+                (out, used) if !used.is_empty() && size_of(&out) < c.size() => {
+                    if env.trace {
+                        eprintln!("polish: {} -> {} by {}", c.size(), size_of(&out), used.join(","));
                     }
-                    new(p, format!("polish/{}", used.last().unwrap()))
+                    new(out, format!("polish/{}", used.last().unwrap()))
                 }
                 _ => c.clone(),
             })
             .collect(),
         "reprint" => {
-            let out = crate::egglog_to_infix(&main.term, &|n| crate::norm_const(n, &cli.num_type));
+            let cli = env.cli(name);
+            let out = crate::egglog_to_infix(main.term(), &|n| crate::norm_const(n, &cli.num_type));
             vec![new(crate::infix_to_egglog(&out, true), main.origin.clone())]
         }
         _ if name == "egglog" || name.starts_with("egglog/") => {
-            let roots: Vec<&str> = set.iter().map(|c| c.term.as_str()).collect();
+            let cli = env.cli(name);
+            let roots: Vec<&str> = set.iter().map(Cand::term).collect();
             let clock = std::time::Instant::now();
             let e = crate::egglog_round(&env.egg, &roots, cli)?;
             stats::add(name, stats::since(clock));
-            if cli.trace {
-                eprintln!("{name}: root {} extracted {}", size_of(&main.term), size_of(&e));
+            if env.trace {
+                eprintln!("{name}: root {} extracted {}", main.size(), size_of(&e));
             }
             let origin = match stats::source_of(&e) {
                 Some(src) => format!("pre/{src}"),
@@ -285,16 +539,13 @@ fn pass(name: &str, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
         }
         _ => {
             let f = linear_mba::term_pass(name).unwrap_or_else(|| panic!("unknown pass {name}"));
-            if crate::sched::is_off(name) {
-                return Ok(set);
-            }
-            stats::time(&format!("pipe/{name}"), || {
-                let ctx = linear_mba::Ctx::new(w);
+            env.ctx(|ctx| {
                 set.iter()
                     .map(|c| {
-                        let t = parse(&c.term);
-                        match f(&t, &ctx) {
-                            Some(r) if r != t => new(show(&r), name.to_string()),
+                        let t = c.tree();
+                        let r: Option<Term> = stats::pass(name, t, || f(t, ctx));
+                        match r {
+                            Some(r) if r != *t => Cand::of(r, &c.origin),
                             _ => c.clone(),
                         }
                     })
@@ -302,17 +553,19 @@ fn pass(name: &str, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             })
         }
     };
-    // A term a pass gives back keeps the origin it came with.
+    // A term a pass over the list gives back keeps the origin it came with; passes over one
+    // term keep each candidate's own.
+    let by_term = linear_mba::term_pass(name).is_some();
     let out: Vec<Cand> = dedup(out)
         .into_iter()
-        .map(|c| match set.iter().find(|s| s.term == c.term) {
+        .map(|c| match set.iter().find(|s| !by_term && s.same(&c)) {
             Some(s) => s.clone(),
             None => c,
         })
         .collect();
     for scope in env.seen.borrow_mut().iter_mut() {
         for c in &out {
-            let n = size_of(&c.term);
+            let n = c.size();
             if scope.as_ref().is_none_or(|(m, _)| n < *m) {
                 *scope = Some((n, c.clone()));
             }
