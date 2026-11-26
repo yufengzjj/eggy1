@@ -29,6 +29,17 @@ poly_max_factor_vars=12 poly_max_pivots=4 poly_max_roots=16 poly_max_factor_step
 poly_max_solutions=8 poly_max_shifted=4 poly_max_shifted_monos=4 poly_max_atoms=4
 poly_max_masked_monos=16 poly_max_masked_size=20
 
+# The rebuilds of linear regions and the shortest bitwise expressions.
+common_multiple_min=4 common_multiple_tries=2 overlap_max_values=4 overlap_max_choices=16
+decompose_max_vars=5 decompose_min_free_size=10 decompose_max_free_classes=4
+relate_max_written_out=2 relate_max_free_product=20 relate_max_parts=8 unify_operands_max_leaves=8
+memo_contexts=4
+
+# `polish`.
+join_constants_max_leaves=3 join_constants_max_sets=10 join_linear_max_groups=12
+join_linear_near_slack=4 join_linear_near_moves=3 join_linear_max_near_groups=8
+shift_cases_depth=2 shift_cases_max_size=64
+
 # A later round: the pre-pass rebuilds, then their extraction, or the one proved minimal.
 (let later prepass | (if minimal take_minimal (egglog later)))
 

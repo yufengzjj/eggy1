@@ -2,13 +2,9 @@
 
 use super::*;
 
-/// Most leaves of two groups together that `join_constant` rebuilds with the region's
-/// constant (one group: `max_leaves`), and most such rebuilds per region.
-const MAX_JOINED_LEAVES: usize = 3;
-const MAX_JOINED_SETS: usize = 10;
-
-/// `t` with the constant of each linear region rebuilt together with one leaf group, or two
-/// groups of at most `MAX_JOINED_LEAVES` leaves, where that is smaller: the rebuild of a
+/// `t` with the constant of each linear region rebuilt together with one leaf group (of at
+/// most `max_leaves` leaves), or two groups of at most `join_constants_max_leaves` leaves,
+/// where that is smaller: the rebuild of a
 /// whole region (or of its groups, `clustered`) keeps the constant apart, but
 /// `3·((r | 0x7fffffff) ^ u)` is `-3·u + (r & 2^31) + 0x7ffffffd`, one term only when
 /// rebuilt with its constant.
@@ -44,11 +40,11 @@ fn join_constant(t: &T, w: &Ctx) -> Option<T> {
         leaves.len()
     };
     let mut sets: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).chain((0..n).flat_map(|i| (i + 1..n).map(move |j| vec![i, j]))).collect();
-    let most = max_leaves();
-    sets.retain(|s| joined(s) <= if s.len() == 1 { most } else { MAX_JOINED_LEAVES });
+    let (most, most_two) = (max_leaves(), limit(Limit::JoinConstantsMaxLeaves));
+    sets.retain(|s| joined(s) <= if s.len() == 1 { most } else { most_two });
     // Each rebuild searches a semi-linear region with a constant, which is slow.
     sets.sort_by_key(|s| joined(s));
-    sets.truncate(MAX_JOINED_SETS);
+    sets.truncate(limit(Limit::JoinConstantsMaxSets));
     let mut best = t.clone();
     for set in sets {
         let g: Vec<(u64, T)> = set.iter().flat_map(|&i| groups[i].1.clone()).collect();
@@ -61,12 +57,8 @@ fn join_constant(t: &T, w: &Ctx) -> Option<T> {
     (best != *t).then_some(best)
 }
 
-/// Most leaf groups of a region `join_linear` moves leaves between: it rebuilds each
-/// ordered pair for every shared leaf and multiple.
-const MAX_MOVE_GROUPS: usize = 12;
-
 /// `t` with each bitwise region of 6 leaves written as its smallest `g(A) op h(B)`
-/// (`decompose`), where that is smaller; `bool_expr` only splits up to `MAX_DECOMPOSE`
+/// (`decompose`), where that is smaller; `bool_expr` only splits up to `decompose_max_vars`
 /// variables, since over 6 it takes milliseconds per table:
 /// `(((y·s) | (2·v)) ^ ((s ^ w) & (v + t))) | (u & w)`.
 pub(super) fn decompose_regions(t: &T, w: &Ctx, in_bit: bool) -> T {
@@ -88,7 +80,7 @@ pub(super) fn decompose_regions(t: &T, w: &Ctx, in_bit: bool) -> T {
         let env = |v: &str| if p >> v[2..].parse::<usize>().unwrap() & 1 == 1 { w.mask } else { 0 };
         acc | (crate::eval::eval(&x, ty, &env).unwrap_or(0) & 1) << p
     });
-    let Some((_, b)) = decompose(tt, 6, usize::MAX, true) else { return node };
+    let Some((_, b)) = decompose(tt, 6, usize::MAX, true, Dec::read()) else { return node };
     let r = b_to_t(&b, &lv);
     if size(&r) < size(&node) { r } else { node }
 }
@@ -113,9 +105,10 @@ const MOVED_MULTIPLES: [i64; 7] = [0, 1, -1, 2, -2, 3, -3];
 
 /// `t` with each linear region's smallest rebuild after moving `a·v` or `a·~v` from one leaf
 /// group to another that also uses leaf `v` (and the region's constant into the first, or
-/// not), also two such moves when the first adds at most `NEAR_MOVE_SLACK` nodes: the
-/// groups are rebuilt apart, and which group takes a shared leaf's linear part is not
-/// known; `(s - (z & (y | s))) + z + (u ^ x ^ z)` is `((z & ~y) | s) + (u ^ x ^ z)`.
+/// not), also two such moves when the first adds at most `join_linear_near_slack` nodes:
+/// the groups are rebuilt apart, and which group takes a shared leaf's linear part is not
+/// known (each ordered pair of groups is rebuilt for every shared leaf and multiple);
+/// `(s - (z & (y | s))) + z + (u ^ x ^ z)` is `((z & ~y) | s) + (u ^ x ^ z)`.
 fn join_linear(t: &T, w: &Ctx, in_lin: bool) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     let lin = kind(t, w) == Kind::Lin;
@@ -126,31 +119,25 @@ fn join_linear(t: &T, w: &Ctx, in_lin: bool) -> T {
     move_linear(&node, w).unwrap_or(node)
 }
 
-/// Most nodes a move may add and still be followed by a second one, how many such moves
-/// are followed, and the most leaf groups of a region where they are: some regions only get
-/// smaller after two moves, but each second move rebuilds every pair again.
-const NEAR_MOVE_SLACK: usize = 4;
-const NEAR_MOVES: usize = 3;
-const MAX_NEAR_GROUPS: usize = 8;
-
 fn move_linear(t: &T, w: &Ctx) -> Option<T> {
     let (terms, konst) = region_terms(t, w);
     if terms.len() < 2 {
         return None;
     }
     let groups: Vec<Vec<(u64, T)>> = leaf_groups(terms, w).into_iter().map(|(_, g)| g).collect();
-    if groups.len() > MAX_MOVE_GROUPS {
+    let max_groups = limit(Limit::JoinLinearMaxGroups);
+    if groups.len() > max_groups {
         return None;
     }
     let mut best = t.clone();
     let mut near = Vec::new();
     move_groups(&groups, konst, size(t), w, &mut best, Some(&mut near));
     near.sort_by_key(|(_, _, alt)| size(alt));
-    for (groups, konst, alt) in near.into_iter().take(NEAR_MOVES) {
+    for (groups, konst, alt) in near.into_iter().take(limit(Limit::JoinLinearNearMoves)) {
         move_groups(&groups, konst, size(t), w, &mut best, None);
         let (terms, konst) = region_terms(&alt, w);
         let regrouped: Vec<Vec<(u64, T)>> = leaf_groups(terms, w).into_iter().map(|(_, g)| g).collect();
-        if regrouped.len() <= MAX_MOVE_GROUPS {
+        if regrouped.len() <= max_groups {
             move_groups(&regrouped, konst, size(t), w, &mut best, None);
         }
     }
@@ -161,11 +148,12 @@ fn move_linear(t: &T, w: &Ctx) -> Option<T> {
 type Moved = (Vec<Vec<(u64, T)>>, u64, T);
 
 /// `best` replaced by each smaller move between `groups`; with `near`, the moves (not the
-/// plain rebuilds, `a = 0`) of at most `NEAR_MOVE_SLACK` nodes more than `size0` are
+/// plain rebuilds, `a = 0`) of at most `join_linear_near_slack` nodes more than `size0` are
 /// collected there with the moved groups kept apart: grouping their sum again by leaves
 /// can undo the move, or allow other moves.
 fn move_groups(groups: &[Vec<(u64, T)>], konst: u64, size0: usize, w: &Ctx, best: &mut T, mut near: Option<&mut Vec<Moved>>) {
     let n = groups.len();
+    let (slack, near_groups) = (limit(Limit::JoinLinearNearSlack), limit(Limit::JoinLinearMaxNearGroups));
     let leaf_terms: Vec<Vec<T>> = groups
         .iter()
         .map(|g| {
@@ -201,7 +189,7 @@ fn move_groups(groups: &[Vec<(u64, T)>], konst: u64, size0: usize, w: &Ctx, best
                         let alt = build_sum(&all, k_out, w);
                         if size(&alt) < size(best) {
                             *best = alt;
-                        } else if let Some(near) = near.as_deref_mut().filter(|_| a != 0 && n <= MAX_NEAR_GROUPS && size(&alt) <= size0 + NEAR_MOVE_SLACK) {
+                        } else if let Some(near) = near.as_deref_mut().filter(|_| a != 0 && n <= near_groups && size(&alt) <= size0.saturating_add(slack)) {
                             if !near.iter().any(|(_, _, x)| *x == alt) {
                                 let mut moved: Vec<Vec<(u64, T)>> = (0..n).filter(|&k| k != i && k != j).map(|k| groups[k].clone()).collect();
                                 moved.extend([vec![(1, ri)], vec![(1, rj.clone())]]);
@@ -215,9 +203,6 @@ fn move_groups(groups: &[Vec<(u64, T)>], konst: u64, size0: usize, w: &Ctx, best
     }
 }
 
-/// Most variable shift amounts `shift_cases` splits on, nested.
-const SHIFT_CASE_DEPTH: usize = 2;
-
 /// `t` rebuilt by cases of a variable shift amount `s` of `a << s`, when smaller and equal
 /// to `t` in every case (the rebuild of their difference is 0). The candidates are the
 /// rebuild with each such shift a fresh `2^K·v` (`K` = 1, 2), checked for `s = k < K`; for
@@ -225,14 +210,11 @@ const SHIFT_CASE_DEPTH: usize = 2;
 /// for every `k`. Case `k` sets the low bits of each `b` there, so other uses of `b` see
 /// them: `(A | (~c & ((A << (c & 63)) & 1))) + y` is `A + y`.
 fn shift_cases(t: &T, w: &Ctx) -> T {
-    if size(t) > MAX_SHIFT_CASE_SIZE {
+    if size(t) > limit(Limit::ShiftCasesMaxSize) {
         return t.clone();
     }
-    shift_cases_in(t, w, SHIFT_CASE_DEPTH)
+    shift_cases_in(t, w, limit(Limit::ShiftCasesDepth))
 }
-
-/// Largest term `shift_cases` runs on: it rebuilds up to `2w` cases per amount.
-const MAX_SHIFT_CASE_SIZE: usize = 64;
 
 fn shift_cases_in(t: &T, w: &Ctx, depth: usize) -> T {
     fn amounts(t: &T, out: &mut Vec<T>) {

@@ -401,6 +401,25 @@ fn b_size(b: &B) -> usize {
 }
 
 #[test]
+fn bool_expr_cache_keeps_decompose_values_apart() {
+    // `((w ^ x) | (x & y)) & ~(y ^ z)` over variables 0..4, which `decompose` splits.
+    let tt = (0..16usize).filter(|&p| ((p ^ p >> 1) | (p >> 1 & p >> 2)) & !(p >> 2 ^ p >> 3) & 1 == 1).fold(0u64, |t, p| t | 1 << p);
+    let cost = |spec: &str| {
+        let p = crate::sched::Passes::parse(spec).unwrap();
+        crate::pipe::in_run(&p, None, || crate::pipe::Cand::new("(Var \"x\")", "input"), || {
+            let BE::E(c, _) = bool_expr_canon(tt, 4) else { panic!("not constant") };
+            (c, bool_expr_cached_now(tt, 4))
+        })
+    };
+    let (split, _) = cost("");
+    assert_eq!(split, 12);
+    let (plain, _) = cost("decompose_max_vars=3");
+    assert!(plain > split, "{plain} without decompose");
+    assert_eq!(cost(""), (split, true), "the entry under the default values is still there");
+    assert_eq!(cost("decompose_max_vars=3"), (plain, true));
+}
+
+#[test]
 fn bool_expr_matches_table() {
     crate::sched::in_default_run(|| {
         let check = |n: usize, tt: u64| {

@@ -190,6 +190,49 @@ limits! {
     /// `poly_mba`: largest term the masked expansion rebuilds for a single product with
     /// constants in both factors.
     PolyMaxMaskedSize "poly_max_masked_size";
+    /// `common_multiple`: smallest `|c|` pulled out.
+    CommonMultipleMin "common_multiple_min";
+    /// `common_multiple`: most values of `c` tried.
+    CommonMultipleTries "common_multiple_tries";
+    /// `overlapping_terms`: most distinct non-zero values of a table it searches.
+    OverlapMaxValues "overlap_max_values";
+    /// `overlapping_terms`: most ways tried to resolve points whose value is the sum of
+    /// several subsets of the coefficients.
+    OverlapMaxChoices "overlap_max_choices";
+    /// `relate`: most further arithmetic leaves tried that the region also has written out.
+    RelateMaxWrittenOut "relate_max_written_out";
+    /// `relate`: largest product leaf tried when it is not an operand of a bitwise operation.
+    RelateMaxFreeProduct "relate_max_free_product";
+    /// `relate`: most arithmetic leaves `relate_parts` tries.
+    RelateMaxParts "relate_max_parts";
+    /// `unify_operands`: most leaves of an arithmetic operand compared by its values.
+    UnifyOperandsMaxLeaves "unify_operands_max_leaves" <= 63;
+    /// `join_constants`: most leaves of two leaf groups rebuilt together with the constant.
+    JoinConstantsMaxLeaves "join_constants_max_leaves";
+    /// `join_constants`: most rebuilds with the constant per region.
+    JoinConstantsMaxSets "join_constants_max_sets";
+    /// `join_linear`: most leaf groups of a region it moves leaves between.
+    JoinLinearMaxGroups "join_linear_max_groups";
+    /// `join_linear`: most nodes a move may add and still be followed by a second one.
+    JoinLinearNearSlack "join_linear_near_slack";
+    /// `join_linear`: most such moves followed by a second one.
+    JoinLinearNearMoves "join_linear_near_moves";
+    /// `join_linear`: most leaf groups of a region where moves are followed by a second one.
+    JoinLinearMaxNearGroups "join_linear_max_near_groups";
+    /// `shift_cases`: most variable shift amounts split on, nested.
+    ShiftCasesDepth "shift_cases_depth";
+    /// `shift_cases`: largest term it runs on (it rebuilds up to `2w` cases per amount).
+    ShiftCasesMaxSize "shift_cases_max_size";
+    /// Most variables of a truth table split as `g(A) op h(B)` (`decompose`) when its
+    /// shortest bitwise expression is looked for.
+    DecomposeMaxVars "decompose_max_vars";
+    /// `decompose`: smallest size to beat for which it also fills free points.
+    DecomposeMinFreeSize "decompose_min_free_size";
+    /// `decompose`: most classes of free points enumerated for one side.
+    DecomposeMaxFreeClasses "decompose_max_free_classes" <= 63;
+    /// Most results one key of the `rewrite`, `simba_memo` and `relate` memos keeps, the
+    /// oldest dropped first.
+    MemoContexts "memo_contexts";
 }
 
 /// Variables besides the limits: `rewrites` (uncached `rewrite` calls left), `semi_leaves`
@@ -252,8 +295,36 @@ pub const ITER_LIMIT: usize = RUN0 + 6;
 pub const DEADLINE: usize = RUN0 + RUN.len();
 pub const NVARS: usize = DEADLINE + 1;
 /// The bit of the read variables (`read`) that stands for all the `LIMITS` (`limits_key`).
-const LIMITS_BIT: usize = 127;
-const _: () = assert!(NVARS <= LIMITS_BIT, "the read variables are a u128");
+const LIMITS_BIT: usize = NVARS;
+const READ_WORDS: usize = (NVARS + 1).div_ceil(64);
+
+/// A set of variables (`VARS` positions, and `LIMITS_BIT`), as the memos record what a
+/// computation read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadSet([u64; READ_WORDS]);
+
+impl ReadSet {
+    pub const EMPTY: ReadSet = ReadSet([0; READ_WORDS]);
+
+    pub fn union(mut self, o: ReadSet) -> ReadSet {
+        self.0.iter_mut().zip(o.0).for_each(|(a, b)| *a |= b);
+        self
+    }
+
+    pub fn remove(&mut self, i: usize) {
+        self.0[i / 64] &= !(1 << (i % 64));
+    }
+
+    fn ones(self) -> impl Iterator<Item = usize> {
+        self.0.into_iter().enumerate().flat_map(|(k, mut bits)| {
+            std::iter::from_fn(move || {
+                let i = bits.trailing_zeros() as usize;
+                bits &= bits.wrapping_sub(1);
+                (i < 64).then_some(k * 64 + i)
+            })
+        })
+    }
+}
 
 /// `none`, no limit: the value of every variable until it is assigned.
 pub const NONE: u64 = u64::MAX;
@@ -302,7 +373,7 @@ thread_local! {
     /// the value bound.
     static FRAMES: std::cell::RefCell<Vec<Vec<(usize, u64, u64)>>> = const { std::cell::RefCell::new(Vec::new()) };
     /// Bits of the variables read since the last `swap_read`.
-    static READ: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
+    static READ: [std::cell::Cell<u64>; READ_WORDS] = const { [const { std::cell::Cell::new(0) }; READ_WORDS] };
     /// The passes of the run on this thread (`set_current`), the default ones until set.
     static CURRENT: std::cell::RefCell<Option<std::rc::Rc<Passes>>> = const { std::cell::RefCell::new(None) };
 }
@@ -329,8 +400,15 @@ pub fn get(i: usize) -> u64 {
 
 /// The value of variable `i`, recorded as read for the memos (`swap_read`).
 pub fn read(i: usize) -> u64 {
-    READ.with(|r| r.set(r.get() | 1 << i));
+    mark_read(i);
     get(i)
+}
+
+fn mark_read(i: usize) {
+    READ.with(|r| {
+        let c = &r[i / 64];
+        c.set(c.get() | 1 << (i % 64));
+    });
 }
 
 /// Sets variable `i` outside any binding: a scope that binds it later restores this value.
@@ -401,30 +479,22 @@ pub fn in_scope<R>(f: impl FnOnce() -> R) -> R {
 }
 
 /// The variables read since the last call, which sets them to `v`.
-pub fn swap_read(v: u128) -> u128 {
-    READ.with(|r| r.replace(v))
+pub fn swap_read(v: ReadSet) -> ReadSet {
+    READ.with(|r| ReadSet(std::array::from_fn(|k| r[k].replace(v.0[k]))))
 }
 
 /// The values of the variables in `bits`, in order.
-pub fn values(bits: u128) -> Vec<u64> {
-    VARS.with(|a| ones(bits).map(|i| value_at(a, i)).collect())
+pub fn values(bits: ReadSet) -> Vec<u64> {
+    VARS.with(|a| bits.ones().map(|i| value_at(a, i)).collect())
 }
 
 /// Whether the variables in `bits` have the values `vals` (`values`).
-pub fn same_values(bits: u128, vals: &[u64]) -> bool {
-    VARS.with(|a| ones(bits).zip(vals).all(|(i, v)| value_at(a, i) == *v))
+pub fn same_values(bits: ReadSet, vals: &[u64]) -> bool {
+    VARS.with(|a| bits.ones().zip(vals).all(|(i, v)| value_at(a, i) == *v))
 }
 
 fn value_at(a: &[std::cell::Cell<u64>; NVARS], i: usize) -> u64 {
     if i == LIMITS_BIT { LIMITS_HASH.with(|c| c.get()) } else { a[i].get() }
-}
-
-fn ones(mut bits: u128) -> impl Iterator<Item = usize> {
-    std::iter::from_fn(move || {
-        let i = bits.trailing_zeros() as usize;
-        bits &= bits.wrapping_sub(1);
-        (i < 128).then_some(i)
-    })
 }
 
 /// The values of all variables but the budgets and the deadline, which a result depends on
@@ -436,7 +506,7 @@ pub fn key() -> Vec<u64> {
 /// A hash of the `LIMITS` on this thread, for the key of a memo that may depend on any of
 /// them; recorded as a read of all of them.
 pub fn limits_key() -> u64 {
-    READ.with(|r| r.set(r.get() | 1 << LIMITS_BIT));
+    mark_read(LIMITS_BIT);
     LIMITS_HASH.with(|c| c.get())
 }
 
@@ -449,6 +519,11 @@ pub fn epoch_ns() -> u64 {
 /// The value of `l` on this thread; `none` is `usize::MAX`.
 pub fn limit(l: Limit) -> usize {
     read(LIMIT0 + l as usize) as usize
+}
+
+/// `limit` not recorded as read, for a value that changes no result.
+pub fn limit_unread(l: Limit) -> usize {
+    get(LIMIT0 + l as usize) as usize
 }
 
 /// `limit` as a `u32`, `none` and values past it `u32::MAX`.
@@ -1488,6 +1563,23 @@ mod tests {
         assert_eq!(run("prepass=(scope poly_max_monos = 0 | (best 1 id poly_mba))"), input, "no product is multiplied out");
         assert_eq!(run("prepass=(scope (poly_max_monos = 0 | id) | (best 1 id poly_mba))"), plain, "the assignment ends with its sequence");
         assert_eq!(run("prepass=(scope (poly_max_monos = 0 | (best 1 id poly_mba)) | (best 1 id poly_mba))"), plain, "the memo keeps the scopes apart");
+    }
+
+    #[test]
+    fn moved_polish_constants_bind_in_their_scope() {
+        let input = crate::expr_convert::infix_to_egglog("(s - (z & (y | s))) + z + (u ^ x ^ z)", true);
+        let t = || crate::pipe::Cand::new(&input, "input");
+        let run = |spec: &str| {
+            let p = Passes::parse(spec).unwrap();
+            let r = crate::pipe::run(&p.prepass, vec![t()], &crate::pipe::Env::prepass(&p, 32, None, false, t().term())).unwrap();
+            crate::eval::size(&crate::eval::parse(r[0].term()))
+        };
+        let before = crate::eval::size(&crate::eval::parse(&input));
+        let plain = run("prepass=(scope polish/join_linear)");
+        assert!(plain < before, "a move makes it smaller");
+        assert_eq!(run("prepass=(scope join_linear_max_groups = 0 | polish/join_linear)"), before, "no region is moved in");
+        assert_eq!(run("prepass=(scope (join_linear_max_groups = 0 | id) | polish/join_linear)"), plain, "the assignment ends with its sequence");
+        assert_eq!(run("prepass=(scope (join_linear_max_groups = 0 | polish/join_linear) | polish/join_linear)"), plain, "the memo keeps the scopes apart");
     }
 
     #[test]

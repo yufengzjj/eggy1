@@ -169,16 +169,13 @@ struct Entry<V> {
     v: V,
     /// `State::used` of the computation.
     used: u8,
-    read: u128,
+    read: crate::sched::ReadSet,
     vals: Vec<u64>,
     peel: Option<usize>,
     /// The `clustered` nesting depths it holds at, and `Deps::absent` sorted.
     depths: (i64, i64),
     absent: Vec<u64>,
 }
-
-/// Most results one memo key keeps, the oldest dropped first.
-const MEMO_CONTEXTS: usize = 4;
 
 /// Bits of `State::used`.
 pub(crate) const CLUSTERED: u8 = 1;
@@ -757,15 +754,15 @@ fn cluster_regions(t: &T, w: &Ctx, in_lin: bool) -> T {
 
 /// `f()`, which of `clustered` and `wide_blocks` gave a kept form during it, the variables
 /// it read and what else it read; all of it also counts for the enclosing call.
-fn tracked<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, u8, u128, Deps) {
+fn tracked<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, u8, crate::sched::ReadSet, Deps) {
     let used0 = w.st.used.swap(0, Relaxed);
-    let read0 = crate::sched::swap_read(0);
+    let read0 = crate::sched::swap_read(crate::sched::ReadSet::EMPTY);
     let deps0 = std::mem::take(&mut *w.st.deps.lock().unwrap());
     let r = f();
     let used = w.st.used.load(Relaxed);
     w.st.used.store(used0 | used, Relaxed);
-    let read = crate::sched::swap_read(0);
-    crate::sched::swap_read(read0 | read);
+    let read = crate::sched::swap_read(crate::sched::ReadSet::EMPTY);
+    crate::sched::swap_read(read0.union(read));
     let deps = {
         let mut d = w.st.deps.lock().unwrap();
         let inner = std::mem::replace(&mut *d, deps0);
@@ -780,7 +777,7 @@ fn isolated<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, Deps) {
     let st = &w.st;
     let budgets = [crate::sched::REWRITES, crate::sched::BIT_SPLIT_BUDGET].map(|i| (i, crate::sched::get(i)));
     let used = st.used.load(Relaxed);
-    let read = crate::sched::swap_read(0);
+    let read = crate::sched::swap_read(crate::sched::ReadSet::EMPTY);
     let deps = st.deps.lock().unwrap().clone();
     let (r, _, _, d) = tracked(w, f);
     budgets.iter().for_each(|&(i, v)| crate::sched::set(i, v));
@@ -816,7 +813,7 @@ fn memo_get<K: std::hash::Hash + Eq, V: Clone + PartialEq>(memo: &Memo<K, V>, ke
         m.get(key)?.iter().find(|e| holds(e, w)).cloned()?
     };
     w.st.used.fetch_or(e.used, Relaxed);
-    crate::sched::swap_read(crate::sched::swap_read(0) | e.read);
+    crate::sched::swap_read(crate::sched::swap_read(crate::sched::ReadSet::EMPTY).union(e.read));
     let at = w.clustering_depth();
     let shift = (e.depths.0 - at, e.depths.1 - at);
     w.read(|d| d.add(&Deps { peel: e.peel.is_some(), shift, absent: e.absent.clone(), cut: false }));
@@ -849,7 +846,7 @@ fn memo_compute<K: std::hash::Hash + Eq, V: Clone>(memo: &Memo<K, V>, key: K, w:
     for (bit, name) in [(CLUSTERED, "clustered"), (WIDE, "wide_blocks")] {
         let i = crate::sched::inner_index(name);
         if used & bit == 0 && crate::sched::get(i) != 0 {
-            read &= !(1u128 << i);
+            read.remove(i);
         }
     }
     let st = &w.st;
@@ -871,7 +868,11 @@ fn memo_compute<K: std::hash::Hash + Eq, V: Clone>(memo: &Memo<K, V>, key: K, w:
     let mut m = memo.lock().unwrap();
     let list = m.entry(key).or_default();
     list.retain(|o| !holds(o, w));
-    if list.len() >= MEMO_CONTEXTS {
+    let most = crate::sched::limit_unread(Limit::MemoContexts);
+    if most == 0 {
+        return v;
+    }
+    if list.len() >= most {
         list.remove(0);
     }
     list.push(e);

@@ -84,30 +84,82 @@ pub(super) fn table_full(n: usize) -> u64 {
     if n >= 6 { u64::MAX } else { (1u64 << (1 << n)) - 1 }
 }
 
+/// The variables `decompose` and the search of `bool_expr` over it read.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct Dec {
+    pub(super) max_vars: usize,
+    min_free_size: usize,
+    max_free_classes: usize,
+}
+
+impl Dec {
+    pub(super) fn read() -> Dec {
+        Dec {
+            max_vars: limit(Limit::DecomposeMaxVars),
+            min_free_size: limit(Limit::DecomposeMinFreeSize),
+            max_free_classes: limit(Limit::DecomposeMaxFreeClasses),
+        }
+    }
+}
+
 /// `bool_expr` over variables `0..n`, cached.
 pub(super) fn bool_expr_canon(tt: u64, n: usize) -> BE {
-    bool_expr_cached(tt, n, true)
+    if n <= 3 {
+        return bool_expr_uncached(tt, n, false, None);
+    }
+    bool_expr_cached(tt, n, true, Dec::read())
+}
+
+/// `bool_expr_canon` with the variables `dec` read before, for loops.
+pub(super) fn bool_expr_with(tt: u64, n: usize, dec: Dec) -> BE {
+    if n <= 3 {
+        return bool_expr_uncached(tt, n, false, None);
+    }
+    bool_expr_cached(tt, n, true, dec)
+}
+
+type Cache = crate::eval::FastMap<(u64, usize, bool), BE>;
+
+thread_local! {
+    /// One cache per value of `Dec` met on this thread.
+    static CACHE: std::cell::RefCell<Vec<(Dec, Cache)>> = Default::default();
+}
+
+fn bool_expr_cache<R>(f: impl FnOnce(&mut Vec<(Dec, Cache)>) -> R) -> R {
+    CACHE.with(|c| f(&mut c.borrow_mut()))
 }
 
 /// `bool_expr_canon`; `top` is false for the tables its own search builds from, which
 /// `decompose` splits without filling free points (they come back many times, and that
 /// search costs more than it gains there).
-fn bool_expr_cached(tt: u64, n: usize, top: bool) -> BE {
-    thread_local! {
-        static CACHE: std::cell::RefCell<crate::eval::FastMap<(u64, usize, bool), BE>> = Default::default();
-    }
+fn bool_expr_cached(tt: u64, n: usize, top: bool, dec: Dec) -> BE {
     if n <= 3 {
-        return bool_expr_uncached(tt, n, false);
+        return bool_expr_uncached(tt, n, false, None);
     }
-    if let Some(r) = CACHE.with(|c| c.borrow().get(&(tt, n, top)).cloned()) {
+    let known = bool_expr_cache(|c| c.iter().find(|(d, _)| *d == dec).and_then(|(_, m)| m.get(&(tt, n, top)).cloned()));
+    if let Some(r) = known {
         return r;
     }
-    let r = bool_expr_uncached(tt, n, top);
-    CACHE.with(|c| c.borrow_mut().insert((tt, n, top), r.clone()));
+    let r = bool_expr_uncached(tt, n, top, Some(dec));
+    bool_expr_cache(|c| {
+        let i = c.iter().position(|(d, _)| *d == dec).unwrap_or_else(|| {
+            c.push((dec, Cache::default()));
+            c.len() - 1
+        });
+        c[i].1.insert((tt, n, top), r.clone());
+    });
     r
 }
 
-fn bool_expr_uncached(tt: u64, n: usize, top: bool) -> BE {
+/// Whether the table `tt` over `n > 3` variables is cached under the current `Dec`.
+#[cfg(test)]
+pub(super) fn bool_expr_cached_now(tt: u64, n: usize) -> bool {
+    let dec = Dec::read();
+    bool_expr_cache(|c| c.iter().any(|(d, m)| *d == dec && m.contains_key(&(tt, n, true))))
+}
+
+/// `dec` is `None` only for `n <= 3`, which looks the table up.
+fn bool_expr_uncached(tt: u64, n: usize, top: bool, dec: Option<Dec>) -> BE {
     let pts = 1usize << n;
     if tt == 0 {
         return BE::Zero;
@@ -119,6 +171,7 @@ fn bool_expr_uncached(tt: u64, n: usize, top: bool) -> BE {
         let (c, b) = bool_table(n)[tt as usize].as_ref().expect("non-constant table");
         return BE::E(*c, b.clone());
     }
+    let dec = dec.expect("read for more than 3 variables");
     let not = |b: B| B::Not(Arc::new(b));
     let bin = |op, x: B, y: B| B::Bin(op, Arc::new(x), Arc::new(y));
     let mut best: Option<(usize, B)> = None;
@@ -133,7 +186,7 @@ fn bool_expr_uncached(tt: u64, n: usize, top: bool) -> BE {
         }
         let x = B::V(i);
         let sub_full = table_full(n - 1);
-        let inner = |t: u64| bool_expr_cached(t, n - 1, false);
+        let inner = |t: u64| bool_expr_cached(t, n - 1, false, dec);
         let cost = match (inner(f0), inner(f1)) {
             (BE::Zero, BE::Ones) => 1,
             (BE::Ones, BE::Zero) => 2,
@@ -177,16 +230,12 @@ fn bool_expr_uncached(tt: u64, n: usize, top: bool) -> BE {
         }
     }
     let bound = best.as_ref().map_or(usize::MAX, |b| b.0);
-    if let Some(cand) = if n <= MAX_DECOMPOSE { decompose(tt, n, bound, top) } else { None } {
+    if let Some(cand) = if n <= dec.max_vars { decompose(tt, n, bound, top, dec) } else { None } {
         best = Some(cand);
     }
     let (c, b) = best.unwrap();
     BE::E(c, b)
 }
-
-/// Most variables `bool_expr` tries `decompose` on; its cost grows with the pairs of
-/// subsets (`decompose_regions` goes to 6 on the final result).
-pub(super) const MAX_DECOMPOSE: usize = 5;
 
 /// Smallest `g(A) op h(B)` with `A ∪ B` all variables and both proper subsets, as in
 /// `((w ^ x) | (x & y)) & ~(y ^ z)`. For `&`, `g` and `h` are `tt` ORed over the
@@ -196,7 +245,7 @@ pub(super) const MAX_DECOMPOSE: usize = 5;
 /// variables is also tried with the points the other side decides alone set either way
 /// (`(e | (f & c)) & (c ^ e ^ m)`), and for `^` both sides with a function of `A ∩ B`
 /// XORed in.
-pub(super) fn decompose(tt: u64, n: usize, bound: usize, free_points: bool) -> Option<(usize, B)> {
+pub(super) fn decompose(tt: u64, n: usize, bound: usize, free_points: bool, dec: Dec) -> Option<(usize, B)> {
     let full_vars = (1usize << n) - 1;
     let full = table_full(n);
     // Table with variable `i` forced to `v`, still over all `n` variables.
@@ -221,7 +270,7 @@ pub(super) fn decompose(tt: u64, n: usize, bound: usize, free_points: bool) -> O
                 break;
             }
         }
-        match bool_expr_cached(st, keep.count_ones() as usize, false) {
+        match bool_expr_cached(st, keep.count_ones() as usize, false, dec) {
             BE::E(c, b) => Some((c, b)),
             _ => None,
         }
@@ -254,7 +303,7 @@ pub(super) fn decompose(tt: u64, n: usize, bound: usize, free_points: bool) -> O
             zero |= u64::from(must0) << (p & keep);
         }
         let free: Vec<usize> = classes(keep).filter(|&q| (one | zero) >> q & 1 == 0).collect();
-        if free.is_empty() || free.len() > MAX_FREE_CLASSES {
+        if free.is_empty() || free.len() > dec.max_free_classes {
             return Vec::new();
         }
         tables_over(keep, one, &free)
@@ -275,7 +324,7 @@ pub(super) fn decompose(tt: u64, n: usize, bound: usize, free_points: bool) -> O
     // Free points are filled only when the size to beat is large: small tables are many
     // and rarely improve.
     for fill in [false, true] {
-        if fill && (!free_points || best.0 < MIN_FREE_POINTS_SIZE) {
+        if fill && (!free_points || best.0 < dec.min_free_size) {
             break;
         }
         for a in 1..full_vars {
@@ -328,12 +377,6 @@ pub(super) fn decompose(tt: u64, n: usize, bound: usize, free_points: bool) -> O
     let (eg, eh) = (sub(g, a)?.1, sub(h, b)?.1);
     Some((best.0, B::Bin(op, Arc::new(remap(&eg, &vars(a))), Arc::new(remap(&eh, &vars(b))))))
 }
-
-/// Smallest size to beat for which `decompose` also fills free points.
-const MIN_FREE_POINTS_SIZE: usize = 10;
-
-/// Most classes of free points `decompose` enumerates for one side.
-const MAX_FREE_CLASSES: usize = 4;
 
 pub(super) fn b_to_t(b: &B, leaves: &[T]) -> T {
     match b {

@@ -86,10 +86,11 @@ pub(super) fn one_wide_term_pass(t: &T, w: &Ctx) -> Option<T> {
 }
 
 /// `c·B + k` for values that take two values only, `B` split by `decompose` past the
-/// `MAX_DECOMPOSE` leaves where `bool_expr` stops: `(g | b | a) & (c ^ f ^ (a | e))`.
+/// `decompose_max_vars` leaves where `bool_expr` stops: `(g | b | a) & (c ^ f ^ (a | e))`.
 fn one_wide_term(vals: &[u64], lv: &[T], w: &Ctx) -> Option<T> {
     let n = lv.len();
-    if n <= MAX_DECOMPOSE {
+    let dec = Dec::read();
+    if n <= dec.max_vars {
         return None;
     }
     let k = vals[0];
@@ -98,7 +99,7 @@ fn one_wide_term(vals: &[u64], lv: &[T], w: &Ctx) -> Option<T> {
         return None;
     }
     let tt = (0..vals.len()).filter(|&p| vals[p] != k).fold(0u64, |t, p| t | 1 << p);
-    let (_, b) = decompose(tt, n, usize::MAX, true)?;
+    let (_, b) = decompose(tt, n, usize::MAX, true, dec)?;
     Some(build_sum(&[(c, b_to_t(&b, lv))], k, w))
 }
 
@@ -108,10 +109,11 @@ fn common_multiple(vals: &[u64], lv: &[T], w: &Ctx) -> Option<T> {
     let n = lv.len();
     let a: Vec<u64> = (0..n).map(|i| vals[1 << i].wrapping_sub(vals[0]) & w.mask).collect();
     let near = |x: u64, c: u64| w.signed(x.wrapping_sub(c) & w.mask).unsigned_abs() <= 1;
+    let (min, tries) = (limit(Limit::CommonMultipleMin) as u64, limit(Limit::CommonMultipleTries));
     let mut tried = Vec::new();
     let mut best: Option<T> = None;
     for c in a.iter().flat_map(|&x| [x, x.wrapping_add(1), x.wrapping_sub(1)].map(|c| c & w.mask)) {
-        if w.signed(c).unsigned_abs() < MIN_COMMON || !w.signed(c).unsigned_abs().is_power_of_two() || tried.contains(&c) || tried.len() == MAX_COMMON_TRIES {
+        if w.signed(c).unsigned_abs() < min || !w.signed(c).unsigned_abs().is_power_of_two() || tried.contains(&c) || tried.len() == tries {
             continue;
         }
         let s: Vec<usize> = (0..n).filter(|&j| near(a[j], c)).collect();
@@ -133,10 +135,6 @@ fn common_multiple(vals: &[u64], lv: &[T], w: &Ctx) -> Option<T> {
     }
     best
 }
-
-/// Smallest `|c|` `common_multiple` pulls out, and how many `c` it tries.
-const MIN_COMMON: u64 = 4;
-const MAX_COMMON_TRIES: usize = 2;
 
 /// The linear MBA over `lv` with values `vals` on {0,1}^n. When every value is a
 /// multiple of `2^k`, `±2^k·L` with `L` rebuilt from `±vals / 2^k` is also tried, as in
@@ -270,6 +268,7 @@ fn rebuild_table_uncached(gp: &[u64], lv: &[T], shape: &[(usize, bool)], konst: 
     let n = lv.len();
     let pts = 1usize << n;
     let m = w.mask;
+    let dec = Dec::read();
     let mut cands: Vec<(Vec<(u64, T)>, u64)> = Vec::new();
     // Leaves with their own coefficient, then one term per remaining value. A leaf
     // with coefficient 0 would repeat the subset without it.
@@ -290,7 +289,7 @@ fn rebuild_table_uncached(gp: &[u64], lv: &[T], shape: &[(usize, bool)], konst: 
         distinct.dedup();
         for u in distinct {
             let tt = (0..pts).filter(|&p| r[p] == u).fold(0u64, |acc, p| acc | 1 << p);
-            let BE::E(_, b) = bool_expr_canon(tt, n) else {
+            let BE::E(_, b) = bool_expr_with(tt, n, dec) else {
                 unreachable!("r[0] == 0, so the table is neither empty nor full")
             };
             terms.push((u, b_to_t(&b, lv)));
@@ -303,9 +302,6 @@ fn rebuild_table_uncached(gp: &[u64], lv: &[T], shape: &[(usize, bool)], konst: 
         .min_by_key(|(ts, k)| sum_size(ts, *k, w))
         .unwrap()
 }
-
-/// Most distinct non-zero values for which `overlapping_terms` searches.
-const OVERLAP_MAX_VALUES: usize = 4;
 
 /// Up to 3 bitwise terms whose supports may overlap (`11*(x^y) - x`), possibly
 /// non-zero at 0 (`-23*~(x|y)`). Shifting the table by `d` gives
@@ -320,8 +316,9 @@ pub(super) fn overlapping_terms(gp: &[u64], lv: &[T], konst: u64, w: &Ctx) -> Ve
         v.dedup();
         v
     };
+    let (most, choices, dec) = (limit(Limit::OverlapMaxValues), limit(Limit::OverlapMaxChoices), Dec::read());
     let vals = distinct(gp);
-    if vals.len() > OVERLAP_MAX_VALUES {
+    if vals.len() > most {
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -329,7 +326,7 @@ pub(super) fn overlapping_terms(gp: &[u64], lv: &[T], konst: u64, w: &Ctx) -> Ve
     for d in offsets {
         let h: Vec<u64> = gp.iter().map(|v| v.wrapping_add(d) & m).collect();
         let hv = distinct(&h);
-        if hv.len() > OVERLAP_MAX_VALUES {
+        if hv.len() > most {
             continue;
         }
         let mut pool = hv.clone();
@@ -344,7 +341,7 @@ pub(super) fn overlapping_terms(gp: &[u64], lv: &[T], konst: u64, w: &Ctx) -> Ve
         for k in (1..=3usize).filter(|k| hv.len() < 1 << k) {
             // At k = 3 a repeated coefficient leaves ambiguous points (rejected) or two equal terms.
             combinations(&pool, k, k == 2, &mut Vec::new(), &mut |coefs| {
-                if let Some(c) = split_by_sums(&h, &hv, coefs, lv, konst.wrapping_add(d) & m, w) {
+                if let Some(c) = split_by_sums(&h, &hv, coefs, lv, konst.wrapping_add(d) & m, (choices, dec), w) {
                     out.push(c);
                 }
             });
@@ -366,15 +363,12 @@ pub(super) fn combinations(pool: &[u64], k: usize, repeat: bool, prefix: &mut Ve
     }
 }
 
-/// Most ways tried to resolve points whose value is the sum of several subsets of `coefs`.
-const MAX_SUBSET_CHOICES: usize = 16;
-
 /// Write `h` as `Σ coefs[j]·b_j`, where each point's value is the sum of the
 /// coefficients of the `b_j` that are 1 there. With two terms a point can only
 /// be ambiguous when `c1 + c2 = 0` (as in `(y ^ k) - k`); such points are
-/// resolved in up to `MAX_SUBSET_CHOICES` ways and the shortest result wins.
+/// resolved in up to `choices` ways and the shortest result wins.
 /// With three terms ambiguity is common and too costly to resolve, so it fails.
-fn split_by_sums(h: &[u64], h_vals: &[u64], coefs: &[u64], lv: &[T], konst: u64, w: &Ctx) -> Option<(Vec<(u64, T)>, u64)> {
+fn split_by_sums(h: &[u64], h_vals: &[u64], coefs: &[u64], lv: &[T], konst: u64, (choices, dec): (usize, Dec), w: &Ctx) -> Option<(Vec<(u64, T)>, u64)> {
     let m = w.mask;
     let k = coefs.len();
     let sums: Vec<u64> = (0..1usize << k)
@@ -393,7 +387,7 @@ fn split_by_sums(h: &[u64], h_vals: &[u64], coefs: &[u64], lv: &[T], konst: u64,
     }
     let ways = ambiguous.iter().try_fold(1usize, |acc, &p| acc.checked_mul(options[p].len())).unwrap_or(usize::MAX);
     let mut best: Option<(Vec<(u64, T)>, u64)> = None;
-    'ways: for mut way in 0..ways.min(MAX_SUBSET_CHOICES) {
+    'ways: for mut way in 0..ways.min(choices) {
         let mut choice: Vec<usize> = options.iter().map(|o| o[0]).collect();
         for &p in &ambiguous {
             choice[p] = options[p][way % options[p].len()];
@@ -410,7 +404,7 @@ fn split_by_sums(h: &[u64], h_vals: &[u64], coefs: &[u64], lv: &[T], konst: u64,
         let mut terms = Vec::new();
         let mut kk = konst;
         for (j, &tt) in tts.iter().enumerate() {
-            match bool_expr_canon(tt, lv.len()) {
+            match bool_expr_with(tt, lv.len(), dec) {
                 BE::Zero => continue 'ways,
                 // All ones in every bit is the word -1.
                 BE::Ones => kk = kk.wrapping_sub(coefs[j]) & m,

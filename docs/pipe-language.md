@@ -334,6 +334,28 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `poly_max_atoms` | 4 | `poly_mba`：按掩码展开时最多把位分成几组 |
 | `poly_max_masked_monos` | 16 | `poly_mba`：按掩码展开最多几个单项式（或普通展开的两倍） |
 | `poly_max_masked_size` | 20 | `poly_mba`：只有一个两边都带常数的乘积时，按掩码展开的项最大多大 |
+| `common_multiple_min` | 4 | `common_multiple`：提出的 `c` 的绝对值至少多大 |
+| `common_multiple_tries` | 2 | `common_multiple`：最多试几个 `c` |
+| `overlap_max_values` | 4 | `overlapping_terms`：表里不同的非零值多于此时不搜索 |
+| `overlap_max_choices` | 16 | `overlapping_terms`：一个点的值是几组系数之和时，最多试几种取法 |
+| `decompose_max_vars` | 5 | 找最短位运算式时，最多几个变量的真值表才试 `g(A) op h(B)` 分解（`decompose`） |
+| `decompose_min_free_size` | 10 | `decompose`：要胜过的大小至少这么大时，才把自由点两种取值都试 |
+| `decompose_max_free_classes` | 4，上限 63 | `decompose`：一边最多枚举几类自由点 |
+| `relate_max_written_out` | 2 | `relate`：试过 `related` 个算术叶子后，再试几个区域里也展开写出的叶子 |
+| `relate_max_free_product` | 20 | `relate`：不是位运算操作数的乘积叶子最大多大才试 |
+| `relate_max_parts` | 8 | `relate`：按部分处理宽区域时最多试几个算术叶子 |
+| `unify_operands_max_leaves` | 8，上限 63 | `unify_operands`：算术操作数最多几个叶子才按 {0,1}^n 上的值比较 |
+| `memo_contexts` | 4 | `rewrite`、`simba_memo`、`relate` 的缓存每个键最多存几个结果，多了丢最早的（0 不缓存） |
+| `join_constants_max_leaves` | 3 | `join_constants`：两个叶子组合起来和常数一起重建时，最多几个叶子 |
+| `join_constants_max_sets` | 10 | `join_constants`：每个区域最多几次和常数一起的重建 |
+| `join_linear_max_groups` | 12 | `join_linear`：区域最多几个叶子组才在组间移动叶子 |
+| `join_linear_near_slack` | 4 | `join_linear`：一次移动最多多出几个节点，还能接着再移一次 |
+| `join_linear_near_moves` | 3 | `join_linear`：最多几个这样的移动接着再移一次 |
+| `join_linear_max_near_groups` | 8 | `join_linear`：区域最多几个叶子组才接着再移一次 |
+| `shift_cases_depth` | 2 | `shift_cases`：最多嵌套按几个变量移位量分情况 |
+| `shift_cases_max_size` | 64 | `shift_cases`：只处理不大于此的项（每个移位量最多重建 `2w` 种情况） |
+
+`decompose_max_vars`、`decompose_min_free_size`、`decompose_max_free_classes` 决定最短位运算式的搜索；线程级的真值表缓存按这三个值分开存，所以不同作用域里的不同值各建一份表。`memo_contexts` 只决定缓存留多少结果，不改变结果，所以不记入缓存读过的变量。
 
 ### 7.4 `sub/NAME`
 

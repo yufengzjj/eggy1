@@ -118,11 +118,6 @@ fn relate_uncached(t: &T, w: &Ctx) -> T {
     relate_region(&t, w).filter(|r| size(r) < size(&t)).unwrap_or(t)
 }
 
-/// Most further arithmetic leaves `relate_region` tries that the region also has written out.
-const MAX_WRITTEN_OUT: usize = 2;
-/// Largest product leaf `relate_region` tries when it is not an operand of a bitwise operation.
-const MAX_FREE_PRODUCT: usize = 20;
-
 pub(super) fn relate_region(t: &T, w: &Ctx) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
@@ -164,9 +159,6 @@ fn bit_operands(t: &T, w: &Ctx, out: &mut Vec<T>) {
     }
 }
 
-/// Most arithmetic leaves `relate_parts` tries.
-const MAX_PARTS: usize = 8;
-
 /// `relate_region` on parts of the region `t` (`lv` its leaves): for an arithmetic operand
 /// `L` of a bitwise operation, the terms whose leaves are all among the leaves of the terms
 /// that contain `L` and the leaves of the arithmetic leaves there (`L` included) as linear
@@ -181,7 +173,7 @@ fn relate_parts(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
     let mut operands = Vec::new();
     bit_operands(t, w, &mut operands);
     let (mut changed, mut tried) = (false, Vec::new());
-    for l in lv.iter().filter(|l| matches!(l, T::Op(..)) && kind(l, w) != Kind::Bit && operands.contains(l)).take(MAX_PARTS) {
+    for l in lv.iter().filter(|l| matches!(l, T::Op(..)) && kind(l, w) != Kind::Bit && operands.contains(l)).take(limit(Limit::RelateMaxParts)) {
         let term_leaves: Vec<Vec<T>> = terms.iter().map(|(_, x)| leaves_of(x)).collect();
         let mut near = leaves_of(l);
         for x in term_leaves.iter().filter(|tl| tl.contains(l)).flatten() {
@@ -320,18 +312,19 @@ fn relate_in(t: &T, w: &Ctx) -> Option<T> {
     let mut operands = Vec::new();
     bit_operands(t, w, &mut operands);
     let vars: Vec<Vec<String>> = lv.iter().map(crate::eval::vars).collect();
+    let (related, free_product) = (limit(Limit::Related), limit(Limit::RelateMaxFreeProduct));
     let candidates: Vec<usize> = (0..lv.len())
-        .filter(|&i| matches!(&lv[i], T::Op(..)) && kind(&lv[i], w) != Kind::Bit && (operands.contains(&lv[i]) || size(&lv[i]) <= MAX_FREE_PRODUCT) && (0..lv.len()).any(|j| j != i && vars[j].iter().any(|v| vars[i].contains(v))))
+        .filter(|&i| matches!(&lv[i], T::Op(..)) && kind(&lv[i], w) != Kind::Bit && (operands.contains(&lv[i]) || size(&lv[i]) <= free_product) && (0..lv.len()).any(|j| j != i && vars[j].iter().any(|v| vars[i].contains(v))))
         .collect();
-    let mut arith: Vec<usize> = candidates.iter().copied().take(limit(Limit::Related)).collect();
+    let mut arith: Vec<usize> = candidates.iter().copied().take(related).collect();
     // Past those, leaves written out in the region as well, whose `μ·(v - L)` cancels terms.
-    if candidates.len() > limit(Limit::Related) {
+    if candidates.len() > related {
         let own = region_terms(t, w).0;
         let written_out = |l: &T| {
             let (lt, _) = region_terms(l, w);
             lt.len() > 1 && lt.iter().all(|(_, x)| own.iter().any(|(_, y)| x == y))
         };
-        arith.extend(candidates[limit(Limit::Related)..].iter().copied().filter(|&i| kind(&lv[i], w) == Kind::Lin && written_out(&lv[i])).take(MAX_WRITTEN_OUT));
+        arith.extend(candidates[related..].iter().copied().filter(|&i| kind(&lv[i], w) == Kind::Lin && written_out(&lv[i])).take(limit(Limit::RelateMaxWrittenOut)));
     }
     if arith.is_empty() {
         return None;
@@ -592,9 +585,6 @@ fn signed_products(t: &T) -> T {
     }
 }
 
-/// Most leaves of an arithmetic operand that `unify_operands` compares by its values.
-const MAX_UNIFY_LEAVES: usize = 8;
-
 #[derive(PartialEq, Eq, Hash)]
 enum OperandKey {
     /// The leaves, sorted, and the values on {0,1}^n (or their complements, whichever is smaller).
@@ -604,6 +594,7 @@ enum OperandKey {
 
 struct Unifier<'a> {
     w: &'a Ctx,
+    max_leaves: usize,
     classes: crate::eval::FastMap<OperandKey, usize>,
     /// Per class: the smallest member and whether it is the complement of the class key.
     best: Vec<(usize, T, bool)>,
@@ -648,7 +639,7 @@ impl Unifier<'_> {
         let w = self.w;
         let mut lv = Vec::new();
         leaves(&abs, w, &mut lv);
-        let (key, flip) = if lv.len() <= MAX_UNIFY_LEAVES && !has_const_bitwise(&abs, w) {
+        let (key, flip) = if lv.len() <= self.max_leaves && !has_const_bitwise(&abs, w) {
             lv.sort_by_key(term_hash);
             let prog = Prog::new(&abs, &lv, w);
             let vals: Vec<u64> = (0..1usize << lv.len()).map(|p| prog.at(p, w)).collect();
@@ -709,7 +700,7 @@ impl Unifier<'_> {
 /// proves it) written as the smallest of them or its `~`, so that the regions around
 /// them share the leaf: `(a & (~x - z)) + ((~y - w) & (x + z))` with `a = y + w`.
 pub(super) fn unify_operands(t: &T, w: &Ctx) -> T {
-    let mut u = Unifier { w, classes: Default::default(), best: Vec::new(), of: Default::default(), built: Vec::new(), first: Default::default(), regions: 0, shared: false };
+    let mut u = Unifier { w, max_leaves: limit(Limit::UnifyOperandsMaxLeaves), classes: Default::default(), best: Vec::new(), of: Default::default(), built: Vec::new(), first: Default::default(), regions: 0, shared: false };
     u.classify(t, false, 0);
     if !u.shared {
         return t.clone();
