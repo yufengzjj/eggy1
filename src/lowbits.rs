@@ -82,6 +82,10 @@ fn known_low(a: &Info, b: &Info, f: impl Fn(u64, u64) -> u64, w: &Ctx) -> (u64, 
 
 /// `square`: the operands of a product are the same term, so bit 1 is 0 (`a² mod 4` is 0 or 1).
 fn combine(op: Op, args: &[Info], square: bool, w: &Ctx) -> Info {
+    // Leaf placeholders (`Op::Leaf`, `Op::Slot`) of the semi-linear search.
+    if args.is_empty() {
+        return leaf_info(0, 0, w);
+    }
     let m = w.mask;
     let a: Vec<Info> = args.iter().map(|i| if i.det { *i } else { leaf_info(i.k0, i.k1, w) }).collect();
     let tz = |i: &Info| lowmask(i.k0.trailing_ones().min(w.w));
@@ -629,8 +633,9 @@ fn shorter_low(q: &T, r: u32, w: &Ctx) -> Option<T> {
     if size(q) > MAX_LOW_REBUILD {
         return None;
     }
-    let rebuilt = crate::linear_mba::rewrite(&folded, w);
-    (size(&rebuilt) < size(q) && size(&rebuilt) < size(&crate::linear_mba::rewrite(q, w))).then_some(rebuilt)
+    let low = crate::linear_mba::sub_index("low_factor");
+    let rebuilt = crate::linear_mba::sub(low, &folded, w);
+    (size(&rebuilt) < size(q) && size(&rebuilt) < size(&crate::linear_mba::sub(low, q, w))).then_some(rebuilt)
 }
 
 /// `t` without operations whose constant operand leaves the other unchanged (`a*1`, `a + 0`, `a & -1`, ...).

@@ -589,6 +589,19 @@ pub(crate) fn rewrite(t: &T, w: &Ctx) -> T {
     memo_compute(&w.st.rewritten, key, w, f)
 }
 
+/// `t` rebuilt by `Passes::subs` entry `i` (`crate::sched::SUBS`), for a pass that rebuilds
+/// a subterm.
+pub(crate) fn sub(i: usize, t: &T, w: &Ctx) -> T {
+    let p = crate::sched::current();
+    match &p.subs[i] {
+        crate::sched::Pipe::Pass(n) if n == "rewrite" => rewrite(t, w),
+        crate::sched::Pipe::Pass(n) if n == "rebuild" => rebuild_once(t, w),
+        pipe => crate::pipe::run_term(pipe, t, w),
+    }
+}
+
+pub(crate) use crate::sched::sub_index;
+
 fn rewrite_uncached(t: &T, w: &Ctx) -> T {
     crate::pipe::run_term(&crate::sched::current().rewrite, t, w)
 }
@@ -647,7 +660,7 @@ fn recombine_regions(t: &T, w: &Ctx, in_lin: bool) -> T {
     }
     match recombine_products(&node, w) {
         Some(s) => {
-            let again = rewrite(&s, w);
+            let again = sub(sub_index("recombine"), &s, w);
             if size(&again) < size(&s) { again } else { s }
         }
         None => node,
@@ -687,8 +700,8 @@ fn recombine_products(t: &T, w: &Ctx) -> Option<T> {
                     if !maybe_zero(&diff, w) || rewrite(&diff, w) != T::Num(0) {
                         continue;
                     }
-                    let f1 = rewrite(&add(q1.clone(), p2.clone()), w);
-                    let f2 = rewrite(&add(q1.clone(), q2.clone()), w);
+                    let f1 = crate::linear_mba::sub(sub_index("recombine"), &add(q1.clone(), p2.clone()), w);
+                    let f2 = crate::linear_mba::sub(sub_index("recombine"), &add(q1.clone(), q2.clone()), w);
                     let coef = terms[i].0;
                     terms.remove(j);
                     terms[i] = match (f1, f2) {
@@ -919,7 +932,7 @@ pub const TINY: usize = 3;
 pub(crate) const ABSTRACTED: [&str; 2] = ["over_const_bitwise", "over_shared_bitwise"];
 
 /// The rebuild `simplify_linear` applies to its input, without `relate`.
-fn rebuild_once(t: &T, w: &Ctx) -> T {
+pub(crate) fn rebuild_once(t: &T, w: &Ctx) -> T {
     let t = unshift(&crate::lowbits::simplify(t, w), w);
     crate::tfunc::replacement(&t, w).unwrap_or_else(|| crate::tfunc::simplify(&cluster_regions(&rewrite(&t, w), w, false), w))
 }
@@ -945,8 +958,8 @@ pub(crate) const TERM_PASSES: &[(&str, fn(&T, &Ctx) -> Option<T>)] = &[
     ("halve", |t, w| Some(halve(t, w))),
     ("over_const_bitwise", |t, w| Some(over_const_bitwise(t, w))),
     ("over_shared_bitwise", |t, w| Some(over_shared_bitwise(t, w))),
-    ("over_products", |t, w| Some(crate::lowbits::over_products(t, w, |x| rebuild_once(x, w)))),
-    ("split_bits", |t, w| Some(split_in(t, w, &|x| rebuild_once(x, w)))),
+    ("over_products", |t, w| Some(crate::lowbits::over_products(t, w, |x| sub(sub_index("over_products"), x, w)))),
+    ("split_bits", |t, w| Some(split_in(t, w, &|x| sub(sub_index("split_bits"), x, w)))),
     ("drop_identities", |t, w| Some(drop_identities(t, w))),
     ("rebuild", |t, w| Some(rebuild_once(t, w))),
     ("simba", simba),

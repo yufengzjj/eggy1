@@ -152,7 +152,7 @@ pub(super) fn halve(t: &T, w: &Ctx) -> T {
     let Some((k, (T::Op(op, a), c))) = best else { return node };
     // Only the low `w - k` bits of the operands matter, so their constants are cut
     // to that width, once the rebuild has merged them: `(2^63 + 1)·y` becomes `y`.
-    let inner = T::Op(op, a.iter().map(|x| low_consts(&rewrite(x, w), w.w - k)).collect());
+    let inner = T::Op(op, a.iter().map(|x| low_consts(&sub(sub_index("halve"), x, w), w.w - k)).collect());
     let scaled = T::Op(Op::Mul, vec![T::Num(w.signed(1 << k)), inner]);
     if c == 0 { scaled } else { T::Op(Op::Add, vec![scaled, T::Num(c as i64)]) }
 }
@@ -336,7 +336,7 @@ fn over_subterms(t: &T, w: &Ctx, pick: &dyn Fn(&T) -> bool) -> T {
     if found.is_empty() {
         return t.clone();
     }
-    let r = rebuild_once(&a, w);
+    let r = sub(sub_index("over_bitwise"), &a, w);
     if r == a {
         return t.clone();
     }

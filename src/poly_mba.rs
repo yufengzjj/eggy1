@@ -6,7 +6,7 @@
 //! reverse.
 
 use crate::eval::{Op, Term as T, size};
-use crate::linear_mba::{Kind, MAX_LEAVES, Ctx, build_sum, Prog, const_shift, kind, leaves, rewrite, simba_memo};
+use crate::linear_mba::{Kind, MAX_LEAVES, Ctx, build_sum, Prog, const_shift, kind, leaves, simba_memo};
 use crate::sched::{Limit, limit};
 use std::collections::BTreeMap;
 
@@ -56,7 +56,7 @@ impl<'a> Expansion<'a> {
     }
 
     fn leaf(&mut self, t: &T) -> Option<usize> {
-        let t = rewrite(t, self.w);
+        let t = crate::linear_mba::sub(crate::linear_mba::sub_index("poly"), t, self.w);
         self.push_leaf(t, None)
     }
 
@@ -201,7 +201,7 @@ impl<'a> Expansion<'a> {
             // rebuilt first, `(x + K) - (x | K)` is the single leaf `x & K`. Other factors
             // stay as they are: rebuilt, `~(y - 1)` becomes `-y`, a leaf unrelated to `y - 1`.
             Op::Mul => {
-                let f = |t: &T| if has_const_bit(t, self.w) { rewrite(t, self.w) } else { t.clone() };
+                let f = |t: &T| if has_const_bit(t, self.w) { crate::linear_mba::sub(crate::linear_mba::sub_index("poly"), t, self.w) } else { t.clone() };
                 let (x, y) = (self.poly(&f(&a[0]))?, self.poly(&f(&a[1]))?);
                 self.product(&x, &y)?
             }
@@ -911,6 +911,7 @@ fn collect_masks(t: &T, out: &mut Vec<u64>) {
 mod tests {
     use super::*;
     use crate::eval::{NumType, eval};
+    use crate::linear_mba::rewrite;
 
     struct Rng(u64);
     impl Rng {

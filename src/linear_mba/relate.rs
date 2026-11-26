@@ -307,7 +307,7 @@ fn complemented(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
         if own.len() < 2 || Prog::new(l, &own, w).at(0, w) != w.mask {
             continue;
         }
-        let c = rewrite(&T::Op(Op::Sub, vec![T::Op(Op::Neg, vec![l.clone()]), T::Num(1)]), w);
+        let c = sub(sub_index("relate"), &T::Op(Op::Sub, vec![T::Op(Op::Neg, vec![l.clone()]), T::Num(1)]), w);
         if size(&c) < size(l) {
             from.push(l.clone());
             to.push(T::Op(Op::Not, vec![c]));
@@ -499,7 +499,7 @@ fn relate_in(t: &T, w: &Ctx) -> Option<T> {
         let mut slv = Vec::new();
         leaves(&s, w, &mut slv);
         let dropped = if wide && slv.len() > MAX_LEAVES { drop_leaves(&s, &slv, w) } else { None };
-        let r = dropped.unwrap_or_else(|| rewrite(&s, w));
+        let r = dropped.unwrap_or_else(|| sub(sub_index("relate"), &s, w));
         let back: Vec<T> = combo.iter().map(|&(k, _)| lv[arith[k]].clone()).collect();
         let used: Vec<T> = combo.iter().map(|&(k, _)| ph[k].clone()).collect();
         let r = crate::lowbits::replace(&r, &used, &back);
@@ -510,7 +510,7 @@ fn relate_in(t: &T, w: &Ctx) -> Option<T> {
         let (fewer, r) = if rlv.len() < lv.len() {
             (true, r)
         } else if wide && opaque(&rlv) < opaque(&lv) {
-            let again = rewrite(&r, w);
+            let again = sub(sub_index("relate"), &r, w);
             (size(&again) < size(t), again)
         } else {
             (false, r)

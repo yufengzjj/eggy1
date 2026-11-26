@@ -445,6 +445,57 @@ pub fn pipeline() -> String {
 /// operands rewritten; `poly_mba` taken instead when strictly smaller.
 pub const REWRITE: &str = "again(best(1,regions(best(1,simba,small_blocks,wide_blocks)),poly_mba))";
 
+/// The rebuilds of subterms that passes inside a rebuild make (`Passes::subs`), by name, and
+/// their default pipelines: `rewrite` (the memoized `Passes::rewrite`) or `rebuild` (the
+/// rebuild of `simplify_linear` without `relate`, `linear_mba::rebuild_once`).
+pub const SUBS: [(&str, &str); 13] = [
+    // Each group of a clustered region, and each term of a group that did not shrink.
+    ("cluster", "rewrite"),
+    // A region with arithmetic leaves related, the shrunk region whole, complemented leaves.
+    ("relate", "rewrite"),
+    // The sides of a `bit_split`.
+    ("bit_split", "rewrite"),
+    // The halved operands of `halve`.
+    ("halve", "rewrite"),
+    // A region with its unused leaves set to 0.
+    ("drop_unused", "rewrite"),
+    // The factors of recombined products and the region they changed.
+    ("recombine", "rewrite"),
+    // The joined groups of `join_constants` and `join_linear`.
+    ("polish", "rewrite"),
+    // A product factor with its constants cut below the other's trailing zeros.
+    ("low_factor", "rewrite"),
+    // The leaves `poly_mba` expands over and its factors with a constant bitwise operation.
+    ("poly", "rewrite"),
+    // The cases of `over_products`.
+    ("over_products", "rebuild"),
+    // The cases of `split_bits`.
+    ("split_bits", "rebuild"),
+    // The terms of `over_const_bitwise` and `over_shared_bitwise`.
+    ("over_bitwise", "rebuild"),
+    // The cases of `shift_cases`.
+    ("shift_cases", "rebuild"),
+];
+
+/// The position of `name` in `SUBS`.
+pub const fn sub_index(name: &str) -> usize {
+    let mut i = 0;
+    while i < SUBS.len() {
+        let (a, b) = (SUBS[i].0.as_bytes(), name.as_bytes());
+        if a.len() == b.len() {
+            let mut j = 0;
+            while j < a.len() && a[j] == b[j] {
+                j += 1;
+            }
+            if j == a.len() {
+                return i;
+            }
+        }
+        i += 1;
+    }
+    panic!("not a SUBS name")
+}
+
 /// The rebuild of one linear region (`Passes::simba`). Past `MAX_LEAVES` leaves: the smallest
 /// of the region with unused leaves dropped, clustered, and peeled (only when no leaf is
 /// unused: then the rewrite of the dropped form peels), the region itself or else its
@@ -618,6 +669,8 @@ pub struct Passes {
     pub rewrite: Pipe,
     /// The rebuild of one linear region (`SIMBA`), the `simba` pass.
     pub simba: Pipe,
+    /// The rebuilds of subterms, in the order of `SUBS`.
+    pub subs: Vec<Pipe>,
 }
 
 impl Default for Passes {
@@ -648,6 +701,7 @@ impl Default for Passes {
             polish: Pipe::parse(&polish(&crate::linear_mba::POLISH.map(|(n, _)| n))).unwrap(),
             rewrite: Pipe::parse(REWRITE).unwrap(),
             simba: Pipe::parse(SIMBA).unwrap(),
+            subs: SUBS.iter().map(|(_, d)| Pipe::Pass(d.to_string())).collect(),
         }
     }
 }
@@ -680,7 +734,7 @@ impl Passes {
     /// `key=value`, and for the lists `pre`, `off`, `gates` and `schedule` also `key+=names`
     /// and `key-=names` (names separated by `,`; schedule steps written `run:`, `once:` or
     /// `sat:` and a ruleset). The `LIMITS` are keys too (`split_runs=8`); `pipeline`,
-    /// `prepass`, `polish`, `rewrite` and `simba` take a `Pipe` (spaces inside its parentheses allowed), and
+    /// `prepass`, `polish`, `rewrite`, `simba` and `sub/NAME` (`SUBS`) take a `Pipe` (spaces inside its parentheses allowed), and
     /// `polish` also a list of polish pass names, run as `polish(names)`.
     pub fn parse(spec: &str) -> Result<Passes, String> {
         let mut p = Passes::default();
@@ -713,6 +767,12 @@ impl Passes {
             }
             if let Some(val) = item.strip_prefix("simba=") {
                 p.simba = Pipe::parse(val)?;
+                continue;
+            }
+            if let Some((name, val)) = item.strip_prefix("sub/").and_then(|s| s.split_once('=')) {
+                let names: Vec<&str> = SUBS.iter().map(|(n, _)| *n).collect();
+                let i = names.iter().position(|n| *n == name).ok_or_else(|| format!("unknown sub/{name}; known: {}", names.join(" ")))?;
+                p.subs[i] = Pipe::parse(val)?;
                 continue;
             }
             if let Some(val) = item.strip_prefix("polish=") {
@@ -820,7 +880,13 @@ impl fmt::Display for Passes {
                 write!(f, " {name}={v}")?;
             }
         }
-        write!(f, " pipeline={} prepass={} polish={} rewrite={} simba={}", self.pipeline, self.prepass, self.polish, self.rewrite, self.simba)
+        write!(f, " pipeline={} prepass={} polish={} rewrite={} simba={}", self.pipeline, self.prepass, self.polish, self.rewrite, self.simba)?;
+        for ((name, default), p) in SUBS.iter().zip(&self.subs) {
+            if *p != Pipe::Pass(default.to_string()) {
+                write!(f, " sub/{name}={p}")?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -838,6 +904,11 @@ mod tests {
         let p = Passes::parse("rewrite=regions(best(1,simba,poly_mba))").unwrap();
         assert_eq!(p.rewrite.to_string(), "regions(best(1,simba,poly_mba))");
         assert_eq!(Pipe::parse(&Passes::default().simba.to_string()).unwrap(), Passes::default().simba);
+        let p = Passes::parse("sub/cluster=regions(simba) sub/split_bits=rewrite").unwrap();
+        assert_eq!(p.subs[sub_index("cluster")].to_string(), "regions(simba)");
+        assert!(p.to_string().contains(" sub/cluster=regions(simba) sub/split_bits=rewrite"));
+        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
+        assert!(Passes::parse("sub/nope=rewrite").is_err());
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("polish+=factor").is_err() && Passes::parse("polish=nope").is_err());
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);

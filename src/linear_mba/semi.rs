@@ -319,7 +319,7 @@ fn bit_split(groups: &[(Vec<u64>, u64)], lv: &[T], arith: bool, e0: u64, w: &Ctx
             if low as usize + 1 >= limit || !w.take_budget(&w.st.bit_splits) {
                 return out;
             }
-            let t = T::Op(op, vec![rewrite(&side(&ps, a), w), rewrite(&side(&qs, b), w)]);
+            let t = T::Op(op, vec![sub(sub_index("bit_split"), &side(&ps, a), w), sub(sub_index("bit_split"), &side(&qs, b), w)]);
             limit = limit.min(size(&t));
             out.push(t);
         }

@@ -41,7 +41,7 @@ pub(super) fn drop_leaves(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
     if z == *t {
         return None;
     }
-    Some(rewrite(&z, w)).filter(|r| size(r) < size(t))
+    Some(sub(sub_index("drop_unused"), &z, w)).filter(|r| size(r) < size(t))
 }
 
 /// `e(0)` and the leaves the region's value depends on, from its values on {0,1}^n,
@@ -911,11 +911,11 @@ fn clustered_in(t: &T, w: &Ctx) -> Option<T> {
     let mut parts = Vec::new();
     for (key, g) in &groups {
         let sum = build_sum(g, 0, w);
-        let r = if key.len() <= MAX_LEAVES && g.len() > 1 { rewrite(&sum, w) } else { sum.clone() };
+        let r = if key.len() <= MAX_LEAVES && g.len() > 1 { sub(sub_index("cluster"), &sum, w) } else { sum.clone() };
         if size(&r) < size(&sum) {
             parts.push((1, r));
         } else {
-            parts.extend(g.iter().map(|(c, x)| (*c, rewrite(x, w))));
+            parts.extend(g.iter().map(|(c, x)| (*c, sub(sub_index("cluster"), x, w))));
         }
     }
     let (mut whole, mut k0) = (Vec::new(), konst);

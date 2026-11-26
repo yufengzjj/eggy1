@@ -52,7 +52,7 @@ fn join_constant(t: &T, w: &Ctx) -> Option<T> {
     for set in sets {
         let g: Vec<(u64, T)> = set.iter().flat_map(|&i| groups[i].1.clone()).collect();
         let others: Vec<(u64, T)> = (0..n).filter(|j| !set.contains(j)).flat_map(|j| groups[j].1.clone()).collect();
-        let alt = T::Op(Op::Add, vec![build_sum(&others, 0, w), rewrite(&build_sum(&g, konst, w), w)]);
+        let alt = T::Op(Op::Add, vec![build_sum(&others, 0, w), sub(sub_index("polish"), &build_sum(&g, konst, w), w)]);
         if size(&alt) < size(&best) {
             best = alt;
         }
@@ -186,11 +186,11 @@ fn move_groups(groups: &[Vec<(u64, T)>], konst: u64, size0: usize, w: &Ctx, best
                         gi.push((a, v.clone()));
                         gj.push((a.wrapping_neg() & w.mask, v.clone()));
                     }
-                    let rj = rewrite(&build_sum(&gj, 0, w), w);
+                    let rj = sub(sub_index("polish"), &build_sum(&gj, 0, w), w);
                     let others: Vec<(u64, T)> = (0..n).filter(|&k| k != i && k != j).flat_map(|k| groups[k].clone()).collect();
                     for with_konst in [false, true] {
                         let (k_in, k_out) = if with_konst { (konst, 0) } else { (0, konst) };
-                        let ri = rewrite(&build_sum(&gi, k_in, w), w);
+                        let ri = sub(sub_index("polish"), &build_sum(&gi, k_in, w), w);
                         let mut all = others.clone();
                         all.extend([(1, ri.clone()), (1, rj.clone())]);
                         // A negative first term costs a `Neg`; later ones become `Sub`.
@@ -252,7 +252,8 @@ fn shift_cases_in(t: &T, w: &Ctx, depth: usize) -> T {
         }
         T::Op(*op, a.iter().map(|x| wide(x, s, k, tag, fresh)).collect())
     }
-    let rebuild = |x: &T| if depth > 1 { shift_cases_in(&rebuild_once(x, w), w, depth - 1) } else { rebuild_once(x, w) };
+    let once = |x: &T| sub(sub_index("shift_cases"), x, w);
+    let rebuild = |x: &T| if depth > 1 { shift_cases_in(&once(x), w, depth - 1) } else { once(x) };
     let m = (w.w - 1) as i64;
     let tag = format!("%s{depth}_");
     let mut found = Vec::new();
@@ -400,7 +401,7 @@ pub(crate) const POLISH: [Pass; 10] = [
     ("join_linear", |t, w| join_linear(t, w, false)),
     ("over_const_bitwise", over_const_bitwise),
     ("over_shared_bitwise", over_shared_bitwise),
-    ("over_products", |t, w| crate::lowbits::over_products(t, w, |a| rebuild_once(a, w))),
+    ("over_products", |t, w| crate::lowbits::over_products(t, w, |a| sub(sub_index("over_products"), a, w))),
     ("recombine", |t, w| if selectors(t, w).is_empty() { recombine_regions(t, w, false) } else { t.clone() }),
     ("shift_cases", shift_cases),
     ("decompose", |t, w| decompose_regions(t, w, false)),
