@@ -2,219 +2,114 @@
 
 [English](README.md)
 
-一个基于 egglog 等式饱和的 Rust 命令行工具，用于简化中缀算术与位运算表达式，
-包括 MBA（混合布尔-算术，mixed boolean-arithmetic）风格的混淆表达式。
+在固定位宽的回绕算术下化简含算术和位运算的整数表达式，主要针对 MBA（混合布尔-算术）混淆表达式。它把线性、半线性和多项式 MBA 的代数重建与 [egglog-experimental](https://github.com/egraphs-good/egglog-experimental) 的等式饱和结合起来。
 
-## 功能特性
+## 示例
 
-- **表达式简化**：使用大量代数与 MBA 恒等式简化算术/位运算表达式
-- **MBA 反混淆**：折叠混合布尔-算术恒等式，例如 `(x ^ y) + 2*(x & y) → x + y`、`(a & ~b) | (~a & b) → a ^ b`
-- **多数字类型支持**：支持 `i8/u8/i16/u16/i32/u32/i64/u64`，所有规则在所选位宽的 **wrapping（模）** 算术下都可靠
-- **完整的运算符支持**：算术（`+`, `-`, `*`, `/`, `%`）、位运算（`&`, `|`, `^`, `~`, `<<`, `>>`）、一元 `-`/`~`，以及 `mulhi(a, b)` 高位乘法内建
-- **灵活的输出格式**：简化后的表达式、egglog 规则/模式形式，或 egglog 表达式形式
-- **提取-重启驱动**：每轮用当前最优结果重建一个干净的 e-graph，比单次饱和收敛得更彻底，同时抑制图膨胀
+| 命令 | 输出 |
+|---|---|
+| `eggy1 -n i32 "(x ^ y) + 2*(x & y)"` | `(x + y)` |
+| `eggy1 -n u32 "2*(x \| y) - (x & ~y) - (~x & y)"` | `(x + y)` |
+| `eggy1 -n u32 "(x & 0xf0) + (x & 0x0f)"` | `(x & 0xff)` |
+| `eggy1 -n u32 "(x & y)*(x \| y) + (x & ~y)*(~x & y)"` | `(x * y)` |
+| `eggy1 -n u32 "(x \| 0x10)*(x & 0x10) + (x & ~0x10)*(~x & 0x10)"` | `(0x10 * x)` |
+| `eggy1 -n u32 "x - ((2*x) \| ~(2*0x1234)) - 0x1234 - 1"` | `(x ^ 0x1234)` |
+| `eggy1 -n u32 "mulhi(x, 0xaaaaaaab) >> 1"` | `(x / 3)` |
+| `eggy1 -n u8 "(x*(x+3)+2) & 1"` | `0` |
+
+绝对值大于 9 的常数以十六进制输出。在 PowerShell 里要给表达式加引号；表达式以 `-` 开头时，在它前面写 `--`（`eggy1 -n i32 -- "-x + y"`）。
 
 ## 安装
-
-### 从源码安装
 
 ```bash
 git clone <repository-url>
 cd eggy1
-
-# egglog-experimental 是 git 依赖，首次构建会拉取并编译它（耗时较长）。
-cargo install --path .
+cargo install --path .   # 第一次构建会下载并编译 egglog-experimental
 ```
 
-## 使用方法
-
-### 基本简化
-
-```bash
-eggy1 "1 + 2 * 3"
-# 输出: 7
-
-eggy1 "(a + b) * 0"
-# 输出: 0
-```
-
-### 命令行选项
+## 用法
 
 ```
-Usage: eggy1 [OPTIONS] <EXPR>
+Usage: eggy1 [OPTIONS] [EXPR]
 
-Arguments:
-  <EXPR>  要简化的中缀表达式
-
-Options:
-  -r, --rule-compile                 输出表达式的 egglog 规则（模式）形式而不是简化
-  -e, --expr-compile                 输出表达式的 egglog 表达式形式而不是简化
-  -n, --num-type <NUM_TYPE>          使用的数字类型 [默认值: i64] [可能的取值: i64, u64, i32, u32, i16, u16, i8, u8]
-  -i, --iter-limit <ITER_LIMIT>      最大简化迭代次数 [默认值: 10]
-  -m, --max-restarts <MAX_RESTARTS>  最大提取-重启轮数 [默认值: 2]
-  -h, --help                         打印帮助信息
-  -V, --version                      打印版本信息
+  -n, --num-type <NUM_TYPE>          i64（默认）、u64、i32、u32、i16、u16、i8、u8
+  -i, --iter-limit <ITER_LIMIT>      每轮 egglog 的规则迭代次数 [默认: 10]
+  -m, --max-restarts <MAX_RESTARTS>  提取再重启的轮数 [默认: 2]
+      --time-limit <SECONDS>         超过这么久就不再开始新的 pass，输出到那时最小的形式
+      --trace                        把预处理候选和每轮大小打印到 stderr
+      --stats                        把各 pass 的次数、耗时和胜出次数打印到 stderr
+      --passes <PASSES>              修改 pass 管线（见下文）
+      --show-passes                  打印 pass 管线后退出
 ```
 
-### 示例
-
-#### 简化
-
-```bash
-# 基础算术
-eggy1 "1 + 2 * 3"
-# 输出: 7
-
-# 包含变量
-eggy1 "x * 0 + y * 1"
-# 输出: y
-
-# 位运算
-eggy1 "0x1 << 4"
-# 输出: 0x10
-
-# 代数消去
-eggy1 "((a + b) * (a - b)) - (a * a - b * b)"
-# 输出: 0
-```
-
-#### MBA 反混淆
-
-数字类型决定规则在哪个位宽下被证明可靠。MBA 恒等式在固定位宽下最有用：
-
-```bash
-# XOR 重构
-eggy1 -n i32 "(a & ~b) | (~a & b)"
-# 输出: (a ^ b)
-
-# 布尔-算术进位恒等式
-eggy1 -n i32 "(x ^ y) + 2*(x & y)"
-# 输出: (x + y)
-```
-
-#### 规则/模式形式
-
-输出 egglog 规则（模式）形式，变量为裸模式变量：
-
-```bash
-eggy1 -r "x * (y + z)"
-# 输出: (Mul x (Add y z))
-```
-
-#### 表达式形式
-
-输出 egglog 表达式形式，变量被包裹为 `(Var "…")`：
-
-```bash
-eggy1 -e "a + b * c"
-# 输出: (Add (Var "a") (Mul (Var "b") (Var "c")))
-```
-
-#### 调整搜索强度
-
-`-i` 控制每轮运行多少次规则应用迭代；`-m` 控制运行多少轮提取-重启。
-遇到顽固表达式可调高：
-
-```bash
-eggy1 -i 30 -m 4 "very_complex_expression"
-```
+运算符：`+ - * / % & | ^ ~ << >>`、一元 `-`，以及 `mulhi(a, b)`（乘积的高半部分）。常数可以是十进制或十六进制（`0xff`）。结果在所选位宽下总与输入等价；只对部分类型成立的规则只在那些类型上使用。
 
 ## 工作原理
 
-该工具使用 [egglog-experimental](https://github.com/egraphs-good/egglog-experimental)
-进行等式饱和与项重写：
+1. **预处理。** 把输入分成线性区域（叶子的位运算函数乘以常数再相加），每个区域按它的取值重建：线性 MBA 用 SiMBA 式的方法，带常数掩码的区域（半线性）逐位处理，多项式 MBA 用 GAMBA 式的展开和因式分解。其他 pass 处理已知的混淆手法：已知位推理（`lowbits`）、小 T-函数查表（`tfunc`）、按单个位分情况（`split_bits`）、`2^k·a + c` 形式操作数的拆半（`halve`）等。保留多个重建候选。
+2. **等式饱和。** 把候选合并到一个 e-graph 里，运行各规则集（规范化、常量折叠、分析、恒等式、有向 MBA 规则、魔数除法识别）。提取最小的项，下一轮在新的 e-graph 上从它开始，直到不再变化。枚举证明为最小的重建结果跳过饱和。
+3. **收尾（polish）。** 对结果做局部改写（把 `~` 往里推、合并常数、提公因式），只保留让项变小的改写。
 
-1. **解析**：分词器 + Pratt 解析器将中缀表达式转换为 egglog 表达式。
-2. **饱和**：back-off 调度器分阶段运行各规则集（规范化 → 常量折叠 → 分析 →
-   恒等/零元 → 定向 MBA 简化）。
-3. **提取-重启**：提取当前最优项，用它重建一个干净的 e-graph 再次运行；如此
-   重复（至多 `--max-restarts` 轮）直到不动点，使后续轮次从更小的项、以完整的
-   匹配预算继续重写。
-4. **提取**：提取最小规模的等价表达式；`|值| > 9` 的常量以十六进制打印。
+这些步骤的顺序是用一门小语言写的管线，从 `src/default.pipe` 读入；`--show-passes` 打印它。
 
-### 支持的简化规则
+## 修改管线
 
-所有规则在每个支持的位宽下都在 wrapping（模）算术下可靠，或按数字类型/守卫
-谓词进行门控。
+`--passes` 接受若干项，依次作用在默认设置之上：
 
-- 常量折叠（例如 `1 + 2 → 3`）
-- 恒等/零元/吸收律（例如 `x + 0 → x`, `x * 1 → x`, `x & ~x → 0`）
-- Neg/Not 规范化与德摩根律
-- 分配律与同类项合并（例如 `2*a + 3*a → 5*a`）
-- MBA 恒等式（Hacker's Delight）：XOR/OR/AND 重构、进位恒等式、三输入全加器、
-  湮灭/不透明谓词折叠等
-- 移位代数：移位合并，以及移位对位运算 / `+` / `-` 的分配
-- Magic-number 除法识别（把编译器生成的高位乘法序列还原为 `n / d`）
+```bash
+eggy1 --passes "extra=0 keep=1" -n u32 "expr"            # 设置
+eggy1 --passes "off=relate,poly_mba" -n u32 "expr"        # 关掉内部 pass
+eggy1 --passes "prepass=lowbits | (if mixed rewrite)" "expr"
+eggy1 --passes "file=my.pipe" "expr"                      # 从文件读入各项
+```
+
+管线把一组等价候选映射为另一组：`a | b` 依次执行，还有 `(union a b)`、`(best K a b)`、`(first a b)`、`(fix N p)`、`(if COND a b)`、`(with off=NAME p)`、寄存器 `(save R)`/`(load R)`、`(mul >= 4 && !mixed)` 这样的条件，以及 `(let NAME p)` 定义（`src/default.pipe` 里定义的名字可以直接用）。读入时会检查管线（未知名字、参数不对、寄存器先读后存、pass 出现在不能运行它的管线里、递归），不起作用的部分给出警告。完整的参考（所有形式、pass、条件、设置和限值）见 [docs/pipe-language.md](docs/pipe-language.md)。
+
+## Benchmark 与 fuzz
+
+```bash
+sh scripts/fetch-datasets.sh                                       # 把 MBA 数据集下载到 bench-data/
+cargo run --release --example bench -- -l 100 bench-data/*.txt     # 每节 100 个用例
+python -I scripts/bench-shards.py -j 26 -o out/quick --cases scripts/quick-cases.tsv   # 精简集，并行分片
+python -I scripts/bench-diff.py out/old out/new --show             # 比较两次运行
+cargo run --release --example fuzz -- -c 20000 -j 13 -o fails.txt  # 差分 fuzz
+```
+
+benchmark 用求值检查每个输出与输入等价，并按节统计：达到数据集参考答案大小的（`solved`）、变小的（`partial`）、没变的、超时的、错误的。`scripts/gen-*.py` 生成更多用例集（半线性、更深的、移位和除法）。
 
 ## 开发
 
-### 项目结构
-
-```
-src/
-├── lib.rs           # 规则定义（make_egg）、egglog 原语、simplify 驱动
-├── main.rs          # 基于库的轻量 CLI 二进制
-└── expr_convert.rs  # 表达式解析与格式转换
-tests/
-├── expr_convert_tests.rs  # 解析器/转换器单元测试
-└── simplify_tests.rs      # 简化与 magic-number 测试（按规则分组以便并行）
-Cargo.toml           # 项目配置与依赖
-```
-
-### 从源码构建
-
 ```bash
-cargo build --release   # 优化构建
-cargo test              # 运行所有测试（集成测试并行运行）
-cargo run -- "1 + 2"    # 对表达式运行
+cargo build
+cargo test -- --test-threads=8              # 全部测试（几分钟）
+cargo test --test simplify_tests complex_   # 一组化简测试
+cargo test --lib                            # 单元测试
 ```
 
-### 添加新规则
+| 路径 | 内容 |
+|---|---|
+| `src/lib.rs` | egglog 规则（`make_egg`）、原语、命令行、驱动 |
+| `src/sched.rs`、`src/pipe.rs`、`src/pipe_lang.rs`、`src/default.pipe` | 管线设置、执行器、语言、默认管线 |
+| `src/linear_mba/` | 线性与半线性重建、宽区域、`relate`、`halve`、`split_bits`、polish |
+| `src/poly_mba.rs` | 多项式 MBA 的展开与因式分解 |
+| `src/lowbits.rs`、`src/known_bits.rs` | 已知位推理 |
+| `src/tfunc.rs` | 小表达式查表，用 T-函数精确证明等价 |
+| `src/minimal.rs` | 用枚举证明最小 |
+| `src/expr_convert.rs`、`src/eval.rs`、`src/dag.rs` | 解析与输出、求值、共享子项 |
+| `examples/bench.rs`、`examples/fuzz.rs`、`scripts/` | benchmark、fuzzer、用例生成和运行工具 |
 
-简化规则在 `src/lib.rs` 的 `make_egg` 函数中定义。要添加新规则：
+新规则用 `rewrite!` 宏加在 `make_egg` 里，模式用中缀写法。规则必须在每种支持的位宽下对回绕算术成立，否则要按类型或守卫原语限定；新增数值类型需要补齐所有按类型区分的原语，并加进 `--num-type` 的取值列表。化简测试接受一组输出，因为可能提取出几个大小相同的形式。
 
-1. 用 `rewrite!` 宏把规则加到合适的规则集。优先在 `simplify` 里用定向 `=>` 规则；
-   只在真正的规范化恒等式上使用 `<=>`（birewrite），因为 birewrite 会让 e-graph
-   快速膨胀。
-2. 确保规则在**所有**支持的位宽下都在 wrapping 算术下可靠，否则按 `num_type` /
-   守卫原语（如 `is-2-pow-n-*`）进行门控。
-3. 在 `tests/simplify_tests.rs` 添加用例。由于提取可能选中多个等价最小形式之一，
-   期望值是一组可接受的输出；≥ 10 的常量以十六进制显示。
+## 局限
 
-**添加新的数字类型**还需要在 `init_egg_function` 中为每个运算添加原语，并把该
-类型加入 `Cli` 的 `value_parser` 列表。
+- 只支持 8 到 64 位整数。
+- 线性区域最多 6 个叶子时能精确重建；更宽的只能拆成小组重建，所以很宽的 MBA 可能只化简一部分。
+- 很大或嵌套很深的输入可能要几秒；用 `--time-limit` 限制运行时间。
 
-## 测试
+## 许可
 
-```bash
-# 运行所有测试
-cargo test
-
-# 运行单个集成测试二进制
-cargo test --test expr_convert_tests
-cargo test --test simplify_tests
-```
-
-测试用例涵盖算术与位运算简化、MBA 恒等式、magic-number 除法识别、
-wrapping 算术可靠性回归，以及解析器/转换器。
-
-## 限制
-
-- 仅支持整数算术（无浮点数）。
-- 表达式大小受可用内存限制。
-- 非常复杂的表达式可能在迭代/重启限制内无法收敛。
-
-## 许可证
-
-本项目根据 MIT 许可证条款授权。
+MIT。
 
 ## 致谢
 
-- 使用 [egglog-experimental](https://github.com/egraphs-good/egglog-experimental) 构建
-- 使用 [clap](https://github.com/clap-rs/clap) 进行命令行参数解析
-- MBA 恒等式取自《Hacker's Delight》及等式饱和 MBA 研究
-
----
-
-**注意**：此工具主要用于教育和研究目的，展示如何将等式饱和应用于代数简化与
-MBA 反混淆。
+基于 [egglog-experimental](https://github.com/egraphs-good/egglog-experimental) 和 [clap](https://github.com/clap-rs/clap)。方法参考 *Hacker's Delight* 以及已发表的 MBA 化简工作（SiMBA、GAMBA 等）。
