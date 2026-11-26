@@ -86,7 +86,7 @@ limits! {
     Related "related" = 4;
     /// Most leaf splits `bit_split` rebuilds per region.
     BitSplits "bit_splits" = 4;
-    /// Most `P op Q` pairs `bit_split` rebuilds per `simplify_linear` call.
+    /// Most `P op Q` pairs `bit_split` rebuilds per pre-pass candidate (`Pipe::Cand`).
     BitSplitBudget "bit_split_budget" = 8;
     /// Most variable bits `split_bits` tries on one term.
     Splits "splits" = 4;
@@ -192,12 +192,13 @@ pub enum Pipe {
     Tag(String, Box<Pipe>),
     /// The candidates the condition holds for, each taken alone (`filter(c)`).
     Filter(Cond),
-    /// The pre-pass candidate `NAME`: `p` timed as `pre/NAME/made`, its candidates with
-    /// origin `NAME`; none when `NAME` is an entry of `PRE` turned off (`cand(NAME,p)`).
+    /// The pre-pass candidate `NAME`: `p` with its own `bit_split_budget`, timed as
+    /// `pre/NAME/made`, its candidates with origin `NAME`; none when `NAME` is an entry of
+    /// `PRE` turned off (`cand(NAME,p)`).
     Cand(String, Box<Pipe>),
     /// `p` with run settings of the enclosing `scope` changed, each restored after
-    /// (`with(rewrites=128+exclude=wide,p)`; values are numbers, `LIMITS` names or
-    /// `clustered`/`wide`/`none` for `exclude`; `crate::linear_mba::Ctx::setting`).
+    /// (`with(rewrites=128+semi_leaves=2,p)`; values are numbers or `LIMITS` names;
+    /// `crate::linear_mba::Ctx::setting`).
     With(Vec<(String, String)>, Box<Pipe>),
     /// `p` with its passes over one term sharing one run: memos, budgets, settings
     /// (`scope(p)`).
@@ -314,15 +315,11 @@ impl Pipe {
             ("with", 1) => {
                 let set = first.split('+').map(|kv| {
                     let (k, v) = kv.split_once('=').ok_or_else(|| format!("expected KEY=VALUE in with: {kv}"))?;
-                    let known = ["rewrites", "semi_leaves", "relate_leaves", "bit_splits", "exclude"];
+                    let known = ["rewrites", "semi_leaves", "relate_leaves", "bit_splits"];
                     if !known.contains(&k) {
                         return Err(format!("unknown setting {k}; known: {}", known.join(" ")));
                     }
-                    let ok = match k {
-                        "exclude" => ["clustered", "wide", "none"].contains(&v),
-                        _ => v.parse::<usize>().is_ok() || LIMITS.iter().any(|(n, _)| *n == v),
-                    };
-                    if !ok {
+                    if !(v.parse::<usize>().is_ok() || LIMITS.iter().any(|(n, _)| *n == v)) {
                         return Err(format!("bad value {v} for {k}"));
                     }
                     Ok((k.to_string(), v.to_string()))
@@ -408,8 +405,8 @@ pub fn prepass() -> String {
         // A region rebuilt by `wide_blocks` is smaller there, but the other rebuilds can leave
         // subterms the abstracted rebuilds share across terms; a larger one unioned beside the
         // first rebuild made the rules finish worse as often as better.
-        &format!("cand(no_wide,if(used_wide,seq(load/t,with(exclude=wide,{r}),save/n,filter(lt:r)),none)),"),
-        "cand(no_wide_abstracted,seq(load/n,with(exclude=wide,union(over_const_bitwise,over_shared_bitwise)),filter(lt:r+le:3/4:n))),",
+        &format!("cand(no_wide,if(used_wide,seq(load/t,off(wide_blocks,{r}),save/n,filter(lt:r)),none)),"),
+        "cand(no_wide_abstracted,seq(load/n,off(wide_blocks,union(over_const_bitwise,over_shared_bitwise)),filter(lt:r+le:3/4:n))),",
         "cand(split_bits,if(fits_split,seq(split_bits,filter(!eq:r)),none)),",
         &format!("cand(halve_first,seq(halve,filter(!eq:r),{rp})),"),
         "cand(over_products,seq(over_products,filter(!eq:r))),",
@@ -422,8 +419,8 @@ pub fn prepass() -> String {
         "finish,save/f,filter(!abstracted|le:3/4:f),save/b,label/b,",
         // A region rebuilt in clusters is smaller there but can leave the rules a worse start
         // than rebuilding it whole.
-        "cand(unclustered,seq(load/t,if(used_clustered+few_rewrites+!replaceable,with(bit_splits=bit_split_budget+exclude=clustered+relate_leaves=unclustered_relate_leaves+rewrites=unclustered_rewrites,",
-        "seq(rewrite,within,relate,within,tfunc,finish,drop_identities)),none))),",
+        "cand(unclustered,if(used_clustered+few_rewrites,seq(load/t,if(!replaceable,off(clustered,with(relate_leaves=unclustered_relate_leaves+rewrites=unclustered_rewrites,",
+        "seq(rewrite,within,relate,within,tfunc,finish,drop_identities))),none)),none)),",
         // An equal-size one can take the extraction from the first rebuild with nothing gained.
         "label/b,save/u,load/b,best(keep,id),save/m,union(seq(load/u,filter(lt:m)),load/m,seq(load/u,filter(gt:m+lt:t0))),pre_done))",
     ]
@@ -453,6 +450,30 @@ pub fn set_gates(p: &Passes, s: &crate::stats::Shape) {
 pub fn is_off(name: &str) -> bool {
     let bits = OFF.with(|o| o.get());
     bits != 0 && INNER.iter().position(|k| *k == name).is_some_and(|i| bits >> i & 1 == 1)
+}
+
+/// The position of `name` in `INNER`, for `is_off_at`.
+pub const fn inner_index(name: &str) -> usize {
+    let mut i = 0;
+    while i < INNER.len() {
+        let (a, b) = (INNER[i].as_bytes(), name.as_bytes());
+        if a.len() == b.len() {
+            let mut j = 0;
+            while j < a.len() && a[j] == b[j] {
+                j += 1;
+            }
+            if j == a.len() {
+                return i;
+            }
+        }
+        i += 1;
+    }
+    panic!("not an INNER pass")
+}
+
+/// `is_off` of the `INNER` pass at position `i`.
+pub fn is_off_at(i: usize) -> bool {
+    OFF.with(|o| o.get()) >> i & 1 == 1
 }
 
 /// The rulesets of `make_egg`.
@@ -750,8 +771,8 @@ mod tests {
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert_eq!(Pipe::parse(&Passes::default().pipeline.to_string()).unwrap(), Passes::default().pipeline);
         assert_eq!(Pipe::parse(&Passes::default().prepass.to_string()).unwrap(), Passes::default().prepass);
-        let p = Passes::parse("prepass=scope(seq(save/t,with(rewrites=unified_rewrites+exclude=wide,rewrite),filter(lt:t|le:3/4:t+!tiny),cand(halve_input,load/t)))").unwrap();
-        assert_eq!(p.prepass.to_string(), "scope(seq(save/t,with(rewrites=unified_rewrites+exclude=wide,rewrite),filter(lt:t|le:3/4:t+!tiny),cand(halve_input,load/t)))");
+        let p = Passes::parse("prepass=scope(seq(save/t,with(rewrites=unified_rewrites+semi_leaves=2,rewrite),filter(lt:t|le:3/4:t+!tiny),cand(halve_input,load/t)))").unwrap();
+        assert_eq!(p.prepass.to_string(), "scope(seq(save/t,with(rewrites=unified_rewrites+semi_leaves=2,rewrite),filter(lt:t|le:3/4:t+!tiny),cand(halve_input,load/t)))");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         for bad in ["prepass=filter(lt)", "prepass=filter(le:3:t)", "prepass=with(rewrites=x,id)", "prepass=with(nope=1,id)", "prepass=save/", "prepass=scope(id,id)"] {
             assert!(Passes::parse(bad).is_err(), "{bad}");

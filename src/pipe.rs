@@ -61,11 +61,12 @@ pub const CONDS: [&str; 16] = [
     "tiny",
     // The main candidate has at most `split_size` nodes.
     "fits_split",
-    // `wide_blocks` gave a kept form in the enclosing `scope`.
+    // `wide_blocks` gave a kept form in the passes that made a candidate.
     "used_wide",
-    // `clustered` gave a kept form in the enclosing `scope`.
+    // `clustered` gave a kept form in the passes that made a candidate.
     "used_clustered",
-    // The enclosing `scope` made at most `unclustered_after` `rewrite` calls.
+    // The passes that made the main candidate made at most `unclustered_after` uncached
+    // `rewrite` calls.
     "few_rewrites",
     // The main candidate as a whole has a smaller T-function form (`tfunc::replacement`).
     "replaceable",
@@ -115,6 +116,10 @@ pub fn is_cond(name: &str) -> bool {
 pub struct Cand {
     forms: Rc<Forms>,
     pub origin: String,
+    /// Which of `clustered` and `wide_blocks` gave a kept form in the passes that made it.
+    used: u8,
+    /// The uncached `rewrite` calls of the passes that made it.
+    rewrites: usize,
 }
 
 #[derive(Debug, Default)]
@@ -126,11 +131,13 @@ struct Forms {
 
 impl Cand {
     pub fn new(text: &str, origin: &str) -> Cand {
-        Cand { forms: Rc::new(Forms { text: OnceCell::from(text.to_string()), ..Default::default() }), origin: origin.to_string() }
+        Cand { forms: Rc::new(Forms { text: OnceCell::from(text.to_string()), ..Default::default() }), origin: origin.to_string(), used: 0, rewrites: 0 }
     }
 
-    fn of(tree: Term, origin: &str) -> Cand {
-        Cand { forms: Rc::new(Forms { tree: OnceCell::from(tree), ..Default::default() }), origin: origin.to_string() }
+    /// `tree` made from `from` by a pass with these `used` bits and `rewrites` calls.
+    fn of(tree: Term, from: &Cand, used: u8, rewrites: usize) -> Cand {
+        let forms = Rc::new(Forms { tree: OnceCell::from(tree), ..Default::default() });
+        Cand { forms, origin: from.origin.clone(), used: from.used | used, rewrites: from.rewrites + rewrites }
     }
 
     /// The egglog text.
@@ -295,9 +302,9 @@ fn cond(name: &str, set: &[Cand], env: &Env) -> bool {
         "printed" => p.printed > 0,
         "tiny" => main.size() <= linear_mba::TINY,
         "fits_split" => main.size() <= limit(Limit::SplitSize),
-        "used_wide" => env.ctx(|c| c.used(WIDE)),
-        "used_clustered" => env.ctx(|c| c.used(CLUSTERED)),
-        "few_rewrites" => env.ctx(|c| usize::MAX - c.setting("rewrites").unwrap() <= limit(Limit::UnclusteredAfter)),
+        "used_wide" => set.iter().any(|c| c.used & WIDE != 0),
+        "used_clustered" => set.iter().any(|c| c.used & CLUSTERED != 0),
+        "few_rewrites" => main.rewrites <= limit(Limit::UnclusteredAfter),
         "replaceable" => env.ctx(|c| crate::tfunc::replacement(main.tree(), c).is_some()),
         "abstracted" => linear_mba::ABSTRACTED.contains(&main.origin.as_str()),
         "true" => true,
@@ -399,21 +406,17 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
                 return Ok(Vec::new());
             }
             let clock = std::time::Instant::now();
-            let out = go(p, set, env)?;
+            let budget = Pipe::With(vec![("bit_splits".into(), "bit_split_budget".into())], p.clone());
+            let out = go(&budget, set, env)?;
             stats::add(&format!("pre/{name}/made"), stats::since(clock));
             Ok(out.into_iter().map(|c| Cand { origin: name.clone(), ..c }).collect())
         }
         Pipe::With(kv, p) => {
-            let value = |k: &str, v: &str| match (k, v) {
-                ("exclude", "clustered") => CLUSTERED as usize,
-                ("exclude", "wide") => WIDE as usize,
-                ("exclude", _) => 0,
-                _ => v.parse().unwrap_or_else(|_| crate::sched::limit_named(v).unwrap()),
-            };
+            let value = |v: &str| v.parse().unwrap_or_else(|_| crate::sched::limit_named(v).unwrap());
             let old: Vec<(&str, usize, usize)> = env.ctx(|c| {
                 kv.iter()
                     .map(|(k, v)| {
-                        let (was, now) = (c.setting(k).unwrap(), value(k, v));
+                        let (was, now) = (c.setting(k).unwrap(), value(v));
                         c.set_setting(k, now);
                         (k.as_str(), was, now)
                     })
@@ -543,10 +546,14 @@ fn pass(name: &str, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
                 set.iter()
                     .map(|c| {
                         let t = c.tree();
+                        let (outer, left) = (ctx.swap_used(0), ctx.setting("rewrites").unwrap());
                         let r: Option<Term> = stats::pass(name, t, || f(t, ctx));
+                        let used = ctx.swap_used(0);
+                        ctx.swap_used(outer | used);
+                        let made = left.saturating_sub(ctx.setting("rewrites").unwrap());
                         match r {
-                            Some(r) if r != *t => Cand::of(r, &c.origin),
-                            _ => c.clone(),
+                            Some(r) if r != *t => Cand::of(r, c, used, made),
+                            _ => Cand { used: c.used | used, rewrites: c.rewrites + made, ..c.clone() },
                         }
                     })
                     .collect()

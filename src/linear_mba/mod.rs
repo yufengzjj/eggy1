@@ -71,8 +71,7 @@ impl Ctx {
         Ctx { st: self.st.clone(), ..Ctx::new(w) }
     }
     /// The run settings `crate::pipe` changes by name (`Pipe::With`): `rewrites` (calls
-    /// left), `semi_leaves`, `relate_leaves`, `bit_splits` (splits left), `exclude` (bits of
-    /// `CLUSTERED`, `WIDE`).
+    /// left), `semi_leaves`, `relate_leaves`, `bit_splits` (splits left).
     pub(crate) fn setting(&self, key: &str) -> Option<usize> {
         let st = &self.st;
         Some(match key {
@@ -80,7 +79,6 @@ impl Ctx {
             "semi_leaves" => st.semi_leaves.load(Relaxed),
             "relate_leaves" => st.relate_leaves.load(Relaxed),
             "bit_splits" => st.bit_splits.load(Relaxed),
-            "exclude" => st.excluded.load(Relaxed) as usize,
             _ => return None,
         })
     }
@@ -91,13 +89,13 @@ impl Ctx {
             "semi_leaves" => st.semi_leaves.store(v, Relaxed),
             "relate_leaves" => st.relate_leaves.store(v, Relaxed),
             "bit_splits" => st.bit_splits.store(v, Relaxed),
-            "exclude" => st.excluded.store(v as u8, Relaxed),
             _ => panic!("unknown setting {key}"),
         }
     }
-    /// Whether `clustered` (`CLUSTERED`) or `wide_blocks` (`WIDE`) gave a kept form in this run.
-    pub(crate) fn used(&self, bit: u8) -> bool {
-        self.st.used.load(Relaxed) & bit != 0
+    /// Which of `clustered` (`CLUSTERED`) and `wide_blocks` (`WIDE`) gave a kept form since
+    /// the last call, which sets it to `v`.
+    pub(crate) fn swap_used(&self, v: u8) -> u8 {
+        self.st.used.swap(v, Relaxed)
     }
     pub(crate) fn low_values(&self) -> &crate::lowbits::ValuesMemo {
         &self.st.low_values
@@ -109,7 +107,7 @@ impl Ctx {
 }
 
 type Memo<K, V> = std::sync::Mutex<crate::eval::FastMap<K, (V, u8)>>;
-/// Bits of `State::used` and `State::excluded`.
+/// Bits of `State::used`.
 pub(crate) const CLUSTERED: u8 = 1;
 pub(crate) const WIDE: u8 = 2;
 type RebuiltKey = (Vec<u64>, Vec<(usize, bool)>, u64, u32);
@@ -134,8 +132,6 @@ struct State {
     /// `peel` calls nested inside each other.
     peel_depth: AtomicUsize,
     clustering: std::sync::Mutex<Vec<T>>,
-    /// `CLUSTERED` turns `clustered` off and `WIDE` turns `wide_blocks` off, for the rebuilds without them.
-    excluded: AtomicU8,
     /// Which of `clustered` and `wide_blocks` gave a kept form since the last reset.
     used: AtomicU8,
 }
@@ -156,7 +152,6 @@ impl Default for State {
             bit_splits: AtomicUsize::new(limit(Limit::BitSplitBudget)),
             peel_depth: AtomicUsize::new(0),
             clustering: Default::default(),
-            excluded: AtomicU8::new(0),
             used: AtomicU8::new(0),
         }
     }
@@ -711,10 +706,17 @@ fn tracking_clusters<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, u8) {
     (r, used)
 }
 
+/// The bits of `State::used` whose pass is now off.
+pub(super) fn used_off() -> u8 {
+    const C: usize = crate::sched::inner_index("clustered");
+    const W: usize = crate::sched::inner_index("wide_blocks");
+    (crate::sched::is_off_at(C) as u8 * CLUSTERED) | (crate::sched::is_off_at(W) as u8 * WIDE)
+}
+
 /// A memoized result, unless it came from a pass that is now off.
 fn memo_get<K: std::hash::Hash + Eq, V: Clone>(memo: &Memo<K, V>, key: &K, w: &Ctx) -> Option<V> {
     let (r, used) = memo.lock().unwrap().get(key).cloned()?;
-    if used & w.st.excluded.load(Relaxed) != 0 {
+    if used & used_off() != 0 {
         return None;
     }
     w.st.used.fetch_or(used, Relaxed);
