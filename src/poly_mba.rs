@@ -16,31 +16,46 @@ type Conj = u64;
 type Mono = Vec<Conj>;
 type Poly = BTreeMap<Mono, u64>;
 
-const MAX_MONOS: usize = 4096;
-/// Candidate factors tried at the top level of `build`; one below it.
-const FACTOR_TRIES: usize = 3;
-const MAX_FACTOR_MONOS: usize = 64;
-const MAX_FACTOR_VARS: usize = 12;
-const MAX_PIVOTS: usize = 4;
-const MAX_ROOTS: usize = 16;
-const MAX_FACTOR_STEPS: usize = 4096;
-const MAX_SOLUTIONS: usize = 8;
-/// Constants `build` shifts the factors of a product by, for at most `MAX_SHIFTED` factorings
-/// with factors of at most `MAX_SHIFTED_MONOS` monomials and a rest of at most twice that.
+/// Constants `build` shifts the factors of a product by.
 const SHIFTS: [i64; 3] = [-1, 0, 1];
-const MAX_SHIFTED: usize = 4;
-const MAX_SHIFTED_MONOS: usize = 4;
-/// Most bit sets `masked_poly` splits the width into, and most monomials it builds
-/// (or twice those of the plain expansion).
-const MAX_ATOMS: usize = 4;
-const MAX_MASKED_MONOS: usize = 16;
-/// Largest term `masked_poly` rebuilds for a single product with constants in both factors.
-const MAX_MASKED_SIZE: usize = 20;
+
+struct Lims {
+    max_monos: usize,
+    factor_tries: usize,
+    max_factor_monos: usize,
+    max_factor_vars: usize,
+    max_pivots: usize,
+    max_roots: usize,
+    max_factor_steps: usize,
+    max_solutions: usize,
+    max_shifted: usize,
+    max_shifted_monos: usize,
+    builds: usize,
+}
+
+impl Lims {
+    fn read() -> Lims {
+        Lims {
+            max_monos: limit(Limit::PolyMaxMonos),
+            factor_tries: limit(Limit::PolyFactorTries),
+            max_factor_monos: limit(Limit::PolyMaxFactorMonos),
+            max_factor_vars: limit(Limit::PolyMaxFactorVars),
+            max_pivots: limit(Limit::PolyMaxPivots),
+            max_roots: limit(Limit::PolyMaxRoots),
+            max_factor_steps: limit(Limit::PolyMaxFactorSteps),
+            max_solutions: limit(Limit::PolyMaxSolutions),
+            max_shifted: limit(Limit::PolyMaxShifted),
+            max_shifted_monos: limit(Limit::PolyMaxShiftedMonos),
+            builds: limit(Limit::PolyBuilds),
+        }
+    }
+}
 
 struct Expansion<'a> {
     w: &'a Ctx,
     leaves: Vec<T>,
-    built: std::cell::RefCell<crate::eval::FastMap<(Poly, usize), T>>,
+    lim: Lims,
+    built: std::cell::RefCell<crate::eval::FastMap<(Poly, bool), T>>,
     builds: std::cell::Cell<usize>,
     linear: std::cell::RefCell<crate::eval::FastMap<Poly, T>>,
     /// When not empty, the bit sets on which every constant of a bitwise operation is
@@ -52,7 +67,7 @@ struct Expansion<'a> {
 
 impl<'a> Expansion<'a> {
     fn new(w: &'a Ctx, atoms: Vec<u64>) -> Self {
-        Expansion { w, leaves: Vec::new(), built: Default::default(), builds: Default::default(), linear: Default::default(), atoms, base: Vec::new() }
+        Expansion { w, lim: Lims::read(), leaves: Vec::new(), built: Default::default(), builds: Default::default(), linear: Default::default(), atoms, base: Vec::new() }
     }
 
     fn leaf(&mut self, t: &T) -> Option<usize> {
@@ -146,7 +161,7 @@ impl<'a> Expansion<'a> {
     }
 
     fn product(&self, a: &Poly, b: &Poly) -> Option<Poly> {
-        if a.len() * b.len() > MAX_MONOS {
+        if a.len() * b.len() > self.lim.max_monos {
             return None;
         }
         let mut r = Poly::new();
@@ -344,13 +359,13 @@ impl<'a> Expansion<'a> {
     /// and every pair must give `c_jk = r_j·b_k + r_k·b_j - 2a·r_j·r_k`.
     fn factor2(&self, p: &Poly) -> Vec<(Poly, Poly)> {
         let mut out = Vec::new();
-        if p.len() > MAX_FACTOR_MONOS || p.keys().any(|m| m.len() > 2) {
+        if p.len() > self.lim.max_factor_monos || p.keys().any(|m| m.len() > 2) {
             return out;
         }
         let mut vars: Vec<Conj> = p.keys().flatten().copied().collect();
         vars.sort_unstable();
         vars.dedup();
-        if vars.len() > MAX_FACTOR_VARS {
+        if vars.len() > self.lim.max_factor_vars {
             return out;
         }
         let coef = |m: &[Option<Conj>]| {
@@ -362,7 +377,7 @@ impl<'a> Expansion<'a> {
             vars.iter().filter(|&&v| p.keys().any(|m| m.len() == 2 && m.contains(&v))).map(|&v| (coef(&[Some(v), Some(v)]) & 1 == 0, v)).collect();
         pivots.sort_unstable();
         let mask = self.w.mask;
-        for &(_, v) in pivots.iter().take(MAX_PIVOTS) {
+        for &(_, v) in pivots.iter().take(self.lim.max_pivots) {
             let a = coef(&[Some(v), Some(v)]);
             let us: Vec<Option<Conj>> = vars.iter().filter(|&&u| u != v).map(|&u| Some(u)).chain([None]).collect();
             let b: Vec<u64> = us.iter().map(|&u| coef(&[Some(v), u])).collect();
@@ -377,7 +392,7 @@ impl<'a> Expansion<'a> {
                     c & mask == coef(&[us[j], us[k]])
                 })
             };
-            Self::assign(&roots, &mut r, 0, &fits, &mut steps, &mut sols);
+            self.assign(&roots, &mut r, 0, &fits, &mut steps, &mut sols);
             for r in sols {
                 let (mut l1, mut l2) = (Poly::new(), Poly::new());
                 self.add_to(&mut l1, vec![v], 1);
@@ -398,13 +413,13 @@ impl<'a> Expansion<'a> {
     /// coefficient), and the division by `v + r` must leave no remainder.
     fn factor3(&self, p: &Poly) -> Vec<(Poly, Poly)> {
         let mut out = Vec::new();
-        if p.len() > MAX_FACTOR_MONOS || p.keys().any(|m| m.len() > 3) || !p.keys().any(|m| m.len() == 3) {
+        if p.len() > self.lim.max_factor_monos || p.keys().any(|m| m.len() > 3) || !p.keys().any(|m| m.len() == 3) {
             return out;
         }
         let mut vars: Vec<Conj> = p.keys().flatten().copied().collect();
         vars.sort_unstable();
         vars.dedup();
-        if vars.len() > MAX_FACTOR_VARS {
+        if vars.len() > self.lim.max_factor_vars {
             return out;
         }
         let coef = |m: &[Option<Conj>]| {
@@ -415,7 +430,7 @@ impl<'a> Expansion<'a> {
         let mut pivots: Vec<(bool, Conj)> = vars.iter().filter(|&&v| coef(&[Some(v); 3]) != 0).map(|&v| (coef(&[Some(v); 3]) & 1 == 0, v)).collect();
         pivots.sort_unstable();
         let neg1 = self.w.mask;
-        for &(_, v) in pivots.iter().take(MAX_PIVOTS) {
+        for &(_, v) in pivots.iter().take(self.lim.max_pivots) {
             let a = coef(&[Some(v); 3]);
             let us: Vec<Option<Conj>> = vars.iter().filter(|&&u| u != v).map(|&u| Some(u)).chain([None]).collect();
             let roots: Vec<Vec<u64>> = us.iter().map(|&u| self.cubic_roots(a, coef(&[Some(v), Some(v), u]), coef(&[Some(v), u, u]), coef(&[u, u, u]))).collect();
@@ -430,7 +445,7 @@ impl<'a> Expansion<'a> {
             let mut pick = vec![0usize; us.len()];
             // Fixed points where `p(-r, u)` must vanish, checked before dividing.
             let points: Vec<Vec<u64>> = (1..=2u64).map(|k| (0..us.len()).map(|j| k.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(7 * j as u32 + 3) | 1).collect()).collect();
-            for _ in 0..MAX_FACTOR_STEPS {
+            for _ in 0..self.lim.max_factor_steps {
                 let r: Vec<u64> = pick.iter().zip(&roots).map(|(&i, rs)| rs[i]).collect();
                 let vanishes = points.iter().all(|pt| {
                     let val = |x: Conj| us.iter().position(|&u| u == Some(x)).map_or(0, |j| pt[j]);
@@ -440,7 +455,7 @@ impl<'a> Expansion<'a> {
                 });
                 if let Some(f) = vanishes.then(|| self.divide_cubic(&r, &us, v, a, &parts)).flatten() {
                     out.push(f);
-                    if out.len() >= MAX_SOLUTIONS {
+                    if out.len() >= self.lim.max_solutions {
                         return out;
                     }
                 }
@@ -461,14 +476,14 @@ impl<'a> Expansion<'a> {
     fn factor3_by_coefficient(&self, p: &Poly, vars: &[Conj], out: &mut Vec<(Poly, Poly)>) {
         let mut tried: Vec<Poly> = Vec::new();
         let once = |u: Conj| p.keys().all(|m| m.iter().filter(|&&x| x == u).count() <= 1) && p.keys().any(|m| m.len() == 3 && m.contains(&u));
-        for &u in vars.iter().filter(|&&u| once(u)).take(MAX_PIVOTS) {
+        for &u in vars.iter().filter(|&&u| once(u)).take(self.lim.max_pivots) {
             let mut pu = Poly::new();
             for (m, &c) in p.iter().filter(|(m, _)| m.contains(&u)) {
                 let mut rest = m.clone();
                 rest.retain(|&x| x != u);
                 self.add_to(&mut pu, rest, c);
             }
-            for (l1, l2) in self.factor2(&pu).into_iter().take(MAX_PIVOTS) {
+            for (l1, l2) in self.factor2(&pu).into_iter().take(self.lim.max_pivots) {
                 for l in [l1, l2] {
                     let Some((&v, &c)) = l.iter().find_map(|(m, c)| (m.len() == 1 && c & 1 == 1).then(|| (&m[0], c))) else { continue };
                     let mut inv = c;
@@ -482,7 +497,7 @@ impl<'a> Expansion<'a> {
                     tried.push(l.clone());
                     if let Some(q) = self.divide(p, &l, v) {
                         out.push((l, q));
-                        if out.len() >= MAX_SOLUTIONS {
+                        if out.len() >= self.lim.max_solutions {
                             return;
                         }
                     }
@@ -552,7 +567,7 @@ impl<'a> Expansion<'a> {
         for k in 0..self.w.w {
             let m = if k + 1 == 64 { u64::MAX } else { (1u64 << (k + 1)) - 1 };
             rs = rs.iter().flat_map(|&r| [r, r | 1 << k]).filter(|&r| f(r) & m == 0).collect();
-            if rs.len() > MAX_ROOTS {
+            if rs.len() > self.lim.max_roots {
                 let mut cands = self.quad_roots(a.wrapping_mul(3), b.wrapping_mul(2), c);
                 if a & 1 == 1 {
                     let a3 = a.wrapping_mul(3);
@@ -571,19 +586,19 @@ impl<'a> Expansion<'a> {
         rs
     }
 
-    fn assign(roots: &[Vec<u64>], r: &mut [u64], k: usize, fits: &dyn Fn(&[u64], usize) -> bool, steps: &mut usize, sols: &mut Vec<Vec<u64>>) {
+    fn assign(&self, roots: &[Vec<u64>], r: &mut [u64], k: usize, fits: &dyn Fn(&[u64], usize) -> bool, steps: &mut usize, sols: &mut Vec<Vec<u64>>) {
         if k == roots.len() {
             sols.push(r.to_vec());
             return;
         }
         for &x in &roots[k] {
             *steps += 1;
-            if *steps > MAX_FACTOR_STEPS || sols.len() >= MAX_SOLUTIONS {
+            if *steps > self.lim.max_factor_steps || sols.len() >= self.lim.max_solutions {
                 return;
             }
             r[k] = x;
             if fits(r, k) {
-                Self::assign(roots, r, k + 1, fits, steps, sols);
+                self.assign(roots, r, k + 1, fits, steps, sols);
             }
         }
     }
@@ -596,7 +611,7 @@ impl<'a> Expansion<'a> {
         for k in 0..self.w.w {
             let m = if k + 1 == 64 { u64::MAX } else { (1u64 << (k + 1)) - 1 };
             rs = rs.iter().flat_map(|&r| [r, r | 1 << k]).filter(|&r| f(r) & m == 0).collect();
-            if rs.len() > MAX_ROOTS {
+            if rs.len() > self.lim.max_roots {
                 let mut inv = a;
                 for _ in 0..6 {
                     inv = inv.wrapping_mul(2u64.wrapping_sub(a.wrapping_mul(inv)));
@@ -615,18 +630,18 @@ impl<'a> Expansion<'a> {
     }
 
     /// Short term for `p`: pull out a common conjunction `f` (`p = f·q + r`)
-    /// so that `q` gets rebuilt as a linear MBA, recursively.
-    fn build(&self, p: &Poly, tries: usize) -> T {
-        let key = (p.clone(), tries);
+    /// so that `q` gets rebuilt as a linear MBA, recursively; `top` for the whole polynomial.
+    fn build(&self, p: &Poly, top: bool) -> T {
+        let key = (p.clone(), top);
         if let Some(t) = self.built.borrow().get(&key) {
             return t.clone();
         }
-        let t = self.build_uncached(p, tries);
+        let t = self.build_uncached(p, top);
         self.built.borrow_mut().insert(key, t.clone());
         t
     }
 
-    fn build_uncached(&self, p: &Poly, tries: usize) -> T {
+    fn build_uncached(&self, p: &Poly, top: bool) -> T {
         if p.keys().all(|m| m.len() <= 1) {
             return self.build_linear(p);
         }
@@ -658,8 +673,8 @@ impl<'a> Expansion<'a> {
             for (l0, q) in if three { self.factor3(target) } else { Vec::new() } {
                 let quads = self.factor2(&q);
                 if quads.is_empty() {
-                    cands.push(mul(side(&l0, false), self.build(&q, 1)));
-                    cands.push(mul(side(&l0, true), self.build(&self.scale(q.clone(), neg1), 1)));
+                    cands.push(mul(side(&l0, false), self.build(&q, false)));
+                    cands.push(mul(side(&l0, true), self.build(&self.scale(q.clone(), neg1), false)));
                 }
                 for (l1, l2) in quads {
                     for (n0, n1, n2) in [(false, false, false), (true, true, false), (true, false, true), (false, true, true)] {
@@ -677,12 +692,11 @@ impl<'a> Expansion<'a> {
             }
         };
         keep(&mut best, factored(p, true, false));
-        let top = tries == FACTOR_TRIES;
         // Pulling `f` out of its degree-1 monomial too (`x*y - 7*x` → `x*(y - 7)`)
         // can block a shorter linear rebuild of the rest, so try both, while the
         // budget lasts: the choices multiply at every level.
         self.builds.set(self.builds.get() + 1);
-        let (tries, both) = if self.builds.get() > limit(Limit::PolyBuilds) { (1, 1) } else { (tries, 2) };
+        let (tries, both) = if self.builds.get() > self.lim.builds { (1, 1) } else if top { (self.lim.factor_tries, 2) } else { (1, 2) };
         let choices = cands.iter().take(tries).flat_map(|&(f, _)| [(f, false), (f, true)].into_iter().take(both));
         for (f, with_linear) in choices {
             let (mut q, mut r) = (Poly::new(), Poly::new());
@@ -699,12 +713,12 @@ impl<'a> Expansion<'a> {
                 }
             }
             let ft = self.conj_term(f);
-            let prod = match self.build(&q, 1) {
+            let prod = match self.build(&q, false) {
                 T::Num(1) => ft,
                 T::Num(-1) => T::Op(Op::Neg, vec![ft]),
                 qt => T::Op(Op::Mul, vec![ft, qt]),
             };
-            let cand = if r.is_empty() { prod } else { T::Op(Op::Add, vec![prod, self.build(&r, 1)]) };
+            let cand = if r.is_empty() { prod } else { T::Op(Op::Add, vec![prod, self.build(&r, false)]) };
             if best.as_ref().is_none_or(|b| size(&cand) < size(b)) {
                 best = Some(cand);
             }
@@ -729,8 +743,8 @@ impl<'a> Expansion<'a> {
                 let plus = |l: &Poly, c: u64| self.sum(l.clone(), self.constant(c));
                 let with_rest = |prod: T, rest: Poly| if rest.is_empty() { prod } else { T::Op(Op::Add, vec![prod, self.build_linear(&rest)]) };
                 let mut shifted = Vec::new();
-                let small = |l: &Poly| l.len() <= MAX_SHIFTED_MONOS;
-                let tries = if low.len() > 2 * MAX_SHIFTED_MONOS { 0 } else { MAX_SHIFTED };
+                let small = |l: &Poly| l.len() <= self.lim.max_shifted_monos;
+                let tries = if low.len() > self.lim.max_shifted_monos.saturating_mul(2) { 0 } else { self.lim.max_shifted };
                 for (l1, l2) in self.factor2(&high).into_iter().filter(|(a, b)| small(a) && small(b)).take(tries) {
                     // Only shifts that leave the rest fewer monomials are built.
                     let mut cache: Vec<Option<[T; 2]>> = vec![None; 2 * SHIFTS.len()];
@@ -755,8 +769,8 @@ impl<'a> Expansion<'a> {
                         let e = *e as u64 & neg1;
                         let rest = self.sum(low.clone(), self.scale(l0.clone(), e.wrapping_neg()));
                         let q = plus(&q, e);
-                        shifted.push(with_rest(mul(side(&l0, false), self.build(&q, 1)), rest.clone()));
-                        shifted.push(with_rest(mul(side(&l0, true), self.build(&self.scale(q, neg1), 1)), rest));
+                        shifted.push(with_rest(mul(side(&l0, false), self.build(&q, false)), rest.clone()));
+                        shifted.push(with_rest(mul(side(&l0, true), self.build(&self.scale(q, neg1), false)), rest));
                     }
                 }
                 keep(&mut best, shifted);
@@ -785,9 +799,6 @@ fn has_product(t: &T, w: &Ctx) -> bool {
     }
 }
 
-/// Rebuilt form of the polynomial region rooted at `t`, if it has a product of
-/// non-constant terms or is a linear region with more than `max_leaves` leaves,
-/// and the rebuilt form is smaller.
 /// Number of monomials in the expansion of `t`, after the null polynomials are reduced
 /// if that leaves fewer.
 pub(crate) fn monomials(t: &T, w: &Ctx) -> Option<usize> {
@@ -796,6 +807,9 @@ pub(crate) fn monomials(t: &T, w: &Ctx) -> Option<usize> {
     Some(p.len().min(ctx.reduce_null(&p).len()))
 }
 
+/// Rebuilt form of the polynomial region rooted at `t`, if it has a product of
+/// non-constant terms or is a linear region with more than `max_leaves` leaves,
+/// and the rebuilt form is smaller.
 pub(crate) fn simplify_poly(t: &T, w: &Ctx) -> Option<T> {
     // A bitwise root would be its own leaf, and `leaf` rewrites leaves.
     let wide = kind(t, w) == Kind::Lin && {
@@ -815,18 +829,18 @@ pub(crate) fn simplify_poly(t: &T, w: &Ctx) -> Option<T> {
     })?;
     // Far more monomials than nodes (products of bitwise terms over many leaves)
     // rarely rebuild smaller, and building them is slow.
-    if p.len().min(q.len()) > 4 * size(t) {
+    if p.len().min(q.len()) > limit(Limit::PolyMonosPerNode).saturating_mul(size(t)) {
         return None;
     }
     if p.len().min(q.len()) > limit(Limit::PolyBranchMonos) {
-        ctx.builds.set(limit(Limit::PolyBuilds));
+        ctx.builds.set(ctx.lim.builds);
     }
-    let r = stats::time("poly/build", || ctx.build(if q.len() < p.len() { &q } else { &p }, FACTOR_TRIES));
+    let r = stats::time("poly/build", || ctx.build(if q.len() < p.len() { &q } else { &p }, true));
     // As many monomials, but a null polynomial can have made coefficients huge (`2^63·y` beside
     // a factor that keeps the rest even).
     let huge = |p: &Poly| p.values().any(|&c| w.signed(c).unsigned_abs() >= 1 << (w.w - 2));
-    let r = if q.len() == p.len() && p.len() <= MAX_FACTOR_MONOS && huge(&p) && !huge(&q) {
-        let s = ctx.build(&q, FACTOR_TRIES);
+    let r = if q.len() == p.len() && p.len() <= ctx.lim.max_factor_monos && huge(&p) && !huge(&q) {
+        let s = ctx.build(&q, true);
         if size(&s) < size(&r) { s } else { r }
     } else {
         r
@@ -847,11 +861,12 @@ fn masked_poly(t: &T, monos: usize, w: &Ctx) -> Option<T> {
     // One product is enough in a small term; in large ones that is most regions of
     // semi-linear inputs, at several times the run time.
     let (any, both) = masked_products(t, w);
-    if any < 2 && (both == 0 || size(t) > MAX_MASKED_SIZE) {
+    if any < 2 && (both == 0 || size(t) > limit(Limit::PolyMaxMaskedSize)) {
         return None;
     }
     let mut consts = Vec::new();
     collect_masks(t, &mut consts);
+    let max_atoms = limit(Limit::PolyMaxAtoms);
     let mut atoms: Vec<u64> = Vec::new();
     let mut sigs: Vec<Vec<bool>> = Vec::new();
     for j in 0..w.w {
@@ -859,7 +874,7 @@ fn masked_poly(t: &T, monos: usize, w: &Ctx) -> Option<T> {
         match sigs.iter().position(|s| *s == sig) {
             Some(k) => atoms[k] |= 1 << j,
             None => {
-                if atoms.len() == MAX_ATOMS {
+                if atoms.len() == max_atoms {
                     return None;
                 }
                 sigs.push(sig);
@@ -872,11 +887,11 @@ fn masked_poly(t: &T, monos: usize, w: &Ctx) -> Option<T> {
     }
     let mut ctx = Expansion::new(w, atoms);
     let p = ctx.poly(t)?;
-    if p.len() > MAX_MASKED_MONOS.max(2 * monos) {
+    if p.len() > limit(Limit::PolyMaxMaskedMonos).max(2 * monos) {
         return None;
     }
     let q = ctx.reduce_null(&p);
-    Some(ctx.build(if q.len() < p.len() { &q } else { &p }, FACTOR_TRIES))
+    Some(ctx.build(if q.len() < p.len() { &q } else { &p }, true))
 }
 
 /// Products of non-constant factors where `poly` expands `t` structurally, with a bitwise
@@ -996,7 +1011,7 @@ mod tests {
                     let t = op(Op::Mul, vec![op(Op::Mul, vec![a.clone(), b]), c]);
                     let mut ctx = Expansion::new(&w, Vec::new());
                     let Some(p) = ctx.poly(&t) else { continue };
-                    let built = ctx.build(&p, FACTOR_TRIES);
+                    let built = ctx.build(&p, true);
                     factored += (size(&built) <= size(&t)) as u32;
                     for _ in 0..32 {
                         let (x, y, z) = (r.next(), r.next(), r.next());

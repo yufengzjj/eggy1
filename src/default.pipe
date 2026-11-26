@@ -23,6 +23,12 @@ lowbits_max_bits=18 lowbits_max_context_bits=18 lowbits_narrow_context_bits=12 l
 lowbits_max_product_bits=4 lowbits_budget=67108864 lowbits_wide_budget=8388608 lowbits_max_low_rebuild=64
 lowbits_refine_bits=2 lowbits_max_refine_bits=12 lowbits_refine_budget=4194304 lowbits_max_factor_terms=4
 
+# `poly_mba`.
+poly_max_monos=4096 poly_monos_per_node=4 poly_factor_tries=3 poly_max_factor_monos=64
+poly_max_factor_vars=12 poly_max_pivots=4 poly_max_roots=16 poly_max_factor_steps=4096
+poly_max_solutions=8 poly_max_shifted=4 poly_max_shifted_monos=4 poly_max_atoms=4
+poly_max_masked_monos=16 poly_max_masked_size=20
+
 # A later round: the pre-pass rebuilds, then their extraction, or the one proved minimal.
 (let later prepass | (if minimal take_minimal (egglog later)))
 

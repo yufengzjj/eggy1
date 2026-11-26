@@ -320,6 +320,20 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `lowbits_max_refine_bits` | 12，上限 63 | `lowbits`：`refine_low` 总共最多枚举几个叶子位 |
 | `lowbits_refine_budget` | 4194304 | `lowbits`：`refine_low` 一次调用的求值步数 |
 | `lowbits_max_factor_terms` | 4 | `over_products`：多于这么多项的因子不展开 |
+| `poly_max_monos` | 4096 | `poly_mba`：乘出来的积最多几个单项式，超过就不展开 |
+| `poly_monos_per_node` | 4 | `poly_mba`：展开的单项式多于项的节点数的这么多倍时不重建 |
+| `poly_factor_tries` | 3 | `poly_mba`：重建整个多项式时试几个公因子（下层只试一个） |
+| `poly_max_factor_monos` | 64 | `poly_mba`：最多几个单项式的多项式才分解因式，也是按约化形式再重建一次的上限 |
+| `poly_max_factor_vars` | 12 | `poly_mba`：最多几个合取的多项式才分解因式 |
+| `poly_max_pivots` | 4 | `poly_mba`：分解因式时最多试几个主元合取 |
+| `poly_max_roots` | 16 | `poly_mba`：系数方程的根多于此时只留几个可能的根 |
+| `poly_max_factor_steps` | 4096 | `poly_mba`：分解因式时最多试几种根的组合 |
+| `poly_max_solutions` | 8 | `poly_mba`：一个主元最多给出几种分解 |
+| `poly_max_shifted` | 4 | `poly_mba`：最多几种分解把因子加减常数、和线性余项并列 |
+| `poly_max_shifted_monos` | 4 | `poly_mba`：加减常数的因子最多几个单项式，余项最多两倍 |
+| `poly_max_atoms` | 4 | `poly_mba`：按掩码展开时最多把位分成几组 |
+| `poly_max_masked_monos` | 16 | `poly_mba`：按掩码展开最多几个单项式（或普通展开的两倍） |
+| `poly_max_masked_size` | 20 | `poly_mba`：只有一个两边都带常数的乘积时，按掩码展开的项最大多大 |
 
 ### 7.4 `sub/NAME`
 

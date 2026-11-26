@@ -160,6 +160,36 @@ limits! {
     LowbitsRefineBudget "lowbits_refine_budget";
     /// `lowbits`: most terms of a factor that `over_products` multiplies out.
     LowbitsMaxFactorTerms "lowbits_max_factor_terms";
+    /// `poly_mba`: most monomials of a product it multiplies out.
+    PolyMaxMonos "poly_max_monos";
+    /// `poly_mba`: expansions with more monomials per node of the term are not rebuilt.
+    PolyMonosPerNode "poly_monos_per_node";
+    /// `poly_mba`: candidate factors pulled out at the top level of a rebuild (one below it).
+    PolyFactorTries "poly_factor_tries";
+    /// `poly_mba`: most monomials of a polynomial factored, and of one rebuilt again from its
+    /// null-reduced form.
+    PolyMaxFactorMonos "poly_max_factor_monos";
+    /// `poly_mba`: most conjunctions of a polynomial factored.
+    PolyMaxFactorVars "poly_max_factor_vars";
+    /// `poly_mba`: most pivot conjunctions a factoring tries.
+    PolyMaxPivots "poly_max_pivots";
+    /// `poly_mba`: past this many roots of a coefficient equation only the likely ones are kept.
+    PolyMaxRoots "poly_max_roots";
+    /// `poly_mba`: most root combinations a factoring tries.
+    PolyMaxFactorSteps "poly_max_factor_steps";
+    /// `poly_mba`: most factorings one pivot gives.
+    PolyMaxSolutions "poly_max_solutions";
+    /// `poly_mba`: most factorings shifted by constants beside the linear rest.
+    PolyMaxShifted "poly_max_shifted";
+    /// `poly_mba`: most monomials of a shifted factor; the rest may have twice as many.
+    PolyMaxShiftedMonos "poly_max_shifted_monos";
+    /// `poly_mba`: most bit sets the masked expansion splits the width into.
+    PolyMaxAtoms "poly_max_atoms";
+    /// `poly_mba`: most monomials of the masked expansion (or twice the plain one's).
+    PolyMaxMaskedMonos "poly_max_masked_monos";
+    /// `poly_mba`: largest term the masked expansion rebuilds for a single product with
+    /// constants in both factors.
+    PolyMaxMaskedSize "poly_max_masked_size";
 }
 
 /// Variables besides the limits: `rewrites` (uncached `rewrite` calls left), `semi_leaves`
@@ -1442,6 +1472,22 @@ mod tests {
             crate::pipe::run(&lang::parse("lowbits_max_try = 1 | id").unwrap(), vec![t()], &crate::pipe::Env::prepass(&plain, 8, None, false, t().term())).unwrap();
             assert_eq!(limit(Limit::LowbitsMaxTry), 256, "a run ends the bindings made in it");
         });
+    }
+
+    #[test]
+    fn moved_poly_constants_bind_in_their_scope() {
+        let (x, y) = ("(Var \"x\")", "(Var \"y\")");
+        let input = format!("(Sub (Mul (Add {x} {y}) (Add {x} {y})) (Add (Mul {x} {x}) (Mul (Num 2) (Mul {x} {y}))))");
+        let t = || crate::pipe::Cand::new(&input, "input");
+        let run = |spec: &str| {
+            let p = Passes::parse(spec).unwrap();
+            crate::pipe::run(&p.prepass, vec![t()], &crate::pipe::Env::prepass(&p, 8, None, false, t().term())).unwrap()[0].term().to_string()
+        };
+        let plain = run("prepass=(scope (best 1 id poly_mba))");
+        assert_eq!(plain, format!("(Mul {y} {y})"));
+        assert_eq!(run("prepass=(scope poly_max_monos = 0 | (best 1 id poly_mba))"), input, "no product is multiplied out");
+        assert_eq!(run("prepass=(scope (poly_max_monos = 0 | id) | (best 1 id poly_mba))"), plain, "the assignment ends with its sequence");
+        assert_eq!(run("prepass=(scope (poly_max_monos = 0 | (best 1 id poly_mba)) | (best 1 id poly_mba))"), plain, "the memo keeps the scopes apart");
     }
 
     #[test]
