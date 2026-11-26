@@ -89,9 +89,9 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
     Ok(out)
 }
 
-const FORMS: [&str; 23] = [
+const FORMS: [&str; 24] = [
     "seq", "union", "best", "first", "fix", "if", "retry", "smallest", "scope", "regions", "again", "tag", "cand", "smaller", "wins", "filter", "with", "save", "load",
-    "label", "off", "egglog", "time-limit",
+    "label", "off", "on", "egglog", "time-limit",
 ];
 
 /// An expression before it is read as a condition or a value.
@@ -355,18 +355,18 @@ impl Parser<'_> {
                 let n = format!("{f}/{}", self.name(&format!("a name after {f}"))?);
                 Pipe::Pass(resolve(&n).unwrap())
             }
-            "off" => {
-                let mut ps = Vec::new();
+            "off" | "on" => {
+                // One pass for all the names: a sequence of them would end their effect.
+                let mut ns = Vec::new();
                 while !self.at_close() {
-                    let n = self.name("a pass name after off")?;
-                    let p = resolve(&format!("off/{n}")).ok_or_else(|| format!("unknown off name {n}; known: {}", INNER.join(",")))?;
-                    ps.push(Pipe::Pass(p));
+                    let n = self.name(&format!("a pass name after {f}"))?;
+                    let known = || INNER.iter().chain(&crate::sched::FLAGS).copied().collect::<Vec<_>>().join(",");
+                    ns.push(crate::sched::switch(&n).ok_or_else(|| format!("unknown {f} name {n}; known: {}", known()))?);
                 }
-                match ps.len() {
-                    0 => return Err("off needs a pass name".into()),
-                    1 => ps.pop().unwrap(),
-                    _ => Pipe::Seq(ps),
+                if ns.is_empty() {
+                    return Err(format!("{f} needs a pass name"));
                 }
+                Pipe::Pass(if f == "off" { Pass::Off(ns) } else { Pass::On(ns) })
             }
             _ => unreachable!(),
         })
@@ -574,7 +574,7 @@ fn show_pass(p: &Pass) -> String {
     }
     let n = p.name();
     match n.split_once('/') {
-        Some((h @ ("save" | "load" | "label" | "off" | "egglog"), r)) => form(h, &[r.to_string()]),
+        Some((h @ ("save" | "load" | "label" | "off" | "on" | "egglog"), r)) => form(h, &[r.to_string()]),
         _ => n,
     }
 }
@@ -717,7 +717,7 @@ mod tests {
         same("(if (!minimal || tiny) (rewrite | polish))", "(if (!minimal || (tiny)) (seq rewrite polish) id)");
         same("(filter (mul >= 4 && vars < 3))", "(filter ((mul >= 4) && (vars < 3)))");
         same("(with off=relate,tfunc rewrites=8 rewrite)", "(with off=relate,tfunc (with rewrites=8 rewrite))");
-        same("(off lowbits relate) | (save t)", "((off lowbits) | (off relate)) | (save t)");
+        assert_eq!(parse("(off lowbits relate)").unwrap(), Pipe::Pass(Pass::Off(vec!["lowbits", "relate"])));
         same("(fix restarts prepass | egglog)", "(fix restarts (prepass | egglog))");
         same("# comment
 (best 2 rewrite (scope relate)) # more", "(best 2 rewrite (scope relate))");

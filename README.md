@@ -39,7 +39,6 @@ Usage: eggy1 [OPTIONS] [EXPR]
   -n, --num-type <NUM_TYPE>          i64 (default), u64, i32, u32, i16, u16, i8, u8
   -i, --iter-limit <ITER_LIMIT>      Rule iterations per egglog round [default: 10]
   -m, --max-restarts <MAX_RESTARTS>  Extract-and-restart rounds [default: 2]
-      --time-limit <SECONDS>         Stop starting passes after this long, print the smallest form so far
       --trace                        Print pre-pass candidates and round sizes to stderr
       --stats                        Print per-pass counts, times and wins to stderr
       --passes <PASSES>              Change the pass pipeline (see below)
@@ -137,7 +136,8 @@ forms of equal size can be extracted.
 - Integers of 8 to 64 bits only.
 - Linear regions are rebuilt exactly up to 6 leaves; wider ones only by splitting into
   smaller groups, so wide MBA can stay partly simplified.
-- Large or deeply nested inputs can take seconds; use `--time-limit` to bound the run.
+- Large or deeply nested inputs can take seconds; `--passes time_limit=MS` bounds the run
+  (it stops starting passes after MS ms and prints the smallest form found by then).
 
 ## License
 

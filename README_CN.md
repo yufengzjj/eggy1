@@ -35,7 +35,6 @@ Usage: eggy1 [OPTIONS] [EXPR]
   -n, --num-type <NUM_TYPE>          i64（默认）、u64、i32、u32、i16、u16、i8、u8
   -i, --iter-limit <ITER_LIMIT>      每轮 egglog 的规则迭代次数 [默认: 10]
   -m, --max-restarts <MAX_RESTARTS>  提取再重启的轮数 [默认: 2]
-      --time-limit <SECONDS>         超过这么久就不再开始新的 pass，输出到那时最小的形式
       --trace                        把预处理候选和每轮大小打印到 stderr
       --stats                        把各 pass 的次数、耗时和胜出次数打印到 stderr
       --passes <PASSES>              修改 pass 管线（见下文）
@@ -104,7 +103,7 @@ cargo test --lib                            # 单元测试
 
 - 只支持 8 到 64 位整数。
 - 线性区域最多 6 个叶子时能精确重建；更宽的只能拆成小组重建，所以很宽的 MBA 可能只化简一部分。
-- 很大或嵌套很深的输入可能要几秒；用 `--time-limit` 限制运行时间。
+- 很大或嵌套很深的输入可能要几秒；`--passes time_limit=MS` 限制运行时间（MS 毫秒后不再开始新的 pass，输出到那时最小的形式）。
 
 ## 许可
 

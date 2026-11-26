@@ -107,12 +107,12 @@ pub const COUNTS: [&str; 4] = ["restarts", "extra", "printed", "keep"];
 /// The passes as a pipeline writes them, for error messages.
 pub fn names() -> Vec<String> {
     let polish = linear_mba::POLISH.iter().map(|(n, _)| format!("polish/{n}"));
-    let forms = ["(egglog LABEL)", "(save R)", "(load R)", "(label R)", "(off NAME)"].map(String::from);
+    let forms = ["(egglog LABEL)", "(save R)", "(load R)", "(label R)", "(off NAME)", "(on NAME)"].map(String::from);
     SET_PASSES.iter().map(|n| n.to_string()).chain(forms).chain(linear_mba::TERM_PASSES.iter().map(|(n, _)| n.to_string())).chain(polish).collect()
 }
 
 /// The internal names of the passes a pipeline writes as forms: `(save R)` is `save/R`.
-pub const FORM_PASSES: [&str; 5] = ["save", "load", "label", "egglog", "off"];
+pub const FORM_PASSES: [&str; 6] = ["save", "load", "label", "egglog", "off", "on"];
 
 /// The pass of the internal name `name`: `Pass::name`, `save/R` for `(save R)`.
 pub fn resolve(name: &str) -> Option<Pass> {
@@ -125,7 +125,10 @@ pub fn resolve(name: &str) -> Option<Pass> {
         return Some(Pass::Egglog(name.to_string()));
     }
     if let Some(n) = name.strip_prefix("off/") {
-        return crate::sched::INNER.iter().find(|k| **k == n).map(|k| Pass::Off(*k));
+        return crate::sched::switch(n).map(|n| Pass::Off(vec![n]));
+    }
+    if let Some(n) = name.strip_prefix("on/") {
+        return crate::sched::switch(n).map(|n| Pass::On(vec![n]));
     }
     if let Some(i) = SET_PASSES.iter().position(|n| *n == name) {
         return Some(Pass::Set(i));
@@ -390,55 +393,47 @@ fn holds(c: &Cond, set: &[Cand], env: &Env) -> bool {
 }
 
 thread_local! {
-    /// When `go` stops starting passes (`Cli::time_limit`).
-    static DEADLINE: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
     /// The limit `(time-limit N)` set in the enclosing sequences, if any.
     static LOCAL: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
     /// `LOCAL` as the innermost enclosing sequence found it, which `(time-limit 0)` restores.
     static OUTER: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
-    /// Some pass was skipped at the deadline.
+    /// Some pass was skipped past a limit while the switch `cut` was on.
     static CUT: Cell<bool> = const { Cell::new(false) };
     /// Seconds the last egglog round took.
     static LAST_ROUND: Cell<f64> = const { Cell::new(0.0) };
 }
 
-/// Starts the time limit of a run on this thread (`None`: no limit).
-pub fn set_deadline(seconds: Option<f64>) {
-    let at = seconds.map(|s| std::time::Instant::now() + std::time::Duration::from_secs_f64(s.max(0.0)));
-    DEADLINE.with(|d| d.set(at));
+/// Starts a `simplify` run on this thread: no limit, no cut, no egglog round timed yet.
+pub fn start() {
     LOCAL.with(|l| l.set(None));
+    OUTER.with(|o| o.set(None));
     CUT.with(|c| c.set(false));
     LAST_ROUND.with(|r| r.set(0.0));
 }
 
-/// Whether a pass was skipped at the deadline since `set_deadline`.
+/// Whether a step was skipped past a limit with `cut` on since `start`.
 pub fn cut() -> bool {
     CUT.with(|c| c.get())
 }
 
-/// Whether work taking `secs` more would end past the deadline; records the cut when it
-/// would. Results computed then are not memoized (`Ctx::mark_cut`).
-/// A `(time-limit N)` past its limit only skips the step (`time-limit/skipped`), it is not a
-/// cut of the run.
+/// Whether work taking `secs` more would end past the `(time-limit N)` in force; counts the
+/// skipped step (`time-limit/skipped`), and records a cut of the run when the switch `cut` is
+/// on. Results computed then are not memoized (`Ctx::mark_cut`).
 fn past_deadline(secs: f64, env: &Env) -> bool {
-    let (deadline, local) = (DEADLINE.with(|d| d.get()), LOCAL.with(|l| l.get()));
-    if deadline.is_none() && local.is_none() {
+    let Some(at) = LOCAL.with(|l| l.get()) else { return false };
+    if std::time::Instant::now() + std::time::Duration::from_secs_f64(secs) < at {
         return false;
     }
-    let end = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs);
-    if deadline.is_some_and(|at| end >= at) {
+    stats::add("time-limit/skipped", 0.0);
+    if crate::sched::is_on("cut") {
         CUT.with(|c| c.set(true));
-    } else if local.is_some_and(|at| end >= at) {
-        stats::add("time-limit/skipped", 0.0);
-    } else {
-        return false;
     }
     env.ctx(|c| c.mark_cut());
     true
 }
 
-/// `f` as a scope, a sequence or a pipeline run: a `(time-limit N)` or `(off NAME)` inside
-/// it ends with it.
+/// `f` as a scope, a sequence or a pipeline run: a `(time-limit N)`, `(on NAME)` or
+/// `(off NAME)` inside it ends with it.
 fn scoped<R>(f: impl FnOnce() -> R) -> R {
     let local = LOCAL.with(|l| l.get());
     let outer = OUTER.with(|o| o.replace(local));
@@ -461,7 +456,7 @@ pub fn run(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
 fn bookkeeping(p: &Pipe) -> bool {
     match p {
         Pipe::Seq(_) | Pipe::Filter(_) => true,
-        Pipe::Pass(Pass::Save(_) | Pass::Load(_) | Pass::Label(_) | Pass::Off(_) | Pass::TimeLimit(_)) => true,
+        Pipe::Pass(Pass::Save(_) | Pass::Load(_) | Pass::Label(_) | Pass::Off(_) | Pass::On(_) | Pass::TimeLimit(_)) => true,
         Pipe::Pass(Pass::Set(i)) => matches!(SET_PASSES[*i], "id" | "none" | "within" | "pre_done"),
         _ => false,
     }
@@ -743,8 +738,12 @@ fn pass(p: &Pass, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             return Ok(set);
         }
         Pass::Load(r) => return Ok(env.regs.borrow().get(r).cloned().unwrap_or_default()),
-        Pass::Off(n) => {
-            crate::sched::turn_off(n);
+        Pass::Off(ns) => {
+            ns.iter().for_each(|n| crate::sched::turn_off(n));
+            return Ok(set);
+        }
+        Pass::On(ns) => {
+            ns.iter().for_each(|n| crate::sched::turn_on(n));
             return Ok(set);
         }
         Pass::TimeLimit(v) => {
@@ -928,6 +927,54 @@ mod tests {
             assert!(crate::sched::is_off("relate"), "a branch that is no sequence does not");
         });
         assert!(!crate::sched::is_off("relate"));
+    }
+
+    #[test]
+    fn on_and_off_switches() {
+        let passes = Passes::default();
+        let env = Env::prepass(&passes, 32, None, false, "(Var \"x\")");
+        let step = |p: &str| go(&lang::parse(p).unwrap(), vec![Cand::new("(Var \"x\")", "input")], &env).unwrap();
+        use crate::sched::{is_off, is_on};
+        crate::sched::apply(&passes);
+        scoped(|| {
+            step("(off relate tfunc)");
+            assert!(is_off("relate") && is_off("tfunc"), "several names in one off");
+            step("(on relate)");
+            assert!(!is_off("relate") && is_off("tfunc"), "the later switch counts");
+            crate::sched::apply(&passes);
+            assert!(!is_off("relate") && is_off("tfunc"), "a run started here keeps them");
+            crate::sched::with_off(&["relate"], || {
+                assert!(is_off("relate"));
+                step("(on relate)");
+                assert!(!is_off("relate"));
+            });
+            assert!(!is_off("relate"));
+            assert!(!is_on("cut"));
+            step("(on cut)");
+            assert!(is_on("cut"));
+        });
+        assert!(!is_on("cut") && !is_off("tfunc"));
+    }
+
+    #[test]
+    fn a_limit_cuts_the_run_only_with_cut_on() {
+        let passes = Passes::default();
+        let env = Env::prepass(&passes, 32, None, false, "(Var \"x\")");
+        let step = |p: &str| go(&lang::parse(p).unwrap(), vec![Cand::new("(Var \"x\")", "input")], &env).unwrap();
+        for on in [false, true] {
+            start();
+            scoped(|| {
+                if on {
+                    step("(on cut)");
+                }
+                step("(time-limit 1)");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                step("rewrite");
+            });
+            assert_eq!(cut(), on);
+        }
+        start();
+        assert!(!cut());
     }
 
     #[test]

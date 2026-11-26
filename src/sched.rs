@@ -57,6 +57,15 @@ pub const INNER: [&str; 34] = [
     "semi/short_consts",
 ];
 
+/// Switches that are off unless turned on: `cut`, a step skipped past a `(time-limit N)`
+/// makes the run cut (`crate::pipe::cut`).
+pub const FLAGS: [&str; 1] = ["cut"];
+
+/// The `INNER` pass or `FLAGS` switch named `name`, which `(on NAME)` and `(off NAME)` take.
+pub fn switch(name: &str) -> Option<&'static str> {
+    INNER.iter().chain(&FLAGS).find(|k| **k == name).copied()
+}
+
 macro_rules! limits {
     ($($(#[doc = $doc:literal])* $id:ident $name:literal = $default:expr;)*) => {
         /// Numeric limits of the passes inside a rebuild; `--passes` sets them as `NAME=value`.
@@ -111,6 +120,8 @@ limits! {
     PolyBranchMonos "poly_branch_monos" = 128;
     /// Uncached `rewrite` calls one `polish` call may make.
     PolishRewrites "polish_rewrites" = 2000;
+    /// Milliseconds the default `pipeline` gives a `simplify` run; 0: no limit.
+    TimeLimit "time_limit" = 0;
 }
 
 thread_local! {
@@ -122,6 +133,10 @@ thread_local! {
     static SCOPED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Bits of the `INNER` passes `(off NAME)` turned off in the scopes under way.
     static RUN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Bits of the `INNER` passes `(on NAME)` turned on again in the scopes under way.
+    static RUN_ON: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Bits of the `FLAGS` turned on in the scopes under way.
+    static FLAG: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Bits of the `INNER` passes asked whether they are off, since the last `swap_touched`.
     static TOUCHED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// The passes of the run on this thread (`apply`), the default ones until set.
@@ -168,7 +183,7 @@ pub fn apply(p: &Passes) {
             *c = Some(std::rc::Rc::new(p.clone()));
         }
     });
-    let bits = off_bits(&p.off) | SCOPED.with(|s| s.get()) | RUN.with(|r| r.get());
+    let bits = (off_bits(&p.off) | SCOPED.with(|s| s.get()) | RUN.with(|r| r.get())) & !RUN_ON.with(|r| r.get());
     OFF.with(|o| o.set(bits));
     let custom = p.limits.iter().zip(LIMITS).any(|(v, (_, d))| v != d);
     LIMIT.with(|l| *l.borrow_mut() = custom.then(|| p.limits.clone()));
@@ -189,9 +204,11 @@ pub fn limit_named(name: &str) -> Option<usize> {
 pub fn with_off<R>(names: &[&str], f: impl FnOnce() -> R) -> R {
     let bits = off_bits(names);
     let (scoped, off) = (SCOPED.with(|s| s.replace(s.get() | bits)), OFF.with(|o| o.replace(o.get() | bits)));
+    let on = RUN_ON.with(|r| r.replace(r.get() & !bits));
     let r = f();
     SCOPED.with(|s| s.set(scoped));
     OFF.with(|o| o.set(off));
+    RUN_ON.with(|r| r.set(on));
     r
 }
 
@@ -263,9 +280,11 @@ pub enum Pass {
     Save(String),
     Load(String),
     Label(String),
-    /// Turns an `INNER` pass off until the end of the enclosing sequence, also in the runs
-    /// it calls.
-    Off(&'static str),
+    /// Turns an `INNER` pass or `FLAGS` switch off until the end of the enclosing sequence,
+    /// also in the runs it calls.
+    Off(Vec<&'static str>),
+    /// `Off` the other way.
+    On(Vec<&'static str>),
     /// Gives the rest of the enclosing sequence this many milliseconds; 0 clears it.
     TimeLimit(Value),
     /// A pass over one term; `alt` is the used bit of an alternative
@@ -294,7 +313,8 @@ impl Pass {
             Pass::Save(r) => format!("save/{r}"),
             Pass::Load(r) => format!("load/{r}"),
             Pass::Label(r) => format!("label/{r}"),
-            Pass::Off(n) => format!("off/{n}"),
+            Pass::Off(ns) => format!("off/{}", ns.join(" ")),
+            Pass::On(ns) => format!("on/{}", ns.join(" ")),
             Pass::TimeLimit(_) => "time-limit".into(),
         }
     }
@@ -434,20 +454,43 @@ pub fn polish(names: &[&str]) -> String {
     format!("(scope (with rewrites=polish_rewrites (wins 8\n  {steps})))")
 }
 
-/// Turns off the `INNER` pass `name` until the end of the scope under way (`in_scope`: the
-/// enclosing sequence or pipeline run), also in the runs it starts (the pass `(off NAME)`).
+/// Turns off the `INNER` pass or `FLAGS` switch `name` until the end of the scope under way
+/// (`in_scope`: the enclosing sequence or pipeline run), also in the runs it starts (the
+/// pass `(off NAME)`).
 pub fn turn_off(name: &str) {
-    let bits = off_bits(&[name]);
+    let (bits, flag) = (off_bits(&[name]), flag_bits(name));
     OFF.with(|o| o.set(o.get() | bits));
     RUN.with(|r| r.set(r.get() | bits));
+    RUN_ON.with(|r| r.set(r.get() & !bits));
+    FLAG.with(|f| f.set(f.get() & !flag));
 }
 
-/// `f` as a scope: the passes `(off NAME)` turns off inside it are on again after.
+/// `turn_off` the other way (the pass `(on NAME)`): the later of the two in a scope counts.
+pub fn turn_on(name: &str) {
+    let (bits, flag) = (off_bits(&[name]), flag_bits(name));
+    OFF.with(|o| o.set(o.get() & !bits));
+    RUN.with(|r| r.set(r.get() & !bits));
+    RUN_ON.with(|r| r.set(r.get() | bits));
+    FLAG.with(|f| f.set(f.get() | flag));
+}
+
+fn flag_bits(name: &str) -> u64 {
+    FLAGS.iter().position(|k| *k == name).map_or(0, |i| 1 << i)
+}
+
+/// Whether the `FLAGS` switch `name` is on on this thread.
+pub fn is_on(name: &str) -> bool {
+    FLAG.with(|f| f.get()) & flag_bits(name) != 0
+}
+
+/// `f` as a scope: the switches `(on NAME)` and `(off NAME)` set inside it are back after.
 pub fn in_scope<R>(f: impl FnOnce() -> R) -> R {
-    let (run, off) = (RUN.with(|r| r.get()), OFF.with(|o| o.get()));
+    let saved = (RUN.with(|r| r.get()), RUN_ON.with(|r| r.get()), OFF.with(|o| o.get()), FLAG.with(|f| f.get()));
     let r = f();
-    RUN.with(|r| r.set(run));
-    OFF.with(|o| o.set(off));
+    RUN.with(|r| r.set(saved.0));
+    RUN_ON.with(|r| r.set(saved.1));
+    OFF.with(|o| o.set(saved.2));
+    FLAG.with(|f| f.set(saved.3));
     r
 }
 
@@ -1218,6 +1261,11 @@ prepass=lowbits | r2
         let flat = Passes::parse("(let g relate | tfunc) (let h (relate | tfunc)) prepass=lowbits | g | finish rewrite=lowbits | h | finish").unwrap();
         assert_eq!(flat.prepass.to_string(), "lowbits | relate | tfunc | finish");
         assert_eq!(flat.rewrite.to_string(), "lowbits | (relate | tfunc) | finish");
+        let p = Passes::parse("prepass=(off relate tfunc) | (on relate cut) | rewrite time_limit=500").unwrap();
+        assert_eq!(p.prepass.to_string(), "(off relate tfunc) | (on relate cut) | rewrite");
+        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
+        assert!(Passes::parse("prepass=(on nope)").is_err() && Passes::parse("prepass=(on)").is_err() && Passes::parse("prepass=on/relate").is_err());
+        assert!(Passes::parse("prepass=(with off=cut rewrite)").is_err(), "with off= takes passes only");
         let e = Passes::parse("prepass=save/t").unwrap_err();
         assert!(e.contains("(save t)"), "{e}");
         for bad in ["pipeline=nope", "pipeline=(seq rewrite", "pipeline=(best x rewrite)", "pipeline=(fix 2 a b)", "pipeline=(with off=nope rewrite)", "pipeline=(loop rewrite)", "pipeline=(fix many id)", "pipeline=(if nope id)", "pipeline=(if mixed id id id)", "pipeline=(retry mixed id)"] {

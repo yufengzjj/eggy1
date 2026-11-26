@@ -31,7 +31,8 @@ struct Args {
     #[arg(short, long, default_value_t = 10.0)]
     timeout: f64,
     /// Fraction of `--timeout` after which a case stops starting passes and gives the smallest
-    /// form so far (`eggy1 --time-limit`); such a result not solved is `cut`. 0: no limit.
+    /// form so far (`time_limit` in `--passes`, which can override it); such a result not
+    /// solved is `cut`. 0: no limit.
     #[arg(long, default_value_t = 0.8)]
     time_limit: f64,
     /// Parallel cases (default: number of CPUs).
@@ -320,8 +321,7 @@ fn run_one(args: &Args) {
         iter_limit: args.iter_limit,
         max_restarts: args.max_restarts,
         trace: args.trace,
-        passes: eggy1::sched::Passes::parse(&args.passes).expect("bad --passes"),
-        time_limit: (args.time_limit > 0.0).then_some(args.time_limit * args.timeout),
+        passes: eggy1::sched::Passes::parse(&format!("time_limit={} {}", (args.time_limit.max(0.0) * args.timeout * 1000.0) as u64, args.passes)).expect("bad --passes"),
         expr: input.clone(),
         ..Default::default()
     };

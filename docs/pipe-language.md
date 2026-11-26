@@ -8,7 +8,7 @@ eggy1 的化简流程由几条管线描述，默认的写在 `src/default.pipe` 
 - 候选记着**来源**（origin，产生它的 pass 或 `cand` 名，`--stats` 按它计数）、哪些 pass 给过它被保留的形式（`used_wide`、`used_clustered`），以及产生它用了多少次未缓存的 `rewrite`（`few_rewrites`）。
 - 一组候选可以是空的。空组照常往下传：大多数 pass 对空组什么也不做，条件在空组上为假。
 - 每条管线的一次运行有自己的一套**寄存器**（`save`/`load`），运行之间、管线之间不共享。
-- 超过时限（`--time-limit`，或第 4.1 节的 `(time-limit N)`）后，干活的步骤原样返回输入，所以任何时候停下来结果都正确。只搬动候选的步骤照常执行：`seq` 本身、`save`、`load`、`label`、`filter`、`off`、`time-limit`、`id`、`none`、`within`、`pre_done`，所以寄存器照常可用，清除时限后管线能接着往下走。时限只在步骤之间检查，打断不了正在运行的单个步骤（一轮 egglog、一次大的 `poly_mba` 展开）。
+- 超过时限（第 4.1 节的 `(time-limit N)`；默认 `pipeline` 开头用 `time_limit` 设一个，见第 7.2 节）后，干活的步骤原样返回输入，所以任何时候停下来结果都正确。只搬动候选的步骤照常执行：`seq` 本身、`save`、`load`、`label`、`filter`、`off`、`time-limit`、`id`、`none`、`within`、`pre_done`，所以寄存器照常可用，清除时限后管线能接着往下走。时限只在步骤之间检查，打断不了正在运行的单个步骤（一轮 egglog、一次大的 `poly_mba` 展开）。
 
 ### 管线
 
@@ -78,22 +78,23 @@ CMP    := '<' | '<=' | '>' | '>=' | '==' | '!='
 | `(save R)` | 把当前候选组存进寄存器 `R`，原样往下传 |
 | `(load R)` | 把当前候选组换成寄存器 `R` 的内容（空寄存器给出空组）。可以反复读 |
 | `(label R)` | 只做统计：每个候选记 `stats::label`，与寄存器 `R` 的主候选来源不同时记 `pre/来源/differs` 和 `pre/来源/gain`；`--trace` 时打印候选 |
-| `(off NAME ...)` | 从这里起，关掉内部 pass，直到所在的 seq 结束，见第 4.1 节；这期间调用的管线（`prepass`、`polish`、`rewrite`……）也继承这一设置 |
+| `(off NAME ...)` | 从这里起，关掉内部 pass 或开关（第 5.5 节），直到所在的 seq 结束，见第 4.1 节；这期间调用的管线（`prepass`、`polish`、`rewrite`……）也继承这一设置 |
+| `(on NAME ...)` | 同上，方向相反：重新打开内部 pass，或打开开关。同一作用域里 `on` 和 `off` 以后写的为准 |
 | `(egglog LABEL)`、`egglog` | 一轮 egglog：所有候选合并进一个 e-graph，饱和，提取。统计计在 `egglog/LABEL` 下，默认用 `first`、`later`、`rerun_input` |
 | `(time-limit N)` | 从这里起，所在的 seq 剩下的部分有 `N` 毫秒，见第 4.1 节；`N` 为 0 时清除 |
 
 `(let NAME p)` 不是形式，而是 `--passes` 的一项（第 8 节）：之后写到 `NAME` 的地方展开成 `p`。定义体直接写成 `a | b` 时，展开后平铺进所在的 seq，和直接写出来一样；定义体整个包在括号里，写成 `(a | b)` 时，展开成一条嵌套的 seq，于是它里面的 `(time-limit N)`、`(off NAME)` 只在这里面有效。
 
-### 4.1 作用域：`(time-limit N)` 与 `(off NAME)`
+### 4.1 作用域：`(time-limit N)`、`(on NAME)`、`(off NAME)`
 
-语言里只有 **seq** 是作用域：`a | b | ...` 形成的一条序列，包括括号里的 `( ... )`、`(seq ...)`，以及每条管线的一次运行。`(time-limit N)` 和 `(off NAME)` 都从写下的位置起，作用到它所在的最内层 seq 结束；这期间调用的管线（`prepass`、`polish`、`rewrite`……）也受它们影响。`(off NAME)` 就是这样；`(time-limit N)` 的细节如下：
+语言里只有 **seq** 是作用域：`a | b | ...` 形成的一条序列，包括括号里的 `( ... )`、`(seq ...)`，以及每条管线的一次运行。`(time-limit N)`、`(on NAME)`、`(off NAME)` 都从写下的位置起，作用到它所在的最内层 seq 结束；这期间调用的管线（`prepass`、`polish`、`rewrite`……）也受它们影响。`on`/`off` 就是这样；`(time-limit N)` 的细节如下：
 
 - 从这一步起，这条 seq 剩下的步骤共有 `N` 毫秒；到期后剩下干活的步骤都被跳过（计入 `time-limit/skipped`），这条 seq 很快结束，外面的步骤照常运行。
 - `(time-limit 0)` 清除本 seq 里设的时限，回到进入这条 seq 时的时限（外层设的仍然有效）。
 - seq 结束时，它里面设的时限随之失效。
-- 时限叠加：外层 seq、外层管线的时限和 `--time-limit` 同时有效，取最早到期的。内层不能把时限延长到外层之后。
+- 时限叠加：外层 seq、外层管线的时限同时有效，取最早到期的。内层不能把时限延长到外层之后。
 - `N` 是第 6.3 节的数，进入这一步时求值，可以读特征和限值：`(time-limit (size * 10))`。
-- 内层时限到期不算整次运行被截断：只有 `--time-limit` 到期时，`eggy1` 才提示、bench 才把未解出的用例记作 `cut`。
+- 时限到期时开关 `cut` 开着，就算整次运行被截断：`eggy1` 打印提示，bench 把没解出的用例记作 `cut`。默认 `pipeline` 开头是 `(time-limit time_limit) | (on cut)`，所以 `--passes time_limit=MS` 设的总时限到期时算截断。`cut` 会被内层继承，所以里面再设的时限到期也算；不想算的地方写 `(off cut)`。
 - 截断后得到的结果不进缓存。
 
 不是 seq 的形式参数不形成作用域：`(if C (time-limit 100))` 那一支只有一个 pass，时限作用到 `if` 所在的 seq；`(if C ((time-limit 100) | x))` 那一支是一条 seq，时限只限 `x`。`(off NAME)` 同理：`default.pipe` 的 `gates` 写成 `(if (mul < 1) (off poly_mba)) | ...`，平铺进 `prepass` 的顶层 seq，所以一直关到这次预处理结束。
@@ -174,13 +175,17 @@ a | (if big (time-limit 200)) | b | c            # 输入大时 b、c 共用 200
 
 写作 `polish/NAME`，单项 pass，用在 `polish` 管线里：`push_not`、`join_constants`、`join_linear`、`over_const_bitwise`、`over_shared_bitwise`、`over_products`、`recombine`、`shift_cases`、`decompose`、`factor`。`--passes` 的 `polish=a,b,...` 是这些名字的简写（第 8 节）。
 
-### 5.5 内部 pass 名（`off`）
+### 5.5 内部 pass 名与开关（`off`、`on`）
 
-`(with off=...)`、`(off ...)` 和 `--passes` 的 `off=` 接受下列名字。关掉之后，它在一串步骤里时返回输入，作为 alternative 时不给出形式。它们大多同时也是 pass 名；`poly/masked`、`semi/*` 只是内部步骤：
+`(with off=...)`、`(off ...)`、`(on ...)` 和 `--passes` 的 `off=` 接受下列名字。关掉之后，它在一串步骤里时返回输入，作为 alternative 时不给出形式。它们大多同时也是 pass 名；`poly/masked`、`semi/*` 只是内部步骤：
 
 `lowbits unshift tfunc_whole relate tfunc unify_operands recombine cut_products shifted_xor simplify_rebuilt cluster_regions simba small_blocks wide_blocks poly_mba poly/masked rebuild_values common_multiple related_leaves one_wide_term semi_linear drop_unused clustered peel peel_clustered semi/grouped semi/peel_grouped semi/shapes semi/pairs semi/peel_shapes semi/semi_split semi/scaled semi/bit_split semi/short_consts`
 
 默认关掉的是 `semi/peel_shapes`。
+
+`(on ...)`、`(off ...)` 另外接受**开关**，开关默认是关的：
+
+- `cut`：开着时，时限到期而跳过的步骤会把整次运行记为截断（第 4.1 节）。
 
 ## 6. 条件与数
 
@@ -263,6 +268,7 @@ a | (if big (time-limit 200)) | b | c            # 输入大时 b、c 共用 200
 | `poly_builds` | 512 | `poly_mba` 穷举选择时最多构造几个乘积，之后每层只取第一种 |
 | `poly_branch_monos` | 128 | 展开的单项式多于此时，从一开始就每层只取第一种 |
 | `polish_rewrites` | 2000 | 一次 `polish` 最多几次未缓存的 `rewrite` |
+| `time_limit` | 0 | 默认 `pipeline` 给一次 `simplify` 的毫秒数，到期算截断；0 不限时。bench 用 `-t` 乘以它的 `--time-limit` 比例（默认 0.8）设置，写在 `--passes` 里的 `time_limit=` 优先 |
 
 ### 7.3 `sub/NAME`
 

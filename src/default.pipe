@@ -18,9 +18,12 @@
 # The pipeline of `simplify`: the restart rounds while the extraction changes, extra ones
 # while the pre-pass still rebuilds it, polish, all keeping the smallest form seen (the
 # extraction prefers fewer non-constant nodes, results are compared by node count); then
-# the same from the printed result, kept when smaller.
+# the same from the printed result, kept when smaller. With `time_limit=MS` the run stops
+# starting passes after MS ms, keeps the smallest form so far and counts as cut.
 pipeline=
-  (smallest
+  (time-limit time_limit)
+  | (on cut)
+  | (smallest
     (fix 1 first_round)
     | (if moved (fix restarts later))
     | (if moved (fix extra (if rebuilds later)))

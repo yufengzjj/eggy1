@@ -1013,7 +1013,7 @@ pub(crate) fn egglog_round(egg: &str, roots: &[&str], cli: &Cli) -> Result<Strin
 /// rounds resume rewriting from the smaller term with the full match budget
 /// available again.
 pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
-    pipe::set_deadline(cli.time_limit);
+    pipe::start();
     let egg = make_egg(&cli.num_type);
     stats::set_width(width_of(&cli.num_type));
     let env = pipe::Env::new(cli, egg, s);
@@ -1029,7 +1029,8 @@ pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
     Ok(egglog_to_infix(&r, &|n| norm_const(n, &cli.num_type)))
 }
 
-/// Whether the last `simplify` on this thread stopped at its `Cli::time_limit`.
+/// Whether the last `simplify` on this thread was cut short: a step skipped past a
+/// `(time-limit N)` with the switch `cut` on (the default `pipeline` with `time_limit=MS`).
 pub fn last_run_cut() -> bool {
     pipe::cut()
 }
@@ -1097,8 +1098,6 @@ pub struct Cli {
     pub show_passes: bool,
     #[arg(long, help = "Print per-pass counts, times and wins to stderr")]
     pub stats: bool,
-    #[arg(long, value_name = "SECONDS", help = "Stop starting passes after this long and return the smallest form so far; an egglog round is skipped when the last one would not fit")]
-    pub time_limit: Option<f64>,
     #[arg(default_value = "", hide_default_value = true, help = "The infix expression to simplify")]
     pub expr: String,
 }
@@ -1113,7 +1112,6 @@ impl Default for Cli {
             passes: sched::Passes::default(),
             show_passes: false,
             stats: false,
-            time_limit: None,
             expr: String::new(),
         }
     }
