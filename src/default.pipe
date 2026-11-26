@@ -1,0 +1,153 @@
+# The default pass pipelines (docs/pipe-language.md), read by `sched::Passes::default`.
+# `--passes` items come after these and can use the names defined here.
+
+# A later round: the pre-pass rebuilds, then their extraction, or the one proved minimal.
+(let later prepass | (if minimal take_minimal (egglog later)))
+
+# The first round. Saturating a large input is most of the run time and rarely beats its
+# rebuild, so the input joins only inputs with shifts, division or mulhi whose rebuild is
+# not tiny (`opaque`), or a rerun when the result still mixes arithmetic or constants
+# into bitwise operations.
+(let first_round
+  (if opaque
+    ((union id prepass) | (if minimal take_minimal (egglog first)))
+    (retry (rerun_input && mixed && !minimal)
+      (prepass | (if minimal take_minimal (egglog first)))
+      ((union id prepass) | (egglog rerun_input)))))
+
+# The pipeline of `simplify`: the restart rounds while the extraction changes, extra ones
+# while the pre-pass still rebuilds it, polish, all keeping the smallest form seen (the
+# extraction prefers fewer non-constant nodes, results are compared by node count); then
+# the same from the printed result, kept when smaller.
+pipeline=
+  (smallest
+    (fix 1 first_round)
+    | (if moved (fix restarts later))
+    | (if moved (fix extra (if rebuilds later)))
+    | polish)
+  | (if (printed && !input)
+      (tag rerun_printed
+        (best 1 id
+          (reprint
+           | (smallest
+               (fix 1 first_round)
+               | (if moved (fix printed later))
+               | polish)))))
+
+# A rebuild of the main candidate: the whole term replaced by a T-function lookup, or its
+# regions rewritten, clustered, related and its subterms replaced (`~(y - 1)` replaced
+# before the rebuild would become `-y`, a leaf the rebuild no longer relates to `y - 1`).
+(let rebuild_main (first tfunc_whole (rewrite_top | cluster_top | relate | tfunc)))
+(let rebuild_plain (first tfunc_whole (rewrite_top | cluster_top | tfunc)))
+
+# The passes the pre-pass turns off for inputs where paired `off=` runs without them lost
+# nothing: `poly_mba` without products of non-constant factors, `lowbits` without those,
+# shifts and bitwise operations with a constant operand, and `small_blocks` with more than
+# 3 products and no shift.
+(let gates
+  (if (mul < 1) (off poly_mba))
+  | (if (mul < 1 && shift < 1 && bitconst < 1) (off lowbits))
+  | (if (mul >= 4 && shift < 1) (off small_blocks)))
+
+# The pre-pass, on one run (`scope`). Registers: `t0` the input, `t` with low bits and
+# shifts rewritten, `r` the first rebuild, `n` the rebuild without `wide_blocks`, `f`/`b`
+# the candidates finished, `u` the rebuild without clusters, `m` the ones kept.
+prepass=
+  (scope
+    (save t0) | gates | lowbits | unshift | (save t)
+    | (cand first rebuild_main)
+    # Unified operands let the regions around them share leaves, but the rebuild of the
+    # input as written is sometimes smaller; dropped once it needs `unified_rewrites` rewrites.
+    | (best 1 id
+        (cand unified
+          (load t) | unify_operands | (filter !(same t))
+          | (with rewrites=unified_rewrites
+              (first tfunc_whole (rewrite | within | cluster_regions | relate | within | tfunc)))))
+    | (save r)
+    | (union id
+        # A region rebuilt by `wide_blocks` is smaller there, but the other rebuilds can
+        # leave subterms the abstracted rebuilds share across terms; a larger one unioned
+        # beside the first rebuild made the rules finish worse as often as better.
+        (cand no_wide
+          (if used_wide
+            ((load t) | (with off=wide_blocks rebuild_main) | (save n) | (filter (size < (size r))))
+            none))
+        (cand no_wide_abstracted
+          (load n)
+          | (with off=wide_blocks (union over_const_bitwise over_shared_bitwise))
+          | (filter (size < (size r) && size <= (size n) * 3 / 4)))
+        (cand split_bits (if fits_split (split_bits | (filter !(same r))) none))
+        (cand halve_first halve | (filter !(same r)) | rebuild_plain)
+        (cand over_products over_products | (filter !(same r)))
+        (cand over_const_bitwise over_const_bitwise | (filter !(same r)))
+        (cand over_shared_bitwise over_shared_bitwise | (filter !(same r)))
+        # Halving the whole input can give semi-linear regions that are slow to search.
+        (cand halve_input
+          (with semi_leaves=2
+            (if tiny none ((load t) | halve | (filter !(same t)) | rebuild_plain)))))
+    # A form from abstracted subterms only a little smaller than the first rebuild, or
+    # larger, made the rules finish worse at least as often as better (Ensia, LLVM Pluto).
+    | finish | (save f) | (filter (!abstracted || size <= (size f) * 3 / 4)) | (save b) | (label b)
+    # A region rebuilt in clusters is smaller there but can leave the rules a worse start
+    # than rebuilding it whole.
+    | (cand unclustered
+        (if (used_clustered && few_rewrites)
+          ((load t)
+           | (if !replaceable
+               (with off=clustered relate_leaves=unclustered_relate_leaves rewrites=unclustered_rewrites
+                 rewrite | within | relate | within | tfunc | finish | drop_identities)
+               none))
+          none))
+    # An equal-size one can take the extraction from the first rebuild with nothing gained.
+    | (label b) | (save u) | (load b) | (best keep id) | (save m)
+    | (union
+        ((load u) | (filter (size < (size m))))
+        (load m)
+        ((load u) | (filter (size > (size m) && size < (size t0)))))
+    | pre_done)
+
+# The final polish, on one candidate: the polish passes in turn, each kept when smaller,
+# repeated while one is, until 8 are; on one run whose `rewrite` calls are limited.
+# `join_linear` rewrites every pair of leaf groups many times, and semi-linear groups of
+# many leaves take seconds there. `polish=a,b,...` writes the same for other passes.
+polish=
+  (scope
+    (with rewrites=polish_rewrites
+      (wins 8
+        (smaller polish/push_not polish/push_not | drop_identities)
+        | (smaller polish/join_constants polish/join_constants | drop_identities)
+        | (smaller polish/join_linear (with semi_leaves=2 polish/join_linear | drop_identities))
+        | (smaller polish/over_const_bitwise polish/over_const_bitwise | drop_identities)
+        | (smaller polish/over_shared_bitwise polish/over_shared_bitwise | drop_identities)
+        | (smaller polish/over_products polish/over_products | drop_identities)
+        | (smaller polish/recombine polish/recombine | drop_identities)
+        | (smaller polish/shift_cases polish/shift_cases | drop_identities)
+        | (smaller polish/decompose polish/decompose | drop_identities)
+        | (smaller polish/factor polish/factor | drop_identities))))
+
+# The rebuild of one term, what `linear_mba::rewrite` memoizes: a linear region rebuilt by
+# the smallest of `simba`, `small_blocks` and `wide_blocks`, or else its operands
+# rewritten; `poly_mba` taken instead when strictly smaller.
+rewrite=(again (best 1 (regions (best 1 simba small_blocks wide_blocks)) poly_mba))
+
+# The rebuild of one linear region, the `simba` pass. Past `MAX_LEAVES` leaves: the
+# smallest of the region with unused leaves dropped, clustered, and peeled (only when no
+# leaf is unused: then the rewrite of the dropped form peels), the region itself or else
+# its clustered form, which a region too large to evaluate needs. Otherwise the
+# semi-linear rebuild, or the smallest rebuild from its values, kept when smaller than
+# the region; `one_wide_term` costs more than it gains on the cofactors of `poly_mba`.
+simba=
+  (if no_leaves none
+    (if wide
+      ((save in)
+       | (best 1
+           (drop_unused | (save d))
+           (clustered | (save c))
+           ((load d)
+            | (if true none
+                ((load in) | (first peel ((load c) | peel_clustered)) | (filter !(same in)))))))
+      ((save in)
+       | (if const_bitwise
+           (best 1 semi_linear)
+           (best 1 rebuild_values common_multiple related_leaves (if !cofactor one_wide_term none)))
+       | (filter (size < (size in))))))

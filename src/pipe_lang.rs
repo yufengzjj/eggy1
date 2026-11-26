@@ -145,12 +145,16 @@ fn to_value(e: E) -> Result<Value, String> {
     })
 }
 
-struct Parser {
+/// The pipelines `(let NAME p)` defined, by name.
+pub type Defs = std::collections::HashMap<String, Pipe>;
+
+struct Parser<'a> {
     toks: Vec<Tok>,
     at: usize,
+    defs: &'a Defs,
 }
 
-impl Parser {
+impl Parser<'_> {
     fn peek(&self) -> Option<&Tok> {
         self.toks.get(self.at)
     }
@@ -180,10 +184,18 @@ impl Parser {
     }
 
     fn pipe(&mut self) -> Result<Pipe, String> {
-        let mut stages = vec![self.stage()?];
-        while self.peek() == Some(&Tok::Bar) {
+        let mut stages = Vec::new();
+        loop {
+            // A defined sequence used as a stage joins this one, as if written out.
+            let named = matches!(self.peek(), Some(Tok::Name(n)) if self.defs.contains_key(n));
+            match self.stage()? {
+                Pipe::Seq(ps) if named && ps.len() > 1 => stages.extend(ps),
+                p => stages.push(p),
+            }
+            if self.peek() != Some(&Tok::Bar) {
+                break;
+            }
             self.at += 1;
-            stages.push(self.stage()?);
         }
         Ok(if stages.len() == 1 { stages.pop().unwrap() } else { Pipe::Seq(stages) })
     }
@@ -191,6 +203,7 @@ impl Parser {
     fn stage(&mut self) -> Result<Pipe, String> {
         match self.next() {
             Some(Tok::Name(n)) if FORMS.contains(&n.as_str()) && n != "egglog" => Err(format!("{n} needs parentheses: ({n} ...)")),
+            Some(Tok::Name(n)) if self.defs.contains_key(&n) => Ok(self.defs[&n].clone()),
             Some(Tok::Name(n)) => resolve(&n).map(Pipe::Pass).ok_or_else(|| format!("unknown pass {n}; known: {}", crate::pipe::names().join(" "))),
             Some(Tok::Open) => {
                 let p = match self.peek() {
@@ -205,6 +218,13 @@ impl Parser {
                 Ok(p)
             }
             x => Err(format!("expected a pass or (, found {}", show_tok(x.as_ref()))),
+        }
+    }
+
+    fn end(&self) -> Result<(), String> {
+        match self.peek() {
+            None => Ok(()),
+            t => Err(format!("unexpected {} after the pipeline", show_tok(t))),
         }
     }
 
@@ -427,12 +447,33 @@ fn show_tok(t: Option<&Tok>) -> String {
 
 /// Parses `s` in the pipeline language.
 pub fn parse(s: &str) -> Result<Pipe, String> {
-    let mut p = Parser { toks: lex(s)?, at: 0 };
+    parse_with(s, &Defs::new())
+}
+
+/// Parses `s`, where the names of `defs` stand for their pipelines.
+pub fn parse_with(s: &str, defs: &Defs) -> Result<Pipe, String> {
+    let mut p = Parser { toks: lex(s)?, at: 0, defs };
     let pipe = p.pipe()?;
-    if p.at < p.toks.len() {
-        return Err(format!("unexpected {} after the pipeline", show_tok(p.peek())));
-    }
+    p.end()?;
     Ok(pipe)
+}
+
+/// Parses the definition `(let NAME p)`: `NAME` then stands for `p`, which is expanded where
+/// it is used.
+pub fn parse_let(s: &str, defs: &Defs) -> Result<(String, Pipe), String> {
+    let mut p = Parser { toks: lex(s)?, at: 0, defs };
+    p.expect(Tok::Open, "(let")?;
+    if p.name("let")? != "let" {
+        return Err(format!("expected (let NAME pipeline): {s}"));
+    }
+    let name = p.name("a name after let")?;
+    if FORMS.contains(&name.as_str()) || resolve(&name).is_some() || name == "let" {
+        return Err(format!("let {name}: the name of a pass or form"));
+    }
+    let pipe = p.pipe()?;
+    p.expect(Tok::Close, ")")?;
+    p.end()?;
+    Ok((name, pipe))
 }
 
 /// Whether `s` is written in the old `seq(a,b)` syntax: a name directly followed by `(`.
@@ -441,9 +482,9 @@ pub fn is_old_syntax(s: &str) -> bool {
     cs.windows(2).any(|w| name_char(w[0]) && w[1] == '(')
 }
 
-/// Parses `s` in either syntax.
-pub fn parse_any(s: &str) -> Result<Pipe, String> {
-    if is_old_syntax(s) { Pipe::parse(s) } else { parse(s) }
+/// Parses `s` in either syntax, `defs` as in `parse_with`.
+pub fn parse_any(s: &str, defs: &Defs) -> Result<Pipe, String> {
+    if is_old_syntax(s) { Pipe::parse(s) } else { parse_with(s, defs) }
 }
 
 /// `v` where an operand of precedence `need` stands: `+ -` are 1, `* /` 2, the rest 3.
@@ -646,7 +687,7 @@ mod tests {
             assert_eq!(&Pipe::parse(old).unwrap(), p);
             assert_eq!(&parse(&show(p)).unwrap(), p, "{}", show(p));
             assert_eq!(&parse(&pretty(p)).unwrap(), p, "{}", pretty(p));
-            assert_eq!(&parse_any(old).unwrap(), p);
+            assert_eq!(&parse_any(old, &Defs::new()).unwrap(), p);
         }
     }
 

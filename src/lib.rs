@@ -1104,7 +1104,7 @@ pub struct Cli {
         default_value = "",
         hide_default_value = true,
         value_parser = sched::Passes::parse,
-        help = "Change the pass pipeline: items key=value, key+=names or key-=names (pre, off, schedule), pipelines in the language of docs/pipe-language.md, e.g. \"extra=0 prepass=lowbits | (if mixed rewrite)\"; --show-passes prints the result"
+        help = "Change the pass pipeline: items key=value, key+=names or key-=names (pre, off, schedule), pipelines in the language of docs/pipe-language.md, (let NAME pipeline) definitions (those of src/default.pipe come first), file=PATH to read items from a file, e.g. \"extra=0 prepass=lowbits | (if mixed rewrite)\"; --show-passes prints the result"
     )]
     pub passes: sched::Passes,
     #[arg(long, help = "Print the pass pipeline in --passes form and exit")]
