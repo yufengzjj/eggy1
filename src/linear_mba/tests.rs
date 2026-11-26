@@ -420,6 +420,41 @@ fn bool_expr_cache_keeps_decompose_values_apart() {
 }
 
 #[test]
+fn shapes_grow_past_a_smaller_max() {
+    let direct = grown_levels(3, &[(6, 15)]);
+    let (sets, operands) = grown_levels(3, &[(4, 4), (6, 15)]);
+    assert_eq!(sets, direct.0, "the entries do not depend on the max");
+    assert_eq!(operands, direct.1, "a larger max fills the elems the smaller one left out");
+    let (_, operands) = grown_levels(3, &[(5, 5), (3, 3)]);
+    assert_eq!(operands, [true, true, true, true, true, false]);
+}
+
+#[test]
+fn shape_candidates_follow_shapes_max_size() {
+    // `(x ^ 0x5a) | (y & 0x33)` over 8 bits, a bitwise expression with constants of size 7.
+    let (x, y) = (T::Var("x".into()), T::Var("y".into()));
+    let t = T::Op(Op::Or, vec![T::Op(Op::Xor, vec![x.clone(), T::Num(0x5a)]), T::Op(Op::And, vec![y.clone(), T::Num(0x33)])]);
+    let lv = [x, y];
+    let best = |spec: &str| {
+        let p = crate::sched::Passes::parse(spec).unwrap();
+        crate::pipe::in_run(&p, None, || crate::pipe::Cand::new("(Var \"x\")", "input"), || {
+            let w = Ctx::new(8);
+            let prog = Prog::new(&t, &lv, &w);
+            let base: Vec<u64> = (0..w.w).flat_map(|j| prog.run_many(4, |i, q| ((q >> i & 1) as u64) << j, &w)).collect();
+            let (e0, groups) = groups_from(&|j, q| base[j as usize * 4 + q], 2, &w).unwrap();
+            let mut cands = Vec::new();
+            shape_candidates(&groups, &lv, e0, &w, 100, &mut cands);
+            cands.iter().map(size).min()
+        })
+    };
+    assert_eq!(best(""), Some(7));
+    assert_eq!(best("shapes_max_size=6"), None);
+    assert_eq!(best(""), Some(7), "a smaller max leaves the table usable");
+    assert_eq!(best("shapes_max_size=6"), None);
+    assert!(crate::sched::Passes::parse("shapes_max_size=16").is_err());
+}
+
+#[test]
 fn bool_expr_matches_table() {
     crate::sched::in_default_run(|| {
         let check = |n: usize, tt: u64| {

@@ -2,9 +2,6 @@
 
 use super::*;
 
-/// Largest bitwise expression size `shape_candidates` searches.
-const MAX_SHAPE: usize = 15;
-
 #[derive(Clone, Copy)]
 enum Shape {
     Leaf(u8),
@@ -25,6 +22,8 @@ struct Shapes {
     how: Vec<Shape>,
     /// `levels[s]`: the entries of size `s`.
     levels: Vec<std::ops::Range<usize>>,
+    /// Whether the entries of each level have their `elems`.
+    operands: Vec<bool>,
     seen: crate::eval::FastSet<[u64; 4]>,
 }
 
@@ -36,7 +35,7 @@ pub(super) fn one(f: u8) -> [u64; 4] {
 
 impl Shapes {
     fn new(n: usize) -> Shapes {
-        let mut sh = Shapes { n, sets: Vec::new(), elems: Vec::new(), how: Vec::new(), levels: vec![0..0], seen: Default::default() };
+        let mut sh = Shapes { n, sets: Vec::new(), elems: Vec::new(), how: Vec::new(), levels: vec![0..0], operands: vec![true], seen: Default::default() };
         let full = sh.full();
         let mut level = Vec::new();
         for i in 0..n {
@@ -60,22 +59,37 @@ impl Shapes {
             self.push(s, how, true);
         }
         self.levels.push(start..self.sets.len());
+        self.operands.push(true);
     }
 
-    /// Entries of the last level are never operands, so they need no `elems`.
+    fn tables(s: &[u64; 4]) -> Vec<u8> {
+        (0..=255u8).filter(|&f| s[(f >> 6) as usize] >> (f & 63) & 1 == 1).collect()
+    }
+
     fn push(&mut self, s: [u64; 4], how: Shape, operand: bool) {
         if self.seen.insert(s) {
-            self.elems.push(if operand { (0..=255u8).filter(|&f| s[(f >> 6) as usize] >> (f & 63) & 1 == 1).collect() } else { Vec::new() });
+            self.elems.push(if operand { Self::tables(&s) } else { Vec::new() });
             self.sets.push(s);
             self.how.push(how);
         }
     }
 
-    fn grow(&mut self, size: usize) {
+    /// Builds the levels up to `size <= max`. Entries of size `max` are never operands, so
+    /// they get no `elems` until a larger `max` needs them; the entries do not depend on `max`.
+    fn grow(&mut self, size: usize, max: usize) {
+        debug_assert!(size <= max);
+        for s in 1..self.levels.len().min(max) {
+            if !self.operands[s] {
+                for i in self.levels[s].clone() {
+                    self.elems[i] = Self::tables(&self.sets[i]);
+                }
+                self.operands[s] = true;
+            }
+        }
         let full = self.full();
         while self.levels.len() <= size {
             let s = self.levels.len();
-            let operand = s < MAX_SHAPE;
+            let operand = s < max;
             let start = self.sets.len();
             for i in self.levels[s - 1].clone() {
                 let mut set = [0; 4];
@@ -105,6 +119,7 @@ impl Shapes {
                 }
             }
             self.levels.push(start..self.sets.len());
+            self.operands.push(operand);
         }
     }
 
@@ -200,6 +215,7 @@ pub(super) fn shape_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w:
     scales.dedup();
     let zero_env: Vec<(T, u64)> = lv.iter().map(|l| (l.clone(), 0)).collect();
     let nf = 1usize << pts;
+    let max = crate::sched::limit(Limit::ShapesMaxSize);
     for c in scales {
         let overhead = if c == 1 { 0 } else if c == m { 1 } else { 2 };
         // Table `f` fits when `c·(f(q) - f(0)) = g(q)` at every point: with `f(0) = 0`
@@ -254,7 +270,7 @@ pub(super) fn shape_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w:
             if acc.iter().any(|a| a == &[0; 4]) {
                 continue;
             }
-            let Some(b) = smallest_shape(&acc, n, MAX_SHAPE.min(limit.saturating_sub(overhead + r_size + 1)), lv, w) else {
+            let Some(b) = smallest_shape(&acc, n, max.min(limit.saturating_sub(overhead + r_size + 1)), max, lv, w) else {
                 continue;
             };
             let r = e0.wrapping_sub(c.wrapping_mul(eval(&b, w, &zero_env))) & m;
@@ -264,12 +280,6 @@ pub(super) fn shape_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w:
         }
     }
 }
-
-/// Most groups `pair_candidates` handles, and most shape entries it checks.
-const MAX_PAIR_GROUPS: usize = 8;
-const PAIR_BUDGET: usize = 500_000;
-/// Largest total size of the two shapes.
-const MAX_PAIR_SIZE: usize = 12;
 
 fn meets(a: &[u64; 4], b: &[u64; 4]) -> bool {
     a.iter().zip(b).any(|(x, y)| x & y != 0)
@@ -284,7 +294,7 @@ fn meets(a: &[u64; 4], b: &[u64; 4]) -> bool {
 pub(super) fn pair_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, limit: usize, cands: &mut Vec<T>) {
     let n = lv.len();
     // One group is a linear table, which `overlapping_terms` covers.
-    if !(1..=3).contains(&n) || !(2..=MAX_PAIR_GROUPS).contains(&groups.len()) {
+    if !(1..=3).contains(&n) || !(2..=crate::sched::limit(Limit::PairsMaxGroups)).contains(&groups.len()) {
         return;
     }
     let key = (w.w, groups.to_vec(), e0, lv.to_vec(), limit, crate::sched::limits_key());
@@ -314,7 +324,8 @@ fn pair_candidates_uncached(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &C
     scales.dedup();
     scales.truncate(12);
     let coef = |c: u64| if c == 1 { 0 } else if c == m { 1 } else { 2 };
-    let mut budget = PAIR_BUDGET;
+    let (max_shape, max_size) = (crate::sched::limit(Limit::ShapesMaxSize), crate::sched::limit(Limit::PairsMaxSize));
+    let mut budget = crate::sched::limit(Limit::PairsBudget);
     let mut best = limit;
     let leaf_sizes: Vec<usize> = lv.iter().map(size).collect();
     let group_of: Vec<usize> = (0..w.w).map(|j| groups.iter().position(|(_, mask)| mask >> j & 1 == 1).unwrap_or(0)).collect();
@@ -393,7 +404,7 @@ fn pair_candidates_uncached(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &C
                 continue;
             }
             let mut sh = shapes(n).lock().unwrap();
-            let top = (best - overhead - 1).min(MAX_PAIR_SIZE);
+            let top = (best - overhead - 1).min(max_size);
             let other = (2..).map(|v: u64| v & m).find(|&v| v != c1 && v != c2).unwrap();
             // Whether some choice of tables at 0 makes r = 0, per group's set of
             // reachable (f1(0), f2(0)); None when pick_bits gives up.
@@ -406,10 +417,10 @@ fn pair_candidates_uncached(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &C
                 }
                 for s1 in 1..s {
                     let s2 = s - s1;
-                    if s1 >= MAX_SHAPE || s2 >= MAX_SHAPE {
+                    if s1 >= max_shape || s2 >= max_shape {
                         continue;
                     }
-                    sh.grow(s1.max(s2));
+                    sh.grow(s1.max(s2), max_shape);
                     for i in sh.levels[s1].clone() {
                         if budget == 0 {
                             return;
@@ -586,16 +597,16 @@ fn build_pair(sh: &Shapes, (i, k): (usize, usize), (c1, c2): (u64, u64), groups:
     build_sum(&[(c1, b1), (c2, b2)], r, w)
 }
 
-/// The smallest expression in `Shapes` of size at most `top` whose table set meets
+/// The smallest expression in `Shapes` of size at most `top <= max` whose table set meets
 /// `acc[j]` for every bit `j`, with its constants solved bit by bit.
-fn smallest_shape(acc: &[[u64; 4]], n: usize, top: usize, lv: &[T], w: &Ctx) -> Option<T> {
+fn smallest_shape(acc: &[[u64; 4]], n: usize, top: usize, max: usize, lv: &[T], w: &Ctx) -> Option<T> {
     let mut distinct = acc.to_vec();
     distinct.sort_unstable();
     distinct.dedup();
     let mut sh = shapes(n).lock().unwrap();
     let fits = |set: &[u64; 4]| distinct.iter().all(|a| a.iter().zip(set).any(|(x, y)| x & y != 0));
     for s in 1..=top {
-        sh.grow(s);
+        sh.grow(s, max);
         let Some(i) = sh.levels[s].clone().find(|&i| fits(&sh.sets[i])) else { continue };
         let mut consts = Vec::new();
         let mut prev = None;
@@ -613,4 +624,18 @@ fn smallest_shape(acc: &[[u64; 4]], n: usize, top: usize, lv: &[T], w: &Ctx) -> 
         return Some(sh.build(i, lv, &consts, &mut 0, w));
     }
     None
+}
+
+/// The entry sets per level of a fresh `Shapes` over `n` leaves grown by `steps` of
+/// `(size, max)`, and whether each level has its `elems`.
+#[cfg(test)]
+pub(super) fn grown_levels(n: usize, steps: &[(usize, usize)]) -> (Vec<Vec<[u64; 4]>>, Vec<bool>) {
+    let mut sh = Shapes::new(n);
+    for &(size, max) in steps {
+        sh.grow(size, max);
+    }
+    for (l, r) in sh.levels.iter().enumerate() {
+        assert!(r.clone().all(|i| sh.elems[i].is_empty() != sh.operands[l]), "level {l}");
+    }
+    (sh.levels.iter().map(|r| sh.sets[r.clone()].to_vec()).collect(), sh.operands.clone())
 }

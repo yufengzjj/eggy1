@@ -354,8 +354,22 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `join_linear_max_near_groups` | 8 | `join_linear`：区域最多几个叶子组才接着再移一次 |
 | `shift_cases_depth` | 2 | `shift_cases`：最多嵌套按几个变量移位量分情况 |
 | `shift_cases_max_size` | 64 | `shift_cases`：只处理不大于此的项（每个移位量最多重建 `2w` 种情况） |
+| `used_leaves_budget` | 33554432 | 宽区域在 {0,1}^n 上求值（`used_leaves`、`peel`）最多多少条指令乘点数 |
+| `peel_min_size` | 16 | `peel`：区域的大小至少是叶子数的这么多倍才试 |
+| `wide_blocks_max_term_leaves` | 10，上限 63 | `wide_blocks`：一项最多几个叶子才展开 |
+| `wide_blocks_max_block` | 10，上限 63 | `wide_blocks`：一个块最多几个叶子才重建成一项 |
+| `wide_blocks_steps` | 4096 | `wide_blocks`：每个块、每个乘数找真值表的搜索步数 |
+| `wide_blocks_max_tables` | 4096 | `wide_blocks`：不多于 6 个叶子的块最多收集几个真值表 |
+| `wide_blocks_max_wide_tables` | 16 | `wide_blocks`：多于 6 个叶子的块最多收集几个真值表（按不相交分解写出，慢） |
+| `wide_blocks_max_functions` | 64 | `wide_blocks`：每个块留几个最小的真值表给块间的搜索 |
+| `wide_blocks_cache_size` | 4096 | `wide_blocks` 的线程级缓存最多存几个区域，满了清空 |
+| `shapes_max_size` | 15，上限 15 | `semi/shapes`、`semi/pairs`：带自由常数的位运算式最大多大（第 15 层的表约 100 MB） |
+| `pairs_max_groups` | 8 | `semi/pairs`：区域最多几个位组 |
+| `pairs_budget` | 500000 | `semi/pairs`：一次调用最多检查几个式子 |
+| `pairs_max_size` | 12 | `semi/pairs`：两个式子的大小之和最大多大 |
 
 `decompose_max_vars`、`decompose_min_free_size`、`decompose_max_free_classes` 决定最短位运算式的搜索；线程级的真值表缓存按这三个值分开存，所以不同作用域里的不同值各建一份表。`memo_contexts` 只决定缓存留多少结果，不改变结果，所以不记入缓存读过的变量。
+`wide_blocks_cache_size` 和 `memo_contexts` 一样只决定缓存留多少，不记入读过的变量；`wide_blocks` 的缓存键里有全部限值的哈希。带自由常数的位运算式按大小逐层建表，进程内共用；表里的式子与 `shapes_max_size` 无关，只是最大那一层的式子不当操作数，不存它们的真值表列表，所以值小时少建几层，值大时补上那一层的列表再接着建。
 
 ### 7.4 `sub/NAME`
 

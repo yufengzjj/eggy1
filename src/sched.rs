@@ -233,6 +233,35 @@ limits! {
     /// Most results one key of the `rewrite`, `simba_memo` and `relate` memos keeps, the
     /// oldest dropped first.
     MemoContexts "memo_contexts";
+    /// Most instructions times points a wide region is evaluated on {0,1}^n (`used_leaves`,
+    /// `peel`).
+    UsedLeavesBudget "used_leaves_budget";
+    /// `peel`: least size per leaf of a region it tries.
+    PeelMinSize "peel_min_size";
+    /// `wide_blocks`: most leaves of one term it expands; points are counted in a `usize`.
+    WideBlocksMaxTermLeaves "wide_blocks_max_term_leaves" <= 63;
+    /// `wide_blocks`: most leaves of one block rebuilt as one term.
+    WideBlocksMaxBlock "wide_blocks_max_block" <= 63;
+    /// `wide_blocks`: search steps per block and multiplier for the tables of a block.
+    WideBlocksSteps "wide_blocks_steps";
+    /// `wide_blocks`: most tables collected per block of at most 6 leaves.
+    WideBlocksMaxTables "wide_blocks_max_tables";
+    /// `wide_blocks`: most tables collected per block of more leaves (split by disjoint
+    /// decomposition, which is slow).
+    WideBlocksMaxWideTables "wide_blocks_max_wide_tables";
+    /// `wide_blocks`: most of the smallest tables per block kept for the search over blocks.
+    WideBlocksMaxFunctions "wide_blocks_max_functions";
+    /// `wide_blocks`: most regions its thread cache keeps before it is cleared.
+    WideBlocksCacheSize "wide_blocks_cache_size";
+    /// Largest bitwise expression with free constants `semi/shapes` and `semi/pairs` search;
+    /// the table of level 15 takes about 100 MB.
+    ShapesMaxSize "shapes_max_size" <= 15;
+    /// `semi/pairs`: most bit groups of a region.
+    PairsMaxGroups "pairs_max_groups";
+    /// `semi/pairs`: most shape entries checked per call.
+    PairsBudget "pairs_budget";
+    /// `semi/pairs`: largest total size of the two shapes.
+    PairsMaxSize "pairs_max_size";
 }
 
 /// Variables besides the limits: `rewrites` (uncached `rewrite` calls left), `semi_leaves`
@@ -1580,6 +1609,21 @@ mod tests {
         assert_eq!(run("prepass=(scope join_linear_max_groups = 0 | polish/join_linear)"), before, "no region is moved in");
         assert_eq!(run("prepass=(scope (join_linear_max_groups = 0 | id) | polish/join_linear)"), plain, "the assignment ends with its sequence");
         assert_eq!(run("prepass=(scope (join_linear_max_groups = 0 | polish/join_linear) | polish/join_linear)"), plain, "the memo keeps the scopes apart");
+    }
+
+    #[test]
+    fn wide_blocks_constants_bind_in_their_scope() {
+        let input = crate::expr_convert::infix_to_egglog("-2*((((h ^ g) & a) | f) - (((h ^ g) & a) & f)) - 2*(((g + j) - (g & j)) + ((a | h) - (a & h)) - ((g | j) | (a ^ h))) + 2*(((b | h) - (b & h)) + ((g + d) - (g | d)) - ((b ^ h) | (g & d))) + 3*(~f & ~b) + c + i", true);
+        let t = || crate::pipe::Cand::new(&input, "input");
+        let run = |spec: &str| {
+            let p = Passes::parse(spec).unwrap();
+            crate::pipe::run(&p.prepass, vec![t()], &crate::pipe::Env::prepass(&p, 64, None, false, t().term())).unwrap()[0].term().to_string()
+        };
+        let plain = run("prepass=(scope (best 1 id wide_blocks))");
+        assert_ne!(plain, input, "a block form is smaller");
+        assert_eq!(run("prepass=(scope wide_blocks_max_block = 2 | (best 1 id wide_blocks))"), input, "no block is small enough");
+        assert_eq!(run("prepass=(scope (wide_blocks_max_block = 2 | id) | (best 1 id wide_blocks))"), plain, "the assignment ends with its sequence");
+        assert_eq!(run("prepass=(scope (wide_blocks_max_block = 2 | (best 1 id wide_blocks)) | (best 1 id wide_blocks))"), plain, "the cache keeps the scopes apart");
     }
 
     #[test]

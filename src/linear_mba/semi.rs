@@ -710,7 +710,7 @@ fn bit_groups(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<(Vec<u64>, u64)>)> {
 }
 
 /// `bit_groups` from `at(j, q)`, the value with leaf `i` set to bit `j` of `q >> i & 1`.
-fn groups_from(at: &dyn Fn(u32, usize) -> u64, n: usize, w: &Ctx) -> Option<(u64, Vec<(Vec<u64>, u64)>)> {
+pub(super) fn groups_from(at: &dyn Fn(u32, usize) -> u64, n: usize, w: &Ctx) -> Option<(u64, Vec<(Vec<u64>, u64)>)> {
     let m = w.mask;
     let e0 = at(0, 0);
     let mut groups: Vec<(Vec<u64>, u64)> = Vec::new();

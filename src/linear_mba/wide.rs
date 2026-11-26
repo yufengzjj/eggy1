@@ -2,9 +2,6 @@
 
 use super::*;
 
-/// Most instructions times points `drop_unused` runs.
-const WIDE_BUDGET: usize = 1 << 25;
-
 /// A region with more than `max_leaves` leaves, rewritten with the leaves its values on
 /// {0,1}^n do not depend on set to 0, as in opaque predicates over many variables.
 pub(super) fn drop_unused(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
@@ -44,7 +41,7 @@ pub(super) fn drop_leaves(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
 
 /// `e(0)` and the leaves the region's value depends on, from its values on {0,1}^n,
 /// or per bit position for a semi-linear region (see `semi_linear`); `None` past
-/// `max_wide_leaves` leaves or `WIDE_BUDGET`.
+/// `max_wide_leaves` leaves or `used_leaves_budget`.
 pub(super) fn used_leaves(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<bool>)> {
     let n = lv.len();
     let (e0, _, tables) = bit_tables(t, lv, w)?;
@@ -54,7 +51,7 @@ pub(super) fn used_leaves(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<bool>)> 
 
 /// `e(0)`, the table index of each bit position, and the tables `g_j(q)` with
 /// `e(q·2^j) = e(0) + 2^j·g_j(q)`, taken modulo `2^(w-j)` for every bit `j` that shares
-/// table `g_b` with a lower `b`; `None` past `max_wide_leaves` leaves or `WIDE_BUDGET`.
+/// table `g_b` with a lower `b`; `None` past `max_wide_leaves` leaves or `used_leaves_budget`.
 fn bit_tables(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<usize>, Vec<Vec<u64>>)> {
     let n = lv.len();
     if n > max_wide_leaves() {
@@ -85,7 +82,7 @@ fn bit_tables(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<usize>, Vec<Vec<u64>
         }
     }
     let prog = Prog::new(t, lv, w);
-    if (prog.0.len() * bits.len()) << n > WIDE_BUDGET {
+    if (prog.0.len() * bits.len()) << n > limit(Limit::UsedLeavesBudget) {
         return None;
     }
     let e0 = prog.at(0, w);
@@ -105,9 +102,6 @@ fn bit_tables(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<usize>, Vec<Vec<u64>
     Some((e0, col, tables))
 }
 
-/// Least size per leaf of a region `peel` tries.
-const MIN_PEEL_SIZE: usize = 16;
-
 /// A region with more than `max_leaves` leaves whose value is a bitwise function of its
 /// leaves, with one leaf `v` that is not arithmetic peeled off: `v | r`, `~v & r` or `v ^ r`
 /// with `r` the region at `v = 0`, or `v & r`, `~v | r` with `r` at `v = -1`; `r` is
@@ -118,7 +112,7 @@ pub(super) fn peel(t: &T, w: &Ctx) -> Option<T> {
     let n = lv.len();
     // Small regions seldom rebuild smaller, but the rest costs a full semi-linear search.
     let (narrow, wide) = (max_leaves(), max_wide_leaves());
-    if !(narrow + 1..=wide).contains(&n) || size(t) < MIN_PEEL_SIZE * n || w.peel_depth() >= wide.saturating_sub(narrow) {
+    if !(narrow + 1..=wide).contains(&n) || size(t) < limit(Limit::PeelMinSize).saturating_mul(n) || w.peel_depth() >= wide.saturating_sub(narrow) {
         return None;
     }
     // Most regions fail; at points of 0s and 1s a bitwise value differs from e(0) in bit 0 only.
@@ -389,19 +383,6 @@ pub(super) fn small_blocks(t: &T, w: &Ctx) -> Option<T> {
     (best_size < size(t)).then(|| fill_placeholders(&best, &ph, &lv))
 }
 
-/// Most leaves of one term `wide_blocks` expands, and of one block it rebuilds as one term.
-const MAX_TERM_LEAVES: usize = 10;
-const MAX_WIDE_BLOCK: usize = 10;
-/// Search steps `wide_blocks` spends per block and multiplier, most tables it collects per
-/// block, and most of the smallest it keeps for the search over blocks.
-const BLOCK_STEPS: usize = 1 << 12;
-const MAX_BLOCK_TABLES: usize = 4096;
-const MAX_BLOCK_FUNCTIONS: usize = 64;
-/// Most tables of a block of more than 6 leaves `wide_blocks` tries.
-const MAX_WIDE_TABLES: usize = 16;
-/// Most regions `wide_blocks` remembers.
-const MAX_WIDE_CACHE: usize = 4096;
-
 /// One choice for a block of `wide_blocks`: `c·term`, its size, whether `term` is a `Not`,
 /// and what it adds at each leftover key.
 #[derive(Clone)]
@@ -445,7 +426,7 @@ pub(super) fn wide_blocks(t: &T, w: &Ctx) -> Option<T> {
     let r = wide_blocks_uncached(t, lv, w);
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
-        if c.len() >= MAX_WIDE_CACHE {
+        if c.len() >= crate::sched::limit_unread(Limit::WideBlocksCacheSize) {
             c.clear();
         }
         c.insert(key, r.clone());
@@ -456,6 +437,9 @@ pub(super) fn wide_blocks(t: &T, w: &Ctx) -> Option<T> {
 fn wide_blocks_uncached(t: &T, lv: Vec<T>, w: &Ctx) -> Option<T> {
     let n = lv.len();
     let m = w.mask;
+    let (max_term_leaves, max_block) = (limit(Limit::WideBlocksMaxTermLeaves), limit(Limit::WideBlocksMaxBlock));
+    let (steps, max_tables, max_wide_tables) = (limit(Limit::WideBlocksSteps), limit(Limit::WideBlocksMaxTables), limit(Limit::WideBlocksMaxWideTables));
+    let (max_functions, dec) = (limit(Limit::WideBlocksMaxFunctions), Dec::read());
     let (terms, konst) = region_terms(t, w);
     let mut coef: crate::eval::FastMap<u64, u64> = Default::default();
     coef.insert(0, konst);
@@ -463,7 +447,7 @@ fn wide_blocks_uncached(t: &T, lv: Vec<T>, w: &Ctx) -> Option<T> {
         let mut xl = Vec::new();
         leaves(x, w, &mut xl);
         let k = xl.len();
-        if k > MAX_TERM_LEAVES {
+        if k > max_term_leaves {
             return None;
         }
         let idx: Vec<usize> = xl.iter().map(|l| lv.iter().position(|g| g == l)).collect::<Option<_>>()?;
@@ -486,7 +470,7 @@ fn wide_blocks_uncached(t: &T, lv: Vec<T>, w: &Ctx) -> Option<T> {
     let mut support: Vec<u64> = coef.keys().copied().collect();
     support.sort_unstable();
     let blocks: Vec<u64> = support.iter().copied().filter(|&p| p.count_ones() >= 2 && !support.iter().any(|&q| q != p && q & p == p)).collect();
-    if blocks.is_empty() || blocks.iter().any(|b| b.count_ones() as usize > MAX_WIDE_BLOCK) {
+    if blocks.is_empty() || blocks.iter().any(|b| b.count_ones() as usize > max_block) {
         return None;
     }
     let nb = blocks.len();
@@ -520,7 +504,7 @@ fn wide_blocks_uncached(t: &T, lv: Vec<T>, w: &Ctx) -> Option<T> {
     for (e, (vars, g)) in points.iter().enumerate() {
         let k = vars.len();
         // Tables over more than 6 leaves are split by `wide_bool_expr`, which is slow.
-        let limit = if k > TABLE_LEAVES { MAX_WIDE_TABLES } else { MAX_BLOCK_TABLES };
+        let limit = if k > TABLE_LEAVES { max_wide_tables } else { max_tables };
         let mut found: Vec<(usize, u64, Vec<u64>, B)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         // The top coefficient of a read-once function is ±2^(number of `^`).
@@ -528,17 +512,17 @@ fn wide_blocks_uncached(t: &T, lv: Vec<T>, w: &Ctx) -> Option<T> {
             let Some(c) = solve_mul(mult as u64 & m, coef[&blocks[e]], w) else { continue };
             let mut fs = Vec::new();
             let mut f = vec![0u64; (1usize << k).div_ceil(64)];
-            block_functions(0, &mut f, k, &own[e], c, w, &mut { BLOCK_STEPS }, limit.saturating_sub(seen.len()), &mut fs);
+            block_functions(0, &mut f, k, &own[e], c, w, &mut { steps }, limit.saturating_sub(seen.len()), &mut fs);
             for f in fs {
                 if seen.insert((c, f.clone())) {
-                    if let Some(b) = wide_bool_expr(&f, k) {
+                    if let Some(b) = wide_bool_expr(&f, k, dec) {
                         found.push((b_size(&b, vars, &leaf_size), c, f, b));
                     }
                 }
             }
         }
         found.sort_by_key(|x| x.0);
-        found.truncate(MAX_BLOCK_FUNCTIONS);
+        found.truncate(max_functions);
         let mut out = Vec::new();
         for (size, c, f, b) in found {
             let term = b_to_t_at(&b, vars, &ph);
@@ -750,27 +734,27 @@ fn block_functions(q: usize, f: &mut Vec<u64>, k: usize, target: &[Option<u64>],
 /// `q / 64` is the value at point `q`): `bool_expr` up to 6 variables; above, the smallest
 /// `g(A) op h(B)` over disjoint variable sets, `g` and `h` split again, which finds every
 /// read-once function; `None` for other functions over more than 6 variables.
-fn wide_bool_expr(f: &[u64], k: usize) -> Option<B> {
+fn wide_bool_expr(f: &[u64], k: usize, dec: Dec) -> Option<B> {
     let neg = if k > TABLE_LEAVES {
         let g: Vec<u64> = f.iter().map(|x| !x).collect();
-        wide_bool_cost(&g, k).map(|(c, b)| (c + 1, B::Not(Arc::new(b))))
+        wide_bool_cost(&g, k, dec).map(|(c, b)| (c + 1, B::Not(Arc::new(b))))
     } else {
         None
     };
-    [wide_bool_cost(f, k), neg].into_iter().flatten().min_by_key(|x| x.0).map(|x| x.1)
+    [wide_bool_cost(f, k, dec), neg].into_iter().flatten().min_by_key(|x| x.0).map(|x| x.1)
 }
 
-fn wide_bool_cost(f: &[u64], k: usize) -> Option<(usize, B)> {
+fn wide_bool_cost(f: &[u64], k: usize, dec: Dec) -> Option<(usize, B)> {
     if k <= TABLE_LEAVES {
-        return match bool_expr_canon(f[0] & table_full(k), k) {
+        return match bool_expr_with(f[0] & table_full(k), k, dec) {
             BE::E(c, b) => Some((c, b)),
             _ => None,
         };
     }
     thread_local! {
-        static CACHE: std::cell::RefCell<crate::eval::FastMap<(Vec<u64>, usize), Option<(usize, B)>>> = Default::default();
+        static CACHE: std::cell::RefCell<crate::eval::FastMap<(Vec<u64>, usize, Dec), Option<(usize, B)>>> = Default::default();
     }
-    if let Some(r) = CACHE.with(|c| c.borrow().get(&(f.to_vec(), k)).cloned()) {
+    if let Some(r) = CACHE.with(|c| c.borrow().get(&(f.to_vec(), k, dec)).cloned()) {
         return r;
     }
     let bit = |q: usize| f[q >> 6] >> (q & 63) & 1 == 1;
@@ -787,9 +771,9 @@ fn wide_bool_cost(f: &[u64], k: usize) -> Option<(usize, B)> {
     // Cost of a side, negated or not, whichever is smaller.
     let side = |v: &[bool], set: usize| -> Option<(usize, B)> {
         let kk = set.count_ones() as usize;
-        let direct = wide_bool_cost(&pack(v), kk);
+        let direct = wide_bool_cost(&pack(v), kk, dec);
         let neg: Vec<bool> = v.iter().map(|x| !x).collect();
-        let negated = if kk > TABLE_LEAVES { wide_bool_cost(&pack(&neg), kk).map(|(c, b)| (c + 1, not(b))) } else { None };
+        let negated = if kk > TABLE_LEAVES { wide_bool_cost(&pack(&neg), kk, dec).map(|(c, b)| (c + 1, not(b))) } else { None };
         let best = [direct, negated].into_iter().flatten().min_by_key(|x| x.0)?;
         Some((best.0, remap(&best.1, &vars(set))))
     };
@@ -830,7 +814,7 @@ fn wide_bool_cost(f: &[u64], k: usize) -> Option<(usize, B)> {
             }
         }
     }
-    CACHE.with(|c| c.borrow_mut().insert((f.to_vec(), k), best.clone()));
+    CACHE.with(|c| c.borrow_mut().insert((f.to_vec(), k, dec), best.clone()));
     best
 }
 

@@ -35,6 +35,12 @@ decompose_max_vars=5 decompose_min_free_size=10 decompose_max_free_classes=4
 relate_max_written_out=2 relate_max_free_product=20 relate_max_parts=8 unify_operands_max_leaves=8
 memo_contexts=4
 
+# Wide regions, `wide_blocks` and the bitwise expressions with free constants.
+used_leaves_budget=33554432 peel_min_size=16 wide_blocks_max_term_leaves=10 wide_blocks_max_block=10
+wide_blocks_steps=4096 wide_blocks_max_tables=4096 wide_blocks_max_wide_tables=16
+wide_blocks_max_functions=64 wide_blocks_cache_size=4096
+shapes_max_size=15 pairs_max_groups=8 pairs_budget=500000 pairs_max_size=12
+
 # `polish`.
 join_constants_max_leaves=3 join_constants_max_sets=10 join_linear_max_groups=12
 join_linear_near_slack=4 join_linear_near_moves=3 join_linear_max_near_groups=8

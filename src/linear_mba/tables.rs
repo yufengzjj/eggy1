@@ -85,7 +85,7 @@ pub(super) fn table_full(n: usize) -> u64 {
 }
 
 /// The variables `decompose` and the search of `bool_expr` over it read.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(super) struct Dec {
     pub(super) max_vars: usize,
     min_free_size: usize,
