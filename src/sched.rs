@@ -271,7 +271,7 @@ impl Cond {
             };
             match crate::pipe::is_cond(n) {
                 true => Ok((neg, n.to_string())),
-                false => Err(format!("unknown condition {n}; known: {} lt:R gt:R eq:R le:P/Q:R", crate::pipe::CONDS.join(" "))),
+                false => Err(format!("unknown condition {n}; known: {} lt:R gt:R eq:R le:P/Q:R FEATURE:N ({})", crate::pipe::CONDS.join(" "), crate::pipe::FEATURES.join(" "))),
             }
         };
         Ok(Cond(s.split('|').map(|a| a.split('+').map(term).collect::<Result<_, _>>()).collect::<Result<_, _>>()?))
@@ -533,7 +533,9 @@ pub fn prepass() -> String {
     let r = REBUILD;
     let rp = REBUILD_PLAIN;
     [
-        "scope(seq(save/t0,gates,lowbits,unshift,save/t,",
+        "scope(seq(save/t0,",
+        GATES,
+        "lowbits,unshift,save/t,",
         &format!("cand(first,{r}),"),
         // Unified operands let the regions around them share leaves, but the rebuild of the
         // input as written is sometimes smaller; dropped once it needs `unified_rewrites` rewrites.
@@ -564,22 +566,16 @@ pub fn prepass() -> String {
     .concat()
 }
 
-/// `INNER` passes that `set_gates` turns off for inputs where paired runs without them
-/// lost nothing.
-pub const GATES: [&str; 3] = ["poly_mba", "lowbits", "small_blocks"];
+/// The passes the pre-pass turns off for inputs where paired `off=` runs without them lost
+/// nothing: `poly_mba` without products of non-constant factors, `lowbits` without those,
+/// shifts and bitwise operations with a constant operand, and `small_blocks` with more than
+/// 3 products and no shift.
+const GATES: &str = "if(!mul:1,off/poly_mba),if(!mul:1+!shift:1+!bitconst:1,off/lowbits),if(mul:4+!shift:1,off/small_blocks),";
 
-/// Also turns off, for the runs on this thread that follow, the passes of `p.gates` that
-/// inputs like `s` do not need: `poly_mba` without products of non-constant factors,
-/// `lowbits` without those, shifts and bitwise operations with a constant operand, and
-/// `small_blocks` with more than 3 products and no shift.
-pub fn set_gates(p: &Passes, s: &crate::stats::Shape) {
-    let skip = |n: &str| match n {
-        "poly_mba" => s.mul == 0,
-        "lowbits" => s.mul == 0 && s.shift == 0 && s.bitconst == 0,
-        "small_blocks" => s.mul > 3 && s.shift == 0,
-        _ => false,
-    };
-    let bits = p.gates.iter().filter(|n| skip(n)).filter_map(|n| INNER.iter().position(|k| k == n)).fold(0u64, |b, i| b | 1 << i);
+/// Turns off the `INNER` pass `name` for the runs on this thread that follow, until the next
+/// `apply` (the pass `off/NAME`).
+pub fn turn_off(name: &str) {
+    let bits = off_bits(&[name]);
     OFF.with(|o| o.set(o.get() | bits));
 }
 
@@ -652,8 +648,6 @@ pub struct Passes {
     pub minimal: bool,
     /// Entries of `INNER` turned off.
     pub off: Vec<&'static str>,
-    /// Entries of `GATES` turned off for inputs that do not need them (`set_gates`).
-    pub gates: Vec<&'static str>,
     /// Values of the `LIMITS`, in order.
     pub limits: Vec<usize>,
     /// The passes `simplify` runs on its input (`pipeline()`).
@@ -694,7 +688,6 @@ impl Default for Passes {
             printed: 2,
             minimal: true,
             off: vec!["semi/peel_shapes"],
-            gates: GATES.to_vec(),
             limits: LIMITS.iter().map(|(_, d)| *d).collect(),
             pipeline: Pipe::parse(&pipeline()).unwrap(),
             prepass: Pipe::parse(&prepass()).unwrap(),
@@ -731,7 +724,7 @@ impl Passes {
     }
 
     /// The default pipeline changed by `spec`: items separated by spaces or `;`, each
-    /// `key=value`, and for the lists `pre`, `off`, `gates` and `schedule` also `key+=names`
+    /// `key=value`, and for the lists `pre`, `off` and `schedule` also `key+=names`
     /// and `key-=names` (names separated by `,`; schedule steps written `run:`, `once:` or
     /// `sat:` and a ruleset). The `LIMITS` are keys too (`split_runs=8`); `pipeline`,
     /// `prepass`, `polish`, `rewrite`, `simba` and `sub/NAME` (`SUBS`) take a `Pipe` (spaces inside its parentheses allowed), and
@@ -791,7 +784,6 @@ impl Passes {
             let list = match key {
                 "pre" => Some((&mut p.pre, names(&PRE)?)),
                 "off" => Some((&mut p.off, names(&INNER)?)),
-                "gates" => Some((&mut p.gates, names(&GATES)?)),
                 _ => None,
             };
             if let Some((list, ns)) = list {
@@ -841,7 +833,7 @@ impl Passes {
                     Some(i) => p.limits[i] = num()?,
                     None => {
                         let limits: Vec<&str> = LIMITS.iter().map(|(n, _)| *n).collect();
-                        return Err(format!("unknown key {key}; known: schedule match_limit ban_length pre keep extra rerun_input printed minimal off gates pipeline prepass polish rewrite simba {}", limits.join(" ")));
+                        return Err(format!("unknown key {key}; known: schedule match_limit ban_length pre keep extra rerun_input printed minimal off pipeline prepass polish rewrite simba {}", limits.join(" ")));
                     }
                 },
             }
@@ -850,8 +842,6 @@ impl Passes {
         p.pre.dedup();
         p.off.sort_by_key(|n| INNER.iter().position(|k| k == n));
         p.off.dedup();
-        p.gates.sort_by_key(|n| GATES.iter().position(|k| k == n));
-        p.gates.dedup();
         Ok(p)
     }
 }
@@ -862,7 +852,7 @@ impl fmt::Display for Passes {
         let steps: Vec<String> = self.schedule.iter().map(|(s, rs)| format!("{}:{rs}", STEPS.iter().find(|(k, _)| k == s).unwrap().1)).collect();
         write!(
             f,
-            "schedule={} match_limit={} ban_length={} pre={} keep={} extra={} rerun_input={} printed={} minimal={} off={} gates={}",
+            "schedule={} match_limit={} ban_length={} pre={} keep={} extra={} rerun_input={} printed={} minimal={} off={}",
             steps.join(","),
             self.match_limit,
             self.ban_length,
@@ -872,8 +862,7 @@ impl fmt::Display for Passes {
             self.rerun_input as u8,
             self.printed,
             self.minimal as u8,
-            self.off.join(","),
-            self.gates.join(",")
+            self.off.join(",")
         )?;
         for ((name, default), v) in LIMITS.iter().zip(&self.limits) {
             if v != default {
@@ -920,12 +909,13 @@ mod tests {
         assert!(is_off("relate") && !is_off("simba"));
         apply(&Passes::default());
         assert!(!is_off("relate"));
-        let p = Passes::parse("gates-=lowbits").unwrap();
-        assert_eq!(p.gates, ["poly_mba", "small_blocks"]);
-        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
-        set_gates(&p, &crate::stats::Shape::default());
-        assert!(is_off("poly_mba") && !is_off("lowbits") && !is_off("small_blocks"));
-        apply(&p);
+        turn_off("poly_mba");
+        assert!(is_off("poly_mba") && !is_off("lowbits"));
+        apply(&Passes::default());
+        assert!(!is_off("poly_mba"));
+        let p = Passes::parse("prepass=seq(if(!mul:1+size:10|vars:3,off/lowbits),lowbits)").unwrap();
+        assert_eq!(p.prepass.to_string(), "seq(if(!mul:1+size:10|vars:3,off/lowbits),lowbits)");
+        assert!(Passes::parse("prepass=if(nope:1,id)").is_err() && Passes::parse("prepass=off/nope").is_err() && Passes::parse("prepass=if(mul:x,id)").is_err());
         let p = Passes::parse("schedule-=sat:analysis schedule+=once:simplify,sat:analysis match_limit=128").unwrap();
         assert_eq!(p.schedule.last(), Some(&(Step::Saturate, "analysis")));
         assert_eq!(p.schedule.len(), 7);

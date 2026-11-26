@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::collections::HashMap;
 
 /// Passes that take the candidate list whole, besides `save/R`, `load/R` and `label/R`.
-const SET_PASSES: [&str; 10] = [
+const SET_PASSES: [&str; 9] = [
     // The candidates unchanged.
     "id",
     // No candidates.
@@ -28,8 +28,6 @@ const SET_PASSES: [&str; 10] = [
     "polish",
     // The main candidate printed and read back.
     "reprint",
-    // Turns off the `sched::GATES` the main candidate does not need (`sched::set_gates`).
-    "gates",
     // No candidates once `rewrite` has used up its calls in the enclosing `with`.
     "within",
     // The end of the pre-pass: counts the kept candidates, names their origins `pre/NAME`
@@ -39,7 +37,8 @@ const SET_PASSES: [&str; 10] = [
 
 /// The conditions of `if`, `retry` and `filter`, on the candidates they see; also `lt:R`,
 /// `gt:R` (main candidate smaller, larger than register `R`'s), `eq:R` (equal),
-/// `le:P/Q:R` (at most `P/Q` its size).
+/// `le:P/Q:R` (at most `P/Q` its size), and `FEATURE:N` (the main candidate's `FEATURES`
+/// entry at least `N`).
 pub const CONDS: [&str; 20] = [
     // The main candidate has a shift, division or mulhi and its rebuild is not tiny.
     "opaque",
@@ -85,6 +84,23 @@ pub const CONDS: [&str; 20] = [
     "cofactor",
 ];
 
+/// The input features of `stats::shape` that conditions `FEATURE:N` test.
+pub const FEATURES: [&str; 8] = ["size", "vars", "depth", "mul", "bitconst", "arith_in_bit", "shift", "div"];
+
+fn feature(s: &stats::Shape, name: &str) -> usize {
+    match name {
+        "size" => s.size,
+        "vars" => s.vars,
+        "depth" => s.depth,
+        "mul" => s.mul,
+        "bitconst" => s.bitconst,
+        "arith_in_bit" => s.arith_in_bit,
+        "shift" => s.shift,
+        "div" => s.div,
+        _ => unreachable!("feature {name}"),
+    }
+}
+
 /// The names a `fix` or `best` count can take: `restarts` (`Cli::max_restarts` less the
 /// first round), `extra` (`Passes::extra`), `printed` (`Passes::printed` less the first
 /// round), `keep` (`Passes::keep`).
@@ -97,7 +113,8 @@ pub fn names() -> Vec<String> {
     let polish = linear_mba::POLISH.iter().map(|(n, _)| format!("polish/{n}"));
     let egglog = ["first", "later", "rerun_input"].iter().map(|l| format!("egglog/{l}"));
     let regs = REGISTER_PASSES.iter().map(|p| format!("{p}R"));
-    SET_PASSES.iter().map(|n| n.to_string()).chain(egglog).chain(regs).chain(linear_mba::TERM_PASSES.iter().map(|(n, _)| n.to_string())).chain(polish).collect()
+    let off = crate::sched::INNER.iter().map(|n| format!("off/{n}"));
+    SET_PASSES.iter().map(|n| n.to_string()).chain(egglog).chain(regs).chain(off).chain(linear_mba::TERM_PASSES.iter().map(|(n, _)| n.to_string())).chain(polish).collect()
 }
 
 /// Whether `name` is a pass.
@@ -112,6 +129,7 @@ pub fn is_cond(name: &str) -> bool {
     }
     match name.split(':').collect::<Vec<_>>().as_slice() {
         ["lt" | "gt" | "eq", r] => !r.is_empty(),
+        [f, n] if FEATURES.contains(f) => n.parse::<usize>().is_ok(),
         ["le", pq, r] => !r.is_empty() && pq.split_once('/').is_some_and(|(p, q)| p.parse::<usize>().is_ok() && q.parse::<usize>().is_ok_and(|q| q > 0)),
         _ => false,
     }
@@ -304,6 +322,7 @@ fn cond(name: &str, set: &[Cand], env: &Env) -> bool {
     let reg = |r: &str, f: &dyn Fn(&Cand) -> bool| env.reg_main(r).is_some_and(|c| f(&c));
     match name.split(':').collect::<Vec<_>>().as_slice() {
         ["lt", r] => return reg(r, &|c| main.size() < c.size()),
+        [f, n] if FEATURES.contains(f) => return feature(&stats::shape(main.tree()), f) >= n.parse::<usize>().unwrap(),
         ["gt", r] => return reg(r, &|c| main.size() > c.size()),
         ["eq", r] => return reg(r, &|c| c.same(main)),
         ["le", pq, r] => {
@@ -618,21 +637,19 @@ fn pass(name: &str, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
     if let Some(r) = name.strip_prefix("load/") {
         return Ok(env.regs.borrow().get(r).cloned().unwrap_or_default());
     }
+    if let Some(n) = name.strip_prefix("off/") {
+        crate::sched::turn_off(n);
+        return Ok(set);
+    }
     if let Some(f) = linear_mba::term_pass(name) {
         return Ok(seen(dedup(term_pass(name, f, &set, env)), env));
     }
     let Some(main) = set.first().cloned() else { return Ok(set) };
-    let p = env.passes;
     let new = |term: String, origin: String| Cand::new(&term, &origin);
     let out = match name {
         "id" => return Ok(set),
         "none" => return Ok(Vec::new()),
         "within" => return Ok(if env.ctx(|c| c.setting("rewrites").unwrap()) > 0 { set } else { Vec::new() }),
-        "gates" => {
-            crate::sched::apply(p);
-            crate::sched::set_gates(p, &stats::shape(main.tree()));
-            return Ok(set);
-        }
         _ if name.starts_with("label/") => {
             let first = env.reg_main(&name["label/".len()..]);
             for c in set.iter().filter(|_| stats::on()) {
