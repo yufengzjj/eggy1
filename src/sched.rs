@@ -167,10 +167,51 @@ pub enum Pipe {
     /// The candidates of the first whose candidates differ from its input's, else the
     /// input (`first(a,b,...)`).
     First(Vec<Pipe>),
-    /// Repeated at most `n` times while the main candidate changes (`fix(n,p)`).
-    Fix(usize, Box<Pipe>),
+    /// Repeated at most `n` times while the main candidate changes (`fix(n,p)`); `n` is a
+    /// number or a name of `crate::pipe::COUNTS` (`fix(restarts,p)`).
+    Fix(String, Box<Pipe>),
     /// With the `INNER` passes named also turned off (`off(relate+tfunc,p)`).
     Off(Vec<&'static str>, Box<Pipe>),
+    /// `a` where the condition holds for the candidates, else `b` (`if(c,a,b)`, `if(c,a)`
+    /// with `b` = `id`).
+    If(Cond, Box<Pipe>, Box<Pipe>),
+    /// `a`, and where the condition holds for its candidates, `b` on the same input taken
+    /// instead when its main candidate is no larger (`retry(c,a,b)`).
+    Retry(Cond, Box<Pipe>, Box<Pipe>),
+    /// The candidates of `p`, unless a pass inside gave a strictly smaller candidate than
+    /// their main one: then the first smallest (`smallest(p)`).
+    Smallest(Box<Pipe>),
+    /// `p` timed as `NAME/run`; a main candidate it changed is counted in `NAME/won/ORIGIN`
+    /// and gets origin `NAME` (`tag(NAME,p)`).
+    Tag(String, Box<Pipe>),
+}
+
+/// A condition on candidates: names of `crate::pipe::CONDS` that must all hold, each
+/// negated by a leading `!` (`mixed+!minimal`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cond(pub Vec<(bool, String)>);
+
+impl Cond {
+    fn parse(s: &str) -> Result<Cond, String> {
+        let terms = s.split('+').map(|t| {
+            let (neg, n) = match t.strip_prefix('!') {
+                Some(n) => (true, n),
+                None => (false, t),
+            };
+            match crate::pipe::CONDS.contains(&n) {
+                true => Ok((neg, n.to_string())),
+                false => Err(format!("unknown condition {n}; known: {}", crate::pipe::CONDS.join(" "))),
+            }
+        });
+        Ok(Cond(terms.collect::<Result<_, _>>()?))
+    }
+}
+
+impl fmt::Display for Cond {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let ts: Vec<String> = self.0.iter().map(|(neg, n)| format!("{}{n}", if *neg { "!" } else { "" })).collect();
+        write!(f, "{}", ts.join("+"))
+    }
 }
 
 impl Pipe {
@@ -197,7 +238,7 @@ impl Pipe {
         };
         let mut args = Vec::new();
         let mut first = None;
-        if matches!(name, "best" | "fix" | "off") {
+        if matches!(name, "best" | "fix" | "off" | "if" | "retry" | "tag") {
             let end = rest.find(',').ok_or_else(|| format!("{name} needs a first argument and a pipeline: {s}"))?;
             first = Some(&rest[..end]);
             rest = &rest[end + 1..];
@@ -215,18 +256,39 @@ impl Pipe {
             }
         }
         let num = || first.unwrap().parse::<usize>().map_err(|_| format!("expected a number: {name}({}", first.unwrap()));
-        let one = |args: Vec<Pipe>| if args.len() == 1 { Ok(Box::new(args.into_iter().next().unwrap())) } else { Err(format!("{name} takes one pipeline: {s}")) };
-        let p = match name {
-            "seq" => Pipe::Seq(args),
-            "union" => Pipe::Union(args),
-            "first" => Pipe::First(args),
-            "best" => Pipe::Best(num()?, args),
-            "fix" => Pipe::Fix(num()?, one(args)?),
-            "off" => {
-                let names = first.unwrap().split('+').map(|n| INNER.iter().find(|k| **k == n).copied().ok_or_else(|| format!("unknown off name {n}; known: {}", INNER.join(",")))).collect::<Result<_, _>>()?;
-                Pipe::Off(names, one(args)?)
+        let mut args = args.into_iter();
+        let n = args.len();
+        let p = match (name, n) {
+            ("seq", _) => Pipe::Seq(args.collect()),
+            ("union", _) => Pipe::Union(args.collect()),
+            ("first", _) => Pipe::First(args.collect()),
+            ("best", _) => Pipe::Best(num()?, args.collect()),
+            ("fix", 1) => {
+                let c = first.unwrap();
+                if c.parse::<usize>().is_err() && !crate::pipe::COUNTS.contains(&c) {
+                    return Err(format!("expected a number or one of {}: fix({c}", crate::pipe::COUNTS.join(" ")));
+                }
+                Pipe::Fix(c.to_string(), Box::new(args.next().unwrap()))
             }
-            _ => return Err(format!("unknown combinator {name}; known: seq union best first fix off")),
+            ("off", 1) => {
+                let names = first.unwrap().split('+').map(|n| INNER.iter().find(|k| **k == n).copied().ok_or_else(|| format!("unknown off name {n}; known: {}", INNER.join(",")))).collect::<Result<_, _>>()?;
+                Pipe::Off(names, Box::new(args.next().unwrap()))
+            }
+            ("if", 1 | 2) => {
+                let c = Cond::parse(first.unwrap())?;
+                let a = Box::new(args.next().unwrap());
+                Pipe::If(c, a, if n == 2 { Box::new(args.next().unwrap()) } else { Box::new(Pipe::Pass("id".into())) })
+            }
+            ("retry", 2) => {
+                let c = Cond::parse(first.unwrap())?;
+                let a = Box::new(args.next().unwrap());
+                Pipe::Retry(c, a, Box::new(args.next().unwrap()))
+            }
+            ("smallest", 1) => Pipe::Smallest(Box::new(args.next().unwrap())),
+            ("tag", 1) => Pipe::Tag(first.unwrap().to_string(), Box::new(args.next().unwrap())),
+            ("fix" | "off" | "smallest" | "tag", _) => return Err(format!("{name} takes one pipeline: {s}")),
+            ("if" | "retry", _) => return Err(format!("{name} takes a condition and two pipelines: {s}")),
+            _ => return Err(format!("unknown combinator {name}; known: seq union best first fix off if retry smallest tag")),
         };
         Ok((p, rest))
     }
@@ -244,15 +306,35 @@ impl fmt::Display for Pipe {
             Pipe::Union(ps) => list(f, "union", None, ps),
             Pipe::First(ps) => list(f, "first", None, ps),
             Pipe::Best(k, ps) => list(f, "best", Some(k.to_string()), ps),
-            Pipe::Fix(n, p) => list(f, "fix", Some(n.to_string()), std::slice::from_ref(p)),
+            Pipe::Fix(n, p) => list(f, "fix", Some(n.clone()), std::slice::from_ref(p)),
             Pipe::Off(ns, p) => list(f, "off", Some(ns.join("+")), std::slice::from_ref(p)),
+            Pipe::If(c, a, b) if **b == Pipe::Pass("id".into()) => list(f, "if", Some(c.to_string()), std::slice::from_ref(a)),
+            Pipe::If(c, a, b) => list(f, "if", Some(c.to_string()), &[(**a).clone(), (**b).clone()]),
+            Pipe::Retry(c, a, b) => list(f, "retry", Some(c.to_string()), &[(**a).clone(), (**b).clone()]),
+            Pipe::Smallest(p) => list(f, "smallest", None, std::slice::from_ref(p)),
+            Pipe::Tag(n, p) => list(f, "tag", Some(n.clone()), std::slice::from_ref(p)),
         }
     }
 }
 
-/// The pipeline of `simplify`: the restart rounds with the pre-pass and polish, then the
-/// run from the printed result.
-pub const PIPELINE: &str = "seq(drive,printed)";
+/// A later round: the pre-pass rebuilds, then their extraction, or the one proved minimal.
+const LATER: &str = "seq(prepass,if(minimal,take_minimal,egglog/later))";
+
+/// The first round. Saturating a large input is most of the run time and rarely beats its
+/// rebuild, so the input joins only inputs with shifts, division or mulhi whose rebuild is
+/// not tiny (`opaque`), or a rerun when the result still mixes arithmetic or constants
+/// into bitwise operations.
+const FIRST: &str = "if(opaque,seq(union(id,prepass),if(minimal,take_minimal,egglog/first)),retry(rerun_input+mixed+!minimal,seq(prepass,if(minimal,take_minimal,egglog/first)),seq(union(id,prepass),egglog/rerun_input)))";
+
+/// The pipeline of `simplify`: the restart rounds while the extraction changes, extra ones
+/// while the pre-pass still rebuilds it, polish, all keeping the smallest form seen (the
+/// extraction prefers fewer non-constant nodes, results are compared by node count); then
+/// the same from the printed result, kept when smaller.
+pub fn pipeline() -> String {
+    format!(
+        "seq(smallest(seq(fix(1,{FIRST}),if(moved,fix(restarts,{LATER})),if(moved,fix(extra,if(rebuilds,{LATER}))),polish)),if(printed+!input,tag(rerun_printed,best(1,id,seq(reprint,smallest(seq(fix(1,{FIRST}),if(moved,fix(printed,{LATER})),polish)))))))"
+    )
+}
 
 /// `INNER` passes that `set_gates` turns off for inputs where paired runs without them
 /// lost nothing.
@@ -326,7 +408,7 @@ pub struct Passes {
     pub gates: Vec<&'static str>,
     /// Values of the `LIMITS`, in order.
     pub limits: Vec<usize>,
-    /// The passes `simplify` runs on its input (`PIPELINE`).
+    /// The passes `simplify` runs on its input (`pipeline()`).
     pub pipeline: Pipe,
 }
 
@@ -355,7 +437,7 @@ impl Default for Passes {
             off: vec!["semi/peel_shapes"],
             gates: GATES.to_vec(),
             limits: LIMITS.iter().map(|(_, d)| *d).collect(),
-            pipeline: Pipe::parse(PIPELINE).unwrap(),
+            pipeline: Pipe::parse(&pipeline()).unwrap(),
         }
     }
 }
@@ -561,7 +643,11 @@ mod tests {
         assert_eq!(p.pipeline.to_string(), "seq(lowbits,best(2,rewrite,off(relate+tfunc,rebuild)),fix(3,egglog),polish/factor)");
         assert_eq!((p.keep, p.extra), (1, 0));
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
-        for bad in ["pipeline=nope", "pipeline=seq(rewrite", "pipeline=best(x,rewrite)", "pipeline=fix(2,a,b)", "pipeline=off(nope,rewrite)", "pipeline=loop(rewrite)"] {
+        let p = Passes::parse("pipeline=smallest(seq(fix(restarts,retry(mixed+!minimal,prepass,egglog/later)),if(!input,tag(t,polish),id)))").unwrap();
+        assert_eq!(p.pipeline.to_string(), "smallest(seq(fix(restarts,retry(mixed+!minimal,prepass,egglog/later)),if(!input,tag(t,polish))))");
+        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
+        assert_eq!(Pipe::parse(&Passes::default().pipeline.to_string()).unwrap(), Passes::default().pipeline);
+        for bad in ["pipeline=nope", "pipeline=seq(rewrite", "pipeline=best(x,rewrite)", "pipeline=fix(2,a,b)", "pipeline=off(nope,rewrite)", "pipeline=loop(rewrite)", "pipeline=fix(many,id)", "pipeline=if(nope,id)", "pipeline=if(mixed,id,id,id)", "pipeline=retry(mixed,id)"] {
             assert!(Passes::parse(bad).is_err(), "{bad}");
         }
         with_off(&["relate"], || {

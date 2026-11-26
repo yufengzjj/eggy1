@@ -1050,137 +1050,17 @@ pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
     let egg = make_egg(&cli.num_type);
     stats::set_width(width_of(&cli.num_type));
     let env = pipe::Env::new(cli, egg, s);
-    let out = pipe::run(&cli.passes.pipeline, vec![s.to_string()], &env)?;
-    let r = out.into_iter().next().unwrap_or_else(|| s.to_string());
-    stats::add(&format!("final/{}", env.origin.borrow()), 0.0);
+    let input = pipe::Cand { term: s.to_string(), origin: "input".into() };
+    let out = pipe::run(&cli.passes.pipeline, vec![input.clone()], &env)?;
+    let r = out.into_iter().next().unwrap_or(input);
+    stats::add(&format!("final/{}", r.origin), 0.0);
+    let r = r.term;
     stats::settle(&eval::parse(&r));
     Ok(egglog_to_infix(&r, &|n| norm_const(n, &cli.num_type)))
 }
 
-/// The run from the printed form of `seed`, the result of `drive` on `input`, when it
-/// ends smaller: it starts with the first-round handling again, which sometimes ends
-/// smaller than the last rounds did.
-fn printed(egg: &str, input: &str, seed: String, cli: &Cli, origin: &std::cell::RefCell<String>) -> Result<String, Error> {
-    if seed == input || cli.passes.printed == 0 {
-        return Ok(seed);
-    }
-    let out = egglog_to_infix(&seed, &|n| norm_const(n, &cli.num_type));
-    let clock = std::time::Instant::now();
-    let (again, again_origin) = drive(egg, &infix_to_egglog(&out, true), cli, cli.passes.printed, 0)?;
-    let won = eval::size(&eval::parse(&again)) < eval::size(&eval::parse(&seed));
-    stats::add("rerun_printed/run", stats::since(clock));
-    if !won {
-        return Ok(seed);
-    }
-    stats::add(&format!("rerun_printed/won/{again_origin}"), 0.0);
-    *origin.borrow_mut() = "rerun_printed".into();
-    Ok(again)
-}
-
-/// The restart rounds of `simplify`: `rounds`, plus up to `extra` while the pre-pass still
-/// changes the last extraction; returns the smallest form seen and where it came from.
-fn drive(egg: &str, s: &str, cli: &Cli, rounds: usize, extra: usize) -> Result<(String, String), Error> {
-    let mut seed = s.to_string();
-    let mut seed_origin = "input".to_string();
-    let pre = |e: &str| format!("pre/{}", stats::source_of(e).unwrap_or_else(|| "unlabeled".into()));
-    // Extraction prefers fewer non-constant nodes, but results are compared by node count,
-    // so the forms the pre-pass and the rules give along the way are kept by node count.
-    let size_of = |e: &str| eval::size(&eval::parse(e));
-    let mut smallest: Option<(usize, String, String)> = None;
-    let mut offer = |e: &str, origin: String| {
-        let n = size_of(e);
-        if smallest.as_ref().is_none_or(|(m, _, _)| n < *m) {
-            smallest = Some((n, e.to_string(), origin));
-        }
-    };
-    let (mut rounds, mut extra, mut first) = (rounds, extra, true);
-    while rounds > 0 {
-        rounds -= 1;
-        let (alt, other) = linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), cli.trace, &cli.passes);
-        offer(&alt, pre(&alt));
-        other.iter().for_each(|o| offer(o, pre(o)));
-        // Saturating a large input is most of the run time and rarely beats its
-        // rebuild; it is kept only where rules do better from the input: results
-        // that still mix arithmetic or constants into bitwise operations, and
-        // inputs with shifts, division or mulhi, unless the rebuild is already tiny.
-        let opaque = ["(Shl ", "(Shr ", "(Div ", "(Mod ", "(Mulhi "].iter().any(|o| seed.contains(o))
-            && !(first && eval::size(&eval::parse(&linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), cli.trace, &cli.passes).0)) <= linear_mba::TINY);
-        // When no smaller term equals `alt` (or the first extraction, for the rerun with the
-        // input), saturation could only pick another term of its size. No rule makes a
-        // shift, division or mulhi from a term without one, so without them in the program
-        // only smaller terms without them need ruling out.
-        let t_only = !["(Shl ", "(Shr ", "(Div ", "(Mod ", "(Mulhi "].iter().any(|o| seed.contains(o) || alt.contains(o) || other.iter().any(|x| x.contains(o)));
-        let is_min = |e: &str| {
-            let t = eval::parse(e);
-            cli.passes.minimal
-                && minimal::is_tidy(&t)
-                && (eval::NumType::from_name(&cli.num_type).is_some_and(|ty| minimal::is_minimal(&t, ty)) || t_only && minimal::is_t_minimal(&t))
-        };
-        let minimal = is_min(&alt);
-        let clock = std::time::Instant::now();
-        let mut extracted = match minimal {
-            true => alt.clone(),
-            false => simplify_round(&egg, &seed, cli, first && opaque)?,
-        };
-        let round = if first { "first" } else { "later" };
-        let mut origin = match minimal {
-            true => {
-                stats::add("round/minimal", stats::since(clock));
-                pre(&alt)
-            }
-            false => {
-                stats::add(&format!("egglog/{round}"), stats::since(clock));
-                match stats::source_of(&extracted) {
-                    Some(src) => format!("pre/{src}"),
-                    None if extracted == seed => seed_origin.clone(),
-                    None => format!("egglog/{round}"),
-                }
-            }
-        };
-        if cli.passes.rerun_input && first && !opaque && !minimal && mixed(&eval::parse(&extracted)) && !is_min(&extracted) {
-            let clock = std::time::Instant::now();
-            let full = simplify_round(&egg, &seed, cli, true)?;
-            stats::add("egglog/rerun_input", stats::since(clock));
-            if eval::size(&eval::parse(&full)) <= eval::size(&eval::parse(&extracted)) {
-                if eval::size(&eval::parse(&full)) < eval::size(&eval::parse(&extracted)) {
-                    origin = "egglog/rerun_input".to_string();
-                }
-                extracted = full;
-            }
-        }
-        offer(&extracted, origin.clone());
-        if cli.trace {
-            eprintln!("round: seed {} extracted {}", eval::size(&eval::parse(&seed)), eval::size(&eval::parse(&extracted)));
-        }
-        first = false;
-        if extracted == seed {
-            seed = extracted;
-            break;
-        }
-        seed = extracted;
-        seed_origin = origin;
-        // The last extraction can still hold a linear region the pre-pass rebuilds.
-        if rounds == 0 && extra > 0 && linear_mba::simplify_linear_with(&seed, width_of(&cli.num_type), cli.trace, &cli.passes).0 != seed {
-            rounds = 1;
-            extra -= 1;
-            stats::add("round/extra", 0.0);
-        }
-    }
-    let (polished, used) = linear_mba::polish_with(&seed, width_of(&cli.num_type), &cli.passes);
-    if cli.trace {
-        eprintln!("polish: {} -> {} by {}", size_of(&seed), size_of(&polished), used.join(","));
-    }
-    if let Some(last) = used.last() {
-        offer(&polished, format!("polish/{last}"));
-    }
-    match smallest {
-        Some((n, e, origin)) if n < size_of(&seed) => Ok((e, origin)),
-        _ => Ok((seed, seed_origin)),
-    }
-}
-
 /// Whether `t` has an arithmetic operation or a constant directly under a bitwise one.
-fn mixed(t: &eval::Term) -> bool {
+pub(crate) fn mixed(t: &eval::Term) -> bool {
     let eval::Term::Op(op, a) = t else { return false };
     let bit = |o: &eval::Op| matches!(o, eval::Op::And | eval::Op::Or | eval::Op::Xor | eval::Op::Not);
     let plain = |x: &eval::Term| match x {
@@ -1191,7 +1071,7 @@ fn mixed(t: &eval::Term) -> bool {
     bit(op) && !a.iter().all(plain) || a.iter().any(mixed)
 }
 
-fn norm_const(n: i64, num_type: &str) -> i64 {
+pub(crate) fn norm_const(n: i64, num_type: &str) -> i64 {
     match num_type {
         "i8" => (n as i8) as i64,
         "u8" => (n as u8) as i64,
