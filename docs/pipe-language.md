@@ -151,7 +151,7 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 |---|---|
 | `lowbits` | 已知位推理：只碰已知位的位运算改成加法、低位截断、按求值确定的低位 |
 | `unshift` | 把 `c·(a >> s)` 等写成掩码形式，使区域成为半线性的 |
-| `tfunc_whole` | 整个项换成更小的 T-函数形式（≤ 3 个变量）；不适用时没有结果 |
+| `tfunc_whole` | 整个项换成更小的 T-函数形式（≤ `tfunc_max_vars` 个变量）；不适用时没有结果 |
 | `tfunc` | 对子项做同样的替换 |
 | `rewrite` | 运行 `rewrite` 管线（带缓存） |
 | `rewrite_top` | 同 `rewrite`，统计分开计 |
@@ -367,9 +367,20 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `pairs_max_groups` | 8 | `semi/pairs`：区域最多几个位组 |
 | `pairs_budget` | 500000 | `semi/pairs`：一次调用最多检查几个式子 |
 | `pairs_max_size` | 12 | `semi/pairs`：两个式子的大小之和最大多大 |
+| `tfunc_max_vars` | 3，上限 4 | `tfunc`：子项最多几个变量（或位运算原子）才查表（求值点是定长数组） |
+| `tfunc_max_size` | 7 | `tfunc`：查找表里的式子最大多大 |
+| `tfunc_points` | 24，上限 24 | `tfunc`：查表时在几个点上求值（值是定长数组） |
+| `tfunc_max_try` | 256 | `tfunc`：最大试多大的子项（大的很少能换，证明也贵） |
+| `tfunc_max_carries` | 64，上限 128 | T-函数证明（`tfunc`、`lowbits`）：最多几个进位（进位状态是 `u128`） |
+| `tfunc_max_states` | 512 | T-函数证明：每一位最多几个可达的进位状态，超过就放弃 |
+| `tfunc_max_factor` | 255 | T-函数证明：展开成加法器的常数乘数（或它的相反数）最大多大 |
+| `minimal_points` | 64 | 最小性证明：在几个点上比较项和更小的项 |
+| `minimal_lanes` | 16，上限 16 | 只含 `+ - * & \| ^ ~ neg` 的最小性证明：低位值向量有几个点（定长数组） |
+| `minimal_budget` | 2097152 | 只含 `+ - * & \| ^ ~ neg` 的最小性证明：最多组合几对项 |
 
 `decompose_max_vars`、`decompose_min_free_size`、`decompose_max_free_classes` 决定最短位运算式的搜索；线程级的真值表缓存按这三个值分开存，所以不同作用域里的不同值各建一份表。`memo_contexts` 只决定缓存留多少结果，不改变结果，所以不记入缓存读过的变量。
 `wide_blocks_cache_size` 和 `memo_contexts` 一样只决定缓存留多少，不记入读过的变量；`wide_blocks` 的缓存键里有全部限值的哈希。带自由常数的位运算式按大小逐层建表，进程内共用；表里的式子与 `shapes_max_size` 无关，只是最大那一层的式子不当操作数，不存它们的真值表列表，所以值小时少建几层，值大时补上那一层的列表再接着建。
+`tfunc` 的查找表进程内共用，按位宽、变量数和 `tfunc_max_vars`、`tfunc_max_size`、`tfunc_points` 分开建，所以不同作用域里的不同值各建一份，正常运行只建默认那一份；没用到的求值点上变量都是 0，值和第 0 个点相同，不改变查表的结果。`tfunc_max_carries`、`tfunc_max_states`、`tfunc_max_factor` 也决定 `lowbits` 在上下文里的证明，每次 `lowbits` 调用读一次。
 
 ### 7.4 `sub/NAME`
 

@@ -1,8 +1,8 @@
 //! A test that no term with fewer nodes equals a given one, so saturating it cannot help.
 
 use crate::eval::{apply, size, vars, NumType, Op, Term};
+use crate::sched::{limit, Limit};
 
-const POINTS: usize = 64;
 const BINARY: [Op; 11] = [Op::Add, Op::Sub, Op::Mul, Op::Div, Op::Mod, Op::And, Op::Or, Op::Xor, Op::Shl, Op::Shr, Op::Mulhi];
 
 /// Whether every term with fewer nodes than `t` differs from `t` at some point; `false`
@@ -21,14 +21,14 @@ pub fn is_minimal(t: &Term, ty: NumType) -> bool {
     if k == 0 || n > 2 * k + 1 || (n > 2 * k - 1 && k > 3) {
         return false;
     }
-    let points = points(k);
+    let points = points(k, limit(Limit::MinimalPoints));
     let at = |e: &Term, p: &[u64]| strict_eval(e, ty, &names, p);
     let values: Vec<Option<u64>> = points.iter().map(|p| at(t, p)).collect();
     // Each variable must change the value somewhere, or a term without it could be equal.
     let relevant = (0..k).all(|v| {
         points.iter().zip(&values).enumerate().any(|(i, (p, x))| {
             let mut q = p.clone();
-            q[v] = points[(i + 1) % POINTS][v];
+            q[v] = points[(i + 1) % points.len()][v];
             matches!((x, at(t, &q)), (Some(x), Some(y)) if *x != y)
         })
     });
@@ -43,8 +43,8 @@ pub fn is_minimal(t: &Term, ty: NumType) -> bool {
 }
 
 const T_OPS: [Op; 6] = [Op::Add, Op::Sub, Op::Mul, Op::And, Op::Or, Op::Xor];
-const LANES: usize = 16;
-const T_BUDGET: usize = 1 << 21;
+/// Most lanes (`minimal_lanes`) of the value vectors; the variables are 0 in the lanes past it.
+pub(crate) const LANES_CAP: usize = 16;
 
 /// Whether no term with fewer nodes than `t` built of `+ - * & | ^ ~` and negation,
 /// variables of `t` and any constants equals `t`; `false` when that is not proved.
@@ -63,8 +63,9 @@ fn none_smaller_low(t: &Term, bits: u32) -> bool {
     let names = vars(t);
     let ty = NumType { bits, signed: false };
     let m = ty.mask() as u8;
+    let (lanes, budget) = (limit(Limit::MinimalLanes), limit(Limit::MinimalBudget));
     let mut s = 0x2545_f491_4f6c_dd1du64;
-    let points: Vec<Vec<u64>> = (0..LANES)
+    let mut points: Vec<Vec<u64>> = (0..lanes)
         .map(|_| {
             (0..names.len())
                 .map(|_| {
@@ -76,20 +77,21 @@ fn none_smaller_low(t: &Term, bits: u32) -> bool {
                 .collect()
         })
         .collect();
-    let mut target = [0u8; LANES];
+    points.resize(LANES_CAP, vec![0; names.len()]);
+    let mut target = [0u8; LANES_CAP];
     for (i, p) in points.iter().enumerate() {
         match strict_eval(t, ty, &names, p) {
             Some(v) => target[i] = v as u8,
             None => return false,
         }
     }
-    let mut seen: crate::eval::FastSet<[u8; LANES]> = Default::default();
-    let mut levels: Vec<Vec<[u8; LANES]>> = vec![Vec::new(), Vec::new()];
+    let mut seen: crate::eval::FastSet<[u8; LANES_CAP]> = Default::default();
+    let mut levels: Vec<Vec<[u8; LANES_CAP]>> = vec![Vec::new(), Vec::new()];
     for v in 0..names.len() {
         levels[1].push(std::array::from_fn(|i| points[i][v] as u8));
     }
     for c in 0..=m {
-        levels[1].push([c; LANES]);
+        levels[1].push([c; LANES_CAP]);
     }
     levels[1].retain(|v| seen.insert(*v));
     let mut work = 0;
@@ -98,7 +100,7 @@ fn none_smaller_low(t: &Term, bits: u32) -> bool {
             return false;
         }
         let mut next = Vec::new();
-        let mut add = |v: [u8; LANES], next: &mut Vec<[u8; LANES]>| {
+        let mut add = |v: [u8; LANES_CAP], next: &mut Vec<[u8; LANES_CAP]>| {
             if seen.insert(v) {
                 next.push(v);
             }
@@ -110,12 +112,12 @@ fn none_smaller_low(t: &Term, bits: u32) -> bool {
         for i in 1..size - 1 {
             let (left, right) = (&levels[i], &levels[size - 1 - i]);
             work += left.len() * right.len();
-            if work > T_BUDGET {
+            if work > budget {
                 return false;
             }
             for a in left {
                 for b in right {
-                    let f = |g: fn(u8, u8) -> u8| -> [u8; LANES] { std::array::from_fn(|l| g(a[l], b[l]) & m) };
+                    let f = |g: fn(u8, u8) -> u8| -> [u8; LANES_CAP] { std::array::from_fn(|l| g(a[l], b[l]) & m) };
                     add(f(u8::wrapping_add), &mut next);
                     add(f(u8::wrapping_sub), &mut next);
                     add(f(u8::wrapping_mul), &mut next);
@@ -184,7 +186,7 @@ fn trees(set: u32, u: usize) -> Vec<Term> {
 
 /// Evaluation points: the corner values, then pseudo-random ones, half of them of small
 /// magnitude so that shift amounts such as `~y` or `x + y` stay below the width.
-fn points(k: usize) -> Vec<Vec<u64>> {
+fn points(k: usize, n: usize) -> Vec<Vec<u64>> {
     let mut s = 0x9e37_79b9_7f4a_7c15u64;
     let mut next = || {
         s ^= s << 13;
@@ -193,7 +195,7 @@ fn points(k: usize) -> Vec<Vec<u64>> {
         s
     };
     let corner = [0u64, 1, u64::MAX, 2, 3, 5];
-    (0..POINTS)
+    (0..n)
         .map(|i| {
             (0..k)
                 .map(|v| match i {
@@ -240,7 +242,7 @@ mod tests {
     use crate::expr_convert::infix_to_egglog;
 
     fn minimal(e: &str, ty: &str) -> bool {
-        is_minimal(&crate::eval::parse(&infix_to_egglog(e, true)), NumType::from_name(ty).unwrap())
+        crate::sched::in_default_run(|| is_minimal(&crate::eval::parse(&infix_to_egglog(e, true)), NumType::from_name(ty).unwrap()))
     }
 
     /// `drive` relies on this to use `is_t_minimal`.
@@ -297,7 +299,7 @@ mod tests {
 
     #[test]
     fn t_terms() {
-        let t = |e: &str| is_t_minimal(&crate::eval::parse(&infix_to_egglog(e, true)));
+        let t = |e: &str| crate::sched::in_default_run(|| is_t_minimal(&crate::eval::parse(&infix_to_egglog(e, true))));
         for e in ["-2*(x|y) + 1", "(x & -4) ^ 0x1234567", "14 * ~(y|x)", "6 * ~x", "(x ^ y) * (x | 5)", "(x & 0x7f) * 3"] {
             assert!(t(e), "{e}");
         }

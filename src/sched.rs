@@ -262,6 +262,28 @@ limits! {
     PairsBudget "pairs_budget";
     /// `semi/pairs`: largest total size of the two shapes.
     PairsMaxSize "pairs_max_size";
+    /// `tfunc`: most variables (or bitwise atoms) of a subterm looked up; the points are a
+    /// fixed array.
+    TfuncMaxVars "tfunc_max_vars" <= crate::tfunc::VARS_CAP as u64;
+    /// `tfunc`: largest expression of its lookup table.
+    TfuncMaxSize "tfunc_max_size";
+    /// `tfunc`: points a subterm is evaluated at for the lookup; the values are a fixed array.
+    TfuncPoints "tfunc_points" <= crate::tfunc::POINTS_CAP as u64;
+    /// `tfunc`: largest subterm tried; larger ones are rarely replaceable and costly to prove.
+    TfuncMaxTry "tfunc_max_try";
+    /// T-function proofs (`tfunc`, `lowbits`): most carries; the carry state is a `u128`.
+    TfuncMaxCarries "tfunc_max_carries" <= 128;
+    /// T-function proofs: most reachable carry states per bit before giving up.
+    TfuncMaxStates "tfunc_max_states";
+    /// T-function proofs: largest constant multiplier (or its negation) expanded into adders.
+    TfuncMaxFactor "tfunc_max_factor";
+    /// Minimality proofs: points a term and the smaller ones are compared at.
+    MinimalPoints "minimal_points";
+    /// Minimality proofs over `+ - * & | ^ ~ neg`: points of the low-bit value vectors, a
+    /// fixed array.
+    MinimalLanes "minimal_lanes" <= crate::minimal::LANES_CAP as u64;
+    /// Minimality proofs over `+ - * & | ^ ~ neg`: most pairs of terms combined.
+    MinimalBudget "minimal_budget";
 }
 
 /// Variables besides the limits: `rewrites` (uncached `rewrite` calls left), `semi_leaves`
@@ -1609,6 +1631,21 @@ mod tests {
         assert_eq!(run("prepass=(scope join_linear_max_groups = 0 | polish/join_linear)"), before, "no region is moved in");
         assert_eq!(run("prepass=(scope (join_linear_max_groups = 0 | id) | polish/join_linear)"), plain, "the assignment ends with its sequence");
         assert_eq!(run("prepass=(scope (join_linear_max_groups = 0 | polish/join_linear) | polish/join_linear)"), plain, "the memo keeps the scopes apart");
+    }
+
+    #[test]
+    fn tfunc_constants_bind_in_their_scope() {
+        let input = crate::expr_convert::infix_to_egglog("x & -(x & -(x & y))", true);
+        let t = || crate::pipe::Cand::new(&input, "input");
+        let run = |spec: &str| {
+            let p = Passes::parse(spec).unwrap();
+            crate::pipe::run(&p.prepass, vec![t()], &crate::pipe::Env::prepass(&p, 64, None, false, t().term())).unwrap()[0].term().to_string()
+        };
+        let plain = run("prepass=(scope tfunc)");
+        assert_eq!(plain, "(And (Var \"x\") (Var \"y\"))");
+        assert_eq!(run("prepass=(scope tfunc_max_size = 2 | tfunc)"), input, "no table entry is small enough");
+        assert_eq!(run("prepass=(scope (tfunc_max_size = 2 | id) | tfunc)"), plain, "the assignment ends with its sequence");
+        assert_eq!(run("prepass=(scope (tfunc_max_size = 2 | tfunc) | tfunc)"), plain, "the tables keep the values apart");
     }
 
     #[test]

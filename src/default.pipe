@@ -46,6 +46,11 @@ join_constants_max_leaves=3 join_constants_max_sets=10 join_linear_max_groups=12
 join_linear_near_slack=4 join_linear_near_moves=3 join_linear_max_near_groups=8
 shift_cases_depth=2 shift_cases_max_size=64
 
+# T-function replacement and proofs (`tfunc`, also `lowbits`), and the minimality proofs.
+tfunc_max_vars=3 tfunc_max_size=7 tfunc_points=24 tfunc_max_try=256
+tfunc_max_carries=64 tfunc_max_states=512 tfunc_max_factor=255
+minimal_points=64 minimal_lanes=16 minimal_budget=2097152
+
 # A later round: the pre-pass rebuilds, then their extraction, or the one proved minimal.
 (let later prepass | (if minimal take_minimal (egglog later)))
 

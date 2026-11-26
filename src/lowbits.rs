@@ -21,6 +21,7 @@ struct Lims {
     max_product_bits: u32,
     refine_bits: u32,
     max_refine_bits: u32,
+    proof: crate::tfunc::Proof,
 }
 
 impl Lims {
@@ -34,6 +35,7 @@ impl Lims {
             max_product_bits: limit_u32(Limit::LowbitsMaxProductBits),
             refine_bits: limit_u32(Limit::LowbitsRefineBits),
             max_refine_bits: limit_u32(Limit::LowbitsMaxRefineBits),
+            proof: crate::tfunc::Proof::read(),
         }
     }
 }
@@ -446,7 +448,7 @@ impl<'a> Pass<'a> {
                     (self.budget, self.wide) = (budget, wide);
                     let num = T::Num(self.w.signed(v));
                     let g = replace(&abs, &[T::Var(names[i].clone())], std::slice::from_ref(&num));
-                    match crate::tfunc::equal_low(&abs, &g, &all, n, m, &extra, self.w) {
+                    match crate::tfunc::equal_low(&abs, &g, &all, n, m, &extra, self.lim.proof, self.w) {
                         // Only the occurrences `abs` abstracted: `c` inside another candidate was not proved.
                         Some(true) => return self.context(&replace(&g, &holes, &found)),
                         Some(false) => {}
