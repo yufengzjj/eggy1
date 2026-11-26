@@ -24,7 +24,7 @@ const SET_PASSES: [&str; 10] = [
     "egglog",
     // The first candidate proved minimal (`minimal`).
     "take_minimal",
-    // The polish passes of `Passes::polish` on each candidate, kept when smaller.
+    // `Passes::polish` on each candidate alone, its first result kept when smaller.
     "polish",
     // The main candidate printed and read back.
     "reprint",
@@ -184,6 +184,8 @@ pub struct Env<'a> {
     /// The input of the run.
     input: String,
     moved: Cell<bool>,
+    /// Results the `smaller` inside the innermost `wins` took.
+    wins: Cell<usize>,
     /// The smallest candidate each enclosing `smallest` saw, innermost last.
     seen: RefCell<Vec<Option<(usize, Cand)>>>,
     regs: RefCell<HashMap<String, Vec<Cand>>>,
@@ -203,7 +205,7 @@ impl<'a> Env<'a> {
 
     fn with(cli: Option<&'a Cli>, passes: &'a Passes, w: u32, trace: bool, egg: String, input: &str) -> Env<'a> {
         let input = input.to_string();
-        Env { cli, passes, w, trace, egg, input, moved: Cell::new(false), seen: Default::default(), regs: Default::default(), ctxs: Default::default() }
+        Env { cli, passes, w, trace, egg, input, moved: Cell::new(false), wins: Cell::new(0), seen: Default::default(), regs: Default::default(), ctxs: Default::default() }
     }
 
     fn cli(&self, pass: &str) -> &'a Cli {
@@ -438,7 +440,51 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             env.ctxs.borrow_mut().pop();
             out
         }
+        Pipe::Smaller(name, p) => {
+            let clock = std::time::Instant::now();
+            let mut out = go(p, set.clone(), env)?;
+            stats::add(&format!("{name}/run"), stats::since(clock));
+            let (Some(m), Some(before)) = (out.first_mut(), set.first()) else { return Ok(set) };
+            if m.size() >= before.size() {
+                return Ok(set);
+            }
+            if env.trace {
+                eprintln!("{name}: {} -> {}", before.size(), m.size());
+            }
+            stats::add(&format!("{name}/won"), 0.0);
+            stats::produced(name, m.tree(), before.size() - m.size());
+            m.origin = name.clone();
+            env.wins.set(env.wins.get() + 1);
+            Ok(out)
+        }
+        Pipe::Wins(n, p) => {
+            let (n, outer) = (env.count(n), env.wins.replace(0));
+            let mut set = set;
+            loop {
+                let before = env.wins.get();
+                set = go(p, set, env)?;
+                if env.wins.get() == before || env.wins.get() >= n {
+                    break;
+                }
+            }
+            env.wins.set(outer + env.wins.get());
+            Ok(set)
+        }
     }
+}
+
+/// `Passes::polish` of `p` on the egglog term `egg` at width `w`, and the origin of its
+/// result when that is smaller.
+pub fn polish(egg: &str, w: u32, p: &Passes) -> (String, Option<String>) {
+    let env = Env::prepass(p, w, false, egg);
+    polish_one(&Cand::new(egg, "input"), &env).map_or((egg.to_string(), None), |c| (c.term().to_string(), Some(c.origin)))
+}
+
+/// `Passes::polish` on `c` alone, when it makes it smaller.
+fn polish_one(c: &Cand, env: &Env) -> Option<Cand> {
+    crate::sched::apply(env.passes);
+    let out = go(&env.passes.polish, vec![c.clone()], env).expect("polish runs no egglog");
+    out.into_iter().next().filter(|r| r.size() < c.size())
 }
 
 fn pre(e: &str) -> String {
@@ -454,7 +500,6 @@ fn pass(name: &str, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
         return Ok(env.regs.borrow().get(r).cloned().unwrap_or_default());
     }
     let Some(main) = set.first().cloned() else { return Ok(set) };
-    let w = env.w;
     let p = env.passes;
     let new = |term: String, origin: String| Cand::new(&term, &origin);
     let out = match name {
@@ -508,18 +553,7 @@ fn pass(name: &str, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             }
             None => set.clone(),
         },
-        "polish" => set
-            .iter()
-            .map(|c| match linear_mba::polish_with(c.term(), w, p) {
-                (out, used) if !used.is_empty() && size_of(&out) < c.size() => {
-                    if env.trace {
-                        eprintln!("polish: {} -> {} by {}", c.size(), size_of(&out), used.join(","));
-                    }
-                    new(out, format!("polish/{}", used.last().unwrap()))
-                }
-                _ => c.clone(),
-            })
-            .collect(),
+        "polish" => set.iter().map(|c| polish_one(c, env).unwrap_or_else(|| c.clone())).collect(),
         "reprint" => {
             let cli = env.cli(name);
             let out = crate::egglog_to_infix(main.term(), &|n| crate::norm_const(n, &cli.num_type));

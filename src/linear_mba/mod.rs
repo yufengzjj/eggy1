@@ -6,7 +6,7 @@
 //! with constant operands (`x & 0xff`) make the region semi-linear: each bit
 //! position then has its own bitwise function, see `semi_linear`.
 
-use crate::eval::{Op, Term as T, parse, show, size};
+use crate::eval::{Op, Term as T, show, size};
 use crate::sched::{Limit, Passes, limit};
 use crate::stats;
 use std::sync::{Arc, OnceLock};
@@ -30,7 +30,7 @@ use shapes::*;
 use split::*;
 use tables::*;
 use wide::*;
-pub use polish::{polish, polish_with};
+pub use polish::polish;
 pub(crate) use polish::POLISH;
 pub(crate) use linear::simba_memo;
 pub(crate) use split::low_consts;
@@ -57,14 +57,6 @@ pub(crate) struct Ctx {
 impl Ctx {
     pub(crate) fn new(w: u32) -> Ctx {
         Ctx { w, mask: if w == 64 { u64::MAX } else { (1u64 << w) - 1 }, st: Default::default() }
-    }
-    /// Lets `rewrite` make at most `n` more uncached calls in this run.
-    pub(crate) fn limit_rewrites(&self, n: usize) {
-        self.st.rewrites_left.store(n, Relaxed);
-    }
-    /// Most leaves of a semi-linear region rebuilt from now on in this run.
-    pub(crate) fn limit_semi_leaves(&self, n: usize) {
-        self.st.semi_leaves.store(n, Relaxed);
     }
     /// The same run at width `w`, sharing its state.
     pub(crate) fn narrow(&self, w: u32) -> Ctx {

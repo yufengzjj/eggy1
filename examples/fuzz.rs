@@ -903,7 +903,7 @@ fn run_one() {
 
     if prepass_only {
         let (alt, other) = eggy1::linear_mba::simplify_linear_both(&egg, ty.bits);
-        let polished = eggy1::linear_mba::polish(&alt, ty.bits).0;
+        let polished = eggy1::linear_mba::polish(&alt, ty.bits);
         let cands: Vec<(&str, &String)> = [("first", &alt), ("polished", &polished)].into_iter().chain(other.iter().map(|o| ("other", o))).collect();
         for (name, c) in &cands {
             let d = compare(&t, &eval::parse(c), ty);

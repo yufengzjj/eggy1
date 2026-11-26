@@ -1,5 +1,5 @@
 use super::*;
-use crate::eval::{NumType, eval};
+use crate::eval::{NumType, eval, parse};
 use std::collections::HashMap;
 
 fn full_eval(t: &T, w: &Ctx, env: &HashMap<String, u64>) -> u64 {
@@ -320,9 +320,9 @@ fn memoized_rewrites_do_not_depend_on_earlier_settings() {
             shared.set_setting("semi_leaves", MAX_LEAVES);
             shared.set_setting("relate_leaves", MAX_WIDE_LEAVES);
             crate::sched::with_off(&["semi/shapes", "rebuild_values", "common_multiple"], || (rewrite(&t, &shared), relate(&t, &shared)));
-            shared.limit_rewrites(2);
+            shared.set_setting("rewrites", 2);
             rewrite(&t, &shared);
-            shared.limit_rewrites(usize::MAX);
+            shared.set_setting("rewrites", usize::MAX);
             let again = (rewrite(&t, &shared), relate(&t, &shared));
             let fresh = Ctx::new(w);
             let alone = (rewrite(&t, &fresh), relate(&t, &fresh));

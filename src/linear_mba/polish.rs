@@ -397,14 +397,7 @@ type Pass = (&'static str, fn(&T, &Ctx) -> T);
 pub(crate) const POLISH: [Pass; 10] = [
     ("push_not", push_not),
     ("join_constants", |t, w| join_constants(t, w, false)),
-    ("join_linear", |t, w| {
-        // It rewrites every pair of leaf groups many times; semi-linear groups of
-        // many leaves take seconds there.
-        w.limit_semi_leaves(2);
-        let r = join_linear(t, w, false);
-        w.limit_semi_leaves(MAX_LEAVES);
-        r
-    }),
+    ("join_linear", |t, w| join_linear(t, w, false)),
     ("over_const_bitwise", over_const_bitwise),
     ("over_shared_bitwise", over_shared_bitwise),
     ("over_products", |t, w| crate::lowbits::over_products(t, w, |a| rebuild_once(a, w))),
@@ -414,37 +407,7 @@ pub(crate) const POLISH: [Pass; 10] = [
     ("factor", |t, w| factor_regions(t, w, false)),
 ];
 
-/// `polish_with` the default passes.
-pub fn polish(egg: &str, w: u32) -> (String, Vec<&'static str>) {
-    polish_with(egg, w, &crate::sched::Passes::default())
-}
-
-/// The egglog term `egg` with the polish passes of `p` applied in turn while one makes it
-/// smaller, and the names of those that did. Run on the final result only: as a pre-pass
-/// candidate, even a slightly smaller form changes how the rules finish.
-pub fn polish_with(egg: &str, w: u32, p: &crate::sched::Passes) -> (String, Vec<&'static str>) {
-    crate::sched::apply(p);
-    let w = Ctx::new(w);
-    w.limit_rewrites(limit(Limit::PolishRewrites));
-    let mut best = parse(egg);
-    let mut used = Vec::new();
-    let passes: Vec<Pass> = p.polish.iter().filter_map(|n| POLISH.iter().find(|(m, _)| m == n).copied()).collect();
-    loop {
-        let before = used.len();
-        for &(name, run) in &passes {
-            let clock = std::time::Instant::now();
-            let r = drop_identities(&run(&best, &w), &w);
-            crate::stats::add(&format!("polish/{name}/run"), crate::stats::since(clock));
-            if size(&r) < size(&best) {
-                crate::stats::add(&format!("polish/{name}/won"), 0.0);
-                crate::stats::produced(&format!("polish/{name}"), &r, size(&best) - size(&r));
-                best = r;
-                used.push(name);
-            }
-        }
-        if used.len() == before || used.len() >= p.polish_wins {
-            break;
-        }
-    }
-    if used.is_empty() { (egg.to_string(), used) } else { (show(&best), used) }
+/// `crate::sched::polish` with the default passes on the egglog term `egg` at width `w`.
+pub fn polish(egg: &str, w: u32) -> String {
+    crate::pipe::polish(egg, w, &crate::sched::Passes::default()).0
 }

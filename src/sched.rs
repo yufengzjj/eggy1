@@ -227,6 +227,13 @@ pub enum Pipe {
     /// `p` with its passes over one term sharing one run: memos, budgets, settings
     /// (`scope(p)`).
     Scope(Box<Pipe>),
+    /// `p`, taken only when its main candidate is smaller than the input's; timed as
+    /// `NAME/run`, counted in `NAME/won` and `NAME/gain` when taken, which gives the main
+    /// candidate origin `NAME` (`smaller(NAME,p)`).
+    Smaller(String, Box<Pipe>),
+    /// `p` repeated while the `smaller` inside take a result, until they have taken `n`
+    /// (`wins(n,p)`; `n` as in `Fix`).
+    Wins(String, Box<Pipe>),
 }
 
 /// A condition on candidates: alternatives separated by `|`, each names of
@@ -293,7 +300,7 @@ impl Pipe {
         }
         let mut args = Vec::new();
         let mut first = "";
-        if matches!(name, "best" | "fix" | "off" | "if" | "retry" | "tag" | "cand" | "with") {
+        if matches!(name, "best" | "fix" | "off" | "if" | "retry" | "tag" | "cand" | "with" | "smaller" | "wins") {
             let end = rest.find(',').ok_or_else(|| format!("{name} needs a first argument and a pipeline: {s}"))?;
             first = &rest[..end];
             rest = &rest[end + 1..];
@@ -336,6 +343,8 @@ impl Pipe {
             ("scope", 1) => Pipe::Scope(Box::new(args.next().unwrap())),
             ("tag", 1) => Pipe::Tag(first.to_string(), Box::new(args.next().unwrap())),
             ("cand", 1) => Pipe::Cand(first.to_string(), Box::new(args.next().unwrap())),
+            ("smaller", 1) => Pipe::Smaller(first.to_string(), Box::new(args.next().unwrap())),
+            ("wins", 1) => Pipe::Wins(count_ok(first)?, Box::new(args.next().unwrap())),
             ("with", 1) => {
                 let set = first.split('+').map(|kv| {
                     let (k, v) = kv.split_once('=').ok_or_else(|| format!("expected KEY=VALUE in with: {kv}"))?;
@@ -350,9 +359,9 @@ impl Pipe {
                 });
                 Pipe::With(set.collect::<Result<_, _>>()?, Box::new(args.next().unwrap()))
             }
-            ("fix" | "off" | "smallest" | "scope" | "tag" | "cand" | "with", _) => return Err(format!("{name} takes one pipeline: {s}")),
+            ("fix" | "off" | "smallest" | "scope" | "tag" | "cand" | "with" | "smaller" | "wins", _) => return Err(format!("{name} takes one pipeline: {s}")),
             ("if" | "retry", _) => return Err(format!("{name} takes a condition and two pipelines: {s}")),
-            _ => return Err(format!("unknown combinator {name}; known: seq union best first fix off if retry smallest tag filter cand with scope")),
+            _ => return Err(format!("unknown combinator {name}; known: seq union best first fix off if retry smallest tag filter cand with scope smaller wins")),
         };
         Ok((p, rest))
     }
@@ -380,6 +389,8 @@ impl fmt::Display for Pipe {
             Pipe::Scope(p) => list(f, "scope", None, one(p)),
             Pipe::Tag(n, p) => list(f, "tag", Some(n.clone()), one(p)),
             Pipe::Cand(n, p) => list(f, "cand", Some(n.clone()), one(p)),
+            Pipe::Smaller(n, p) => list(f, "smaller", Some(n.clone()), one(p)),
+            Pipe::Wins(n, p) => list(f, "wins", Some(n.clone()), one(p)),
             Pipe::Filter(c) => write!(f, "filter({c})"),
             Pipe::With(kv, p) => list(f, "with", Some(kv.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("+")), one(p)),
         }
@@ -403,6 +414,20 @@ pub fn pipeline() -> String {
     format!(
         "seq(smallest(seq(fix(1,{FIRST}),if(moved,fix(restarts,{LATER})),if(moved,fix(extra,if(rebuilds,{LATER}))),polish)),if(printed+!input,tag(rerun_printed,best(1,id,seq(reprint,smallest(seq(fix(1,{FIRST}),if(moved,fix(printed,{LATER})),polish)))))))"
     )
+}
+
+/// The final polish (`Passes::polish`), on one candidate: the polish passes `names` in
+/// turn, each kept when smaller, repeated while one is, until 8 are; on one run whose
+/// `rewrite` calls are limited. `join_linear` rewrites every pair of leaf groups many times,
+/// and semi-linear groups of many leaves take seconds there.
+pub fn polish(names: &[&str]) -> String {
+    let step = |n: &&str| {
+        let run = format!("seq(polish/{n},drop_identities)");
+        let run = if *n == "join_linear" { format!("with(semi_leaves=2,{run})") } else { run };
+        format!("smaller(polish/{n},{run})")
+    };
+    let steps: Vec<String> = names.iter().map(step).collect();
+    format!("scope(with(rewrites=polish_rewrites,wins(8,seq({}))))", steps.join(","))
 }
 
 /// A rebuild of the main candidate: the whole term replaced by a T-function lookup, or its
@@ -537,10 +562,6 @@ pub struct Passes {
     pub printed: usize,
     /// Take a rebuild proved minimal as the extraction without saturating.
     pub minimal: bool,
-    /// Polish passes in order (names from `linear_mba::POLISH`); repeats allowed.
-    pub polish: Vec<&'static str>,
-    /// Polish stops after this many winning passes.
-    pub polish_wins: usize,
     /// Entries of `INNER` turned off.
     pub off: Vec<&'static str>,
     /// Entries of `GATES` turned off for inputs that do not need them (`set_gates`).
@@ -552,6 +573,9 @@ pub struct Passes {
     /// The pre-pass on one term (`prepass()`): its first candidate is the main rebuild, the
     /// others are unioned with it.
     pub prepass: Pipe,
+    /// The final polish, on each candidate alone (`polish(...)`); a candidate is replaced
+    /// by its first result when smaller.
+    pub polish: Pipe,
 }
 
 impl Default for Passes {
@@ -574,13 +598,12 @@ impl Default for Passes {
             rerun_input: true,
             printed: 2,
             minimal: true,
-            polish: crate::linear_mba::POLISH.iter().map(|(n, _)| *n).collect(),
-            polish_wins: 8,
             off: vec!["semi/peel_shapes"],
             gates: GATES.to_vec(),
             limits: LIMITS.iter().map(|(_, d)| *d).collect(),
             pipeline: Pipe::parse(&pipeline()).unwrap(),
             prepass: Pipe::parse(&prepass()).unwrap(),
+            polish: Pipe::parse(&polish(&crate::linear_mba::POLISH.map(|(n, _)| n))).unwrap(),
         }
     }
 }
@@ -610,10 +633,11 @@ impl Passes {
     }
 
     /// The default pipeline changed by `spec`: items separated by spaces or `;`, each
-    /// `key=value`, and for the lists `pre`, `polish` and `schedule` also `key+=names` and
-    /// `key-=names` (also `off` and `gates`; names separated by `,`; schedule steps written `run:`, `once:` or
-    /// `sat:` and a ruleset). The `LIMITS` are keys too (`split_runs=8`), and `pipeline`
-    /// takes a `Pipe` (spaces inside its parentheses allowed).
+    /// `key=value`, and for the lists `pre`, `off`, `gates` and `schedule` also `key+=names`
+    /// and `key-=names` (names separated by `,`; schedule steps written `run:`, `once:` or
+    /// `sat:` and a ruleset). The `LIMITS` are keys too (`split_runs=8`); `pipeline`,
+    /// `prepass` and `polish` take a `Pipe` (spaces inside its parentheses allowed), and
+    /// `polish` also a list of polish pass names, run as `polish(names)`.
     pub fn parse(spec: &str) -> Result<Passes, String> {
         let mut p = Passes::default();
         let mut items = Vec::new();
@@ -639,6 +663,12 @@ impl Passes {
                 p.pipeline = Pipe::parse(val)?;
                 continue;
             }
+            if let Some(val) = item.strip_prefix("polish=") {
+                let names: Vec<&str> = val.split(',').filter(|s| !s.is_empty()).collect();
+                let all_polish = names.iter().all(|n| crate::linear_mba::POLISH.iter().any(|(m, _)| m == n));
+                p.polish = Pipe::parse(&if all_polish { polish(&names) } else { val.to_string() })?;
+                continue;
+            }
             let (key, op, val) = ["+=", "-=", "="]
                 .iter()
                 .find_map(|op| item.split_once(op).map(|(k, v)| (k, *op, v)))
@@ -646,10 +676,8 @@ impl Passes {
             let names = |known: &[&'static str]| -> Result<Vec<&'static str>, String> {
                 val.split(',').filter(|s| !s.is_empty()).map(|n| known.iter().find(|k| **k == n).copied().ok_or_else(|| format!("unknown {key} name {n}; known: {}", known.join(",")))).collect()
             };
-            let polish_names: Vec<&'static str> = crate::linear_mba::POLISH.iter().map(|(n, _)| *n).collect();
             let list = match key {
                 "pre" => Some((&mut p.pre, names(&PRE)?)),
-                "polish" => Some((&mut p.polish, names(&polish_names)?)),
                 "off" => Some((&mut p.off, names(&INNER)?)),
                 "gates" => Some((&mut p.gates, names(&GATES)?)),
                 _ => None,
@@ -695,14 +723,13 @@ impl Passes {
                 "rerun_input" => p.rerun_input = flag()?,
                 "printed" => p.printed = num()?,
                 "minimal" => p.minimal = flag()?,
-                "polish_wins" => p.polish_wins = num()?,
                 "match_limit" => p.match_limit = num()?,
                 "ban_length" => p.ban_length = num()?,
                 _ => match LIMITS.iter().position(|(n, _)| *n == key) {
                     Some(i) => p.limits[i] = num()?,
                     None => {
                         let limits: Vec<&str> = LIMITS.iter().map(|(n, _)| *n).collect();
-                        return Err(format!("unknown key {key}; known: schedule match_limit ban_length pre keep extra rerun_input printed minimal polish polish_wins off gates {}", limits.join(" ")));
+                        return Err(format!("unknown key {key}; known: schedule match_limit ban_length pre keep extra rerun_input printed minimal off gates pipeline prepass polish {}", limits.join(" ")));
                     }
                 },
             }
@@ -723,7 +750,7 @@ impl fmt::Display for Passes {
         let steps: Vec<String> = self.schedule.iter().map(|(s, rs)| format!("{}:{rs}", STEPS.iter().find(|(k, _)| k == s).unwrap().1)).collect();
         write!(
             f,
-            "schedule={} match_limit={} ban_length={} pre={} keep={} extra={} rerun_input={} printed={} minimal={} polish={} polish_wins={} off={} gates={}",
+            "schedule={} match_limit={} ban_length={} pre={} keep={} extra={} rerun_input={} printed={} minimal={} off={} gates={}",
             steps.join(","),
             self.match_limit,
             self.ban_length,
@@ -733,8 +760,6 @@ impl fmt::Display for Passes {
             self.rerun_input as u8,
             self.printed,
             self.minimal as u8,
-            self.polish.join(","),
-            self.polish_wins,
             self.off.join(","),
             self.gates.join(",")
         )?;
@@ -743,7 +768,7 @@ impl fmt::Display for Passes {
                 write!(f, " {name}={v}")?;
             }
         }
-        write!(f, " pipeline={} prepass={}", self.pipeline, self.prepass)
+        write!(f, " pipeline={} prepass={} polish={}", self.pipeline, self.prepass, self.polish)
     }
 }
 
@@ -756,7 +781,9 @@ mod tests {
         assert_eq!(Passes::parse("").unwrap(), Passes::default());
         let p = Passes::parse("pre-=halve_input,unified;polish=factor,push_not,factor extra=0 keep=3 minimal=off").unwrap();
         assert!(!p.pre_on("unified") && p.pre_on("no_wide"));
-        assert_eq!(p.polish, ["factor", "push_not", "factor"]);
+        assert_eq!(p.polish, Pipe::parse(&polish(&["factor", "push_not", "factor"])).unwrap());
+        assert_eq!(Pipe::parse(&Passes::default().polish.to_string()).unwrap(), Passes::default().polish);
+        assert!(Passes::parse("polish+=factor").is_err() && Passes::parse("polish=nope").is_err());
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("pre+=nope").is_err() && Passes::parse("keep+=1").is_err());
         let p = Passes::parse("off=semi/bit_split,relate").unwrap();
