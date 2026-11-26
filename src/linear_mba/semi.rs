@@ -13,7 +13,7 @@ use super::*;
 /// `((x ^ K) | C) + x` the bits of the bitwise term have tables 0, ±1, but the
 /// `+ x` makes them 0, 1, 2.
 pub(super) fn semi_linear(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
-    if lv.len() > w.st.semi_leaves.load(Relaxed) {
+    if lv.len() > w.semi_leaves() {
         return None;
     }
     let m = w.mask;
@@ -132,7 +132,11 @@ fn fill_slots(t: &T, lv: &[&T]) -> T {
 fn bit_split(groups: &[(Vec<u64>, u64)], lv: &[T], arith: bool, e0: u64, w: &Ctx, mut limit: usize) -> Vec<T> {
     let n = lv.len();
     // Arithmetic leaves are left to `relate`, which needs the rebuilt region's shape.
-    if !(4..=6).contains(&n) || w.st.bit_splits.load(Relaxed) == 0 || arith {
+    if !(4..=6).contains(&n) || arith {
+        return Vec::new();
+    }
+    if w.st.bit_splits.load(Relaxed) == 0 {
+        w.read(|d| d.cut = true);
         return Vec::new();
     }
     let pts = 1usize << n;
@@ -312,7 +316,7 @@ fn bit_split(groups: &[(Vec<u64>, u64)], lv: &[T], arith: bool, e0: u64, w: &Ctx
     // splits are ruled out by size before they are rebuilt.
     for &(low, op, a, b, ..) in found.iter().take(crate::sched::limit(Limit::BitSplits)) {
         for (ps, qs) in (0..5).filter_map(|v| pick(op, a, b, v)) {
-            if low as usize + 1 >= limit || take_one(&w.st.bit_splits) == 0 {
+            if low as usize + 1 >= limit || !w.take_budget(&w.st.bit_splits) {
                 return out;
             }
             let t = T::Op(op, vec![rewrite(&side(&ps, a), w), rewrite(&side(&qs, b), w)]);

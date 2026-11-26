@@ -100,13 +100,112 @@ impl Ctx {
     pub(crate) fn low_values(&self) -> &crate::lowbits::ValuesMemo {
         &self.st.low_values
     }
+    pub(super) fn semi_leaves(&self) -> usize {
+        self.read(|d| d.semi = true);
+        self.st.semi_leaves.load(Relaxed)
+    }
+    pub(super) fn relate_leaves(&self) -> usize {
+        self.read(|d| d.relate = true);
+        self.st.relate_leaves.load(Relaxed)
+    }
+    pub(super) fn peel_depth(&self) -> usize {
+        self.read(|d| d.peel = true);
+        self.st.peel_depth.load(Relaxed)
+    }
+    /// Records in the running computation's `Deps` what it read.
+    fn read(&self, f: impl FnOnce(&mut Deps)) {
+        f(&mut self.st.deps.lock().unwrap());
+    }
+    /// Whether a region `clustered` is running on has a hash in `hs` (sorted).
+    fn in_clustering(&self, hs: &[u64]) -> bool {
+        self.st.clustering.lock().unwrap().iter().any(|(h, _)| hs.binary_search(h).is_ok())
+    }
+    fn clustering_depth(&self) -> i64 {
+        self.st.clustering.lock().unwrap().len() as i64
+    }
+    /// Takes one from the budget `a`, or records a cut when it is used up.
+    fn take_budget(&self, a: &AtomicUsize) -> bool {
+        let ok = take_one(a) > 0;
+        if !ok {
+            self.read(|d| d.cut = true);
+        }
+        ok
+    }
     pub(crate) fn signed(&self, v: u64) -> i64 {
         let sh = 64 - self.w;
         ((v << sh) as i64) >> sh
     }
 }
 
-type Memo<K, V> = std::sync::Mutex<crate::eval::FastMap<K, (V, u8)>>;
+/// Memoized results with what each depends on; a key can hold results for a few contexts.
+type Memo<K, V> = std::sync::Mutex<crate::eval::FastMap<K, Vec<Entry<V>>>>;
+
+/// What a computation read besides its key, collected while it runs (`tracked`).
+#[derive(Clone)]
+struct Deps {
+    semi: bool,
+    relate: bool,
+    peel: bool,
+    /// The changes of the `clustered` nesting depth at its start that keep every depth
+    /// check inside it the same.
+    shift: (i64, i64),
+    /// Hashes of the regions `clustered` ran on inside it, which must not be running
+    /// already where the result is reused.
+    absent: Vec<u64>,
+    /// A budget or a cycle check refused work, so the result is not the one a full run gives.
+    cut: bool,
+}
+
+const ANY_SHIFT: (i64, i64) = (i64::MIN / 4, i64::MAX / 4);
+
+impl Default for Deps {
+    fn default() -> Deps {
+        Deps { semi: false, relate: false, peel: false, shift: ANY_SHIFT, absent: Vec::new(), cut: false }
+    }
+}
+
+impl Deps {
+    fn add(&mut self, o: &Deps) {
+        self.semi |= o.semi;
+        self.relate |= o.relate;
+        self.peel |= o.peel;
+        self.cut |= o.cut;
+        self.shift = (self.shift.0.max(o.shift.0), self.shift.1.min(o.shift.1));
+        self.absent.extend_from_slice(&o.absent);
+    }
+    /// A `clustered` call on a region with hash `h` at nesting depth `depth` (limit `max`),
+    /// refused when `deep` or a `cycle`.
+    fn nesting(&mut self, depth: i64, max: i64, deep: bool, cycle: bool, h: u64) {
+        let s = &mut self.shift;
+        *s = if deep { (s.0.max(max - depth), s.1) } else { (s.0, s.1.min(max - 1 - depth)) };
+        if cycle {
+            self.cut = true;
+        } else if !deep {
+            self.absent.push(h);
+        }
+    }
+}
+
+/// A memoized result, valid where the `INNER` passes in `touched` are off exactly as in
+/// `off` and the settings it read have the values given.
+#[derive(Clone)]
+struct Entry<V> {
+    v: V,
+    /// `State::used` of the computation.
+    used: u8,
+    touched: u64,
+    off: u64,
+    semi: Option<usize>,
+    relate: Option<usize>,
+    peel: Option<usize>,
+    /// The `clustered` nesting depths it holds at, and `Deps::absent` sorted.
+    depths: (i64, i64),
+    absent: Vec<u64>,
+}
+
+/// Most results one memo key keeps, the oldest dropped first.
+const MEMO_CONTEXTS: usize = 4;
+
 /// Bits of `State::used`.
 pub(crate) const CLUSTERED: u8 = 1;
 pub(crate) const WIDE: u8 = 2;
@@ -115,9 +214,9 @@ type GroupedKey = (Vec<(Vec<u64>, u64)>, Vec<T>, u64, u32);
 type PairKey = (u32, Vec<(Vec<u64>, u64)>, u64, Vec<T>, usize);
 
 struct State {
-    simba_memo: Memo<(u32, usize, T), Option<T>>,
+    simba_memo: Memo<(u32, T), Option<T>>,
     rewritten: Memo<(u32, T), T>,
-    related: Memo<(u32, usize, usize, T), T>,
+    related: Memo<(u32, T), T>,
     rebuilt: std::sync::Mutex<crate::eval::FastMap<RebuiltKey, (Vec<(u64, T)>, u64)>>,
     grouped: std::sync::Mutex<crate::eval::FastMap<GroupedKey, T>>,
     low_values: crate::lowbits::ValuesMemo,
@@ -131,7 +230,9 @@ struct State {
     bit_splits: AtomicUsize,
     /// `peel` calls nested inside each other.
     peel_depth: AtomicUsize,
-    clustering: std::sync::Mutex<Vec<T>>,
+    /// The regions `clustered` is running on, with their hashes.
+    clustering: std::sync::Mutex<Vec<(u64, T)>>,
+    deps: std::sync::Mutex<Deps>,
     /// Which of `clustered` and `wide_blocks` gave a kept form since the last reset.
     used: AtomicU8,
 }
@@ -152,6 +253,7 @@ impl Default for State {
             bit_splits: AtomicUsize::new(limit(Limit::BitSplitBudget)),
             peel_depth: AtomicUsize::new(0),
             clustering: Default::default(),
+            deps: Default::default(),
             used: AtomicU8::new(0),
         }
     }
@@ -485,15 +587,14 @@ pub(crate) fn rewrite(t: &T, w: &Ctx) -> T {
         return t.clone();
     }
     let key = (w.w, t.clone());
-    if let Some(r) = memo_get(&w.st.rewritten, &key, w) {
+    let f = || stats::try_pass("rewrite", t, || rewrite_uncached(t, w));
+    if let Some(r) = memo_get(&w.st.rewritten, &key, w, "rewrite", f) {
         return r;
     }
-    if take_one(&w.st.rewrites_left) == 0 {
+    if !w.take_budget(&w.st.rewrites_left) {
         return t.clone();
     }
-    let (r, used) = tracking_clusters(w, || stats::try_pass("rewrite", t, || rewrite_uncached(t, w)));
-    w.st.rewritten.lock().unwrap().insert(key, (r.clone(), used));
-    r
+    memo_compute(&w.st.rewritten, key, w, f)
 }
 
 fn rewrite_uncached(t: &T, w: &Ctx) -> T {
@@ -696,14 +797,40 @@ fn cluster_regions(t: &T, w: &Ctx, in_lin: bool) -> T {
     }
 }
 
-/// `f()`, and which of `clustered` and `wide_blocks` gave a kept form during it (which then
-/// also counts for the enclosing call).
-fn tracking_clusters<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, u8) {
-    let outer = w.st.used.swap(0, Relaxed);
+/// `f()`, which of `clustered` and `wide_blocks` gave a kept form during it, the `INNER`
+/// passes it asked about and what else it read; all of it also counts for the enclosing call.
+fn tracked<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, u8, u64, Deps) {
+    let used0 = w.st.used.swap(0, Relaxed);
+    let touched0 = crate::sched::swap_touched(0);
+    let deps0 = std::mem::take(&mut *w.st.deps.lock().unwrap());
     let r = f();
     let used = w.st.used.load(Relaxed);
-    w.st.used.store(outer | used, Relaxed);
-    (r, used)
+    w.st.used.store(used0 | used, Relaxed);
+    let touched = crate::sched::swap_touched(0);
+    crate::sched::swap_touched(touched0 | touched);
+    let deps = {
+        let mut d = w.st.deps.lock().unwrap();
+        let inner = std::mem::replace(&mut *d, deps0);
+        d.add(&inner);
+        inner
+    };
+    (r, used, touched, deps)
+}
+
+/// `f()` with nothing it changes in the run state kept: budgets, `used`, the tracked reads.
+fn isolated<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, Deps) {
+    let st = &w.st;
+    let budgets = (st.rewrites_left.load(Relaxed), st.bit_splits.load(Relaxed));
+    let used = st.used.load(Relaxed);
+    let touched = crate::sched::swap_touched(0);
+    let deps = st.deps.lock().unwrap().clone();
+    let (r, _, _, d) = tracked(w, f);
+    st.rewrites_left.store(budgets.0, Relaxed);
+    st.bit_splits.store(budgets.1, Relaxed);
+    st.used.store(used, Relaxed);
+    crate::sched::swap_touched(touched);
+    *st.deps.lock().unwrap() = deps;
+    (r, d)
 }
 
 /// The bits of `State::used` whose pass is now off.
@@ -713,14 +840,90 @@ pub(super) fn used_off() -> u8 {
     (crate::sched::is_off_at(C) as u8 * CLUSTERED) | (crate::sched::is_off_at(W) as u8 * WIDE)
 }
 
-/// A memoized result, unless it came from a pass that is now off.
-fn memo_get<K: std::hash::Hash + Eq, V: Clone>(memo: &Memo<K, V>, key: &K, w: &Ctx) -> Option<V> {
-    let (r, used) = memo.lock().unwrap().get(key).cloned()?;
-    if used & used_off() != 0 {
-        return None;
+/// With `EGGY_CHECK_MEMO` set, each memo hit outside another check is computed again and
+/// compared, and differences are counted in `memo/differs/NAME` and printed.
+fn check_memo() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("EGGY_CHECK_MEMO").is_some())
+}
+
+thread_local! {
+    static CHECKING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The result memoized for `key` that holds in the current run state; what it read then
+/// counts for the running computation too. `f` computes it again for `check_memo`.
+fn memo_get<K: std::hash::Hash + Eq, V: Clone + PartialEq>(memo: &Memo<K, V>, key: &K, w: &Ctx, name: &str, f: impl FnOnce() -> V) -> Option<V> {
+    let e = {
+        let m = memo.lock().unwrap();
+        m.get(key)?.iter().find(|e| holds(e, w)).cloned()?
+    };
+    w.st.used.fetch_or(e.used, Relaxed);
+    crate::sched::swap_touched(crate::sched::swap_touched(0) | e.touched);
+    let at = w.clustering_depth();
+    let shift = (e.depths.0 - at, e.depths.1 - at);
+    w.read(|d| d.add(&Deps { semi: e.semi.is_some(), relate: e.relate.is_some(), peel: e.peel.is_some(), shift, absent: e.absent.clone(), cut: false }));
+    if check_memo() && !CHECKING.with(|c| c.replace(true)) {
+        let (again, d) = isolated(w, f);
+        CHECKING.with(|c| c.set(false));
+        if !d.cut && again != e.v {
+            stats::add(&format!("memo/differs/{name}"), 0.0);
+            eprintln!("memo: {name} hit differs from a new run");
+        }
     }
-    w.st.used.fetch_or(used, Relaxed);
-    Some(r)
+    Some(e.v)
+}
+
+fn holds<V>(e: &Entry<V>, w: &Ctx) -> bool {
+    let st = &w.st;
+    crate::sched::off_bits_now() & e.touched == e.off
+        && e.semi.is_none_or(|v| v == st.semi_leaves.load(Relaxed))
+        && e.relate.is_none_or(|v| v == st.relate_leaves.load(Relaxed))
+        && e.peel.is_none_or(|v| v == st.peel_depth.load(Relaxed))
+        && (e.depths.0..=e.depths.1).contains(&w.clustering_depth())
+        && (e.absent.is_empty() || !w.in_clustering(&e.absent))
+}
+
+/// `f()`, memoized for `key` unless a budget or a cycle check cut it short.
+fn memo_compute<K: std::hash::Hash + Eq, V: Clone>(memo: &Memo<K, V>, key: K, w: &Ctx, f: impl FnOnce() -> V) -> V {
+    let (v, used, mut touched, mut d) = tracked(w, f);
+    if d.cut {
+        return v;
+    }
+    // `clustered` and `wide_blocks` are alternatives: a result neither gave holds without them.
+    let off = crate::sched::off_bits_now();
+    for (bit, name) in [(CLUSTERED, "clustered"), (WIDE, "wide_blocks")] {
+        let i = 1u64 << crate::sched::inner_index(name);
+        if used & bit == 0 && off & i == 0 {
+            touched &= !i;
+        }
+    }
+    let st = &w.st;
+    let mut absent = std::mem::take(&mut d.absent);
+    absent.sort_unstable();
+    absent.dedup();
+    let e = Entry {
+        v: v.clone(),
+        used,
+        touched,
+        off: off & touched,
+        semi: d.semi.then(|| st.semi_leaves.load(Relaxed)),
+        relate: d.relate.then(|| st.relate_leaves.load(Relaxed)),
+        peel: d.peel.then(|| st.peel_depth.load(Relaxed)),
+        depths: {
+            let at = w.clustering_depth();
+            (at + d.shift.0, at + d.shift.1)
+        },
+        absent,
+    };
+    let mut m = memo.lock().unwrap();
+    let list = m.entry(key).or_default();
+    list.retain(|o| !holds(o, w));
+    if list.len() >= MEMO_CONTEXTS {
+        list.remove(0);
+    }
+    list.push(e);
+    v
 }
 
 /// Rewrite inside the atom leaves of a rebuilt region.

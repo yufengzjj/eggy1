@@ -98,13 +98,12 @@ pub(super) fn relate(t: &T, w: &Ctx) -> T {
     if !matches!(t, T::Op(..)) {
         return t.clone();
     }
-    let key = (w.w, w.st.relate_leaves.load(Relaxed), w.st.semi_leaves.load(Relaxed), t.clone());
-    if let Some(r) = memo_get(&w.st.related, &key, w) {
+    let key = (w.w, t.clone());
+    let f = || relate_uncached(t, w);
+    if let Some(r) = memo_get(&w.st.related, &key, w, "relate", f) {
         return r;
     }
-    let (r, used) = tracking_clusters(w, || relate_uncached(t, w));
-    w.st.related.lock().unwrap().insert(key, (r.clone(), used));
-    r
+    memo_compute(&w.st.related, key, w, f)
 }
 
 fn relate_uncached(t: &T, w: &Ctx) -> T {
@@ -127,10 +126,10 @@ const MAX_FREE_PRODUCT: usize = 20;
 pub(super) fn relate_region(t: &T, w: &Ctx) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
-    if lv.len() > w.st.relate_leaves.load(Relaxed) {
+    if lv.len() > w.relate_leaves() {
         // Not in the rebuild with fewer leaves related, where parts can leave it the first
         // rebuild's form and so nothing to union.
-        let parts = w.st.relate_leaves.load(Relaxed) == MAX_WIDE_LEAVES;
+        let parts = w.relate_leaves() == MAX_WIDE_LEAVES;
         return relate_abstracted(t, w).or_else(|| if parts { relate_parts(t, &lv, w) } else { None });
     }
     relate_complemented(t, &lv, w)
@@ -208,7 +207,7 @@ fn relate_parts(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
         // holds for any value they take.
         let (mut from, mut to) = (Vec::new(), Vec::new());
         let mut plv = leaves_of(&sum);
-        let abstracted = if plv.len() > w.st.relate_leaves.load(Relaxed) {
+        let abstracted = if plv.len() > w.relate_leaves() {
             beside(&sum, l, w, false, &mut from);
             to = (0..from.len()).map(|k| T::Var(format!("\u{4}{k}"))).collect();
             let a = crate::lowbits::replace(&sum, &from, &to);
@@ -219,7 +218,7 @@ fn relate_parts(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
         } else {
             sum.clone()
         };
-        if plv.len() > w.st.relate_leaves.load(Relaxed) {
+        if plv.len() > w.relate_leaves() {
             continue;
         }
         let Some(r) = relate_complemented(&abstracted, &plv, w).map(|r| crate::lowbits::replace(&r, &to, &from)).filter(|r| size(r) < size(&sum)) else { continue };
@@ -291,7 +290,7 @@ fn relate_abstracted(t: &T, w: &Ctx) -> Option<T> {
     let s = crate::lowbits::replace(t, &from, &to);
     let mut lv = Vec::new();
     leaves(&s, w, &mut lv);
-    if lv.len() > w.st.relate_leaves.load(Relaxed) {
+    if lv.len() > w.relate_leaves() {
         return None;
     }
     Some(crate::lowbits::replace(&relate_complemented(&s, &lv, w)?, &to, &from))

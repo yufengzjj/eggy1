@@ -5,13 +5,12 @@ use super::*;
 /// `simba` memoized per thread, for the linear cofactors `poly_mba` rebuilds: the same
 /// ones come back across its factoring choices and across regions.
 pub(crate) fn simba_memo(t: &T, w: &Ctx) -> Option<T> {
-    let key = (w.w, w.st.semi_leaves.load(Relaxed), t.clone());
-    if let Some(r) = memo_get(&w.st.simba_memo, &key, w) {
+    let key = (w.w, t.clone());
+    let f = || simba_in(t, w, false);
+    if let Some(r) = memo_get(&w.st.simba_memo, &key, w, "simba", f) {
         return r;
     }
-    let (r, used) = tracking_clusters(w, || simba_in(t, w, false));
-    w.st.simba_memo.lock().unwrap().insert(key, (r.clone(), used));
-    r
+    memo_compute(&w.st.simba_memo, key, w, f)
 }
 
 /// Smallest rebuilt form of the linear region `t`, if it has 1..=MAX_LEAVES leaves.

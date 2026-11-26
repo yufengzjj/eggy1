@@ -119,7 +119,7 @@ pub(super) fn peel(t: &T, w: &Ctx) -> Option<T> {
     leaves(t, w, &mut lv);
     let n = lv.len();
     // Small regions seldom rebuild smaller, but the rest costs a full semi-linear search.
-    if !(MAX_LEAVES + 1..=MAX_WIDE_LEAVES).contains(&n) || size(t) < MIN_PEEL_SIZE * n || w.st.peel_depth.load(Relaxed) >= MAX_WIDE_LEAVES - MAX_LEAVES {
+    if !(MAX_LEAVES + 1..=MAX_WIDE_LEAVES).contains(&n) || size(t) < MIN_PEEL_SIZE * n || w.peel_depth() >= MAX_WIDE_LEAVES - MAX_LEAVES {
         return None;
     }
     // Most regions fail; at points of 0s and 1s a bitwise value differs from e(0) in bit 0 only.
@@ -437,9 +437,9 @@ pub(super) fn wide_blocks(t: &T, w: &Ctx) -> Option<T> {
         return None;
     }
     thread_local! {
-        static CACHE: std::cell::RefCell<crate::eval::FastMap<(u32, T), Option<T>>> = Default::default();
+        static CACHE: std::cell::RefCell<crate::eval::FastMap<(u32, u64, T), Option<T>>> = Default::default();
     }
-    let key = (w.w, t.clone());
+    let key = (w.w, crate::sched::limits_key(), t.clone());
     if let Some(r) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
         return r;
     }
@@ -878,14 +878,18 @@ fn fill_placeholders(t: &T, ph: &[T], lv: &[T]) -> T {
 pub(super) fn clustered(t: &T, w: &Ctx) -> Option<T> {
     // Rewriting a group can reach regions whose groups lead back to new forms of the
     // enclosing ones.
-    let nested = {
-        let c = w.st.clustering.lock().unwrap();
-        c.len() >= limit(Limit::ClusterDepth) || c.contains(t)
-    };
-    if used_off() & CLUSTERED != 0 || nested {
+    if used_off() & CLUSTERED != 0 {
         return None;
     }
-    w.st.clustering.lock().unwrap().push(t.clone());
+    let h = term_hash(t);
+    let (depth, max) = (w.st.clustering.lock().unwrap().len(), limit(Limit::ClusterDepth));
+    let deep = depth >= max;
+    let cycle = !deep && w.st.clustering.lock().unwrap().iter().any(|(g, x)| *g == h && x == t);
+    w.read(|d| d.nesting(depth as i64, max as i64, deep, cycle, h));
+    if deep || cycle {
+        return None;
+    }
+    w.st.clustering.lock().unwrap().push((h, t.clone()));
     let r = clustered_in(t, w);
     w.st.clustering.lock().unwrap().pop();
     r

@@ -306,6 +306,34 @@ fn recombined_products_preserve_value() {
 }
 
 #[test]
+fn memoized_rewrites_do_not_depend_on_earlier_settings() {
+    let mut r = Rng(0x9e3779b97f4a7c15);
+    let mut restricted_differs = 0;
+    for w in [8u32, 32] {
+        for _ in 0..1500 {
+            let depth = 2 + (r.next() % 3) as u32;
+            let t = random_term_in(&mut r, depth, &VARS[..4]);
+            let shared = Ctx::new(w);
+            shared.set_setting("semi_leaves", 2);
+            shared.set_setting("relate_leaves", 2);
+            let narrow = (rewrite(&t, &shared), relate(&t, &shared));
+            shared.set_setting("semi_leaves", MAX_LEAVES);
+            shared.set_setting("relate_leaves", MAX_WIDE_LEAVES);
+            crate::sched::with_off(&["semi/shapes", "rebuild_values", "common_multiple"], || (rewrite(&t, &shared), relate(&t, &shared)));
+            shared.limit_rewrites(2);
+            rewrite(&t, &shared);
+            shared.limit_rewrites(usize::MAX);
+            let again = (rewrite(&t, &shared), relate(&t, &shared));
+            let fresh = Ctx::new(w);
+            let alone = (rewrite(&t, &fresh), relate(&t, &fresh));
+            assert_eq!(again, alone, "w={w} {}", show(&t));
+            restricted_differs += (narrow != alone) as usize;
+        }
+    }
+    assert!(restricted_differs > 20, "only {restricted_differs} restricted runs differ");
+}
+
+#[test]
 fn rewrite_preserves_value() {
     let mut r = Rng(0x2545f4914f6cdd1d);
     let mut changed = 0;

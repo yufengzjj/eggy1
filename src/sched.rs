@@ -119,6 +119,30 @@ thread_local! {
     static LIMIT: std::cell::RefCell<Option<Vec<usize>>> = const { std::cell::RefCell::new(None) };
     /// Bits of the `INNER` passes an enclosing `Pipe::Off` turns off.
     static SCOPED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Bits of the `INNER` passes asked whether they are off, since the last `swap_touched`.
+    static TOUCHED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The `INNER` passes asked whether they are off since the last call, which sets them to `v`.
+pub fn swap_touched(v: u64) -> u64 {
+    TOUCHED.with(|t| t.replace(v))
+}
+
+/// Bits of the `INNER` passes turned off on this thread.
+pub fn off_bits_now() -> u64 {
+    OFF.with(|o| o.get())
+}
+
+/// A hash of the limits on this thread, 0 for the defaults.
+pub fn limits_key() -> u64 {
+    use std::hash::{Hash, Hasher};
+    LIMIT.with(|v| {
+        v.borrow().as_ref().map_or(0, |v| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            v.hash(&mut h);
+            h.finish() | 1
+        })
+    })
 }
 
 fn off_bits(names: &[&str]) -> u64 {
@@ -448,8 +472,7 @@ pub fn set_gates(p: &Passes, s: &crate::stats::Shape) {
 
 /// Whether the pass `name` is turned off on this thread.
 pub fn is_off(name: &str) -> bool {
-    let bits = OFF.with(|o| o.get());
-    bits != 0 && INNER.iter().position(|k| *k == name).is_some_and(|i| bits >> i & 1 == 1)
+    INNER.iter().position(|k| *k == name).is_some_and(is_off_at)
 }
 
 /// The position of `name` in `INNER`, for `is_off_at`.
@@ -473,6 +496,7 @@ pub const fn inner_index(name: &str) -> usize {
 
 /// `is_off` of the `INNER` pass at position `i`.
 pub fn is_off_at(i: usize) -> bool {
+    TOUCHED.with(|t| t.set(t.get() | 1 << i));
     OFF.with(|o| o.get()) >> i & 1 == 1
 }
 
