@@ -6,78 +6,83 @@ use super::*;
 /// ones come back across its factoring choices and across regions.
 pub(crate) fn simba_memo(t: &T, w: &Ctx) -> Option<T> {
     let key = (w.w, t.clone());
-    let f = || simba_in(t, w, false);
+    let f = || crate::pipe::run_alt(&crate::sched::current().simba, t, w, true);
     if let Some(r) = memo_get(&w.st.simba_memo, &key, w, "simba", f) {
         return r;
     }
     memo_compute(&w.st.simba_memo, key, w, f)
 }
 
-/// Smallest rebuilt form of the linear region `t`, if it has 1..=MAX_LEAVES leaves.
+/// Smallest rebuilt form of the linear region `t` (`Passes::simba`).
 pub(super) fn simba(t: &T, w: &Ctx) -> Option<T> {
-    simba_in(t, w, true)
+    crate::pipe::run_alt(&crate::sched::current().simba, t, w, false)
 }
 
-/// `simba`, with `one_wide_term` tried when `split`: on the linear cofactors of `poly_mba`
-/// it costs more than it gains.
-fn simba_in(t: &T, w: &Ctx, split: bool) -> Option<T> {
-    use crate::stats;
-    let mut lv = Vec::new();
-    leaves(t, w, &mut lv);
-    let n = lv.len();
-    if n > MAX_LEAVES {
-        let d = stats::try_pass("drop_unused", t, || drop_unused(t, &lv, w));
-        let c = stats::try_pass("clustered", t, || clustered(t, w));
-        // A region too large to evaluate is peeled in its clustered form. With unused leaves
-        // dropped, the rewrite of `d` peels.
-        let p = if d.is_some() { None } else { stats::try_pass("peel", t, || peel(t, w)).map(|p| (p, "peel")).or_else(|| Some((stats::try_pass("peel_clustered", c.as_ref()?, || peel(c.as_ref()?, w))?, "peel_clustered"))) };
-        let sizes: Vec<(&str, usize)> = [d.as_ref().map(|d| ("drop_unused", size(d))), c.as_ref().map(|c| ("clustered", size(c))), p.as_ref().map(|p| (p.1, size(&p.0)))].into_iter().flatten().collect();
-        let best = match (d, c) {
-            (Some(d), Some(c)) if size(&c) >= size(&d) => Some((d, "drop_unused")),
-            (d, None) => d.map(|d| (d, "drop_unused")),
-            (_, c) => c.map(|c| (c, "clustered")),
-        };
-        let best = match (best, p) {
-            (Some(b), Some(p)) if size(&p.0) >= size(&b.0) => Some(b),
-            (b, p) => p.or(b),
-        };
-        if best.as_ref().is_some_and(|b| matches!(b.1, "clustered" | "peel_clustered")) {
-            w.st.used.fetch_or(CLUSTERED, Relaxed);
-        }
-        if let Some((kept, name)) = &best {
-            stats::won_among(name, &sizes, size(t), kept);
-        }
-        return best.map(|b| b.0);
-    }
-    if n == 0 {
-        return None;
-    }
-    let rebuilt = if has_const_bitwise(t, w) {
-        let r = stats::try_pass("semi_linear", t, || semi_linear(t, &lv, w))?;
-        stats::won_among("semi_linear", &[("semi_linear", size(&r))], size(t), &r);
-        r
-    } else {
-        let prog = Prog::new(t, &lv, w);
-        let vals: Vec<u64> = (0..1usize << n).map(|p| prog.at(p, w)).collect();
-        let mut best = ("rebuild_values", stats::try_pass("rebuild_values", t, || rebuild_values(&vals, &lv, w)));
-        let mut sizes = vec![(best.0, size(&best.1))];
-        let mut try_one = |name: &'static str, r: Option<T>| {
-            if let Some(r) = r {
-                sizes.push((name, size(&r)));
-                if size(&r) < size(&best.1) {
-                    best = (name, r);
-                }
+/// The leaves of the linear region `t` and, when asked for, its values on {0,1}^n, kept
+/// for the last region asked about on this thread: the methods of `simba` each need them.
+struct RegionValues {
+    t: T,
+    w: u32,
+    lv: std::rc::Rc<Vec<T>>,
+    vals: Option<std::rc::Rc<Vec<u64>>>,
+}
+
+thread_local! {
+    static LAST_REGION: std::cell::RefCell<Option<RegionValues>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn region_leaves(t: &T, w: &Ctx) -> std::rc::Rc<Vec<T>> {
+    LAST_REGION.with(|c| {
+        let mut c = c.borrow_mut();
+        match c.as_ref() {
+            Some(r) if r.w == w.w && r.t == *t => r.lv.clone(),
+            _ => {
+                let mut lv = Vec::new();
+                leaves(t, w, &mut lv);
+                let lv = std::rc::Rc::new(lv);
+                *c = Some(RegionValues { t: t.clone(), w: w.w, lv: lv.clone(), vals: None });
+                lv
             }
-        };
-        try_one("common_multiple", stats::try_pass("common_multiple", t, || common_multiple(&vals, &lv, w)));
-        try_one("related_leaves", stats::try_pass("related_leaves", t, || related_leaves(t, &lv, w)));
-        if split {
-            try_one("one_wide_term", stats::try_pass("one_wide_term", t, || one_wide_term(&vals, &lv, w)));
         }
-        stats::won_among(best.0, &sizes, size(t), &best.1);
-        best.1
-    };
-    Some(rebuilt).filter(|b| size(b) < size(t))
+    })
+}
+
+fn region_values(t: &T, w: &Ctx) -> (std::rc::Rc<Vec<T>>, std::rc::Rc<Vec<u64>>) {
+    let lv = region_leaves(t, w);
+    if let Some(v) = LAST_REGION.with(|c| c.borrow().as_ref().and_then(|r| r.vals.clone())) {
+        return (lv, v);
+    }
+    let prog = Prog::new(t, &lv, w);
+    let vals = std::rc::Rc::new((0..1usize << lv.len()).map(|p| prog.at(p, w)).collect::<Vec<u64>>());
+    LAST_REGION.with(|c| {
+        if let Some(r) = c.borrow_mut().as_mut().filter(|r| r.w == w.w && r.t == *t) {
+            r.vals = Some(vals.clone());
+        }
+    });
+    (lv, vals)
+}
+
+/// The methods of `simba` on the region `t`, as passes (`TERM_PASSES`).
+pub(super) fn drop_unused_pass(t: &T, w: &Ctx) -> Option<T> {
+    drop_unused(t, &region_leaves(t, w), w)
+}
+pub(super) fn semi_linear_pass(t: &T, w: &Ctx) -> Option<T> {
+    semi_linear(t, &region_leaves(t, w), w)
+}
+pub(super) fn rebuild_values_pass(t: &T, w: &Ctx) -> Option<T> {
+    let (lv, vals) = region_values(t, w);
+    Some(rebuild_values(&vals, &lv, w))
+}
+pub(super) fn common_multiple_pass(t: &T, w: &Ctx) -> Option<T> {
+    let (lv, vals) = region_values(t, w);
+    common_multiple(&vals, &lv, w)
+}
+pub(super) fn related_leaves_pass(t: &T, w: &Ctx) -> Option<T> {
+    related_leaves(t, &region_leaves(t, w), w)
+}
+pub(super) fn one_wide_term_pass(t: &T, w: &Ctx) -> Option<T> {
+    let (lv, vals) = region_values(t, w);
+    one_wide_term(&vals, &lv, w)
 }
 
 /// `c·B + k` for values that take two values only, `B` split by `decompose` past the

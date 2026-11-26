@@ -924,21 +924,8 @@ fn rebuild_once(t: &T, w: &Ctx) -> T {
     crate::tfunc::replacement(&t, w).unwrap_or_else(|| crate::tfunc::simplify(&cluster_regions(&rewrite(&t, w), w, false), w))
 }
 
-/// `t` with `f` applied to each maximal region that is not an atom, keeping the smaller
-/// forms, or `None` when none is smaller.
-fn on_regions(t: &T, w: &Ctx, f: fn(&T, &Ctx) -> Option<T>) -> Option<T> {
-    let T::Op(op, a) = t else { return None };
-    if kind(t, w) != Kind::Atom
-        && let Some(r) = f(t, w).filter(|r| size(r) < size(t))
-    {
-        return Some(r);
-    }
-    let b: Vec<T> = a.iter().map(|x| on_regions(x, w, f).unwrap_or_else(|| x.clone())).collect();
-    (b != *a).then(|| T::Op(*op, b))
-}
-
 /// The passes over one term that `crate::pipe` runs by name: each gives an equivalent
-/// term, or `None` when it does not apply. Passes on linear regions run on each region.
+/// term, or `None` when it does not apply (see `ALTERNATIVES`).
 pub(crate) const TERM_PASSES: &[(&str, fn(&T, &Ctx) -> Option<T>)] = &[
     ("lowbits", |t, w| Some(crate::lowbits::simplify(t, w))),
     ("unshift", |t, w| Some(unshift(t, w))),
@@ -965,14 +952,45 @@ pub(crate) const TERM_PASSES: &[(&str, fn(&T, &Ctx) -> Option<T>)] = &[
     ("simba", simba),
     ("small_blocks", small_blocks),
     ("wide_blocks", wide_blocks),
-    ("clustered", |t, w| on_regions(t, w, clustered)),
-    ("peel", |t, w| on_regions(t, w, peel)),
     ("poly_mba", crate::poly_mba::simplify_poly),
+    ("drop_unused", drop_unused_pass),
+    ("clustered", clustered),
+    ("peel", peel),
+    ("peel_clustered", peel),
+    ("semi_linear", semi_linear_pass),
+    ("rebuild_values", rebuild_values_pass),
+    ("common_multiple", common_multiple_pass),
+    ("related_leaves", related_leaves_pass),
+    ("one_wide_term", one_wide_term_pass),
 ];
 
 /// Passes of `TERM_PASSES` that are alternatives: each runs on the candidate whole and gives
 /// no candidate when it finds no form, and the `State::used` bit its form sets when kept.
-pub(crate) const ALTERNATIVES: [(&str, u8); 4] = [("simba", 0), ("small_blocks", 0), ("wide_blocks", WIDE), ("poly_mba", 0)];
+pub(crate) const ALTERNATIVES: [(&str, u8); 13] = [
+    ("simba", 0),
+    ("small_blocks", 0),
+    ("wide_blocks", WIDE),
+    ("poly_mba", 0),
+    ("drop_unused", 0),
+    ("clustered", CLUSTERED),
+    ("peel", 0),
+    ("peel_clustered", 0),
+    ("semi_linear", 0),
+    ("rebuild_values", 0),
+    ("common_multiple", 0),
+    ("related_leaves", 0),
+    ("one_wide_term", 0),
+];
+
+/// Number of leaves of the linear region `t` (`crate::pipe` conditions).
+pub(crate) fn leaf_count(t: &T, w: &Ctx) -> usize {
+    region_leaves(t, w).len()
+}
+
+/// Whether the linear region `t` has a bitwise operation with a constant operand.
+pub(crate) fn const_bitwise(t: &T, w: &Ctx) -> bool {
+    has_const_bitwise(t, w)
+}
 
 /// The pass over one term named `name`: an entry of `TERM_PASSES`, or `polish/NAME` for a
 /// polish pass.

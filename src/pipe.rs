@@ -40,7 +40,7 @@ const SET_PASSES: [&str; 10] = [
 /// The conditions of `if`, `retry` and `filter`, on the candidates they see; also `lt:R`,
 /// `gt:R` (main candidate smaller, larger than register `R`'s), `eq:R` (equal),
 /// `le:P/Q:R` (at most `P/Q` its size).
-pub const CONDS: [&str; 16] = [
+pub const CONDS: [&str; 20] = [
     // The main candidate has a shift, division or mulhi and its rebuild is not tiny.
     "opaque",
     // A candidate is proved minimal: no smaller term equals it (`Passes::minimal`).
@@ -73,8 +73,16 @@ pub const CONDS: [&str; 16] = [
     // The main candidate comes from a rebuild with abstracted subterms
     // (`linear_mba::ABSTRACTED`).
     "abstracted",
-    // Always.
+    // Always, when there are candidates (as every condition).
     "true",
+    // The main candidate is a linear region without leaves.
+    "no_leaves",
+    // The main candidate is a linear region of more than `linear_mba::MAX_LEAVES` leaves.
+    "wide",
+    // The main candidate has a bitwise operation with a constant operand.
+    "const_bitwise",
+    // The run rebuilds a linear cofactor of `poly_mba` (`simba_memo`).
+    "cofactor",
 ];
 
 /// The names a `fix` or `best` count can take: `restarts` (`Cli::max_restarts` less the
@@ -196,6 +204,8 @@ pub struct Env<'a> {
     /// Set inside a `regions`: the `won` its `best` would count, left for `regions` to count
     /// with the form it builds.
     deferred: RefCell<Option<Option<Won>>>,
+    /// The run rebuilds a linear cofactor of `poly_mba`.
+    cofactor: bool,
     /// The smallest candidate each enclosing `smallest` saw, innermost last.
     seen: RefCell<Vec<Option<(usize, Cand)>>>,
     regs: RefCell<HashMap<String, Vec<Cand>>>,
@@ -215,7 +225,7 @@ impl<'a> Env<'a> {
 
     fn with(cli: Option<&'a Cli>, passes: &'a Passes, w: u32, trace: bool, egg: String, input: &str) -> Env<'a> {
         let input = input.to_string();
-        Env { cli, passes, w, trace, egg, input, moved: Cell::new(false), wins: Cell::new(0), deferred: Default::default(), seen: Default::default(), regs: Default::default(), ctxs: Default::default() }
+        Env { cli, passes, w, trace, egg, input, moved: Cell::new(false), wins: Cell::new(0), deferred: Default::default(), cofactor: false, seen: Default::default(), regs: Default::default(), ctxs: Default::default() }
     }
 
     fn cli(&self, pass: &str) -> &'a Cli {
@@ -320,6 +330,10 @@ fn cond(name: &str, set: &[Cand], env: &Env) -> bool {
         "replaceable" => env.ctx(|c| crate::tfunc::replacement(main.tree(), c).is_some()),
         "abstracted" => linear_mba::ABSTRACTED.contains(&main.origin.as_str()),
         "true" => true,
+        "no_leaves" => env.ctx(|w| linear_mba::leaf_count(main.tree(), w) == 0),
+        "wide" => env.ctx(|w| linear_mba::leaf_count(main.tree(), w) > linear_mba::MAX_LEAVES),
+        "const_bitwise" => env.ctx(|w| linear_mba::const_bitwise(main.tree(), w)),
+        "cofactor" => env.cofactor,
         _ => unreachable!("condition {name}"),
     }
 }
@@ -347,14 +361,11 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
         }
         Pipe::Best(k, ps) => {
             let mut out = Vec::new();
-            let mut from = Vec::new();
-            for (i, p) in ps.iter().enumerate() {
-                let o = go(p, set.clone(), env)?;
-                from.extend(std::iter::repeat_n(i, o.len()));
-                out.extend(o);
+            for p in ps {
+                out.extend(go(p, set.clone(), env)?);
             }
             if stats::on() {
-                count_won(ps, &out, &from, &set, env);
+                count_won(&out, &set, env);
             }
             let mut out = dedup(out);
             out.sort_by_cached_key(|c| c.size());
@@ -364,7 +375,7 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
         Pipe::First(ps) => {
             for p in ps {
                 let out = go(p, set.clone(), env)?;
-                if out != set {
+                if !out.is_empty() && out != set {
                     return Ok(out);
                 }
             }
@@ -535,25 +546,25 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
 /// A `won` to count: the winning pass, each pass's size, the input's size.
 type Won = (String, Vec<(String, usize)>, usize);
 
-/// Counts `won` for the pass of `ps` whose candidate `best` keeps, when it is an alternative
-/// pass (`linear_mba::ALTERNATIVES`); inside a `regions`, leaves it for that to count.
-fn count_won(ps: &[Pipe], out: &[Cand], from: &[usize], set: &[Cand], env: &Env) {
-    let name = |i: usize| match &ps[i] {
-        Pipe::Pass(n) if linear_mba::ALTERNATIVES.iter().any(|(a, _)| a == n) => n.clone(),
-        _ => String::new(),
+/// Counts `won` for the alternative pass (`linear_mba::ALTERNATIVES`, the origin of its
+/// candidates) whose candidate `best` keeps; inside a `regions`, leaves it for that to count.
+fn count_won(out: &[Cand], set: &[Cand], env: &Env) {
+    let name = |c: &Cand| match linear_mba::ALTERNATIVES.iter().any(|(a, _)| *a == c.origin) {
+        true => c.origin.clone(),
+        false => String::new(),
     };
-    let (Some(input), Some(kept)) = (set.first(), out.iter().enumerate().min_by_key(|(_, c)| c.size())) else { return };
-    let winner = name(from[kept.0]);
+    let (Some(input), Some(kept)) = (set.first(), out.iter().min_by_key(|c| c.size())) else { return };
+    let winner = name(kept);
     if winner.is_empty() {
         return;
     }
-    let sizes: Vec<(String, usize)> = out.iter().zip(from).map(|(c, &i)| (name(i), c.size())).collect();
+    let sizes: Vec<(String, usize)> = out.iter().map(|c| (name(c), c.size())).collect();
     let mut slot = env.deferred.borrow_mut();
     match slot.as_mut() {
         Some(s @ None) => *s = Some((winner, sizes, input.size())),
         _ => {
             let sizes: Vec<(&str, usize)> = sizes.iter().map(|(n, s)| (n.as_str(), *s)).collect();
-            stats::won_among(&winner, &sizes, input.size(), kept.1.tree());
+            stats::won_among(&winner, &sizes, input.size(), kept.tree());
         }
     }
 }
@@ -561,11 +572,24 @@ fn count_won(ps: &[Pipe], out: &[Cand], from: &[usize], set: &[Cand], env: &Env)
 /// `p` on the term `t`, on the run `w` (no new scope), for `linear_mba::rewrite`: its main
 /// candidate, or `t` when it gives none.
 pub(crate) fn run_term(p: &Pipe, t: &Term, w: &Ctx) -> Term {
+    run_on(p, t, w, false).map_or_else(|| t.clone(), Cand::into_tree)
+}
+
+/// `run_term` for `linear_mba::simba`, `None` when `p` gives no candidate; the `State::used`
+/// bits of the candidate kept count for the run (`cofactor`: `Env::cofactor`).
+pub(crate) fn run_alt(p: &Pipe, t: &Term, w: &Ctx, cofactor: bool) -> Option<Term> {
+    let c = run_on(p, t, w, cofactor)?;
+    w.swap_used(w.swap_used(0) | c.used);
+    Some(c.into_tree())
+}
+
+fn run_on(p: &Pipe, t: &Term, w: &Ctx, cofactor: bool) -> Option<Cand> {
     let passes = crate::sched::current();
-    let env = Env::with(None, &passes, w.w, false, String::new(), "");
+    let mut env = Env::with(None, &passes, w.w, false, String::new(), "");
+    env.cofactor = cofactor;
     env.ctxs.borrow_mut().push(w.narrow(w.w));
-    let out = go(p, vec![Cand::of(t.clone(), &Cand::new("", "rewrite"), 0, 0)], &env).expect("a rewrite runs no egglog");
-    out.into_iter().next().map_or_else(|| t.clone(), Cand::into_tree)
+    let out = go(p, vec![Cand::of(t.clone(), &Cand::new("", "input"), 0, 0)], &env).expect("a rewrite runs no egglog");
+    out.into_iter().next()
 }
 
 /// `Passes::polish` of `p` on the egglog term `egg` at width `w`, and the origin of its
@@ -701,7 +725,7 @@ fn term_pass(name: &str, f: linear_mba::TermPass, set: &[Cand], env: &Env) -> Ve
                 ctx.swap_used(outer | used);
                 let made = left.saturating_sub(ctx.setting("rewrites").unwrap());
                 match (r, alt) {
-                    (Some(r), Some(bit)) => Some(Cand::of(r, c, used | bit, made)),
+                    (Some(r), Some(bit)) => Some(Cand { origin: name.to_string(), ..Cand::of(r, c, used | bit, made) }),
                     (None, Some(_)) => None,
                     (Some(r), None) if r != *t => Some(Cand::of(r, c, used, made)),
                     _ => Some(Cand { used: c.used | used, rewrites: c.rewrites + made, ..c.clone() }),

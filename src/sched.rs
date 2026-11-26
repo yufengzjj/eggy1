@@ -207,7 +207,7 @@ pub enum Pipe {
     /// All on the same candidates; the `k` smallest of their candidates, the earlier of
     /// equal ones first (`best(k,a,b,...)`; `k` as in `Fix`).
     Best(String, Vec<Pipe>),
-    /// The candidates of the first whose candidates differ from its input's, else the
+    /// The candidates of the first that gives candidates other than its input's, else the
     /// input (`first(a,b,...)`).
     First(Vec<Pipe>),
     /// Repeated at most `n` times while the main candidate changes (`fix(n,p)`); `n` is a
@@ -445,6 +445,14 @@ pub fn pipeline() -> String {
 /// operands rewritten; `poly_mba` taken instead when strictly smaller.
 pub const REWRITE: &str = "again(best(1,regions(best(1,simba,small_blocks,wide_blocks)),poly_mba))";
 
+/// The rebuild of one linear region (`Passes::simba`). Past `MAX_LEAVES` leaves: the smallest
+/// of the region with unused leaves dropped, clustered, and peeled (only when no leaf is
+/// unused: then the rewrite of the dropped form peels), the region itself or else its
+/// clustered form, which a region too large to evaluate needs. Otherwise the semi-linear
+/// rebuild, or the smallest rebuild from its values, kept when smaller than the region;
+/// `one_wide_term` costs more than it gains on the cofactors of `poly_mba`.
+pub const SIMBA: &str = "if(no_leaves,none,if(wide,seq(save/in,best(1,seq(drop_unused,save/d),seq(clustered,save/c),seq(load/d,if(true,none,seq(load/in,first(peel,seq(load/c,peel_clustered)),filter(!eq:in)))))),seq(save/in,if(const_bitwise,best(1,semi_linear),best(1,rebuild_values,common_multiple,related_leaves,if(!cofactor,one_wide_term,none))),filter(lt:in))))";
+
 /// The final polish (`Passes::polish`), on one candidate: the polish passes `names` in
 /// turn, each kept when smaller, repeated while one is, until 8 are; on one run whose
 /// `rewrite` calls are limited. `join_linear` rewrites every pair of leaf groups many times,
@@ -608,6 +616,8 @@ pub struct Passes {
     /// The rebuild of one term (`REWRITE`), memoized by `linear_mba::rewrite` and used by the
     /// passes inside it for subterms.
     pub rewrite: Pipe,
+    /// The rebuild of one linear region (`SIMBA`), the `simba` pass.
+    pub simba: Pipe,
 }
 
 impl Default for Passes {
@@ -637,6 +647,7 @@ impl Default for Passes {
             prepass: Pipe::parse(&prepass()).unwrap(),
             polish: Pipe::parse(&polish(&crate::linear_mba::POLISH.map(|(n, _)| n))).unwrap(),
             rewrite: Pipe::parse(REWRITE).unwrap(),
+            simba: Pipe::parse(SIMBA).unwrap(),
         }
     }
 }
@@ -669,7 +680,7 @@ impl Passes {
     /// `key=value`, and for the lists `pre`, `off`, `gates` and `schedule` also `key+=names`
     /// and `key-=names` (names separated by `,`; schedule steps written `run:`, `once:` or
     /// `sat:` and a ruleset). The `LIMITS` are keys too (`split_runs=8`); `pipeline`,
-    /// `prepass`, `polish` and `rewrite` take a `Pipe` (spaces inside its parentheses allowed), and
+    /// `prepass`, `polish`, `rewrite` and `simba` take a `Pipe` (spaces inside its parentheses allowed), and
     /// `polish` also a list of polish pass names, run as `polish(names)`.
     pub fn parse(spec: &str) -> Result<Passes, String> {
         let mut p = Passes::default();
@@ -698,6 +709,10 @@ impl Passes {
             }
             if let Some(val) = item.strip_prefix("rewrite=") {
                 p.rewrite = Pipe::parse(val)?;
+                continue;
+            }
+            if let Some(val) = item.strip_prefix("simba=") {
+                p.simba = Pipe::parse(val)?;
                 continue;
             }
             if let Some(val) = item.strip_prefix("polish=") {
@@ -766,7 +781,7 @@ impl Passes {
                     Some(i) => p.limits[i] = num()?,
                     None => {
                         let limits: Vec<&str> = LIMITS.iter().map(|(n, _)| *n).collect();
-                        return Err(format!("unknown key {key}; known: schedule match_limit ban_length pre keep extra rerun_input printed minimal off gates pipeline prepass polish rewrite {}", limits.join(" ")));
+                        return Err(format!("unknown key {key}; known: schedule match_limit ban_length pre keep extra rerun_input printed minimal off gates pipeline prepass polish rewrite simba {}", limits.join(" ")));
                     }
                 },
             }
@@ -805,7 +820,7 @@ impl fmt::Display for Passes {
                 write!(f, " {name}={v}")?;
             }
         }
-        write!(f, " pipeline={} prepass={} polish={} rewrite={}", self.pipeline, self.prepass, self.polish, self.rewrite)
+        write!(f, " pipeline={} prepass={} polish={} rewrite={} simba={}", self.pipeline, self.prepass, self.polish, self.rewrite, self.simba)
     }
 }
 
@@ -822,6 +837,7 @@ mod tests {
         assert_eq!(Pipe::parse(&Passes::default().polish.to_string()).unwrap(), Passes::default().polish);
         let p = Passes::parse("rewrite=regions(best(1,simba,poly_mba))").unwrap();
         assert_eq!(p.rewrite.to_string(), "regions(best(1,simba,poly_mba))");
+        assert_eq!(Pipe::parse(&Passes::default().simba.to_string()).unwrap(), Passes::default().simba);
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("polish+=factor").is_err() && Passes::parse("polish=nope").is_err());
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
