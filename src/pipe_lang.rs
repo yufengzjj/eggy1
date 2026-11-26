@@ -204,6 +204,10 @@ impl Parser<'_> {
         match self.next() {
             Some(Tok::Name(n)) if FORMS.contains(&n.as_str()) && n != "egglog" => Err(format!("{n} needs parentheses: ({n} ...)")),
             Some(Tok::Name(n)) if self.defs.contains_key(&n) => Ok(self.defs[&n].clone()),
+            Some(Tok::Name(n)) if n.split_once('/').is_some_and(|(h, _)| crate::pipe::FORM_PASSES.contains(&h)) => {
+                let (h, r) = n.split_once('/').unwrap();
+                Err(format!("write {n} as ({h} {r})"))
+            }
             Some(Tok::Name(n)) => resolve(&n).map(Pipe::Pass).ok_or_else(|| format!("unknown pass {n}; known: {}", crate::pipe::names().join(" "))),
             Some(Tok::Open) => {
                 let p = match self.peek() {

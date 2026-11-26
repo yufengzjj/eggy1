@@ -429,7 +429,7 @@ pub fn polish(names: &[&str]) -> String {
 }
 
 /// Turns off the `INNER` pass `name` for the runs on this thread that follow, until the next
-/// `apply` (the pass `off/NAME`).
+/// `apply` (the pass `(off NAME)`).
 pub fn turn_off(name: &str) {
     let bits = off_bits(&[name]);
     OFF.with(|o| o.set(o.get() | bits));
@@ -777,6 +777,9 @@ impl Passes {
         for (name, p) in &all {
             let mut uses = Uses::default();
             uses.walk(p);
+            if let Some(r) = uses.unsaved {
+                return Err(format!("{name} reads register {r} before any (save {r})"));
+            }
             if *name != "pipeline" {
                 if let Some(what) = uses.needs_run.first() {
                     return Err(format!("{what} needs a simplify run and cannot be in {name}"));
@@ -809,6 +812,10 @@ struct Uses {
     needs_run: Vec<String>,
     /// The pipelines it runs: `prepass`, `polish`, `inner`.
     calls: Vec<&'static str>,
+    /// The registers a `(save R)` may have set by now, in run order; each pipeline has its own.
+    saved: Vec<String>,
+    /// The first register read where no `(save R)` can have run before.
+    unsaved: Option<String>,
 }
 
 impl Uses {
@@ -822,35 +829,61 @@ impl Uses {
                 _ => {}
             },
             Pipe::Pass(Pass::Term { .. }) => self.calls.push("inner"),
+            Pipe::Pass(Pass::Save(r)) => self.saved.push(r.clone()),
+            Pipe::Pass(Pass::Load(r) | Pass::Label(r)) => self.read(r),
             Pipe::Pass(_) => {}
             Pipe::Seq(ps) | Pipe::Union(ps) | Pipe::First(ps) => ps.iter().for_each(|p| self.walk(p)),
             Pipe::Best(v, ps) => {
-                self.value(v);
                 ps.iter().for_each(|p| self.walk(p));
+                self.value(v);
             }
             Pipe::Fix(v, p) | Pipe::Wins(v, p) => {
                 self.value(v);
-                self.walk(p);
+                self.repeated(p);
             }
-            Pipe::If(c, a, b) | Pipe::Retry(c, a, b) => {
+            Pipe::If(c, a, b) => {
                 self.cond(c);
                 self.walk(a);
+                self.walk(b);
+            }
+            Pipe::Retry(c, a, b) => {
+                self.walk(a);
+                self.cond(c);
                 self.walk(b);
             }
             Pipe::Filter(c) => self.cond(c),
             Pipe::Off(_, p) | Pipe::Smallest(p) | Pipe::Tag(_, p) | Pipe::Cand(_, p) | Pipe::With(_, p) | Pipe::Scope(p) | Pipe::Smaller(_, p) => self.walk(p),
             // Both rebuild with `Passes::rewrite`.
-            Pipe::Regions(p) | Pipe::Again(p) => {
+            Pipe::Regions(p) => {
+                self.calls.push("inner");
+                self.repeated(p);
+            }
+            Pipe::Again(p) => {
                 self.calls.push("inner");
                 self.walk(p);
             }
         }
     }
 
+    /// `p` run more than once: a read can see a save of an earlier run.
+    fn repeated(&mut self, p: &Pipe) {
+        let mut body = Uses::default();
+        body.walk(p);
+        self.saved.extend(body.saved);
+        self.walk(p);
+    }
+
+    fn read(&mut self, r: &str) {
+        if self.unsaved.is_none() && !self.saved.iter().any(|s| s == r) {
+            self.unsaved = Some(r.to_string());
+        }
+    }
+
     fn cond(&mut self, c: &Cond) {
         match c {
             Cond::Is(i) if ["opaque", "rebuilds"].contains(&crate::pipe::CONDS[*i]) => self.calls.push("prepass"),
-            Cond::Is(_) | Cond::Same(_) => {}
+            Cond::Is(_) => {}
+            Cond::Same(r) => self.read(r),
             Cond::Not(c) | Cond::Any(c) | Cond::All(c) => self.cond(c),
             Cond::And(cs) | Cond::Or(cs) => cs.iter().for_each(|c| self.cond(c)),
             Cond::Cmp(_, a, b) => {
@@ -863,6 +896,7 @@ impl Uses {
     fn value(&mut self, v: &Value) {
         match v {
             Value::Count(i) if crate::pipe::COUNTS[*i] == "restarts" => self.needs_run.push("restarts".into()),
+            Value::Size(r) => self.read(r),
             Value::Bin(_, a, b) => {
                 self.value(a);
                 self.value(b);
@@ -1011,6 +1045,15 @@ prepass=lowbits | r2
             assert!(e.contains("simplify run") || e.contains("reaches itself"), "{bad}: {e}");
         }
         assert!(Passes::parse("pipeline=(fix restarts prepass | egglog | polish)").is_ok());
+        for bad in ["prepass=(load x)", "prepass=(save t) | (load u)", "prepass=(load t) | (save t)", "polish=(filter (size < (size t)))", "rewrite=(if (same t) id)", "prepass=(if mixed (save t)) | (label u)", "pipeline=(retry (size < (size t)) id (save t))"] {
+            let e = Passes::parse(bad).unwrap_err();
+            assert!(e.contains("before any (save"), "{bad}: {e}");
+        }
+        for good in ["prepass=(if mixed (save t)) | (load t)", "prepass=(fix 3 (union (load t) id) | (save t))", "pipeline=(retry (size < (size t)) (save t) (load t))", "prepass=(best (size t) (save t) id)"] {
+            assert!(Passes::parse(good).is_ok(), "{good}");
+        }
+        let e = Passes::parse("prepass=save/t").unwrap_err();
+        assert!(e.contains("(save t)"), "{e}");
         for bad in ["pipeline=nope", "pipeline=(seq rewrite", "pipeline=(best x rewrite)", "pipeline=(fix 2 a b)", "pipeline=(with off=nope rewrite)", "pipeline=(loop rewrite)", "pipeline=(fix many id)", "pipeline=(if nope id)", "pipeline=(if mixed id id id)", "pipeline=(retry mixed id)"] {
             assert!(Passes::parse(bad).is_err(), "{bad}");
         }

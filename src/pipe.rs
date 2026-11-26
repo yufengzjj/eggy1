@@ -11,7 +11,7 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 use std::collections::HashMap;
 
-/// Passes that take the candidate list whole, besides `save/R`, `load/R` and `label/R`.
+/// Passes that take the candidate list whole, besides `(save R)`, `(load R)` and `(label R)`.
 pub const SET_PASSES: [&str; 9] = [
     // The candidates unchanged.
     "id",
@@ -19,7 +19,7 @@ pub const SET_PASSES: [&str; 9] = [
     "none",
     // The main candidate's pre-pass rebuilds: the main one, then those to union with it.
     "prepass",
-    // One egglog round on all candidates unioned: its extraction (`egglog/LABEL` times it
+    // One egglog round on all candidates unioned: its extraction (`(egglog LABEL)` times it
     // as `egglog/LABEL`).
     "egglog",
     // The first candidate proved minimal (`minimal`).
@@ -35,10 +35,8 @@ pub const SET_PASSES: [&str; 9] = [
     "pre_done",
 ];
 
-/// The conditions of `if`, `retry` and `filter`, on the candidates they see; also `lt:R`,
-/// `gt:R` (main candidate smaller, larger than register `R`'s), `eq:R` (equal),
-/// `le:P/Q:R` (at most `P/Q` its size), and `FEATURE:N` (the main candidate's `FEATURES`
-/// entry at least `N`).
+/// The named conditions of `if`, `retry` and `filter`, on the candidates they see; the
+/// others (`(same R)`, comparisons) are `sched::Cond` forms.
 pub const CONDS: [&str; 20] = [
     // The main candidate has a shift, division or mulhi and its rebuild is not tiny.
     "opaque",
@@ -84,7 +82,7 @@ pub const CONDS: [&str; 20] = [
     "cofactor",
 ];
 
-/// The input features of `stats::shape` that conditions `FEATURE:N` test.
+/// The input features of `stats::shape` that conditions compare (`mul >= 4`).
 pub const FEATURES: [&str; 8] = ["size", "vars", "depth", "mul", "bitconst", "arith_in_bit", "shift", "div"];
 
 fn feature(s: &stats::Shape, i: usize) -> usize {
@@ -106,18 +104,17 @@ fn feature(s: &stats::Shape, i: usize) -> usize {
 /// round), `keep` (`Passes::keep`).
 pub const COUNTS: [&str; 4] = ["restarts", "extra", "printed", "keep"];
 
-const REGISTER_PASSES: [&str; 3] = ["save/", "load/", "label/"];
-
-/// The names a `Pipe::Pass` can take, registers written `R`.
+/// The passes as a pipeline writes them, for error messages.
 pub fn names() -> Vec<String> {
     let polish = linear_mba::POLISH.iter().map(|(n, _)| format!("polish/{n}"));
-    let egglog = ["first", "later", "rerun_input"].iter().map(|l| format!("egglog/{l}"));
-    let regs = REGISTER_PASSES.iter().map(|p| format!("{p}R"));
-    let off = crate::sched::INNER.iter().map(|n| format!("off/{n}"));
-    SET_PASSES.iter().map(|n| n.to_string()).chain(egglog).chain(regs).chain(off).chain(linear_mba::TERM_PASSES.iter().map(|(n, _)| n.to_string())).chain(polish).collect()
+    let forms = ["(egglog LABEL)", "(save R)", "(load R)", "(label R)", "(off NAME)"].map(String::from);
+    SET_PASSES.iter().map(|n| n.to_string()).chain(forms).chain(linear_mba::TERM_PASSES.iter().map(|(n, _)| n.to_string())).chain(polish).collect()
 }
 
-/// The pass named `name` (as `names` lists them, registers filled in).
+/// The internal names of the passes a pipeline writes as forms: `(save R)` is `save/R`.
+pub const FORM_PASSES: [&str; 5] = ["save", "load", "label", "egglog", "off"];
+
+/// The pass of the internal name `name`: `Pass::name`, `save/R` for `(save R)`.
 pub fn resolve(name: &str) -> Option<Pass> {
     for (p, f) in [("save/", Pass::Save as fn(String) -> Pass), ("load/", Pass::Load), ("label/", Pass::Label)] {
         if let Some(r) = name.strip_prefix(p).filter(|r| !r.is_empty()) {
