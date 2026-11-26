@@ -68,12 +68,7 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
                 (Tok::Num(n.parse().map_err(|_| format!("number too large: {n}"))?), len)
             }
             c if name_start(c) => {
-                // `-` joins a name only before a letter or `_` (`time-limit`), so `restarts-1`
-                // is still a subtraction.
-                let mut len = 1;
-                while cs.get(i + len).is_some_and(|c| name_char(*c) || *c == '-' && cs.get(i + len + 1).is_some_and(|d| name_start(*d))) {
-                    len += 1;
-                }
+                let len = cs[i..].iter().take_while(|c| name_char(**c)).count();
                 (Tok::Name(cs[i..i + len].iter().collect()), len)
             }
             _ => return Err(format!("unexpected character {c:?} in pipeline")),
@@ -84,10 +79,14 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
     Ok(out)
 }
 
-const FORMS: [&str; 24] = [
-    "seq", "union", "best", "first", "fix", "if", "retry", "smallest", "scope", "regions", "again", "tag", "cand", "smaller", "wins", "filter", "with", "save", "load",
-    "label", "off", "on", "egglog", "time-limit",
+const FORMS: [&str; 22] = [
+    "seq", "union", "best", "first", "fix", "if", "retry", "smallest", "scope", "regions", "again", "tag", "cand", "smaller", "wins", "filter", "save", "load", "label",
+    "off", "on", "egglog",
 ];
+
+const NO_WITH: &str = "(with KEY=VALUE ... p) is no longer read: write (KEY = VALUE | ... | p), as in (rewrites = 8 | semi_leaves = 2 | rewrite); with's bit_splits=N is bit_split_budget = N";
+const NO_TIME_LIMIT: &str = "(time-limit N) is no longer read: write time_limit = N, or time_limit = none for no limit";
+const NO_TRUE: &str = "true is no longer a condition: write 1, or (any 1) for true only where there are candidates";
 
 /// An expression before it is read as a condition or a value.
 #[derive(Debug)]
@@ -110,12 +109,14 @@ fn to_cond(e: E) -> Result<Cond, String> {
         E::Name(n) => match CONDS.iter().position(|c| *c == n) {
             Some(i) => Cond::Is(i),
             None if FEATURES.contains(&n.as_str()) => return Err(format!("{n} is a number: compare it, as in ({n} >= 1)")),
+            None if n == "true" => return Err(NO_TRUE.into()),
             None => match var_index(&n) {
                 Some(i) => Cond::Var(i),
                 None => return Err(format!("unknown condition {n}; known: {} and the variables", CONDS.join(" "))),
             },
         },
         E::Same(r) => Cond::Same(r),
+        E::Num(n) => Cond::Num(n),
         E::Quant(any, c) => {
             let c = Box::new(to_cond(*c)?);
             if any { Cond::Any(c) } else { Cond::All(c) }
@@ -217,6 +218,10 @@ impl Parser<'_> {
             self.at += 2;
             return self.assign(&n);
         }
+        let k = usize::from(self.peek() == Some(&Tok::Open));
+        if let Some(e) = self.old_form(k) {
+            return Err(e.into());
+        }
         match self.next() {
             Some(Tok::Name(n)) if FORMS.contains(&n.as_str()) && n != "egglog" => Err(format!("{n} needs parentheses: ({n} ...)")),
             Some(Tok::Name(n)) if self.defs.contains_key(&n) => {
@@ -242,6 +247,18 @@ impl Parser<'_> {
                 Ok(p)
             }
             x => Err(format!("expected a pass or (, found {}", show_tok(x.as_ref()))),
+        }
+    }
+
+    /// The error for a form no longer read starting `k` tokens ahead.
+    fn old_form(&self, k: usize) -> Option<&'static str> {
+        let name = |j: usize, s: &str| matches!(self.peek_at(k + j), Some(Tok::Name(n)) if n == s);
+        if name(0, "with") {
+            Some(NO_WITH)
+        } else if name(0, "time") && self.peek_at(k + 1) == Some(&Tok::Arith('-')) && name(2, "limit") {
+            Some(NO_TIME_LIMIT)
+        } else {
+            None
         }
     }
 
@@ -354,35 +371,6 @@ impl Parser<'_> {
                 }
             }
             "filter" => Pipe::Filter(self.cond()?),
-            "with" => {
-                // The old form of `(K = V | ... | p)`; `bit_splits` was the budget there.
-                let mut steps = Vec::new();
-                while let (Some(Tok::Name(k)), Some(Tok::Assign)) = (self.peek().cloned(), self.peek_at(1)) {
-                    self.at += 2;
-                    if k == "off" {
-                        let v = self.name("a pass name after off=")?;
-                        return Err(format!("write (off {v}) in the body: (with ... (off {v}) | p)"));
-                    }
-                    let known = ["rewrites", "semi_leaves", "relate_leaves", "bit_splits"];
-                    if !known.contains(&k.as_str()) {
-                        return Err(format!("unknown setting {k}; known: {}", known.join(" ")));
-                    }
-                    let k = if k == "bit_splits" { "bit_split_budget" } else { k.as_str() };
-                    steps.push(Pipe::Pass(Pass::Assign(var_index(k).unwrap(), Some(self.count()?))));
-                }
-                if steps.is_empty() {
-                    return Err("with needs KEY=VALUE settings".into());
-                }
-                match self.pipe()? {
-                    Pipe::Seq(ps) if ps.len() > 1 => steps.extend(ps),
-                    p => steps.push(p),
-                }
-                Pipe::Seq(steps)
-            }
-            "time-limit" => {
-                let i = var_index("time_limit").unwrap();
-                Pipe::Pass(Pass::Assign(i, Some(self.count()?).filter(|v| *v != Value::Num(0))))
-            }
             "save" | "load" | "label" | "egglog" => {
                 let n = format!("{f}/{}", self.name(&format!("a name after {f}"))?);
                 Pipe::Pass(resolve(&n).unwrap())
@@ -506,7 +494,10 @@ fn assignable(n: &str) -> Result<usize, String> {
     if let Some(i) = var_index(n) {
         return Ok(i);
     }
-    Err(if n == "minimal" {
+    let joined = n.replace('-', "_");
+    Err(if n.contains('-') && var_index(&joined).is_some() {
+        format!("unknown variable {n}: names use _, not -; write {joined}")
+    } else if n == "minimal" {
         "minimal is a condition and cannot be assigned; the setting is prove_minimal".into()
     } else if FEATURES.contains(&n) || CONDS.contains(&n) {
         format!("{n} is computed from the candidates and cannot be assigned")
@@ -515,12 +506,35 @@ fn assignable(n: &str) -> Result<usize, String> {
     })
 }
 
+fn known_name(n: &str) -> bool {
+    var_index(n).is_some() || resolve(n).is_some() || CONDS.contains(&n) || FEATURES.contains(&n) || FORMS.contains(&n)
+}
+
+/// `e` with a note on a word of `s` such as `time-limit` (outside comments), which reads as a
+/// subtraction: the first whose name with `_` is known, else the first not made of numbers.
+fn hyphen_hint(e: String, s: &str) -> String {
+    let code = s.lines().map(|l| l.split('#').next().unwrap_or("")).collect::<Vec<_>>().join("\n");
+    let words: Vec<&str> = code.split(|c: char| !name_char(c) && c != '-').filter(|w| w.contains('-') && w.split('-').all(|p| p.starts_with(name_start))).collect();
+    let number = |p: &str| FEATURES.contains(&p) || var_index(p).is_some();
+    let known = words.iter().find(|w| known_name(&w.replace('-', "_")));
+    let Some(w) = known.or_else(|| words.iter().find(|w| !w.split('-').all(number))) else { return e };
+    let joined = w.replace('-', "_");
+    if e.contains(&joined) {
+        return e;
+    }
+    let write = if known.is_some() { format!("; write {joined}") } else { String::new() };
+    format!("{e} ({w} reads as {}: names use _, not -{write})", w.replace('-', " - "))
+}
+
 /// The assignment `name = val`, a `--passes` item `name=val`.
 pub fn parse_assign(name: &str, val: &str) -> Result<Pass, String> {
-    let mut p = Parser { toks: lex(val)?, at: 0, defs: &Defs::new(), used: Vec::new() };
-    let Pipe::Pass(a) = p.assign(name)? else { unreachable!() };
-    p.end()?;
-    Ok(a)
+    let go = || {
+        let mut p = Parser { toks: lex(val)?, at: 0, defs: &Defs::new(), used: Vec::new() };
+        let Pipe::Pass(a) = p.assign(name)? else { unreachable!() };
+        p.end()?;
+        Ok(a)
+    };
+    go().map_err(|e| hyphen_hint(e, val))
 }
 
 /// The right side of an assignment: `none` for `None`.
@@ -536,16 +550,24 @@ pub fn parse(s: &str) -> Result<Pipe, String> {
 /// Parses `s`, where the names of `defs` stand for their pipelines; the names expanded are
 /// added to `used`.
 pub fn parse_with(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Pipe, String> {
-    let mut p = Parser { toks: lex(s)?, at: 0, defs, used: Vec::new() };
-    let pipe = p.pipe()?;
-    p.end()?;
-    used.extend(p.used);
+    let go = || {
+        let mut p = Parser { toks: lex(s)?, at: 0, defs, used: Vec::new() };
+        let pipe = p.pipe()?;
+        p.end()?;
+        Ok((pipe, p.used))
+    };
+    let (pipe, names) = go().map_err(|e| hyphen_hint(e, s))?;
+    used.extend(names);
     Ok(pipe)
 }
 
 /// Parses the definition `(let NAME p)`: `NAME` then stands for `p`, which is expanded where
 /// it is used; the names of `defs` it expands are added to `used`.
 pub fn parse_let(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<(String, (Pipe, bool)), String> {
+    let_def(s, defs, used).map_err(|e| hyphen_hint(e, s))
+}
+
+fn let_def(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<(String, (Pipe, bool)), String> {
     let mut p = Parser { toks: lex(s)?, at: 0, defs, used: Vec::new() };
     p.expect(Tok::Open, "(let")?;
     if p.name("let")? != "let" {
@@ -592,6 +614,7 @@ fn show_expr(c: &Cond, need: u8) -> String {
     let (s, prec) = match c {
         Cond::Is(i) => (CONDS[*i].to_string(), 5),
         Cond::Var(i) => (var(*i).name.to_string(), 5),
+        Cond::Num(n) => (n.to_string(), 5),
         Cond::Same(r) => (format!("(same {r})"), 5),
         Cond::Any(c) => (format!("(any {})", show_expr(c, 1)), 5),
         Cond::All(c) => (format!("(all {})", show_expr(c, 1)), 5),
@@ -756,9 +779,6 @@ mod tests {
         same("(if mixed rewrite)", "(if mixed rewrite id)");
         same("(if (!minimal || tiny) (rewrite | polish))", "(if (!minimal || (tiny)) (seq rewrite polish) id)");
         same("(filter (mul >= 4 && vars < 3))", "(filter ((mul >= 4) && (vars < 3)))");
-        same("(with rewrites=8 semi_leaves=2 rewrite)", "(with rewrites=8 semi_leaves=2 (rewrite))");
-        same("(with rewrites=8 rewrite | relate)", "(with rewrites=8 (rewrite | relate))");
-        assert!(parse("(with off=relate rewrite)").unwrap_err().contains("(off relate)"));
         assert_eq!(parse("(off lowbits relate)").unwrap(), Pipe::Pass(Pass::Off(vec!["lowbits", "relate"])));
         same("(fix restarts prepass | egglog)", "(fix restarts (prepass | egglog))");
         same("# comment
@@ -792,7 +812,6 @@ mod tests {
             "(if mul id)",
             "(filter (mul + tiny))",
             "(fix mixed id)",
-            "(with nope=1 id)",
             "(off nope)",
             "seq",
             "(retry mixed id)",
@@ -802,6 +821,20 @@ mod tests {
             assert!(parse(bad).is_err(), "{bad}");
         }
         assert!(is_old_syntax("seq(a,b)") && !is_old_syntax("(seq a b)"));
+    }
+
+    #[test]
+    fn numbers_and_hyphens() {
+        let p = parse("split_runs = size-mul").unwrap();
+        assert_eq!(p, Pipe::Pass(Pass::Assign(var_index("split_runs").unwrap(), Some(Value::Bin('-', Box::new(Value::Feature(0)), Box::new(Value::Feature(3)))))));
+        assert_eq!(parse("(if (restarts-1 > size-mul) id)").unwrap(), parse("(if (restarts - 1 > size - mul) id)").unwrap());
+        assert_eq!(parse("(if 1 none id)").unwrap(), Pipe::If(Cond::Num(1), Box::new(Pipe::Pass(resolve("none").unwrap())), Box::new(Pipe::Pass(Pass::id()))));
+        for ok in ["(if 1 none rewrite)", "(filter !0)", "(if (any 1) none)", "(if (1 && mixed) id)"] {
+            let p = parse(ok).unwrap();
+            assert_eq!(parse(&show(&p)).unwrap(), p, "{ok}: {}", show(&p));
+        }
+        assert_eq!(show(&parse("(if 1 none rewrite)").unwrap()), "(if 1 none rewrite)");
+        assert!(parse_assign("time-limit", "5").unwrap_err().contains("write time_limit"));
     }
 
     #[test]
@@ -837,13 +870,6 @@ mod tests {
             assert_eq!(parse(&pretty(&p)).unwrap(), p, "{ok}: {}", pretty(&p));
         }
         assert_eq!(show(&parse("split_runs=vars*2|rewrite").unwrap()), "split_runs = vars * 2 | rewrite");
-        same("(with rewrites=8 semi_leaves=2 rewrite)", "(rewrites = 8 | semi_leaves = 2 | rewrite)");
-        same("(with rewrites=polish_rewrites (wins 8 id))", "(rewrites = polish_rewrites | (wins 8 id))");
-        same("(with relate_leaves=10 (off clustered) | rewrite | tfunc)", "(relate_leaves = 10 | (off clustered) | rewrite | tfunc)");
-        same("(with bit_splits=2 rewrite)", "(bit_split_budget = 2 | rewrite)");
-        same("(time-limit 500) | rewrite", "time_limit = 500 | rewrite");
-        same("(time-limit 0) | rewrite", "time_limit = none | rewrite");
-        same("(time-limit (size * 10)) | rewrite", "time_limit = size * 10 | rewrite");
         for (bad, msg) in [
             ("(if (size = 3) id)", "compare with =="),
             ("(filter (vars = 2 || mul > 1))", "compare with =="),
@@ -859,6 +885,17 @@ mod tests {
             ("(if nope id)", "unknown condition nope"),
             ("split_runs = mixed", "unknown number mixed"),
             ("split_runs =", "found the end"),
+            ("(with rewrites=8 semi_leaves=2 rewrite)", "write (KEY = VALUE | ... | p)"),
+            ("rewrite | (with bit_splits=2 rewrite)", "bit_split_budget"),
+            ("with", "no longer read"),
+            ("(time-limit 500) | rewrite", "write time_limit = N"),
+            ("rewrite | time-limit", "time_limit = none for no limit"),
+            ("(if true id)", "write 1"),
+            ("(filter (true && mixed))", "(any 1)"),
+            ("split_runs = size-mul-x", "size-mul-x reads as size - mul - x: names use _, not -"),
+            ("tfunc-whole", "write tfunc_whole"),
+            ("split_runs = size-mul | tfunc-whole", "tfunc-whole reads as tfunc - whole"),
+            ("(if (prove-minimal) id)", "write prove_minimal"),
         ] {
             let e = parse(bad).unwrap_err();
             assert!(e.contains(msg), "{bad}: {e}");

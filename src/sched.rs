@@ -548,6 +548,8 @@ pub enum Cond {
     Is(usize),
     /// A variable of `VARS`, true when not 0 (`none` too).
     Var(usize),
+    /// A number, true when not 0.
+    Num(u64),
     /// The main candidate is the term of register `R`'s (`(same R)`).
     Same(String),
     Not(Box<Cond>),
@@ -1215,7 +1217,7 @@ impl Uses {
     fn cond(&mut self, c: &Cond) {
         match c {
             Cond::Is(i) if ["opaque", "rebuilds"].contains(&crate::pipe::CONDS[*i]) => self.calls.push("prepass"),
-            Cond::Is(_) | Cond::Var(_) => {}
+            Cond::Is(_) | Cond::Var(_) | Cond::Num(_) => {}
             Cond::Same(r) => self.read(r),
             Cond::Not(c) | Cond::Any(c) | Cond::All(c) => self.cond(c),
             Cond::And(cs) | Cond::Or(cs) => cs.iter().for_each(|c| self.cond(c)),
@@ -1420,10 +1422,10 @@ mod tests {
         assert_eq!(p.prepass, lang::parse("(seq lowbits (if mixed rewrite id) polish)").unwrap());
         assert_eq!(p.pipeline, lang::parse("(fix 2 (seq prepass egglog))").unwrap());
         assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
-        let p = Passes::parse("prepass=(scope (save t) | (with rewrites=unified_rewrites semi_leaves=2 rewrite) | (filter (size < (size t) || size <= (size t) * 3 / 4 && !tiny)) | (cand halve_input (load t)))").unwrap();
+        let p = Passes::parse("prepass=(scope (save t) | (rewrites = unified_rewrites | semi_leaves = 2 | rewrite) | (filter (size < (size t) || size <= (size t) * 3 / 4 && !tiny)) | (cand halve_input (load t)))").unwrap();
         assert_eq!(p.prepass.to_string(), "(scope (save t) | (rewrites = unified_rewrites | semi_leaves = 2 | rewrite) | (filter (size < (size t) || size <= (size t) * 3 / 4 && !tiny)) | (cand halve_input (load t)))");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
-        for bad in ["prepass=(filter lt)", "prepass=(filter (size <=))", "prepass=(with rewrites=x id)", "prepass=(with nope=1 id)", "prepass=(save)", "prepass=(scope id id)"] {
+        for bad in ["prepass=(filter lt)", "prepass=(filter (size <=))", "prepass=(rewrites = x | id)", "prepass=(nope = 1 | id)", "prepass=(save)", "prepass=(scope id id)"] {
             assert!(Passes::parse(bad).is_err(), "{bad}");
         }
         assert_eq!(Passes::default().check(), Ok(()));
@@ -1471,15 +1473,22 @@ prepass=lowbits | r2
         for ok in ["prepass=(save t) | (if mixed (save t)) | (load t)", "prepass=(save t) | (cand unified (save t)) | (load t)", "prepass=(fix 3 (save t) | rewrite) | (load t)", "prepass=(save t) | (filter (size < (size t))) | (save t) | (load t)", "prepass=(save t) | (first rewrite (save t)) | (load t)", "prepass=(if mixed (save t) (save t)) | (load t)"] {
             assert_eq!(Passes::parse_noting(ok).unwrap().1, Vec::<String>::new(), "{ok}");
         }
-        let p = Passes::parse("prepass=rewrite | (time-limit 500) | relate | (time-limit (size-1 * 2)) | tfunc | (time-limit 0) | lowbits").unwrap();
+        let p = Passes::parse("prepass=rewrite | time_limit = 500 | relate | time_limit = size-1 * 2 | tfunc | time_limit = none | lowbits").unwrap();
         assert_eq!(p.prepass.to_string(), "rewrite | time_limit = 500 | relate | time_limit = size - 1 * 2 | tfunc | time_limit = none | lowbits");
         assert_eq!(p, Passes::parse(&p.prepass.to_string().replace("rewrite |", "prepass=rewrite |")).unwrap());
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
-        assert!(Passes::parse("prepass=(time-limit)").is_err() && Passes::parse("prepass=time-limit").is_err() && Passes::parse("prepass=(time-limit mixed)").is_err());
-        assert!(Passes::parse("prepass=(if (size-x > 1) id)").unwrap_err().contains("size-x"));
-        let (_, w) = Passes::parse_noting("prepass=rewrite | (time-limit 100)").unwrap();
+        for old in ["prepass=(time-limit 500) | rewrite", "prepass=time-limit", "prepass=(time-limit)", "time-limit=500"] {
+            let e = Passes::parse(old).unwrap_err();
+            assert!(e.contains("time_limit"), "{old}: {e}");
+        }
+        assert!(Passes::parse("prepass=(if (size-x > 1) id)").unwrap_err().contains("size-x reads as size - x"));
+        for old in ["prepass=(with rewrites=8 rewrite)", "(let w (with semi_leaves=2 rewrite))", "pipeline=(if true id)"] {
+            let e = Passes::parse(old).unwrap_err();
+            assert!(e.contains("no longer"), "{old}: {e}");
+        }
+        let (_, w) = Passes::parse_noting("prepass=rewrite | time_limit = 100").unwrap();
         assert!(w.len() == 1 && w[0].contains("time_limit = 100 ends its sequence"), "{w:?}");
-        assert_eq!(Passes::parse_noting("prepass=rewrite | (if mixed (time-limit 100)) | relate").unwrap().1, Vec::<String>::new());
+        assert_eq!(Passes::parse_noting("prepass=rewrite | (if mixed time_limit = 100) | relate").unwrap().1, Vec::<String>::new());
         let flat = Passes::parse("(let g relate | tfunc) (let h (relate | tfunc)) prepass=lowbits | g | finish rewrite=lowbits | h | finish").unwrap();
         assert_eq!(flat.prepass.to_string(), "lowbits | relate | tfunc | finish");
         assert_eq!(flat.rewrite.to_string(), "lowbits | (relate | tfunc) | finish");
@@ -1487,14 +1496,11 @@ prepass=lowbits | r2
         assert_eq!(p.prepass.to_string(), "(off relate tfunc) | (on relate cut) | rewrite");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("prepass=(on nope)").is_err() && Passes::parse("prepass=(on)").is_err() && Passes::parse("prepass=on/relate").is_err());
-        assert!(Passes::parse("prepass=(with off=relate rewrite)").unwrap_err().contains("(off relate)"), "with takes no off=");
-        let (_, w) = Passes::parse_noting("prepass=rewrite | (scope (with rewrites=8 (off relate))) | (off cut) | lowbits").unwrap();
+        let (_, w) = Passes::parse_noting("prepass=rewrite | (scope (rewrites = 8 | (off relate))) | (off cut) | lowbits").unwrap();
         assert!(w.len() == 1 && w[0].contains("(off relate) ends its sequence"), "{w:?}");
-        let (_, w) = Passes::parse_noting("prepass=(with semi_leaves=2 rewrite) polish=(scope (with semi_leaves=2 rewrite)) rewrite=(with semi_leaves=2 simba)").unwrap();
-        assert!(w.is_empty(), "a with outside any scope binds too: {w:?}");
         let e = Passes::parse("prepass=save/t").unwrap_err();
         assert!(e.contains("(save t)"), "{e}");
-        for bad in ["pipeline=nope", "pipeline=(seq rewrite", "pipeline=(best x rewrite)", "pipeline=(fix 2 a b)", "pipeline=(with nope=1 rewrite)", "pipeline=(loop rewrite)", "pipeline=(fix many id)", "pipeline=(if nope id)", "pipeline=(if mixed id id id)", "pipeline=(retry mixed id)"] {
+        for bad in ["pipeline=nope", "pipeline=(seq rewrite", "pipeline=(best x rewrite)", "pipeline=(fix 2 a b)", "pipeline=(nope = 1 | rewrite)", "pipeline=(loop rewrite)", "pipeline=(fix many id)", "pipeline=(if nope id)", "pipeline=(if mixed id id id)", "pipeline=(retry mixed id)"] {
             assert!(Passes::parse(bad).is_err(), "{bad}");
         }
         with_off(&["relate"], || {

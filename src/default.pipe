@@ -154,7 +154,7 @@ simba=
            (drop_unused | (save d))
            (clustered | (save c))
            ((load d)
-            | (if true none
+            | (if (any 1) none
                 ((load in) | (first peel ((load c) | peel_clustered)) | (filter !(same in)))))))
       ((save in)
        | (if const_bitwise

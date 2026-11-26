@@ -32,7 +32,7 @@ eggy1 的化简流程由几条管线描述，默认的写在 `src/default.pipe` 
 ## 2. 词法
 
 - 空白只用来分隔；`#` 到行尾是注释。
-- **名字**以字母或 `_` 开头，可以含字母、数字、`_`、`/`，以及后面紧跟字母或 `_` 的 `-`（只为旧写法 `time-limit` 保留）：`polish/factor`、`semi/bit_split`、`split_runs`。所以 `/` 两边是名字时必须留空格：`x / 2`；`3/4` 是三个记号 `3` `/` `4`，只有在两边都是数时才不必留空格。`-` 后面是数时是减号（`restarts-1`），后面是名字时要留空格（`size - mul`，`size-mul` 是一个名字，报未知名字）。
+- **名字**以字母或 `_` 开头，可以含字母、数字、`_`、`/`：`polish/factor`、`semi/bit_split`、`split_runs`。所以 `/` 两边是名字时必须留空格：`x / 2`；`3/4` 是三个记号 `3` `/` `4`，只有在两边都是数时才不必留空格。`-` 不能出现在名字里，总是减号：`size-mul` 就是 `size - mul`，`restarts-1` 就是 `restarts - 1`。
 - **数**是十进制非负整数。
 - 其他记号：`( ) | = || && ! + - * / < <= > >= == !=`。`=` 是赋值（第 4.1 节），`==` 是比较；`=` 两边可以有空格，也可以没有。`--passes` 的各项（`extra=0`、`prepass=...`）是在语言之外分项的（第 8 节）。
 
@@ -45,9 +45,9 @@ stage  := NAME                             # 不带参数的 pass，或 let 定�
         | '(' FORM arg* ')'                # 形式
         | '(' pipe ')'                     # 分组
 rhs    := 'none' | value                   # value 读到 |、) 或结尾为止
-cond   := NAME | '!' cond | '(' expr ')'
+cond   := NAME | NUM | '!' cond | '(' expr ')'
 expr   := expr '||' expr | expr '&&' expr | '!' expr
-        | value CMP value | NAME
+        | value CMP value | NAME | NUM
         | '(' 'any' expr ')' | '(' 'all' expr ')' | '(' 'same' REG ')'
         | '(' expr ')'
 value  := value ('+'|'-') value | value ('*'|'/') value
@@ -59,8 +59,7 @@ CMP    := '<' | '<=' | '>' | '>=' | '==' | '!='
 - 优先级从低到高：`|`（管道）；条件里 `||`、`&&`、`!`、比较、`+ -`、`* /`。同级左结合。
 - `(` 后面紧跟形式关键字（第 4 节）时是一个形式，否则是分组。关键字是保留字，不能用作 `let` 的名字，单独出现时报 `NAME needs parentheses`（`egglog` 除外，它也可以不带参数）。
 - 形式里作为参数的管线如果含 `|`，要加括号：`(best 1 (a | b) c)`。
-- 条件和数是两种不同的东西：条件位置写数、或把特征当布尔用（`(if mul ...)`），解析时报错。条件或次数里写 `=`（`(if (size = 3) ...)`）报错：赋值是一个步骤，比较要写 `==`。
-- 旧写法 `(with KEY=V ... p)` 和 `(time-limit N)` 仍然能读，读成赋值：`(with rewrites=8 semi_leaves=2 p)` 就是 `(rewrites = 8 | semi_leaves = 2 | p)`（`with` 的键 `bit_splits` 读成 `bit_split_budget`），`(time-limit N)` 就是 `time_limit = N`，`(time-limit 0)` 就是 `time_limit = none`。打印时用新写法。
+- 条件和数是两种不同的东西：条件位置写数的表达式、或把特征当布尔用（`(if mul ...)`），解析时报错。只有数字本身可以作条件：非 0 为真，与候选无关，空组上也一样（`(if 1 a b)` 总是运行 `a`）。条件或次数里写 `=`（`(if (size = 3) ...)`）报错：赋值是一个步骤，比较要写 `==`。
 
 ## 4. 形式
 
@@ -109,7 +108,7 @@ CMP    := '<' | '<=' | '>' | '>=' | '==' | '!='
 
 ### 4.2 时限：`time_limit = N`
 
-- 从这一步起，这条 seq 剩下的步骤共有 `N` 毫秒；到期后剩下干活的步骤都被跳过（计入 `time-limit/skipped`），这条 seq 很快结束，外面的步骤照常运行。
+- 从这一步起，这条 seq 剩下的步骤共有 `N` 毫秒；到期后剩下干活的步骤都被跳过（计入 `time_limit/skipped`），这条 seq 很快结束，外面的步骤照常运行。
 - `time_limit = none` 回到进入这条 seq 时的时限（外层设的仍然有效）。`time_limit = 0` 是 0 毫秒：从此刻起就已到期。
 - 时限叠加：外层 seq、外层管线的时限同时有效，取最早到期的。内层不能把时限延长到外层之后。
 - 在数里读 `time_limit`，得到剩下的毫秒数：`time_limit = time_limit / 2`。
@@ -215,11 +214,10 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 
 ### 6.1 条件名
 
-除另有说明外看主候选。下面的条件名在空组上为假（`!` 照常取反）。条件里也可以写变量名（第 5.5 节的开关和第 7 节的变量）：值不为 0 时成立，`none` 也成立，与候选无关，空组上也一样：`(if rerun_input ...)`、`(if (printed && !input) ...)`、`(if !relate ...)`。
+除另有说明外看主候选。下面的条件名在空组上为假（`!` 照常取反）；"有候选"写作 `(any 1)`。条件里也可以写变量名（第 5.5 节的开关和第 7 节的变量）：值不为 0 时成立，`none` 也成立，与候选无关，空组上也一样：`(if rerun_input ...)`、`(if (printed && !input) ...)`、`(if !relate ...)`。
 
 | 名字 | 成立时 |
 |---|---|
-| `true` | 总是（有候选时） |
 | `opaque` | 有移位、除法或 `mulhi`，且它的重建不是很小（会运行 `prepass`） |
 | `rebuilds` | 预处理会改变它（会运行 `prepass`） |
 | `minimal` | 某个候选被证明最小：没有更小的项与它相等（`prove_minimal` 开着时才证明） |
@@ -354,10 +352,10 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 
 读完 `--passes` 后检查，出错时拒绝整个设置：
 
-- 名字：未知的 pass、条件、数、变量、`on`/`off` 名、`with` 的键、`sub/NAME`、规则集，都报错并列出已知的名字。`with` 里写 `off=`，报错并提示 `(off NAME)` 的写法。
+- 名字：未知的 pass、条件、数、变量、`on`/`off` 名、`sub/NAME`、规则集，都报错并列出已知的名字。
 - 赋值：给特征、条件名赋值（`minimal=` 提示运行设置叫 `prove_minimal`）；开关赋 `none`；`none` 不是单独写在右边；条件或次数里写 `=`（提示比较用 `==`）。
 - 形式的参数：个数、种类（条件、数、管线）不对。
-- 旧的单名写法 `save/t`、`off/NAME`、`egglog/LABEL`，报错并提示括号写法；旧的 `seq(a,b)` 语法报错并提示新写法。
+- 旧写法报错并提示新写法：单名写法 `save/t`、`off/NAME`、`egglog/LABEL`（提示括号写法）；`seq(a,b)` 语法；`(with KEY=VALUE ... p)`（提示 `(KEY = VALUE | ... | p)`，它的 `bit_splits` 是现在的 `bit_split_budget`）；`(time-limit N)`（提示 `time_limit = N`，不限写 `time_limit = none`）；条件名 `true`（提示 `1`，只在有候选时为真的写 `(any 1)`）；名字里的 `-`：解析出错时，如果写了 `a-b` 这样的词，提示它读作 `a - b`、名字用 `_`，`a_b` 是已知名字时提示写 `a_b`（`--passes tfunc-whole=0` 也一样）。
 - `egglog`、`reprint` 只能出现在 `pipeline` 里：只有 `simplify` 的运行才有 e-graph。
 - `prepass` 和 `polish` 不能经过别的管线回到自己。调用关系：`prepass` pass 和条件 `opaque`、`rebuilds` 调用 `prepass`；`polish` pass 调用 `polish`；单项 pass、`regions`、`again` 调用 `rewrite`、`simba`、`sub/NAME` 这一组（这一组内部本来就是递归的）。
 - 寄存器的读（`load`、`label`、`size`、`same`）前面必须有可能先执行的同名 `save`。按执行顺序算：`if` 的两支都算，`retry` 的条件在 `a` 之后，`best` 的次数在各支之后；`fix`、`wins`、`regions` 的体会重复执行，体里任何地方的 `save` 对整个体都算。这条检查找的是写错名字和顺序，不保证运行时一定有值。

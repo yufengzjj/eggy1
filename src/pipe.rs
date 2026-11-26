@@ -37,7 +37,7 @@ pub const SET_PASSES: [&str; 9] = [
 
 /// The named conditions of `if`, `retry` and `filter`, on the candidates they see; the
 /// others (`(same R)`, comparisons) are `sched::Cond` forms.
-pub const CONDS: [&str; 18] = [
+pub const CONDS: [&str; 17] = [
     // The main candidate has a shift, division or mulhi and its rebuild is not tiny.
     "opaque",
     // A candidate is proved minimal: no smaller term equals it (with `prove_minimal` on).
@@ -66,8 +66,6 @@ pub const CONDS: [&str; 18] = [
     // The main candidate comes from a rebuild with abstracted subterms
     // (`linear_mba::ABSTRACTED`).
     "abstracted",
-    // Always, when there are candidates (as every condition).
-    "true",
     // The main candidate is a linear region without leaves.
     "no_leaves",
     // The main candidate is a linear region of more than `linear_mba::MAX_LEAVES` leaves.
@@ -351,7 +349,6 @@ fn cond(i: usize, set: &[Cand], env: &Env) -> bool {
         "few_rewrites" => main.rewrites <= limit(Limit::UnclusteredAfter),
         "replaceable" => env.ctx(|c| crate::tfunc::replacement(main.tree(), c).is_some()),
         "abstracted" => linear_mba::ABSTRACTED.contains(&main.origin.as_str()),
-        "true" => true,
         "no_leaves" => env.ctx(|w| linear_mba::leaf_count(main.tree(), w) == 0),
         "wide" => env.ctx(|w| linear_mba::leaf_count(main.tree(), w) > linear_mba::MAX_LEAVES),
         "const_bitwise" => env.ctx(|w| linear_mba::const_bitwise(main.tree(), w)),
@@ -364,6 +361,7 @@ fn holds(c: &Cond, set: &[Cand], env: &Env) -> bool {
     match c {
         Cond::Is(i) => cond(*i, set, env),
         Cond::Var(i) => env.value(&Value::Var(*i), set) != Some(0),
+        Cond::Num(n) => *n != 0,
         Cond::Same(r) => set.first().zip(env.reg_main(r)).is_some_and(|(m, c)| c.same(m)),
         Cond::Not(c) => !holds(c, set, env),
         Cond::And(cs) => cs.iter().all(|c| holds(c, set, env)),
@@ -394,14 +392,14 @@ pub fn cut() -> bool {
 }
 
 /// Whether work taking `secs` more would end past the `time_limit` in force; counts the
-/// skipped step (`time-limit/skipped`), and records a cut of the run when the switch `cut` is
+/// skipped step (`time_limit/skipped`), and records a cut of the run when the switch `cut` is
 /// on. Results computed then are not memoized (`Ctx::mark_cut`).
 fn past_deadline(secs: f64, env: &Env) -> bool {
     let at = crate::sched::get(crate::sched::DEADLINE);
     if at == crate::sched::NONE || crate::sched::epoch_ns().saturating_add((secs * 1e9) as u64) < at {
         return false;
     }
-    stats::add("time-limit/skipped", 0.0);
+    stats::add("time_limit/skipped", 0.0);
     if crate::sched::is_on("cut") {
         CUT.with(|c| c.set(true));
     }
@@ -912,11 +910,11 @@ mod tests {
         scoped(|| {
             step("((off relate) | id)");
             assert!(!crate::sched::is_off("relate"), "a group ends its off");
-            step("(with rewrites=8 (off relate))");
-            assert!(!crate::sched::is_off("relate"), "with ends its off");
+            step("(rewrites = 8 | (off relate))");
+            assert!(!crate::sched::is_off("relate"), "a sequence ends its off");
             step("(scope (off relate))");
             assert!(!crate::sched::is_off("relate"), "scope ends its off");
-            step("(if true (off relate))");
+            step("(if 1 (off relate))");
             assert!(crate::sched::is_off("relate"), "a branch that is no sequence does not");
         });
         assert!(!crate::sched::is_off("relate"));
@@ -1034,7 +1032,7 @@ mod tests {
                 if on {
                     step("(on cut)");
                 }
-                step("(time-limit 1)");
+                step("time_limit = 1");
                 std::thread::sleep(std::time::Duration::from_millis(5));
                 step("rewrite");
             });
@@ -1056,12 +1054,12 @@ mod tests {
         scoped(|| {
             assert_eq!(step("rewrite", input()), ["(Xor (Var \"x\") (Var \"y\"))"]);
             step("(save t)", input());
-            step("(time-limit 1)", input());
+            step("time_limit = 1", input());
             std::thread::sleep(std::time::Duration::from_millis(5));
             assert_eq!(step("rewrite", input()), [x], "work past the limit is skipped");
-            assert_eq!(step("(load t) | (filter true)", vec![]), [x], "bookkeeping still runs");
-            assert_eq!(step("(time-limit 0) | rewrite", input()), [x], "a clear restores the limit outside its sequence");
-            step("(time-limit 0)", input());
+            assert_eq!(step("(load t) | (filter 1)", vec![]), [x], "bookkeeping still runs");
+            assert_eq!(step("time_limit = none | rewrite", input()), [x], "a clear restores the limit outside its sequence");
+            step("time_limit = none", input());
             assert_eq!(step("rewrite", input()), ["(Xor (Var \"x\") (Var \"y\"))"], "a clear lets the rest run");
         });
     }
