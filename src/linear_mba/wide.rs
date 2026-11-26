@@ -3,7 +3,7 @@
 use super::*;
 
 /// Most leaves `drop_unused` evaluates a region on.
-pub(super) const MAX_WIDE_LEAVES: usize = 16;
+pub(crate) const MAX_WIDE_LEAVES: usize = 16;
 /// Most instructions times points `drop_unused` runs.
 const WIDE_BUDGET: usize = 1 << 25;
 

@@ -72,9 +72,9 @@ CMP    := '<' | '<=' | '>' | '>=' | '==' | '!='
 | `(smaller NAME p)` | 运行 `p`，主候选变小才采用，否则返回输入。采用时来源改为 `NAME`，记 `NAME/won` 和 `NAME/gain` |
 | `(wins N p)` | 重复 `p`，直到其中的 `smaller` 不再采用结果，或一共采用了 `N` 次 |
 | `(tag NAME p)` | 运行 `p`，记时间 `NAME/run`；主候选变了时记 `NAME/won/来源`，来源改为 `NAME` |
-| `(cand NAME p)` | 一个预处理候选：`NAME` 是 `pre` 列表（第 8 节）里的名字且被关掉时给出空组；否则运行 `p`（`bit_splits` 从 `bit_split_budget` 重新开始），结果来源改为 `NAME`，记 `pre/NAME/made` |
-| `(scope p)` | `p` 里对同一个项的各 pass 共用一个运行上下文：缓存和 `with` 设置。也是作用域（第 4.1 节） |
-| `(with KEY=V ... p)` | 第 7.1 节的设置，`p` 结束后恢复；只在某个 `scope` 之内（或在 `rewrite`、`simba`、`sub/NAME` 里）才有效。也是作用域，所以要在里面关掉 pass 就写 `(with rewrites=8 (off relate) \| p)` |
+| `(cand NAME p)` | 一个预处理候选：`NAME` 是 `pre` 列表（第 8 节）里的名字且被关掉时给出空组；否则运行 `p`（如同 `(with bit_splits=bit_split_budget p)`），结果来源改为 `NAME`，记 `pre/NAME/made` |
+| `(scope p)` | `p` 里对同一个项的各 pass 共用一个运行上下文（缓存）。也是作用域（第 4.1 节）；设置、开关、时限沿用外面的值 |
+| `(with KEY=V ... p)` | 第 7.1 节的设置，`p` 结束后恢复；写在哪里都有效。也是作用域，所以要在里面关掉 pass 就写 `(with rewrites=8 (off relate) \| p)` |
 | `(regions p)` | 对每个候选：如果它是一个线性区域，叶子先用 `rewrite` 重建，整体用 `p` 的主候选；否则对它的操作数用 `rewrite` |
 | `(again p)` | 运行 `p`；主候选在"位运算的算术叶子"处有变化时，对它再做一次 `rewrite`，变小才保留 |
 | `(save R)` | 把当前候选组存进寄存器 `R`，原样往下传 |
@@ -109,6 +109,8 @@ a | (if big (time-limit 200)) | b | c            # 输入大时 b、c 共用 200
 ```
 
 `with` 的设置和 `scope` 的运行上下文只在包住的管线里有效，也包括其间调用的管线；寄存器属于整条管线的一次运行，不受作用域限制。
+
+设置（第 7.1 节）、开关、限值（第 7.2 节）和时限都是线程上的变量，按调用链动态绑定：`with`、`(on NAME)`、`(off NAME)`、`(time-limit N)` 在当前作用域里绑定，作用域结束时恢复外面的值；调用的管线和新的 `scope` 都读到调用处的值。普通变量以最内层的绑定为准。预算（`rewrites`、`bit_splits`）和时限是链上所有绑定都起作用：内层的预算不超过外层剩下的，用掉的次数退出时也从外层扣除；内层的时限不晚于外层。缓存的结果只在它读过的变量（预算和时限除外）都与当时相同的地方复用。
 
 ## 5. Pass
 
@@ -242,7 +244,7 @@ a | (if big (time-limit 200)) | b | c            # 输入大时 b、c 共用 200
 | `rewrites` | 不限 | 剩下的未缓存 `rewrite` 调用次数，用完后 `rewrite` 原样返回；里面用掉的次数也从外层扣除 |
 | `semi_leaves` | 6 | 半线性区域最多几个叶子才重建 |
 | `relate_leaves` | 16 | `relate` 只处理叶子不多于此的区域 |
-| `bit_splits` | `bit_split_budget` | 剩下的 `bit_split` 次数 |
+| `bit_splits` | 不限 | 剩下的 `bit_split` 次数；每个 `cand` 从 `bit_split_budget` 开始，同 `rewrites` 也从外层扣除 |
 
 写作 `KEY=VALUE`，中间无空格；一个 `with` 可以有多个设置，至少一个。值是数，或限值的名字（`(with rewrites=polish_rewrites p)`）。没有 `off=`：在 `with` 里写 `off=X` 会报错，并提示改成 `(with ... (off X) | p)`。
 
@@ -340,7 +342,6 @@ a | (if big (time-limit 200)) | b | c            # 输入大时 b、c 共用 200
 - 存了却从不读的寄存器。
 - 死存储：同一层又 `save` 了一次，中间没读。写在 `if`、`cand`、`first` 的后几支、`retry` 的 `b` 或循环体里的 `save` 不和外面的比较，所以 `(save t) | (if c (save t))` 这种先存默认值再覆盖的写法不算。
 - `(off NAME)` 在所在的 seq 里后面没有任何单项 pass，什么也关不掉（只看直接写在 seq 里的 `off`；开关不算）。
-- `pipeline`、`prepass`、`polish` 里不在任何 `scope` 之内的 `with`：没有运行上下文可改，什么也不起作用。
 - 写在 seq 最后一步的 `(time-limit N)`，什么也限制不了。
 
 默认管线没有警告，`default.pipe` 的 `let` 都用到了（有测试检查）。

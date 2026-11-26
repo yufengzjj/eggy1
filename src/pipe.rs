@@ -393,10 +393,6 @@ fn holds(c: &Cond, set: &[Cand], env: &Env) -> bool {
 }
 
 thread_local! {
-    /// The limit `(time-limit N)` set in the enclosing sequences, if any.
-    static LOCAL: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
-    /// `LOCAL` as the innermost enclosing sequence found it, which `(time-limit 0)` restores.
-    static OUTER: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
     /// Some pass was skipped past a limit while the switch `cut` was on.
     static CUT: Cell<bool> = const { Cell::new(false) };
     /// Seconds the last egglog round took.
@@ -405,8 +401,7 @@ thread_local! {
 
 /// Starts a `simplify` run on this thread: no limit, no cut, no egglog round timed yet.
 pub fn start() {
-    LOCAL.with(|l| l.set(None));
-    OUTER.with(|o| o.set(None));
+    crate::sched::set(crate::sched::DEADLINE, crate::sched::NONE);
     CUT.with(|c| c.set(false));
     LAST_ROUND.with(|r| r.set(0.0));
 }
@@ -420,8 +415,8 @@ pub fn cut() -> bool {
 /// skipped step (`time-limit/skipped`), and records a cut of the run when the switch `cut` is
 /// on. Results computed then are not memoized (`Ctx::mark_cut`).
 fn past_deadline(secs: f64, env: &Env) -> bool {
-    let Some(at) = LOCAL.with(|l| l.get()) else { return false };
-    if std::time::Instant::now() + std::time::Duration::from_secs_f64(secs) < at {
+    let at = crate::sched::get(crate::sched::DEADLINE);
+    if at == crate::sched::NONE || crate::sched::epoch_ns().saturating_add((secs * 1e9) as u64) < at {
         return false;
     }
     stats::add("time-limit/skipped", 0.0);
@@ -433,14 +428,9 @@ fn past_deadline(secs: f64, env: &Env) -> bool {
 }
 
 /// `f` as a scope (a sequence, `with`, `scope` or a pipeline run): a `(time-limit N)`,
-/// `(on NAME)` or `(off NAME)` inside it ends with it.
+/// `(on NAME)`, `(off NAME)` or `with` setting inside it ends with it.
 fn scoped<R>(f: impl FnOnce() -> R) -> R {
-    let local = LOCAL.with(|l| l.get());
-    let outer = OUTER.with(|o| o.replace(local));
-    let r = crate::sched::in_scope(f);
-    OUTER.with(|o| o.set(outer));
-    LOCAL.with(|l| l.set(local));
-    r
+    crate::sched::in_scope(f)
 }
 
 /// The candidates `p` gives for `set`.
@@ -558,25 +548,12 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             Ok(out.into_iter().map(|c| Cand { origin: name.clone(), ..c }).collect())
         }
         Pipe::With(kv, p) => {
-            let value = |v: &str| v.parse().unwrap_or_else(|_| crate::sched::limit_named(v).unwrap());
-            let old: Vec<(&str, usize, usize)> = env.ctx(|c| {
-                kv.iter()
-                    .map(|(k, v)| {
-                        let (was, now) = (c.setting(k).unwrap(), value(v));
-                        c.set_setting(k, now);
-                        (k.as_str(), was, now)
-                    })
-                    .collect()
-            });
-            let out = scoped(|| go(p, set, env));
-            env.ctx(|c| {
-                for (k, was, set) in old {
-                    // The calls made inside count against the calls left outside.
-                    let back = if k == "rewrites" { was.saturating_sub(set.saturating_sub(c.setting(k).unwrap())) } else { was };
-                    c.set_setting(k, back);
-                }
-            });
-            out
+            let value = |v: &str| v.parse().unwrap_or_else(|_| crate::sched::limit_named(v).unwrap() as u64);
+            let vals: Vec<(usize, u64)> = kv.iter().map(|(k, v)| (crate::sched::setting_index(k).unwrap(), value(v))).collect();
+            scoped(|| {
+                vals.iter().for_each(|&(i, v)| crate::sched::bind(i, v));
+                go(p, set, env)
+            })
         }
         Pipe::Scope(p) => {
             env.ctxs.borrow_mut().push(Ctx::typed(env.w, env.signed));
@@ -746,10 +723,9 @@ fn pass(p: &Pass, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             return Ok(set);
         }
         Pass::TimeLimit(v) => {
-            let outer = OUTER.with(|o| o.get());
             let ms = env.value(v, &set).unwrap_or(0);
-            let at = (ms > 0).then(|| std::time::Instant::now() + std::time::Duration::from_millis(ms));
-            LOCAL.with(|l| l.set(outer.into_iter().chain(at).min()));
+            let at = if ms > 0 { crate::sched::epoch_ns().saturating_add(ms.saturating_mul(1_000_000)) } else { crate::sched::NONE };
+            crate::sched::bind(crate::sched::DEADLINE, at);
             return Ok(set);
         }
         Pass::Term { name, at, alt } => return Ok(seen(dedup(term_pass(name, linear_mba::term_pass_at(*at), *alt, &set, env)), env)),
@@ -762,7 +738,7 @@ fn pass(p: &Pass, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
     let out = match name {
         "id" => return Ok(set),
         "none" => return Ok(Vec::new()),
-        "within" => return Ok(if env.ctx(|c| c.setting("rewrites").unwrap()) > 0 { set } else { Vec::new() }),
+        "within" => return Ok(if crate::sched::get(crate::sched::REWRITES) > 0 { set } else { Vec::new() }),
         "label/" => {
             let Pass::Label(r) = p else { unreachable!() };
             let first = env.reg_main(r);
@@ -850,14 +826,14 @@ fn term_pass(name: &str, f: linear_mba::TermPass, alt: Option<u8>, set: &[Cand],
         set.iter()
             .filter_map(|c| {
                 let t = c.tree();
-                let (outer, left) = (ctx.swap_used(0), ctx.setting("rewrites").unwrap());
+                let (outer, left) = (ctx.swap_used(0), crate::sched::get(crate::sched::REWRITES) as usize);
                 let r: Option<Term> = match alt {
                     Some(_) => stats::try_pass(name, t, || f.run(t, ctx)),
                     None => stats::pass(name, t, || f.run(t, ctx)),
                 };
                 let used = ctx.swap_used(0);
                 ctx.swap_used(outer | used);
-                let made = left.saturating_sub(ctx.setting("rewrites").unwrap());
+                let made = left.saturating_sub(crate::sched::get(crate::sched::REWRITES) as usize);
                 match (r, alt) {
                     (Some(r), Some(bit)) => Some(Cand { origin: name.to_string(), ..Cand::of(r, c, used | bit, made) }),
                     (None, Some(_)) => None,

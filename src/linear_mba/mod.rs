@@ -34,6 +34,7 @@ pub use polish::polish;
 pub(crate) use polish::POLISH;
 pub(crate) use linear::simba_memo;
 pub(crate) use split::low_consts;
+pub(crate) use wide::MAX_WIDE_LEAVES;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Kind {
@@ -69,28 +70,6 @@ impl Ctx {
     pub(crate) fn narrow(&self, w: u32) -> Ctx {
         Ctx { st: self.st.clone(), ..Ctx::typed(w, self.signed.filter(|_| w == self.w)) }
     }
-    /// The run settings `crate::pipe` changes by name (`Pipe::With`): `rewrites` (calls
-    /// left), `semi_leaves`, `relate_leaves`, `bit_splits` (splits left).
-    pub(crate) fn setting(&self, key: &str) -> Option<usize> {
-        let st = &self.st;
-        Some(match key {
-            "rewrites" => st.rewrites_left.load(Relaxed),
-            "semi_leaves" => st.semi_leaves.load(Relaxed),
-            "relate_leaves" => st.relate_leaves.load(Relaxed),
-            "bit_splits" => st.bit_splits.load(Relaxed),
-            _ => return None,
-        })
-    }
-    pub(crate) fn set_setting(&self, key: &str, v: usize) {
-        let st = &self.st;
-        match key {
-            "rewrites" => st.rewrites_left.store(v, Relaxed),
-            "semi_leaves" => st.semi_leaves.store(v, Relaxed),
-            "relate_leaves" => st.relate_leaves.store(v, Relaxed),
-            "bit_splits" => st.bit_splits.store(v, Relaxed),
-            _ => panic!("unknown setting {key}"),
-        }
-    }
     /// Which of `clustered` (`CLUSTERED`) and `wide_blocks` (`WIDE`) gave a kept form since
     /// the last call, which sets it to `v`.
     pub(crate) fn swap_used(&self, v: u8) -> u8 {
@@ -100,12 +79,10 @@ impl Ctx {
         &self.st.low_values
     }
     pub(super) fn semi_leaves(&self) -> usize {
-        self.read(|d| d.semi = true);
-        self.st.semi_leaves.load(Relaxed)
+        crate::sched::read(crate::sched::SEMI_LEAVES) as usize
     }
     pub(super) fn relate_leaves(&self) -> usize {
-        self.read(|d| d.relate = true);
-        self.st.relate_leaves.load(Relaxed)
+        crate::sched::read(crate::sched::RELATE_LEAVES) as usize
     }
     pub(super) fn peel_depth(&self) -> usize {
         self.read(|d| d.peel = true);
@@ -126,9 +103,10 @@ impl Ctx {
     pub(crate) fn mark_cut(&self) {
         self.read(|d| d.cut = true);
     }
-    /// Takes one from the budget `a`, or records a cut when it is used up.
-    fn take_budget(&self, a: &AtomicUsize) -> bool {
-        let ok = take_one(a) > 0;
+    /// Takes one from the budget variable `i` (`crate::sched::take`), or records a cut when
+    /// it is used up.
+    fn take_budget(&self, i: usize) -> bool {
+        let ok = crate::sched::take(i);
         if !ok {
             self.read(|d| d.cut = true);
         }
@@ -146,8 +124,6 @@ type Memo<K, V> = std::sync::Mutex<crate::eval::FastMap<K, Vec<Entry<V>>>>;
 /// What a computation read besides its key, collected while it runs (`tracked`).
 #[derive(Clone)]
 struct Deps {
-    semi: bool,
-    relate: bool,
     peel: bool,
     /// The changes of the `clustered` nesting depth at its start that keep every depth
     /// check inside it the same.
@@ -163,14 +139,12 @@ const ANY_SHIFT: (i64, i64) = (i64::MIN / 4, i64::MAX / 4);
 
 impl Default for Deps {
     fn default() -> Deps {
-        Deps { semi: false, relate: false, peel: false, shift: ANY_SHIFT, absent: Vec::new(), cut: false }
+        Deps { peel: false, shift: ANY_SHIFT, absent: Vec::new(), cut: false }
     }
 }
 
 impl Deps {
     fn add(&mut self, o: &Deps) {
-        self.semi |= o.semi;
-        self.relate |= o.relate;
         self.peel |= o.peel;
         self.cut |= o.cut;
         self.shift = (self.shift.0.max(o.shift.0), self.shift.1.min(o.shift.1));
@@ -189,17 +163,15 @@ impl Deps {
     }
 }
 
-/// A memoized result, valid where the `INNER` passes in `touched` are off exactly as in
-/// `off` and the settings it read have the values given.
+/// A memoized result, valid where the variables in `read` (`crate::sched::var`) have the
+/// values `vals` and the run state it read has the values given.
 #[derive(Clone)]
 struct Entry<V> {
     v: V,
     /// `State::used` of the computation.
     used: u8,
-    touched: u64,
-    off: u64,
-    semi: Option<usize>,
-    relate: Option<usize>,
+    read: u128,
+    vals: Vec<u64>,
     peel: Option<usize>,
     /// The `clustered` nesting depths it holds at, and `Deps::absent` sorted.
     depths: (i64, i64),
@@ -224,13 +196,6 @@ struct State {
     grouped: std::sync::Mutex<crate::eval::FastMap<GroupedKey, T>>,
     low_values: crate::lowbits::ValuesMemo,
     pairs: std::sync::Mutex<crate::eval::FastMap<PairKey, Vec<T>>>,
-    /// Most leaves of a region `relate_region` tries.
-    relate_leaves: AtomicUsize,
-    /// `rewrite` calls left before it returns its input unchanged.
-    rewrites_left: AtomicUsize,
-    /// Most leaves a semi-linear region may have to be rebuilt.
-    semi_leaves: AtomicUsize,
-    bit_splits: AtomicUsize,
     /// `peel` calls nested inside each other.
     peel_depth: AtomicUsize,
     /// The regions `clustered` is running on, with their hashes.
@@ -250,23 +215,12 @@ impl Default for State {
             grouped: Default::default(),
             low_values: Default::default(),
             pairs: Default::default(),
-            relate_leaves: AtomicUsize::new(MAX_WIDE_LEAVES),
-            rewrites_left: AtomicUsize::new(usize::MAX),
-            semi_leaves: AtomicUsize::new(MAX_LEAVES),
-            bit_splits: AtomicUsize::new(limit(Limit::BitSplitBudget)),
             peel_depth: AtomicUsize::new(0),
             clustering: Default::default(),
             deps: Default::default(),
             used: AtomicU8::new(0),
         }
     }
-}
-
-/// Decrements `a` down to 0 and returns its old value.
-fn take_one(a: &AtomicUsize) -> usize {
-    let left = a.load(Relaxed);
-    a.store(left.saturating_sub(1), Relaxed);
-    left
 }
 
 pub(crate) fn const_shift(t: &T, w: &Ctx) -> Option<u32> {
@@ -594,7 +548,7 @@ pub(crate) fn rewrite(t: &T, w: &Ctx) -> T {
     if let Some(r) = memo_get(&w.st.rewritten, &key, w, "rewrite", f) {
         return r;
     }
-    if !w.take_budget(&w.st.rewrites_left) {
+    if !w.take_budget(crate::sched::REWRITES) {
         return t.clone();
     }
     memo_compute(&w.st.rewritten, key, w, f)
@@ -791,38 +745,37 @@ fn cluster_regions(t: &T, w: &Ctx, in_lin: bool) -> T {
     }
 }
 
-/// `f()`, which of `clustered` and `wide_blocks` gave a kept form during it, the `INNER`
-/// passes it asked about and what else it read; all of it also counts for the enclosing call.
-fn tracked<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, u8, u64, Deps) {
+/// `f()`, which of `clustered` and `wide_blocks` gave a kept form during it, the variables
+/// it read and what else it read; all of it also counts for the enclosing call.
+fn tracked<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, u8, u128, Deps) {
     let used0 = w.st.used.swap(0, Relaxed);
-    let touched0 = crate::sched::swap_touched(0);
+    let read0 = crate::sched::swap_read(0);
     let deps0 = std::mem::take(&mut *w.st.deps.lock().unwrap());
     let r = f();
     let used = w.st.used.load(Relaxed);
     w.st.used.store(used0 | used, Relaxed);
-    let touched = crate::sched::swap_touched(0);
-    crate::sched::swap_touched(touched0 | touched);
+    let read = crate::sched::swap_read(0);
+    crate::sched::swap_read(read0 | read);
     let deps = {
         let mut d = w.st.deps.lock().unwrap();
         let inner = std::mem::replace(&mut *d, deps0);
         d.add(&inner);
         inner
     };
-    (r, used, touched, deps)
+    (r, used, read, deps)
 }
 
 /// `f()` with nothing it changes in the run state kept: budgets, `used`, the tracked reads.
 fn isolated<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, Deps) {
     let st = &w.st;
-    let budgets = (st.rewrites_left.load(Relaxed), st.bit_splits.load(Relaxed));
+    let budgets = [crate::sched::REWRITES, crate::sched::BIT_SPLITS].map(|i| (i, crate::sched::get(i)));
     let used = st.used.load(Relaxed);
-    let touched = crate::sched::swap_touched(0);
+    let read = crate::sched::swap_read(0);
     let deps = st.deps.lock().unwrap().clone();
     let (r, _, _, d) = tracked(w, f);
-    st.rewrites_left.store(budgets.0, Relaxed);
-    st.bit_splits.store(budgets.1, Relaxed);
+    budgets.iter().for_each(|&(i, v)| crate::sched::set(i, v));
     st.used.store(used, Relaxed);
-    crate::sched::swap_touched(touched);
+    crate::sched::swap_read(read);
     *st.deps.lock().unwrap() = deps;
     (r, d)
 }
@@ -853,10 +806,10 @@ fn memo_get<K: std::hash::Hash + Eq, V: Clone + PartialEq>(memo: &Memo<K, V>, ke
         m.get(key)?.iter().find(|e| holds(e, w)).cloned()?
     };
     w.st.used.fetch_or(e.used, Relaxed);
-    crate::sched::swap_touched(crate::sched::swap_touched(0) | e.touched);
+    crate::sched::swap_read(crate::sched::swap_read(0) | e.read);
     let at = w.clustering_depth();
     let shift = (e.depths.0 - at, e.depths.1 - at);
-    w.read(|d| d.add(&Deps { semi: e.semi.is_some(), relate: e.relate.is_some(), peel: e.peel.is_some(), shift, absent: e.absent.clone(), cut: false }));
+    w.read(|d| d.add(&Deps { peel: e.peel.is_some(), shift, absent: e.absent.clone(), cut: false }));
     if check_memo() && !CHECKING.with(|c| c.replace(true)) {
         let (again, d) = isolated(w, f);
         CHECKING.with(|c| c.set(false));
@@ -870,9 +823,7 @@ fn memo_get<K: std::hash::Hash + Eq, V: Clone + PartialEq>(memo: &Memo<K, V>, ke
 
 fn holds<V>(e: &Entry<V>, w: &Ctx) -> bool {
     let st = &w.st;
-    crate::sched::off_bits_now() & e.touched == e.off
-        && e.semi.is_none_or(|v| v == st.semi_leaves.load(Relaxed))
-        && e.relate.is_none_or(|v| v == st.relate_leaves.load(Relaxed))
+    crate::sched::same_values(e.read, &e.vals)
         && e.peel.is_none_or(|v| v == st.peel_depth.load(Relaxed))
         && (e.depths.0..=e.depths.1).contains(&w.clustering_depth())
         && (e.absent.is_empty() || !w.in_clustering(&e.absent))
@@ -880,16 +831,15 @@ fn holds<V>(e: &Entry<V>, w: &Ctx) -> bool {
 
 /// `f()`, memoized for `key` unless a budget or a cycle check cut it short.
 fn memo_compute<K: std::hash::Hash + Eq, V: Clone>(memo: &Memo<K, V>, key: K, w: &Ctx, f: impl FnOnce() -> V) -> V {
-    let (v, used, mut touched, mut d) = tracked(w, f);
+    let (v, used, mut read, mut d) = tracked(w, f);
     if d.cut {
         return v;
     }
     // `clustered` and `wide_blocks` are alternatives: a result neither gave holds without them.
-    let off = crate::sched::off_bits_now();
     for (bit, name) in [(CLUSTERED, "clustered"), (WIDE, "wide_blocks")] {
-        let i = 1u64 << crate::sched::inner_index(name);
-        if used & bit == 0 && off & i == 0 {
-            touched &= !i;
+        let i = crate::sched::inner_index(name);
+        if used & bit == 0 && crate::sched::get(i) == 1 {
+            read &= !(1u128 << i);
         }
     }
     let st = &w.st;
@@ -899,10 +849,8 @@ fn memo_compute<K: std::hash::Hash + Eq, V: Clone>(memo: &Memo<K, V>, key: K, w:
     let e = Entry {
         v: v.clone(),
         used,
-        touched,
-        off: off & touched,
-        semi: d.semi.then(|| st.semi_leaves.load(Relaxed)),
-        relate: d.relate.then(|| st.relate_leaves.load(Relaxed)),
+        read,
+        vals: crate::sched::values(read),
         peel: d.peel.then(|| st.peel_depth.load(Relaxed)),
         depths: {
             let at = w.clustering_depth();
@@ -1058,19 +1006,19 @@ pub fn simplify_linear_both(egg: &str, ty: crate::eval::NumType) -> (String, Vec
 /// is set; `signed` as in `Ctx`.
 pub fn simplify_linear_with(egg: &str, w: u32, signed: Option<bool>, trace: bool, p: &Passes) -> (String, Vec<String>) {
     type Result = (String, Vec<String>);
-    type Last = Option<(String, u32, Option<bool>, bool, Passes, u64, Result)>;
+    type Last = Option<(String, u32, Option<bool>, bool, Passes, Vec<u64>, Result)>;
     thread_local! {
         static LAST: std::cell::RefCell<Last> = const { std::cell::RefCell::new(None) };
     }
     crate::sched::apply(p);
-    // An enclosing `(with off=...)` or `(off NAME)` changes the result as `p.off` does.
-    let off = crate::sched::off_bits_now();
-    let hit = |(e, bits, s, t, q, o, _): &&(String, u32, Option<bool>, bool, Passes, u64, Result)| e == egg && *bits == w && *s == signed && *t == trace && q == p && *o == off;
+    // A variable bound where it is called (`(off NAME)`, `with`) changes the result as `p` does.
+    let vars = crate::sched::key();
+    let hit = |(e, bits, s, t, q, v, _): &&(String, u32, Option<bool>, bool, Passes, Vec<u64>, Result)| e == egg && *bits == w && *s == signed && *t == trace && q == p && *v == vars;
     match LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.6.clone())) {
         Some(r) => r,
         None => {
             let r = simplify_linear_uncached(egg, w, signed, trace, p);
-            LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, signed, trace, p.clone(), off, r.clone())));
+            LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, signed, trace, p.clone(), vars, r.clone())));
             r
         }
     }

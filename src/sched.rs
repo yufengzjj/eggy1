@@ -124,19 +124,105 @@ limits! {
     TimeLimit "time_limit" = 0;
 }
 
+/// The settings `with` changes: `rewrites` (uncached `rewrite` calls left), `semi_leaves`
+/// (most leaves of a semi-linear region rebuilt), `relate_leaves` (most leaves of a region
+/// `relate` tries), `bit_splits` (`bit_split` pairs left).
+pub const SETTINGS: [&str; 4] = ["rewrites", "semi_leaves", "relate_leaves", "bit_splits"];
+
+/// How a binding of a variable combines with the outer ones.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum VarKind {
+    /// An `INNER` pass: 1 on, 0 off.
+    Pass,
+    /// A `FLAGS` switch: 1 on, 0 off.
+    Flag,
+    /// An entry of `LIMITS`.
+    Limit,
+    /// `semi_leaves`, `relate_leaves`.
+    Setting,
+    /// `rewrites`, `bit_splits`: a binding is at most what the outer one has left, and what
+    /// is used inside is used up outside too.
+    Budget,
+    /// The `(time-limit N)` deadline in ns of `epoch_ns`: a binding is never later than the
+    /// outer one.
+    Deadline,
+}
+
+/// A variable of the runs on this thread, by its position in `VARS`: an `INNER` pass, a
+/// `FLAGS` switch, a `LIMITS` entry, a `SETTINGS` entry or the deadline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Var {
+    pub name: &'static str,
+    pub kind: VarKind,
+}
+
+const FLAG0: usize = INNER.len();
+const LIMIT0: usize = FLAG0 + FLAGS.len();
+const SETTING0: usize = LIMIT0 + LIMITS.len();
+pub const REWRITES: usize = SETTING0;
+pub const SEMI_LEAVES: usize = SETTING0 + 1;
+pub const RELATE_LEAVES: usize = SETTING0 + 2;
+pub const BIT_SPLITS: usize = SETTING0 + 3;
+pub const DEADLINE: usize = SETTING0 + SETTINGS.len();
+pub const NVARS: usize = DEADLINE + 1;
+const _: () = assert!(NVARS <= 128, "the read variables are a u128");
+
+/// No limit: the value of an unbound budget or deadline.
+pub const NONE: u64 = u64::MAX;
+
+/// The variable at position `i` of `VARS`.
+pub const fn var(i: usize) -> Var {
+    match i {
+        _ if i < FLAG0 => Var { name: INNER[i], kind: VarKind::Pass },
+        _ if i < LIMIT0 => Var { name: FLAGS[i - FLAG0], kind: VarKind::Flag },
+        _ if i < SETTING0 => Var { name: LIMITS[i - LIMIT0].0, kind: VarKind::Limit },
+        _ if i == SEMI_LEAVES || i == RELATE_LEAVES => Var { name: SETTINGS[i - SETTING0], kind: VarKind::Setting },
+        _ if i < DEADLINE => Var { name: SETTINGS[i - SETTING0], kind: VarKind::Budget },
+        _ => Var { name: "time-limit", kind: VarKind::Deadline },
+    }
+}
+
+/// The position of the `with` setting `name` in `VARS`.
+pub fn setting_index(name: &str) -> Option<usize> {
+    SETTINGS.iter().position(|k| *k == name).map(|i| SETTING0 + i)
+}
+
+const DEFAULTS: [u64; NVARS] = {
+    let mut a = [0u64; NVARS];
+    let mut i = 0;
+    while i < NVARS {
+        a[i] = match var(i).kind {
+            VarKind::Pass => 1,
+            VarKind::Flag => 0,
+            VarKind::Limit => LIMITS[i - LIMIT0].1 as u64,
+            VarKind::Budget | VarKind::Deadline => NONE,
+            VarKind::Setting if i == SEMI_LEAVES => crate::linear_mba::MAX_LEAVES as u64,
+            VarKind::Setting => crate::linear_mba::MAX_WIDE_LEAVES as u64,
+        };
+        i += 1;
+    }
+    a
+};
+
+const fn initial_vars() -> [std::cell::Cell<u64>; NVARS] {
+    let mut a = [const { std::cell::Cell::new(0) }; NVARS];
+    let mut i = 0;
+    while i < NVARS {
+        a[i] = std::cell::Cell::new(DEFAULTS[i]);
+        i += 1;
+    }
+    a
+}
+
 thread_local! {
-    /// Bits of the `INNER` passes turned off for the run on this thread.
-    static OFF: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// The limits of the run on this thread, if not the defaults.
-    static LIMIT: std::cell::RefCell<Option<Vec<usize>>> = const { std::cell::RefCell::new(None) };
-    /// Bits of the `INNER` passes `(off NAME)` turned off in the scopes under way.
-    static RUN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// Bits of the `INNER` passes `(on NAME)` turned on again in the scopes under way.
-    static RUN_ON: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// Bits of the `FLAGS` turned on in the scopes under way.
-    static FLAG: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// Bits of the `INNER` passes asked whether they are off, since the last `swap_touched`.
-    static TOUCHED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The current value of each variable. Shallow binding: `bind` keeps the outer value in
+    /// the innermost scope of `FRAMES`, which puts it back when it ends.
+    static VARS: [std::cell::Cell<u64>; NVARS] = const { initial_vars() };
+    /// The scopes under way, innermost last: each variable bound there, its value outside and
+    /// the value bound.
+    static FRAMES: std::cell::RefCell<Vec<Vec<(usize, u64, u64)>>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Bits of the variables read since the last `swap_read`.
+    static READ: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
     /// The passes of the run on this thread (`apply`), the default ones until set.
     static CURRENT: std::cell::RefCell<Option<std::rc::Rc<Passes>>> = const { std::cell::RefCell::new(None) };
 }
@@ -146,34 +232,125 @@ pub fn current() -> std::rc::Rc<Passes> {
     CURRENT.with(|c| c.borrow_mut().get_or_insert_with(|| std::rc::Rc::new(Passes::default())).clone())
 }
 
-/// The `INNER` passes asked whether they are off since the last call, which sets them to `v`.
-pub fn swap_touched(v: u64) -> u64 {
-    TOUCHED.with(|t| t.replace(v))
+/// The value of variable `i`, not recorded as read.
+pub fn get(i: usize) -> u64 {
+    VARS.with(|v| v[i].get())
 }
 
-/// Bits of the `INNER` passes turned off on this thread.
-pub fn off_bits_now() -> u64 {
-    OFF.with(|o| o.get())
+/// The value of variable `i`, recorded as read for the memos (`swap_read`).
+pub fn read(i: usize) -> u64 {
+    READ.with(|r| r.set(r.get() | 1 << i));
+    get(i)
 }
 
-/// A hash of the limits on this thread, 0 for the defaults.
+/// Sets variable `i` outside any binding: a scope that binds it later restores this value.
+pub fn set(i: usize, v: u64) {
+    VARS.with(|a| a[i].set(v));
+}
+
+/// Binds variable `i` to `v` in the innermost scope (`in_scope`) until it ends; a budget is
+/// at most what the outer binding has left, a deadline no later than the outer one.
+pub fn bind(i: usize, v: u64) {
+    let cur = get(i);
+    let kind = var(i).kind;
+    let new = FRAMES.with(|f| {
+        let mut f = f.borrow_mut();
+        let Some(frame) = f.last_mut() else { return v };
+        let slot = frame.iter().position(|e| e.0 == i);
+        let outer = match slot {
+            Some(s) if kind == VarKind::Budget => {
+                let e = &mut frame[s];
+                e.1 = e.1.saturating_sub(e.2.saturating_sub(cur));
+                e.1
+            }
+            Some(s) => frame[s].1,
+            None => cur,
+        };
+        let new = match kind {
+            VarKind::Budget | VarKind::Deadline => v.min(outer),
+            _ => v,
+        };
+        match slot {
+            Some(s) => frame[s].2 = new,
+            None => frame.push((i, cur, new)),
+        }
+        new
+    });
+    set(i, new);
+}
+
+/// Takes one from the budget `i`; false when it is used up.
+pub fn take(i: usize) -> bool {
+    let left = get(i);
+    set(i, left.saturating_sub(1));
+    left > 0
+}
+
+/// `f` as a scope: the variables bound inside it are back after, a budget less what was
+/// used inside.
+pub fn in_scope<R>(f: impl FnOnce() -> R) -> R {
+    FRAMES.with(|fr| fr.borrow_mut().push(Vec::new()));
+    let r = f();
+    let frame = FRAMES.with(|fr| fr.borrow_mut().pop()).unwrap_or_default();
+    for (i, old, bound) in frame {
+        let back = match var(i).kind {
+            VarKind::Budget => old.saturating_sub(bound.saturating_sub(get(i))),
+            _ => old,
+        };
+        set(i, back);
+    }
+    r
+}
+
+/// The variables read since the last call, which sets them to `v`.
+pub fn swap_read(v: u128) -> u128 {
+    READ.with(|r| r.replace(v))
+}
+
+/// The values of the variables in `bits`, in order.
+pub fn values(bits: u128) -> Vec<u64> {
+    VARS.with(|a| ones(bits).map(|i| a[i].get()).collect())
+}
+
+/// Whether the variables in `bits` have the values `vals` (`values`).
+pub fn same_values(bits: u128, vals: &[u64]) -> bool {
+    VARS.with(|a| ones(bits).zip(vals).all(|(i, v)| a[i].get() == *v))
+}
+
+fn ones(mut bits: u128) -> impl Iterator<Item = usize> {
+    std::iter::from_fn(move || {
+        let i = bits.trailing_zeros() as usize;
+        bits &= bits.wrapping_sub(1);
+        (i < 128).then_some(i)
+    })
+}
+
+/// The values of all variables but the budgets and the deadline, which a result depends on
+/// only where they cut it short.
+pub fn key() -> Vec<u64> {
+    VARS.with(|a| (0..NVARS).filter(|i| !matches!(var(*i).kind, VarKind::Budget | VarKind::Deadline)).map(|i| a[i].get()).collect())
+}
+
+/// A hash of the limits on this thread.
 pub fn limits_key() -> u64 {
     use std::hash::{Hash, Hasher};
-    LIMIT.with(|v| {
-        v.borrow().as_ref().map_or(0, |v| {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            v.hash(&mut h);
-            h.finish() | 1
-        })
-    })
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    VARS.with(|a| a[LIMIT0..SETTING0].iter().for_each(|c| c.get().hash(&mut h)));
+    h.finish()
+}
+
+/// Nanoseconds since the first call in the process, the unit of `DEADLINE`.
+pub fn epoch_ns() -> u64 {
+    static EPOCH: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
+    EPOCH.elapsed().as_nanos() as u64
 }
 
 fn off_bits(names: &[&str]) -> u64 {
     names.iter().filter_map(|n| INNER.iter().position(|k| k == n)).fold(0u64, |b, i| b | 1 << i)
 }
 
-/// Sets the `INNER` passes `p.off` (and an `(off NAME)` or `(on NAME)` of a scope under way)
-/// turns off and the limits of `p` for the runs on this thread that follow.
+/// Sets the `INNER` passes and limits that no scope under way binds to those of `p`
+/// (`p.off`, `p.limits`) for the runs on this thread that follow.
 pub fn apply(p: &Passes) {
     CURRENT.with(|c| {
         let mut c = c.borrow_mut();
@@ -181,21 +358,27 @@ pub fn apply(p: &Passes) {
             *c = Some(std::rc::Rc::new(p.clone()));
         }
     });
-    let bits = (off_bits(&p.off) | RUN.with(|r| r.get())) & !RUN_ON.with(|r| r.get());
-    OFF.with(|o| o.set(bits));
-    let custom = p.limits.iter().zip(LIMITS).any(|(v, (_, d))| v != d);
-    LIMIT.with(|l| *l.borrow_mut() = custom.then(|| p.limits.clone()));
+    let bound = FRAMES.with(|f| f.borrow().iter().flatten().fold(0u128, |b, e| b | 1 << e.0));
+    let off = off_bits(&p.off);
+    VARS.with(|a| {
+        for i in (0..FLAG0).filter(|i| bound >> i & 1 == 0) {
+            a[i].set((off >> i & 1 == 0) as u64);
+        }
+        for (j, v) in p.limits.iter().enumerate().filter(|(j, _)| bound >> (LIMIT0 + j) & 1 == 0) {
+            a[LIMIT0 + j].set(*v as u64);
+        }
+    });
 }
 
 /// The value of `l` on this thread.
 pub fn limit(l: Limit) -> usize {
-    LIMIT.with(|v| v.borrow().as_ref().map_or(LIMITS[l as usize].1, |v| v[l as usize]))
+    read(LIMIT0 + l as usize) as usize
 }
 
 /// The value on this thread of the limit named `name`.
 pub fn limit_named(name: &str) -> Option<usize> {
     let i = LIMITS.iter().position(|(n, _)| *n == name)?;
-    Some(LIMIT.with(|v| v.borrow().as_ref().map_or(LIMITS[i].1, |v| v[i])))
+    Some(read(LIMIT0 + i) as usize)
 }
 
 /// `f` with the `INNER` passes `names` turned off, as `((off NAMES) | f)` would run it.
@@ -242,10 +425,9 @@ pub enum Pipe {
     /// `pre/NAME/made`, its candidates with origin `NAME`; none when `NAME` is an entry of
     /// `PRE` turned off (`cand`).
     Cand(String, Box<Pipe>),
-    /// `p` with run settings of the enclosing `scope` changed, each restored after (`with`;
-    /// values are numbers or `LIMITS` names; `crate::linear_mba::Ctx::setting`).
+    /// `p` with `SETTINGS` bound, as a scope (`with`; values are numbers or `LIMITS` names).
     With(Vec<(String, String)>, Box<Pipe>),
-    /// `p` with its passes over one term sharing one run: memos, budgets, settings (`scope`).
+    /// `p` with its passes over one term sharing one run's memos (`scope`).
     Scope(Box<Pipe>),
     /// `p`, taken only when its main candidate is smaller than the input's; timed as
     /// `NAME/run`, counted in `NAME/won` and `NAME/gain` when taken, which gives the main
@@ -446,44 +628,29 @@ pub fn polish(names: &[&str]) -> String {
     format!("(scope (with rewrites=polish_rewrites (wins 8\n  {steps})))")
 }
 
+fn switch_index(name: &str) -> Option<usize> {
+    INNER.iter().chain(&FLAGS).position(|k| *k == name)
+}
+
 /// Turns off the `INNER` pass or `FLAGS` switch `name` until the end of the scope under way
 /// (`in_scope`: the enclosing sequence or pipeline run), also in the runs it starts (the
 /// pass `(off NAME)`).
 pub fn turn_off(name: &str) {
-    let (bits, flag) = (off_bits(&[name]), flag_bits(name));
-    OFF.with(|o| o.set(o.get() | bits));
-    RUN.with(|r| r.set(r.get() | bits));
-    RUN_ON.with(|r| r.set(r.get() & !bits));
-    FLAG.with(|f| f.set(f.get() & !flag));
+    if let Some(i) = switch_index(name) {
+        bind(i, 0);
+    }
 }
 
 /// `turn_off` the other way (the pass `(on NAME)`): the later of the two in a scope counts.
 pub fn turn_on(name: &str) {
-    let (bits, flag) = (off_bits(&[name]), flag_bits(name));
-    OFF.with(|o| o.set(o.get() & !bits));
-    RUN.with(|r| r.set(r.get() & !bits));
-    RUN_ON.with(|r| r.set(r.get() | bits));
-    FLAG.with(|f| f.set(f.get() | flag));
-}
-
-fn flag_bits(name: &str) -> u64 {
-    FLAGS.iter().position(|k| *k == name).map_or(0, |i| 1 << i)
+    if let Some(i) = switch_index(name) {
+        bind(i, 1);
+    }
 }
 
 /// Whether the `FLAGS` switch `name` is on on this thread.
 pub fn is_on(name: &str) -> bool {
-    FLAG.with(|f| f.get()) & flag_bits(name) != 0
-}
-
-/// `f` as a scope: the switches `(on NAME)` and `(off NAME)` set inside it are back after.
-pub fn in_scope<R>(f: impl FnOnce() -> R) -> R {
-    let saved = (RUN.with(|r| r.get()), RUN_ON.with(|r| r.get()), OFF.with(|o| o.get()), FLAG.with(|f| f.get()));
-    let r = f();
-    RUN.with(|r| r.set(saved.0));
-    RUN_ON.with(|r| r.set(saved.1));
-    OFF.with(|o| o.set(saved.2));
-    FLAG.with(|f| f.set(saved.3));
-    r
+    FLAGS.iter().position(|k| *k == name).is_some_and(|i| read(FLAG0 + i) == 1)
 }
 
 /// Whether the pass `name` is turned off on this thread.
@@ -512,8 +679,7 @@ pub const fn inner_index(name: &str) -> usize {
 
 /// `is_off` of the `INNER` pass at position `i`.
 pub fn is_off_at(i: usize) -> bool {
-    TOUCHED.with(|t| t.set(t.get() | 1 << i));
-    OFF.with(|o| o.get()) >> i & 1 == 1
+    read(i) == 0
 }
 
 /// The rulesets of `make_egg`.
@@ -863,8 +1029,7 @@ impl Passes {
 
     /// Parts of the pipelines that do nothing: a `(save R)` never read in its pipeline or
     /// saved over before any read on every path, an `(off NAME)` followed in its sequence by
-    /// no pass over a term, a `with` outside any `scope`, and a `(time-limit N)` at the end of
-    /// its sequence.
+    /// no pass over a term, and a `(time-limit N)` at the end of its sequence.
     pub fn warnings(&self) -> Vec<String> {
         let mut out = Vec::new();
         for (name, uses) in self.uses() {
@@ -875,7 +1040,6 @@ impl Passes {
             dead.dedup();
             out.extend(dead.iter().map(|r| format!("{name}: register {r} is saved again before the earlier save is read")));
             out.extend(uses.idle_limit.iter().map(|t| format!("{name}: {t} ends its sequence and limits nothing")));
-            out.extend(uses.idle_with.iter().map(|s| format!("{name}: (with {s} ...) is outside any (scope ...), so it changes nothing")));
             out.extend(uses.idle_off.iter().map(|o| format!("{name}: (off {o}) is followed in its sequence by no pass it could turn off")));
         }
         out
@@ -887,7 +1051,7 @@ impl Passes {
         main.into_iter()
             .chain(SUBS.iter().map(|(n, _)| *n).zip(&self.subs))
             .map(|(name, p)| {
-                let mut uses = Uses { scoped: !["pipeline", "prepass", "polish"].contains(&name), ..Uses::default() };
+                let mut uses = Uses::default();
                 uses.walk(p);
                 (name, uses)
             })
@@ -916,12 +1080,7 @@ struct Uses {
     /// Every register read, also by `pre_done` (`t0`, which it may find empty).
     reads: Vec<String>,
     /// The names of an `(off NAME)` followed in its sequence by no pass over a term.
-    /// Inside a `scope`, or in a pipeline run on its caller's (`rewrite`, `simba`, `sub/NAME`):
-    /// a `with` outside both changes the settings of no run.
-    scoped: bool,
-    /// The `with` settings outside any `scope`.
     idle_off: Vec<String>,
-    idle_with: Vec<String>,
     /// The `(time-limit N)` that end their sequence, so limit nothing.
     idle_limit: Vec<String>,
     /// The registers saved and not read since on every path that reaches this point, from
@@ -1004,18 +1163,7 @@ impl Uses {
             }
             Pipe::Cand(_, p) => self.maybe(p),
             Pipe::Filter(c) => self.cond(c),
-            Pipe::With(kv, p) => {
-                if !self.scoped {
-                    self.idle_with.push(kv.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" "));
-                }
-                self.walk(p);
-            }
-            Pipe::Scope(p) => {
-                let outer = std::mem::replace(&mut self.scoped, true);
-                self.walk(p);
-                self.scoped = outer;
-            }
-            Pipe::Smallest(p) | Pipe::Tag(_, p) | Pipe::Smaller(_, p) => self.walk(p),
+            Pipe::Smallest(p) | Pipe::With(_, p) | Pipe::Scope(p) | Pipe::Tag(_, p) | Pipe::Smaller(_, p) => self.walk(p),
             // Both rebuild with `Passes::rewrite`.
             Pipe::Regions(p) => {
                 self.calls.push("inner");
@@ -1281,7 +1429,7 @@ prepass=lowbits | r2
         let (_, w) = Passes::parse_noting("prepass=rewrite | (scope (with rewrites=8 (off relate) | id)) | (off cut) | lowbits").unwrap();
         assert!(w.len() == 1 && w[0].contains("(off relate) is followed"), "{w:?}");
         let (_, w) = Passes::parse_noting("prepass=(with semi_leaves=2 rewrite) polish=(scope (with semi_leaves=2 rewrite)) rewrite=(with semi_leaves=2 simba)").unwrap();
-        assert!(w.len() == 1 && w[0].starts_with("prepass: (with semi_leaves=2 ...) is outside"), "{w:?}");
+        assert!(w.is_empty(), "a with outside any scope binds too: {w:?}");
         let e = Passes::parse("prepass=save/t").unwrap_err();
         assert!(e.contains("(save t)"), "{e}");
         for bad in ["pipeline=nope", "pipeline=(seq rewrite", "pipeline=(best x rewrite)", "pipeline=(fix 2 a b)", "pipeline=(with nope=1 rewrite)", "pipeline=(loop rewrite)", "pipeline=(fix many id)", "pipeline=(if nope id)", "pipeline=(if mixed id id id)", "pipeline=(retry mixed id)"] {

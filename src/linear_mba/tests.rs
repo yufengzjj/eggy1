@@ -314,15 +314,16 @@ fn memoized_rewrites_do_not_depend_on_earlier_settings() {
             let depth = 2 + (r.next() % 3) as u32;
             let t = random_term_in(&mut r, depth, &VARS[..4]);
             let shared = Ctx::new(w);
-            shared.set_setting("semi_leaves", 2);
-            shared.set_setting("relate_leaves", 2);
-            let narrow = (rewrite(&t, &shared), relate(&t, &shared));
-            shared.set_setting("semi_leaves", MAX_LEAVES);
-            shared.set_setting("relate_leaves", MAX_WIDE_LEAVES);
+            let narrow = crate::sched::in_scope(|| {
+                crate::sched::bind(crate::sched::SEMI_LEAVES, 2);
+                crate::sched::bind(crate::sched::RELATE_LEAVES, 2);
+                (rewrite(&t, &shared), relate(&t, &shared))
+            });
             crate::sched::with_off(&["semi/shapes", "rebuild_values", "common_multiple"], || (rewrite(&t, &shared), relate(&t, &shared)));
-            shared.set_setting("rewrites", 2);
-            rewrite(&t, &shared);
-            shared.set_setting("rewrites", usize::MAX);
+            crate::sched::in_scope(|| {
+                crate::sched::bind(crate::sched::REWRITES, 2);
+                rewrite(&t, &shared)
+            });
             let again = (rewrite(&t, &shared), relate(&t, &shared));
             let fresh = Ctx::new(w);
             let alone = (rewrite(&t, &fresh), relate(&t, &fresh));
