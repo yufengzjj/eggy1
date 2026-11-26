@@ -2,6 +2,7 @@
 //! are built, how the rounds run and which polish passes run in what order. `Passes::default()` is the tuned pipeline;
 //! `--passes` changes it with a spec such as `pre-=halve_input polish=push_not,factor extra=0`.
 
+use crate::pipe_lang as lang;
 use std::fmt;
 
 /// Pre-pass candidates built beside the first rebuild, in the order they are computed.
@@ -278,13 +279,6 @@ impl Cond {
     }
 }
 
-impl fmt::Display for Cond {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let alt = |a: &Vec<(bool, String)>| a.iter().map(|(neg, n)| format!("{}{n}", if *neg { "!" } else { "" })).collect::<Vec<_>>().join("+");
-        write!(f, "{}", self.0.iter().map(alt).collect::<Vec<_>>().join("|"))
-    }
-}
-
 fn count_ok(c: &str) -> Result<String, String> {
     match c.parse::<usize>().is_ok() || crate::pipe::COUNTS.contains(&c) {
         true => Ok(c.to_string()),
@@ -391,44 +385,23 @@ impl Pipe {
 
 impl fmt::Display for Pipe {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let list = |f: &mut fmt::Formatter, name: &str, head: Option<String>, ps: &[Pipe]| {
-            let args: Vec<String> = head.into_iter().chain(ps.iter().map(|p| p.to_string())).collect();
-            write!(f, "{name}({})", args.join(","))
-        };
-        let one = std::slice::from_ref;
-        match self {
-            Pipe::Pass(n) => write!(f, "{n}"),
-            Pipe::Seq(ps) => list(f, "seq", None, ps),
-            Pipe::Union(ps) => list(f, "union", None, ps),
-            Pipe::First(ps) => list(f, "first", None, ps),
-            Pipe::Best(k, ps) => list(f, "best", Some(k.clone()), ps),
-            Pipe::Fix(n, p) => list(f, "fix", Some(n.clone()), one(p)),
-            Pipe::Off(ns, p) => list(f, "off", Some(ns.join("+")), one(p)),
-            Pipe::If(c, a, b) if **b == Pipe::Pass("id".into()) => list(f, "if", Some(c.to_string()), one(a)),
-            Pipe::If(c, a, b) => list(f, "if", Some(c.to_string()), &[(**a).clone(), (**b).clone()]),
-            Pipe::Retry(c, a, b) => list(f, "retry", Some(c.to_string()), &[(**a).clone(), (**b).clone()]),
-            Pipe::Smallest(p) => list(f, "smallest", None, one(p)),
-            Pipe::Scope(p) => list(f, "scope", None, one(p)),
-            Pipe::Tag(n, p) => list(f, "tag", Some(n.clone()), one(p)),
-            Pipe::Cand(n, p) => list(f, "cand", Some(n.clone()), one(p)),
-            Pipe::Smaller(n, p) => list(f, "smaller", Some(n.clone()), one(p)),
-            Pipe::Wins(n, p) => list(f, "wins", Some(n.clone()), one(p)),
-            Pipe::Regions(p) => list(f, "regions", None, one(p)),
-            Pipe::Again(p) => list(f, "again", None, one(p)),
-            Pipe::Filter(c) => write!(f, "filter({c})"),
-            Pipe::With(kv, p) => list(f, "with", Some(kv.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("+")), one(p)),
-        }
+        write!(f, "{}", lang::show(self))
     }
 }
 
 /// A later round: the pre-pass rebuilds, then their extraction, or the one proved minimal.
-const LATER: &str = "seq(prepass,if(minimal,take_minimal,egglog/later))";
+const LATER: &str = "prepass | (if minimal take_minimal (egglog later))";
 
 /// The first round. Saturating a large input is most of the run time and rarely beats its
 /// rebuild, so the input joins only inputs with shifts, division or mulhi whose rebuild is
 /// not tiny (`opaque`), or a rerun when the result still mixes arithmetic or constants
 /// into bitwise operations.
-const FIRST: &str = "if(opaque,seq(union(id,prepass),if(minimal,take_minimal,egglog/first)),retry(rerun_input+mixed+!minimal,seq(prepass,if(minimal,take_minimal,egglog/first)),seq(union(id,prepass),egglog/rerun_input)))";
+const FIRST: &str = "
+    (if opaque
+      ((union id prepass) | (if minimal take_minimal (egglog first)))
+      (retry (rerun_input && mixed && !minimal)
+        (prepass | (if minimal take_minimal (egglog first)))
+        ((union id prepass) | (egglog rerun_input))))";
 
 /// The pipeline of `simplify`: the restart rounds while the extraction changes, extra ones
 /// while the pre-pass still rebuilds it, polish, all keeping the smallest form seen (the
@@ -436,14 +409,26 @@ const FIRST: &str = "if(opaque,seq(union(id,prepass),if(minimal,take_minimal,egg
 /// the same from the printed result, kept when smaller.
 pub fn pipeline() -> String {
     format!(
-        "seq(smallest(seq(fix(1,{FIRST}),if(moved,fix(restarts,{LATER})),if(moved,fix(extra,if(rebuilds,{LATER}))),polish)),if(printed+!input,tag(rerun_printed,best(1,id,seq(reprint,smallest(seq(fix(1,{FIRST}),if(moved,fix(printed,{LATER})),polish)))))))"
+        "(smallest
+           (fix 1 {FIRST})
+           | (if moved (fix restarts {LATER}))
+           | (if moved (fix extra (if rebuilds ({LATER}))))
+           | polish)
+         | (if (printed && !input)
+             (tag rerun_printed
+               (best 1 id
+                 (reprint
+                  | (smallest
+                      (fix 1 {FIRST})
+                      | (if moved (fix printed {LATER}))
+                      | polish)))))"
     )
 }
 
 /// The rebuild of one term (`Passes::rewrite`, what `linear_mba::rewrite` memoizes): a linear
 /// region rebuilt by the smallest of `simba`, `small_blocks` and `wide_blocks`, or else its
 /// operands rewritten; `poly_mba` taken instead when strictly smaller.
-pub const REWRITE: &str = "again(best(1,regions(best(1,simba,small_blocks,wide_blocks)),poly_mba))";
+pub const REWRITE: &str = "(again (best 1 (regions (best 1 simba small_blocks wide_blocks)) poly_mba))";
 
 /// The rebuilds of subterms that passes inside a rebuild make (`Passes::subs`), by name, and
 /// their default pipelines: `rewrite` (the memoized `Passes::rewrite`) or `rebuild` (the
@@ -502,7 +487,21 @@ pub const fn sub_index(name: &str) -> usize {
 /// clustered form, which a region too large to evaluate needs. Otherwise the semi-linear
 /// rebuild, or the smallest rebuild from its values, kept when smaller than the region;
 /// `one_wide_term` costs more than it gains on the cofactors of `poly_mba`.
-pub const SIMBA: &str = "if(no_leaves,none,if(wide,seq(save/in,best(1,seq(drop_unused,save/d),seq(clustered,save/c),seq(load/d,if(true,none,seq(load/in,first(peel,seq(load/c,peel_clustered)),filter(!eq:in)))))),seq(save/in,if(const_bitwise,best(1,semi_linear),best(1,rebuild_values,common_multiple,related_leaves,if(!cofactor,one_wide_term,none))),filter(lt:in))))";
+pub const SIMBA: &str = "
+    (if no_leaves none
+      (if wide
+        ((save in)
+         | (best 1
+             (drop_unused | (save d))
+             (clustered | (save c))
+             ((load d)
+              | (if true none
+                  ((load in) | (first peel ((load c) | peel_clustered)) | (filter (size != (size in))))))))
+        ((save in)
+         | (if const_bitwise
+             (best 1 semi_linear)
+             (best 1 rebuild_values common_multiple related_leaves (if !cofactor one_wide_term none)))
+         | (filter (size < (size in))))))";
 
 /// The final polish (`Passes::polish`), on one candidate: the polish passes `names` in
 /// turn, each kept when smaller, repeated while one is, until 8 are; on one run whose
@@ -510,20 +509,21 @@ pub const SIMBA: &str = "if(no_leaves,none,if(wide,seq(save/in,best(1,seq(drop_u
 /// and semi-linear groups of many leaves take seconds there.
 pub fn polish(names: &[&str]) -> String {
     let step = |n: &&str| {
-        let run = format!("seq(polish/{n},drop_identities)");
-        let run = if *n == "join_linear" { format!("with(semi_leaves=2,{run})") } else { run };
-        format!("smaller(polish/{n},{run})")
+        let run = format!("polish/{n} | drop_identities");
+        let run = if *n == "join_linear" { format!("(with semi_leaves=2 {run})") } else { run };
+        format!("(smaller polish/{n} {run})")
     };
     let steps: Vec<String> = names.iter().map(step).collect();
-    format!("scope(with(rewrites=polish_rewrites,wins(8,seq({}))))", steps.join(","))
+    let steps = if steps.len() == 1 { format!("(seq {})", steps[0]) } else { steps.join("\n  | ") };
+    format!("(scope (with rewrites=polish_rewrites (wins 8\n  {steps})))")
 }
 
 /// A rebuild of the main candidate: the whole term replaced by a T-function lookup, or its
 /// regions rewritten, clustered, related and its subterms replaced (`~(y - 1)` replaced
 /// before the rebuild would become `-y`, a leaf the rebuild no longer relates to `y - 1`).
-const REBUILD: &str = "first(tfunc_whole,seq(rewrite_top,cluster_top,relate,tfunc))";
+const REBUILD: &str = "(first tfunc_whole (rewrite_top | cluster_top | relate | tfunc))";
 /// `REBUILD` without `relate`.
-const REBUILD_PLAIN: &str = "first(tfunc_whole,seq(rewrite_top,cluster_top,tfunc))";
+const REBUILD_PLAIN: &str = "(first tfunc_whole (rewrite_top | cluster_top | tfunc))";
 
 /// The pre-pass (`Passes::prepass`), on one run (`scope`). Registers: `t0` the input, `t`
 /// with low bits and shifts rewritten, `r` the first rebuild, `n` the rebuild without
@@ -533,35 +533,43 @@ pub fn prepass() -> String {
     let r = REBUILD;
     let rp = REBUILD_PLAIN;
     [
-        "scope(seq(save/t0,",
+        "(scope (save t0) | ",
         GATES,
-        "lowbits,unshift,save/t,",
-        &format!("cand(first,{r}),"),
+        " | lowbits | unshift | (save t)",
+        &format!(" | (cand first {r})"),
         // Unified operands let the regions around them share leaves, but the rebuild of the
         // input as written is sometimes smaller; dropped once it needs `unified_rewrites` rewrites.
-        "best(1,id,cand(unified,seq(load/t,unify_operands,filter(!eq:t),with(rewrites=unified_rewrites,first(tfunc_whole,seq(rewrite,within,cluster_regions,relate,within,tfunc)))))),",
-        "save/r,union(id,",
+        "\n | (best 1 id (cand unified (load t) | unify_operands | (filter (size != (size t)))
+             | (with rewrites=unified_rewrites (first tfunc_whole (rewrite | within | cluster_regions | relate | within | tfunc)))))",
+        "\n | (save r) | (union id",
         // A region rebuilt by `wide_blocks` is smaller there, but the other rebuilds can leave
         // subterms the abstracted rebuilds share across terms; a larger one unioned beside the
         // first rebuild made the rules finish worse as often as better.
-        &format!("cand(no_wide,if(used_wide,seq(load/t,off(wide_blocks,{r}),save/n,filter(lt:r)),none)),"),
-        "cand(no_wide_abstracted,seq(load/n,off(wide_blocks,union(over_const_bitwise,over_shared_bitwise)),filter(lt:r+le:3/4:n))),",
-        "cand(split_bits,if(fits_split,seq(split_bits,filter(!eq:r)),none)),",
-        &format!("cand(halve_first,seq(halve,filter(!eq:r),{rp})),"),
-        "cand(over_products,seq(over_products,filter(!eq:r))),",
-        "cand(over_const_bitwise,seq(over_const_bitwise,filter(!eq:r))),",
-        "cand(over_shared_bitwise,seq(over_shared_bitwise,filter(!eq:r))),",
+        &format!("\n (cand no_wide (if used_wide ((load t) | (with off=wide_blocks {r}) | (save n) | (filter (size < (size r)))) none))"),
+        "\n (cand no_wide_abstracted (load n) | (with off=wide_blocks (union over_const_bitwise over_shared_bitwise))
+             | (filter (size < (size r) && size <= (size n) * 3/4)))",
+        "\n (cand split_bits (if fits_split (split_bits | (filter (size != (size r)))) none))",
+        &format!("\n (cand halve_first halve | (filter (size != (size r))) | {rp})"),
+        "\n (cand over_products over_products | (filter (size != (size r))))",
+        "\n (cand over_const_bitwise over_const_bitwise | (filter (size != (size r))))",
+        "\n (cand over_shared_bitwise over_shared_bitwise | (filter (size != (size r))))",
         // Halving the whole input can give semi-linear regions that are slow to search.
-        &format!("cand(halve_input,with(semi_leaves=2,if(tiny,none,seq(load/t,halve,filter(!eq:t),{rp}))))),"),
+        &format!("\n (cand halve_input (with semi_leaves=2 (if tiny none ((load t) | halve | (filter (size != (size t))) | {rp})))))"),
         // A form from abstracted subterms only a little smaller than the first rebuild, or
         // larger, made the rules finish worse at least as often as better (Ensia, LLVM Pluto).
-        "finish,save/f,filter(!abstracted|le:3/4:f),save/b,label/b,",
+        "\n | finish | (save f) | (filter (!abstracted || size <= (size f) * 3/4)) | (save b) | (label b)",
         // A region rebuilt in clusters is smaller there but can leave the rules a worse start
         // than rebuilding it whole.
-        "cand(unclustered,if(used_clustered+few_rewrites,seq(load/t,if(!replaceable,off(clustered,with(relate_leaves=unclustered_relate_leaves+rewrites=unclustered_rewrites,",
-        "seq(rewrite,within,relate,within,tfunc,finish,drop_identities))),none)),none)),",
+        "\n | (cand unclustered (if (used_clustered && few_rewrites)
+             ((load t) | (if !replaceable
+               (with off=clustered relate_leaves=unclustered_relate_leaves rewrites=unclustered_rewrites
+                 rewrite | within | relate | within | tfunc | finish | drop_identities)
+               none))
+             none))",
         // An equal-size one can take the extraction from the first rebuild with nothing gained.
-        "label/b,save/u,load/b,best(keep,id),save/m,union(seq(load/u,filter(lt:m)),load/m,seq(load/u,filter(gt:m+lt:t0))),pre_done))",
+        "\n | (label b) | (save u) | (load b) | (best keep id) | (save m)
+         | (union ((load u) | (filter (size < (size m)))) (load m) ((load u) | (filter (size > (size m) && size < (size t0)))))
+         | pre_done)",
     ]
     .concat()
 }
@@ -570,7 +578,9 @@ pub fn prepass() -> String {
 /// nothing: `poly_mba` without products of non-constant factors, `lowbits` without those,
 /// shifts and bitwise operations with a constant operand, and `small_blocks` with more than
 /// 3 products and no shift.
-const GATES: &str = "if(!mul:1,off/poly_mba),if(!mul:1+!shift:1+!bitconst:1,off/lowbits),if(mul:4+!shift:1,off/small_blocks),";
+const GATES: &str = "(if (mul < 1) (off poly_mba))
+    | (if (mul < 1 && shift < 1 && bitconst < 1) (off lowbits))
+    | (if (mul >= 4 && shift < 1) (off small_blocks))";
 
 /// Turns off the `INNER` pass `name` for the runs on this thread that follow, until the next
 /// `apply` (the pass `off/NAME`).
@@ -689,11 +699,11 @@ impl Default for Passes {
             minimal: true,
             off: vec!["semi/peel_shapes"],
             limits: LIMITS.iter().map(|(_, d)| *d).collect(),
-            pipeline: Pipe::parse(&pipeline()).unwrap(),
-            prepass: Pipe::parse(&prepass()).unwrap(),
-            polish: Pipe::parse(&polish(&crate::linear_mba::POLISH.map(|(n, _)| n))).unwrap(),
-            rewrite: Pipe::parse(REWRITE).unwrap(),
-            simba: Pipe::parse(SIMBA).unwrap(),
+            pipeline: lang::parse(&pipeline()).unwrap(),
+            prepass: lang::parse(&prepass()).unwrap(),
+            polish: lang::parse(&polish(&crate::linear_mba::POLISH.map(|(n, _)| n))).unwrap(),
+            rewrite: lang::parse(REWRITE).unwrap(),
+            simba: lang::parse(SIMBA).unwrap(),
             subs: SUBS.iter().map(|(_, d)| Pipe::Pass(d.to_string())).collect(),
         }
     }
@@ -723,55 +733,72 @@ impl Passes {
         )
     }
 
-    /// The default pipeline changed by `spec`: items separated by spaces or `;`, each
-    /// `key=value`, and for the lists `pre`, `off` and `schedule` also `key+=names`
-    /// and `key-=names` (names separated by `,`; schedule steps written `run:`, `once:` or
-    /// `sat:` and a ruleset). The `LIMITS` are keys too (`split_runs=8`); `pipeline`,
-    /// `prepass`, `polish`, `rewrite`, `simba` and `sub/NAME` (`SUBS`) take a `Pipe` (spaces inside its parentheses allowed), and
-    /// `polish` also a list of polish pass names, run as `polish(names)`.
+    /// The default pipeline changed by `spec`: items `key=value`, and for the lists `pre`,
+    /// `off` and `schedule` also `key+=names` and `key-=names` (names separated by `,`;
+    /// schedule steps written `run:`, `once:` or `sat:` and a ruleset). The `LIMITS` are keys
+    /// too (`split_runs=8`); `pipeline`, `prepass`, `polish`, `rewrite`, `simba` and
+    /// `sub/NAME` (`SUBS`) take a pipeline (`crate::pipe_lang`, or the old `seq(a,b)`
+    /// syntax), and `polish` also a list of polish pass names, run as `polish(names)`. Items
+    /// are separated by `;`, or by white space before a `key=` (so a pipeline may contain
+    /// spaces); `#` starts a comment to the end of the line.
     pub fn parse(spec: &str) -> Result<Passes, String> {
         let mut p = Passes::default();
-        let mut items = Vec::new();
-        let (mut depth, mut start) = (0i32, 0);
-        for (i, c) in spec.char_indices() {
+        let spec: String = spec.lines().map(|l| l.split_once('#').map_or(l, |(a, _)| a)).collect::<Vec<_>>().join("\n");
+        let mut items: Vec<String> = Vec::new();
+        let (mut depth, mut cur, mut fresh) = (0i32, String::new(), true);
+        let mut chunks = Vec::new();
+        for c in spec.chars() {
             match c {
                 '(' => depth += 1,
                 ')' => depth -= 1,
-                ' ' | ';' if depth == 0 => {
-                    items.push(&spec[start..i]);
-                    start = i + 1;
-                }
                 _ => {}
             }
+            if depth == 0 && (c.is_whitespace() || c == ';') {
+                chunks.push((std::mem::take(&mut cur), c == ';'));
+            } else {
+                cur.push(c);
+            }
         }
-        items.push(&spec[start..]);
-        for item in items.into_iter().filter(|s| !s.is_empty()) {
+        chunks.push((cur, false));
+        for (chunk, ends) in chunks {
+            if !chunk.is_empty() {
+                let key: String = chunk.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '/').collect();
+                let starts = !key.is_empty() && ["=", "+=", "-="].iter().any(|op| chunk[key.len()..].starts_with(op));
+                match items.last_mut() {
+                    Some(last) if !fresh && !starts => *last = format!("{last} {chunk}"),
+                    _ => items.push(chunk),
+                }
+                fresh = false;
+            }
+            fresh |= ends;
+        }
+        for item in items.iter().map(String::as_str) {
             if let Some(val) = item.strip_prefix("prepass=") {
-                p.prepass = Pipe::parse(val)?;
+                p.prepass = lang::parse_any(val)?;
                 continue;
             }
             if let Some(val) = item.strip_prefix("pipeline=") {
-                p.pipeline = Pipe::parse(val)?;
+                p.pipeline = lang::parse_any(val)?;
                 continue;
             }
             if let Some(val) = item.strip_prefix("rewrite=") {
-                p.rewrite = Pipe::parse(val)?;
+                p.rewrite = lang::parse_any(val)?;
                 continue;
             }
             if let Some(val) = item.strip_prefix("simba=") {
-                p.simba = Pipe::parse(val)?;
+                p.simba = lang::parse_any(val)?;
                 continue;
             }
             if let Some((name, val)) = item.strip_prefix("sub/").and_then(|s| s.split_once('=')) {
                 let names: Vec<&str> = SUBS.iter().map(|(n, _)| *n).collect();
                 let i = names.iter().position(|n| *n == name).ok_or_else(|| format!("unknown sub/{name}; known: {}", names.join(" ")))?;
-                p.subs[i] = Pipe::parse(val)?;
+                p.subs[i] = lang::parse_any(val)?;
                 continue;
             }
             if let Some(val) = item.strip_prefix("polish=") {
                 let names: Vec<&str> = val.split(',').filter(|s| !s.is_empty()).collect();
                 let all_polish = names.iter().all(|n| crate::linear_mba::POLISH.iter().any(|(m, _)| m == n));
-                p.polish = Pipe::parse(&if all_polish { polish(&names) } else { val.to_string() })?;
+                p.polish = if all_polish { lang::parse(&polish(&names))? } else { lang::parse_any(val)? };
                 continue;
             }
             let (key, op, val) = ["+=", "-=", "="]
@@ -846,7 +873,8 @@ impl Passes {
     }
 }
 
-/// The spec `Passes::parse` reads back to these passes.
+/// The spec `Passes::parse` reads back to these passes; `{:#}` puts each pipeline on its own
+/// lines.
 impl fmt::Display for Passes {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let steps: Vec<String> = self.schedule.iter().map(|(s, rs)| format!("{}:{rs}", STEPS.iter().find(|(k, _)| k == s).unwrap().1)).collect();
@@ -869,10 +897,14 @@ impl fmt::Display for Passes {
                 write!(f, " {name}={v}")?;
             }
         }
-        write!(f, " pipeline={} prepass={} polish={} rewrite={} simba={}", self.pipeline, self.prepass, self.polish, self.rewrite, self.simba)?;
+        let show = if f.alternate() { lang::pretty } else { lang::show };
+        let sep = if f.alternate() { "\n" } else { " " };
+        for (name, p) in [("pipeline", &self.pipeline), ("prepass", &self.prepass), ("polish", &self.polish), ("rewrite", &self.rewrite), ("simba", &self.simba)] {
+            write!(f, "{sep}{name}={}", show(p))?;
+        }
         for ((name, default), p) in SUBS.iter().zip(&self.subs) {
             if *p != Pipe::Pass(default.to_string()) {
-                write!(f, " sub/{name}={p}")?;
+                write!(f, "{sep}sub/{name}={}", show(p))?;
             }
         }
         Ok(())
@@ -888,14 +920,14 @@ mod tests {
         assert_eq!(Passes::parse("").unwrap(), Passes::default());
         let p = Passes::parse("pre-=halve_input,unified;polish=factor,push_not,factor extra=0 keep=3 minimal=off").unwrap();
         assert!(!p.pre_on("unified") && p.pre_on("no_wide"));
-        assert_eq!(p.polish, Pipe::parse(&polish(&["factor", "push_not", "factor"])).unwrap());
-        assert_eq!(Pipe::parse(&Passes::default().polish.to_string()).unwrap(), Passes::default().polish);
+        assert_eq!(p.polish, lang::parse(&polish(&["factor", "push_not", "factor"])).unwrap());
+        assert_eq!(lang::parse(&Passes::default().polish.to_string()).unwrap(), Passes::default().polish);
         let p = Passes::parse("rewrite=regions(best(1,simba,poly_mba))").unwrap();
-        assert_eq!(p.rewrite.to_string(), "regions(best(1,simba,poly_mba))");
-        assert_eq!(Pipe::parse(&Passes::default().simba.to_string()).unwrap(), Passes::default().simba);
+        assert_eq!(p.rewrite.to_string(), "(regions (best 1 simba poly_mba))");
+        assert_eq!(lang::parse(&Passes::default().simba.to_string()).unwrap(), Passes::default().simba);
         let p = Passes::parse("sub/cluster=regions(simba) sub/split_bits=rewrite").unwrap();
-        assert_eq!(p.subs[sub_index("cluster")].to_string(), "regions(simba)");
-        assert!(p.to_string().contains(" sub/cluster=regions(simba) sub/split_bits=rewrite"));
+        assert_eq!(p.subs[sub_index("cluster")].to_string(), "(regions simba)");
+        assert!(p.to_string().contains(" sub/cluster=(regions simba) sub/split_bits=rewrite"));
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("sub/nope=rewrite").is_err());
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
@@ -914,7 +946,7 @@ mod tests {
         apply(&Passes::default());
         assert!(!is_off("poly_mba"));
         let p = Passes::parse("prepass=seq(if(!mul:1+size:10|vars:3,off/lowbits),lowbits)").unwrap();
-        assert_eq!(p.prepass.to_string(), "seq(if(!mul:1+size:10|vars:3,off/lowbits),lowbits)");
+        assert_eq!(p.prepass.to_string(), "(if (mul < 1 && size >= 10 || vars >= 3) (off lowbits)) | lowbits");
         assert!(Passes::parse("prepass=if(nope:1,id)").is_err() && Passes::parse("prepass=off/nope").is_err() && Passes::parse("prepass=if(mul:x,id)").is_err());
         let p = Passes::parse("schedule-=sat:analysis schedule+=once:simplify,sat:analysis match_limit=128").unwrap();
         assert_eq!(p.schedule.last(), Some(&(Step::Saturate, "analysis")));
@@ -931,16 +963,24 @@ mod tests {
         apply(&Passes::default());
         assert_eq!(limit(Limit::SplitRuns), 16);
         let p = Passes::parse("keep=1 pipeline=seq(lowbits, best(2, rewrite, off(relate+tfunc, rebuild)), fix(3, egglog), polish/factor) extra=0").unwrap();
-        assert_eq!(p.pipeline.to_string(), "seq(lowbits,best(2,rewrite,off(relate+tfunc,rebuild)),fix(3,egglog),polish/factor)");
+        assert_eq!(p.pipeline.to_string(), "lowbits | (best 2 rewrite (with off=relate,tfunc rebuild)) | (fix 3 egglog) | polish/factor");
         assert_eq!((p.keep, p.extra), (1, 0));
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         let p = Passes::parse("pipeline=smallest(seq(fix(restarts,retry(mixed+!minimal,prepass,egglog/later)),if(!input,tag(t,polish),id)))").unwrap();
-        assert_eq!(p.pipeline.to_string(), "smallest(seq(fix(restarts,retry(mixed+!minimal,prepass,egglog/later)),if(!input,tag(t,polish))))");
+        assert_eq!(p.pipeline.to_string(), "(smallest (fix restarts (retry (mixed && !minimal) prepass (egglog later))) | (if !input (tag t polish)))");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
-        assert_eq!(Pipe::parse(&Passes::default().pipeline.to_string()).unwrap(), Passes::default().pipeline);
-        assert_eq!(Pipe::parse(&Passes::default().prepass.to_string()).unwrap(), Passes::default().prepass);
+        assert_eq!(lang::parse(&Passes::default().pipeline.to_string()).unwrap(), Passes::default().pipeline);
+        assert_eq!(lang::parse(&Passes::default().prepass.to_string()).unwrap(), Passes::default().prepass);
+        let d = Passes::default();
+        assert_eq!(Passes::parse(&d.to_string()).unwrap(), d);
+        assert_eq!(Passes::parse(&format!("{d:#}")).unwrap(), d);
+        let p = Passes::parse("extra=0 prepass=lowbits | (if mixed rewrite) # a comment\n| polish keep=3;pipeline=(fix 2 prepass | egglog)").unwrap();
+        assert_eq!((p.extra, p.keep), (0, 3));
+        assert_eq!(p.prepass, Pipe::parse("seq(lowbits,if(mixed,rewrite),polish)").unwrap());
+        assert_eq!(p.pipeline, Pipe::parse("fix(2,seq(prepass,egglog))").unwrap());
+        assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
         let p = Passes::parse("prepass=scope(seq(save/t,with(rewrites=unified_rewrites+semi_leaves=2,rewrite),filter(lt:t|le:3/4:t+!tiny),cand(halve_input,load/t)))").unwrap();
-        assert_eq!(p.prepass.to_string(), "scope(seq(save/t,with(rewrites=unified_rewrites+semi_leaves=2,rewrite),filter(lt:t|le:3/4:t+!tiny),cand(halve_input,load/t)))");
+        assert_eq!(p.prepass.to_string(), "(scope (save t) | (with rewrites=unified_rewrites semi_leaves=2 rewrite) | (filter (size < (size t) || size <= (size t) * 3/4 && !tiny)) | (cand halve_input (load t)))");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         for bad in ["prepass=filter(lt)", "prepass=filter(le:3:t)", "prepass=with(rewrites=x,id)", "prepass=with(nope=1,id)", "prepass=save/", "prepass=scope(id,id)"] {
             assert!(Passes::parse(bad).is_err(), "{bad}");

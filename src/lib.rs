@@ -4,6 +4,7 @@ pub mod expr_convert;
 pub mod known_bits;
 pub mod linear_mba;
 pub mod pipe;
+pub mod pipe_lang;
 pub mod sched;
 pub mod stats;
 mod poly_mba;
@@ -1103,7 +1104,7 @@ pub struct Cli {
         default_value = "",
         hide_default_value = true,
         value_parser = sched::Passes::parse,
-        help = "Change the pass pipeline: items key=value, key+=names or key-=names (pre, off, schedule), e.g. \"pre-=halve_input polish=push_not,factor extra=0\"; --show-passes prints the result"
+        help = "Change the pass pipeline: items key=value, key+=names or key-=names (pre, off, schedule), pipelines in the language of docs/pipe-language.md, e.g. \"extra=0 prepass=lowbits | (if mixed rewrite)\"; --show-passes prints the result"
     )]
     pub passes: sched::Passes,
     #[arg(long, help = "Print the pass pipeline in --passes form and exit")]

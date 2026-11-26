@@ -352,7 +352,18 @@ def main():
     ap.add_argument("--keep", action="store_true", help="keep the shard directories")
     ap.add_argument("--retry-jobs", type=int, default=4, help="timed-out cases rerun at a time (0: no retry)")
     ap.add_argument("--retry-timeout", type=float, help="seconds per case in the retry (default: -t)")
-    args, args.extra = ap.parse_known_args()
+    # argparse takes an argument with a space for a positional one, and a pipeline has spaces.
+    argv, passes = [], []
+    rest = iter(sys.argv[1:])
+    for a in rest:
+        if a.startswith("--passes="):
+            passes.append(a)
+        elif a == "--passes":
+            passes += [a, next(rest)]
+        else:
+            argv.append(a)
+    args, args.extra = ap.parse_known_args(argv)
+    args.extra += passes
     if args.bench is None:
         subprocess.run(["cargo", "build", "--release", "-q", "--example", "bench"], check=True)
         meta = subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"],
