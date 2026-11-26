@@ -120,6 +120,8 @@ thread_local! {
     static LIMIT: std::cell::RefCell<Option<Vec<usize>>> = const { std::cell::RefCell::new(None) };
     /// Bits of the `INNER` passes an enclosing `Pipe::Off` turns off.
     static SCOPED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Bits of the `INNER` passes `(off NAME)` turned off in the scopes under way.
+    static RUN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Bits of the `INNER` passes asked whether they are off, since the last `swap_touched`.
     static TOUCHED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// The passes of the run on this thread (`apply`), the default ones until set.
@@ -157,8 +159,8 @@ fn off_bits(names: &[&str]) -> u64 {
     names.iter().filter_map(|n| INNER.iter().position(|k| k == n)).fold(0u64, |b, i| b | 1 << i)
 }
 
-/// Sets the `INNER` passes `p.off` (and an enclosing `Pipe::Off`) turns off and the limits
-/// of `p` for the runs on this thread that follow.
+/// Sets the `INNER` passes `p.off` (and an enclosing `Pipe::Off` or `(off NAME)` of a scope
+/// under way) turns off and the limits of `p` for the runs on this thread that follow.
 pub fn apply(p: &Passes) {
     CURRENT.with(|c| {
         let mut c = c.borrow_mut();
@@ -166,7 +168,7 @@ pub fn apply(p: &Passes) {
             *c = Some(std::rc::Rc::new(p.clone()));
         }
     });
-    let bits = off_bits(&p.off) | SCOPED.with(|s| s.get());
+    let bits = off_bits(&p.off) | SCOPED.with(|s| s.get()) | RUN.with(|r| r.get());
     OFF.with(|o| o.set(bits));
     let custom = p.limits.iter().zip(LIMITS).any(|(v, (_, d))| v != d);
     LIMIT.with(|l| *l.borrow_mut() = custom.then(|| p.limits.clone()));
@@ -261,8 +263,11 @@ pub enum Pass {
     Save(String),
     Load(String),
     Label(String),
-    /// Turns an `INNER` pass off for the rest of the run.
+    /// Turns an `INNER` pass off until the end of the enclosing sequence, also in the runs
+    /// it calls.
     Off(&'static str),
+    /// Gives the rest of the enclosing sequence this many milliseconds; 0 clears it.
+    TimeLimit(Value),
     /// A pass over one term; `alt` is the used bit of an alternative
     /// (`crate::linear_mba::ALTERNATIVES`).
     Term { name: String, at: TermAt, alt: Option<u8> },
@@ -290,6 +295,7 @@ impl Pass {
             Pass::Load(r) => format!("load/{r}"),
             Pass::Label(r) => format!("label/{r}"),
             Pass::Off(n) => format!("off/{n}"),
+            Pass::TimeLimit(_) => "time-limit".into(),
         }
     }
 }
@@ -428,11 +434,21 @@ pub fn polish(names: &[&str]) -> String {
     format!("(scope (with rewrites=polish_rewrites (wins 8\n  {steps})))")
 }
 
-/// Turns off the `INNER` pass `name` for the runs on this thread that follow, until the next
-/// `apply` (the pass `(off NAME)`).
+/// Turns off the `INNER` pass `name` until the end of the scope under way (`in_scope`: the
+/// enclosing sequence or pipeline run), also in the runs it starts (the pass `(off NAME)`).
 pub fn turn_off(name: &str) {
     let bits = off_bits(&[name]);
     OFF.with(|o| o.set(o.get() | bits));
+    RUN.with(|r| r.set(r.get() | bits));
+}
+
+/// `f` as a scope: the passes `(off NAME)` turns off inside it are on again after.
+pub fn in_scope<R>(f: impl FnOnce() -> R) -> R {
+    let (run, off) = (RUN.with(|r| r.get()), OFF.with(|o| o.get()));
+    let r = f();
+    RUN.with(|r| r.set(run));
+    OFF.with(|o| o.set(off));
+    r
 }
 
 /// Whether the pass `name` is turned off on this thread.
@@ -811,8 +827,8 @@ impl Passes {
     }
 
     /// Parts of the pipelines that do nothing: a `(save R)` never read in its pipeline or
-    /// saved over before any read on every path, and a `(with off=...)` around passes that
-    /// run no pass over a term.
+    /// saved over before any read on every path, a `(with off=...)` around passes that run
+    /// no pass over a term, and a `(time-limit N)` at the end of its sequence.
     pub fn warnings(&self) -> Vec<String> {
         let mut out = Vec::new();
         for (name, uses) in self.uses() {
@@ -822,6 +838,7 @@ impl Passes {
             let mut dead = uses.dead.clone();
             dead.dedup();
             out.extend(dead.iter().map(|r| format!("{name}: register {r} is saved again before the earlier save is read")));
+            out.extend(uses.idle_limit.iter().map(|t| format!("{name}: {t} ends its sequence and limits nothing")));
             out.extend(uses.idle_off.iter().map(|o| format!("{name}: (with off={o} ...) runs no pass it could turn off")));
         }
         out
@@ -863,6 +880,8 @@ struct Uses {
     reads: Vec<String>,
     /// The `off` lists of `(with off=...)` around no pass over a term.
     idle_off: Vec<String>,
+    /// The `(time-limit N)` that end their sequence, so limit nothing.
+    idle_limit: Vec<String>,
     /// The registers saved and not read since on every path that reaches this point, from
     /// saves at the same level of `if`s and other parts that may not run.
     pending: Vec<String>,
@@ -891,8 +910,15 @@ impl Uses {
                 }
             }
             Pipe::Pass(Pass::Load(r) | Pass::Label(r)) => self.read(r),
+            Pipe::Pass(Pass::TimeLimit(v)) => self.value(v),
             Pipe::Pass(_) => {}
-            Pipe::Seq(ps) | Pipe::Union(ps) => ps.iter().for_each(|p| self.walk(p)),
+            Pipe::Seq(ps) => {
+                ps.iter().for_each(|p| self.walk(p));
+                if let Some(Pipe::Pass(Pass::TimeLimit(v))) = ps.last().filter(|_| ps.len() > 1) {
+                    self.idle_limit.push(lang::show(&Pipe::Pass(Pass::TimeLimit(v.clone()))));
+                }
+            }
+            Pipe::Union(ps) => ps.iter().for_each(|p| self.walk(p)),
             Pipe::First(ps) => {
                 self.walk(&ps[0]);
                 ps[1..].iter().for_each(|p| self.maybe(p));
@@ -1045,6 +1071,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn off_ends_with_its_scope() {
+        let p = Passes::default();
+        apply(&p);
+        in_scope(|| {
+            turn_off("relate");
+            in_scope(|| {
+                apply(&p);
+                assert!(is_off("relate"), "a run inherits the passes turned off where it is called");
+                turn_off("tfunc");
+            });
+            assert!(!is_off("tfunc"), "a pass turned off in a scope is on again after it");
+            apply(&p);
+            assert!(is_off("relate"));
+        });
+        apply(&p);
+        assert!(!is_off("relate"));
+    }
+
+    #[test]
     fn spec_round_trip() {
         assert_eq!(Passes::parse("").unwrap(), Passes::default());
         let p = Passes::parse("pre-=halve_input,unified;polish=factor,push_not,factor extra=0 keep=3 minimal=off").unwrap();
@@ -1070,8 +1115,10 @@ mod tests {
         assert!(is_off("relate") && !is_off("simba"));
         apply(&Passes::default());
         assert!(!is_off("relate"));
-        turn_off("poly_mba");
-        assert!(is_off("poly_mba") && !is_off("lowbits"));
+        in_scope(|| {
+            turn_off("poly_mba");
+            assert!(is_off("poly_mba") && !is_off("lowbits"));
+        });
         apply(&Passes::default());
         assert!(!is_off("poly_mba"));
         let p = Passes::parse("prepass=(if (mul < 1 && size >= 10 || vars >= 3) (off lowbits)) | lowbits").unwrap();
@@ -1160,6 +1207,17 @@ prepass=lowbits | r2
         for ok in ["prepass=(save t) | (if mixed (save t)) | (load t)", "prepass=(save t) | (cand unified (save t)) | (load t)", "prepass=(fix 3 (save t) | rewrite) | (load t)", "prepass=(save t) | (filter (size < (size t))) | (save t) | (load t)", "prepass=(save t) | (first rewrite (save t)) | (load t)", "prepass=(if mixed (save t) (save t)) | (load t)"] {
             assert_eq!(Passes::parse_noting(ok).unwrap().1, Vec::<String>::new(), "{ok}");
         }
+        let p = Passes::parse("prepass=rewrite | (time-limit 500) | relate | (time-limit (size-1 * 2)) | tfunc | (time-limit 0) | lowbits").unwrap();
+        assert_eq!(p.prepass.to_string(), "rewrite | (time-limit 500) | relate | (time-limit (size - 1 * 2)) | tfunc | (time-limit 0) | lowbits");
+        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
+        assert!(Passes::parse("prepass=(time-limit)").is_err() && Passes::parse("prepass=time-limit").is_err() && Passes::parse("prepass=(time-limit mixed)").is_err());
+        assert!(Passes::parse("prepass=(if (size-x > 1) id)").unwrap_err().contains("size-x"));
+        let (_, w) = Passes::parse_noting("prepass=rewrite | (time-limit 100)").unwrap();
+        assert!(w.len() == 1 && w[0].contains("limits nothing"), "{w:?}");
+        assert_eq!(Passes::parse_noting("prepass=rewrite | (if mixed (time-limit 100)) | relate").unwrap().1, Vec::<String>::new());
+        let flat = Passes::parse("(let g relate | tfunc) (let h (relate | tfunc)) prepass=lowbits | g | finish rewrite=lowbits | h | finish").unwrap();
+        assert_eq!(flat.prepass.to_string(), "lowbits | relate | tfunc | finish");
+        assert_eq!(flat.rewrite.to_string(), "lowbits | (relate | tfunc) | finish");
         let e = Passes::parse("prepass=save/t").unwrap_err();
         assert!(e.contains("(save t)"), "{e}");
         for bad in ["pipeline=nope", "pipeline=(seq rewrite", "pipeline=(best x rewrite)", "pipeline=(fix 2 a b)", "pipeline=(with off=nope rewrite)", "pipeline=(loop rewrite)", "pipeline=(fix many id)", "pipeline=(if nope id)", "pipeline=(if mixed id id id)", "pipeline=(retry mixed id)"] {

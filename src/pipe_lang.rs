@@ -66,8 +66,13 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
                 (Tok::Num(n.parse().map_err(|_| format!("number too large: {n}"))?), len)
             }
             c if name_start(c) => {
-                let n: String = cs[i..].iter().take_while(|c| name_char(**c)).collect();
-                let len = n.len();
+                // `-` joins a name only before a letter or `_` (`time-limit`), so `restarts-1`
+                // is still a subtraction.
+                let mut len = 1;
+                while cs.get(i + len).is_some_and(|c| name_char(*c) || *c == '-' && cs.get(i + len + 1).is_some_and(|d| name_start(*d))) {
+                    len += 1;
+                }
+                let n: String = cs[i..i + len].iter().collect();
                 if cs.get(i + len) == Some(&'=') && cs.get(i + len + 1) != Some(&'=') {
                     let v: String = cs[i + len + 1..].iter().take_while(|c| !c.is_whitespace() && **c != '(' && **c != ')').collect();
                     let vl = v.len();
@@ -84,9 +89,9 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
     Ok(out)
 }
 
-const FORMS: [&str; 22] = [
+const FORMS: [&str; 23] = [
     "seq", "union", "best", "first", "fix", "if", "retry", "smallest", "scope", "regions", "again", "tag", "cand", "smaller", "wins", "filter", "with", "save", "load",
-    "label", "off", "egglog",
+    "label", "off", "egglog", "time-limit",
 ];
 
 /// An expression before it is read as a condition or a value.
@@ -146,7 +151,9 @@ fn to_value(e: E) -> Result<Value, String> {
 }
 
 /// The pipelines `(let NAME p)` defined, by name.
-pub type Defs = std::collections::HashMap<String, Pipe>;
+/// Each with whether it is written as a sequence without parentheses, which joins the
+/// sequence it is used in (`(let g a | b)`; `(let g (a | b))` stays one nested stage).
+pub type Defs = std::collections::HashMap<String, (Pipe, bool)>;
 
 struct Parser<'a> {
     toks: Vec<Tok>,
@@ -186,12 +193,17 @@ impl Parser<'_> {
     }
 
     fn pipe(&mut self) -> Result<Pipe, String> {
+        let mut stages = self.stages_of_pipe()?;
+        Ok(if stages.len() == 1 { stages.pop().unwrap() } else { Pipe::Seq(stages) })
+    }
+
+    /// The stages of a pipeline `a | b | ...`.
+    fn stages_of_pipe(&mut self) -> Result<Vec<Pipe>, String> {
         let mut stages = Vec::new();
         loop {
-            // A defined sequence used as a stage joins this one, as if written out.
-            let named = matches!(self.peek(), Some(Tok::Name(n)) if self.defs.contains_key(n));
+            let flat = matches!(self.peek(), Some(Tok::Name(n)) if self.defs.get(n).is_some_and(|d| d.1));
             match self.stage()? {
-                Pipe::Seq(ps) if named && ps.len() > 1 => stages.extend(ps),
+                Pipe::Seq(ps) if flat => stages.extend(ps),
                 p => stages.push(p),
             }
             if self.peek() != Some(&Tok::Bar) {
@@ -199,14 +211,14 @@ impl Parser<'_> {
             }
             self.at += 1;
         }
-        Ok(if stages.len() == 1 { stages.pop().unwrap() } else { Pipe::Seq(stages) })
+        Ok(stages)
     }
 
     fn stage(&mut self) -> Result<Pipe, String> {
         match self.next() {
             Some(Tok::Name(n)) if FORMS.contains(&n.as_str()) && n != "egglog" => Err(format!("{n} needs parentheses: ({n} ...)")),
             Some(Tok::Name(n)) if self.defs.contains_key(&n) => {
-                let p = self.defs[&n].clone();
+                let p = self.defs[&n].0.clone();
                 self.used.push(n);
                 Ok(p)
             }
@@ -338,6 +350,7 @@ impl Parser<'_> {
                 let p = if set.is_empty() { p } else { Pipe::With(set, b(p)) };
                 if off.is_empty() { p } else { Pipe::Off(off, b(p)) }
             }
+            "time-limit" => Pipe::Pass(Pass::TimeLimit(self.count()?)),
             "save" | "load" | "label" | "egglog" => {
                 let n = format!("{f}/{}", self.name(&format!("a name after {f}"))?);
                 Pipe::Pass(resolve(&n).unwrap())
@@ -472,7 +485,7 @@ pub fn parse_with(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Pipe, 
 
 /// Parses the definition `(let NAME p)`: `NAME` then stands for `p`, which is expanded where
 /// it is used; the names of `defs` it expands are added to `used`.
-pub fn parse_let(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<(String, Pipe), String> {
+pub fn parse_let(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<(String, (Pipe, bool)), String> {
     let mut p = Parser { toks: lex(s)?, at: 0, defs, used: Vec::new() };
     p.expect(Tok::Open, "(let")?;
     if p.name("let")? != "let" {
@@ -482,11 +495,13 @@ pub fn parse_let(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<(String
     if FORMS.contains(&name.as_str()) || resolve(&name).is_some() || name == "let" {
         return Err(format!("let {name}: the name of a pass or form"));
     }
-    let pipe = p.pipe()?;
+    let mut stages = p.stages_of_pipe()?;
     p.expect(Tok::Close, ")")?;
     p.end()?;
     used.extend(p.used);
-    Ok((name, pipe))
+    let flat = stages.len() > 1;
+    let pipe = if flat { Pipe::Seq(stages) } else { stages.pop().unwrap() };
+    Ok((name, (pipe, flat)))
 }
 
 /// Whether `s` looks like the old `seq(a,b)` syntax, for an error message: a name directly
@@ -554,6 +569,9 @@ fn form(head: &str, args: &[String]) -> String {
 }
 
 fn show_pass(p: &Pass) -> String {
+    if let Pass::TimeLimit(v) = p {
+        return form("time-limit", &[show_count(v)]);
+    }
     let n = p.name();
     match n.split_once('/') {
         Some((h @ ("save" | "load" | "label" | "off" | "egglog"), r)) => form(h, &[r.to_string()]),

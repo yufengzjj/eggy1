@@ -392,6 +392,10 @@ fn holds(c: &Cond, set: &[Cand], env: &Env) -> bool {
 thread_local! {
     /// When `go` stops starting passes (`Cli::time_limit`).
     static DEADLINE: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+    /// The limit `(time-limit N)` set in the enclosing sequences, if any.
+    static LOCAL: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+    /// `LOCAL` as the innermost enclosing sequence found it, which `(time-limit 0)` restores.
+    static OUTER: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
     /// Some pass was skipped at the deadline.
     static CUT: Cell<bool> = const { Cell::new(false) };
     /// Seconds the last egglog round took.
@@ -402,6 +406,7 @@ thread_local! {
 pub fn set_deadline(seconds: Option<f64>) {
     let at = seconds.map(|s| std::time::Instant::now() + std::time::Duration::from_secs_f64(s.max(0.0)));
     DEADLINE.with(|d| d.set(at));
+    LOCAL.with(|l| l.set(None));
     CUT.with(|c| c.set(false));
     LAST_ROUND.with(|r| r.set(0.0));
 }
@@ -413,30 +418,63 @@ pub fn cut() -> bool {
 
 /// Whether work taking `secs` more would end past the deadline; records the cut when it
 /// would. Results computed then are not memoized (`Ctx::mark_cut`).
+/// A `(time-limit N)` past its limit only skips the step (`time-limit/skipped`), it is not a
+/// cut of the run.
 fn past_deadline(secs: f64, env: &Env) -> bool {
-    let Some(at) = DEADLINE.with(|d| d.get()) else { return false };
-    if std::time::Instant::now() + std::time::Duration::from_secs_f64(secs) < at {
+    let (deadline, local) = (DEADLINE.with(|d| d.get()), LOCAL.with(|l| l.get()));
+    if deadline.is_none() && local.is_none() {
         return false;
     }
-    CUT.with(|c| c.set(true));
+    let end = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs);
+    if deadline.is_some_and(|at| end >= at) {
+        CUT.with(|c| c.set(true));
+    } else if local.is_some_and(|at| end >= at) {
+        stats::add("time-limit/skipped", 0.0);
+    } else {
+        return false;
+    }
     env.ctx(|c| c.mark_cut());
     true
 }
 
+/// `f` as a scope, a sequence or a pipeline run: a `(time-limit N)` or `(off NAME)` inside
+/// it ends with it.
+fn scoped<R>(f: impl FnOnce() -> R) -> R {
+    let local = LOCAL.with(|l| l.get());
+    let outer = OUTER.with(|o| o.replace(local));
+    let r = crate::sched::in_scope(f);
+    OUTER.with(|o| o.set(outer));
+    LOCAL.with(|l| l.set(local));
+    r
+}
+
 /// The candidates `p` gives for `set`.
 pub fn run(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
-    crate::sched::apply(env.passes);
-    go(p, set, env)
+    scoped(|| {
+        crate::sched::apply(env.passes);
+        go(p, set, env)
+    })
+}
+
+/// Steps that only move candidates around: they run past a limit too, so that a sequence
+/// still has its registers and can go on after a `(time-limit 0)`.
+fn bookkeeping(p: &Pipe) -> bool {
+    match p {
+        Pipe::Seq(_) | Pipe::Filter(_) => true,
+        Pipe::Pass(Pass::Save(_) | Pass::Load(_) | Pass::Label(_) | Pass::Off(_) | Pass::TimeLimit(_)) => true,
+        Pipe::Pass(Pass::Set(i)) => matches!(SET_PASSES[*i], "id" | "none" | "within" | "pre_done"),
+        _ => false,
+    }
 }
 
 fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
     // Every candidate equals the input, so stopping anywhere keeps the result right.
-    if past_deadline(0.0, env) {
+    if !bookkeeping(p) && past_deadline(0.0, env) {
         return Ok(set);
     }
     match p {
         Pipe::Pass(p) => pass(p, set, env),
-        Pipe::Seq(ps) => ps.iter().try_fold(set, |s, p| go(p, s, env)),
+        Pipe::Seq(ps) => scoped(|| ps.iter().try_fold(set, |s, p| go(p, s, env))),
         Pipe::Union(ps) => {
             let mut out = Vec::new();
             for p in ps {
@@ -673,7 +711,7 @@ fn run_on(p: &Pipe, t: &Term, w: &Ctx, cofactor: bool) -> Option<Cand> {
     let mut env = Env::with(None, &passes, w.w, w.signed, false, String::new(), "");
     env.cofactor = cofactor;
     env.ctxs.borrow_mut().push(w.narrow(w.w));
-    let out = go(p, vec![Cand::of(t.clone(), &Cand::new("", "input"), 0, 0)], &env).expect("a rewrite runs no egglog");
+    let out = scoped(|| go(p, vec![Cand::of(t.clone(), &Cand::new("", "input"), 0, 0)], &env)).expect("a rewrite runs no egglog");
     out.into_iter().next()
 }
 
@@ -686,8 +724,11 @@ pub fn polish(egg: &str, w: u32, signed: Option<bool>, p: &Passes) -> (String, O
 
 /// `Passes::polish` on `c` alone, when it makes it smaller.
 fn polish_one(c: &Cand, env: &Env) -> Option<Cand> {
-    crate::sched::apply(env.passes);
-    let out = go(&env.passes.polish, vec![c.clone()], env).expect("polish runs no egglog");
+    let out = scoped(|| {
+        crate::sched::apply(env.passes);
+        go(&env.passes.polish, vec![c.clone()], env)
+    })
+    .expect("polish runs no egglog");
     out.into_iter().next().filter(|r| r.size() < c.size())
 }
 
@@ -704,6 +745,13 @@ fn pass(p: &Pass, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
         Pass::Load(r) => return Ok(env.regs.borrow().get(r).cloned().unwrap_or_default()),
         Pass::Off(n) => {
             crate::sched::turn_off(n);
+            return Ok(set);
+        }
+        Pass::TimeLimit(v) => {
+            let outer = OUTER.with(|o| o.get());
+            let ms = env.value(v, &set).unwrap_or(0);
+            let at = (ms > 0).then(|| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+            LOCAL.with(|l| l.set(outer.into_iter().chain(at).min()));
             return Ok(set);
         }
         Pass::Term { name, at, alt } => return Ok(seen(dedup(term_pass(name, linear_mba::term_pass_at(*at), *alt, &set, env)), env)),
@@ -834,4 +882,74 @@ fn seen(out: Vec<Cand>, env: &Env) -> Vec<Cand> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipe_lang as lang;
+
+    #[test]
+    fn time_limit_ends_with_its_sequence() {
+        let passes = Passes::default();
+        let env = Env::prepass(&passes, 32, None, false, "(Var \"x\")");
+        let limit = |ms| Pass::TimeLimit(Value::Num(ms));
+        let wait = || std::thread::sleep(std::time::Duration::from_millis(5));
+        scoped(|| {
+            pass(&limit(1), vec![], &env).unwrap();
+            wait();
+            assert!(past_deadline(0.0, &env));
+            scoped(|| {
+                pass(&limit(0), vec![], &env).unwrap();
+                assert!(past_deadline(0.0, &env), "a clear inside keeps the outer limit");
+                pass(&limit(100_000), vec![], &env).unwrap();
+                assert!(past_deadline(0.0, &env), "an inner limit is never later than the outer one");
+            });
+            assert!(past_deadline(0.0, &env));
+            pass(&limit(0), vec![], &env).unwrap();
+            assert!(!past_deadline(0.0, &env));
+            pass(&limit(1), vec![], &env).unwrap();
+        });
+        wait();
+        assert!(!past_deadline(0.0, &env), "a limit ends with its sequence");
+        assert!(!cut());
+    }
+
+    #[test]
+    fn off_ends_with_its_sequence() {
+        let passes = Passes::default();
+        let env = Env::prepass(&passes, 32, None, false, "(Var \"x\")");
+        let step = |p: &str| go(&lang::parse(p).unwrap(), vec![Cand::new("(Var \"x\")", "input")], &env).unwrap();
+        crate::sched::apply(&passes);
+        scoped(|| {
+            step("((off relate) | id)");
+            assert!(!crate::sched::is_off("relate"), "a group ends its off");
+            step("(if true (off relate))");
+            assert!(crate::sched::is_off("relate"), "a branch that is no sequence does not");
+        });
+        assert!(!crate::sched::is_off("relate"));
+    }
+
+    #[test]
+    fn time_limit_skips_work_but_not_bookkeeping() {
+        let passes = Passes::default();
+        let x = "(Sub (Or (Var \"x\") (Var \"y\")) (And (Var \"x\") (Var \"y\")))";
+        let env = Env::prepass(&passes, 32, None, false, x);
+        let step = |p: &str, set: Vec<Cand>| -> Vec<String> {
+            go(&lang::parse(p).unwrap(), set, &env).unwrap().iter().map(|c| c.term().to_string()).collect()
+        };
+        let input = || vec![Cand::new(x, "input")];
+        crate::sched::apply(&passes);
+        scoped(|| {
+            assert_eq!(step("rewrite", input()), ["(Xor (Var \"x\") (Var \"y\"))"]);
+            step("(save t)", input());
+            step("(time-limit 1)", input());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            assert_eq!(step("rewrite", input()), [x], "work past the limit is skipped");
+            assert_eq!(step("(load t) | (filter true)", vec![]), [x], "bookkeeping still runs");
+            assert_eq!(step("(time-limit 0) | rewrite", input()), [x], "a clear restores the limit outside its sequence");
+            step("(time-limit 0)", input());
+            assert_eq!(step("rewrite", input()), ["(Xor (Var \"x\") (Var \"y\"))"], "a clear lets the rest run");
+        });
+    }
 }

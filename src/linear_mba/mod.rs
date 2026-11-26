@@ -1058,17 +1058,19 @@ pub fn simplify_linear_both(egg: &str, ty: crate::eval::NumType) -> (String, Vec
 /// is set; `signed` as in `Ctx`.
 pub fn simplify_linear_with(egg: &str, w: u32, signed: Option<bool>, trace: bool, p: &Passes) -> (String, Vec<String>) {
     type Result = (String, Vec<String>);
-    type Last = Option<(String, u32, Option<bool>, bool, Passes, Result)>;
+    type Last = Option<(String, u32, Option<bool>, bool, Passes, u64, Result)>;
     thread_local! {
         static LAST: std::cell::RefCell<Last> = const { std::cell::RefCell::new(None) };
     }
     crate::sched::apply(p);
-    let hit = |(e, bits, s, t, q, _): &&(String, u32, Option<bool>, bool, Passes, Result)| e == egg && *bits == w && *s == signed && *t == trace && q == p;
-    match LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.5.clone())) {
+    // An enclosing `(with off=...)` or `(off NAME)` changes the result as `p.off` does.
+    let off = crate::sched::off_bits_now();
+    let hit = |(e, bits, s, t, q, o, _): &&(String, u32, Option<bool>, bool, Passes, u64, Result)| e == egg && *bits == w && *s == signed && *t == trace && q == p && *o == off;
+    match LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.6.clone())) {
         Some(r) => r,
         None => {
             let r = simplify_linear_uncached(egg, w, signed, trace, p);
-            LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, signed, trace, p.clone(), r.clone())));
+            LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, signed, trace, p.clone(), off, r.clone())));
             r
         }
     }
