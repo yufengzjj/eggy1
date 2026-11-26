@@ -361,6 +361,40 @@ fn holds(c: &Cond, set: &[Cand], env: &Env) -> bool {
     c.0.iter().any(|alt| alt.iter().all(|(neg, name)| cond(name, set, env) != *neg))
 }
 
+thread_local! {
+    /// When `go` stops starting passes (`Cli::time_limit`).
+    static DEADLINE: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+    /// Some pass was skipped at the deadline.
+    static CUT: Cell<bool> = const { Cell::new(false) };
+    /// Seconds the last egglog round took.
+    static LAST_ROUND: Cell<f64> = const { Cell::new(0.0) };
+}
+
+/// Starts the time limit of a run on this thread (`None`: no limit).
+pub fn set_deadline(seconds: Option<f64>) {
+    let at = seconds.map(|s| std::time::Instant::now() + std::time::Duration::from_secs_f64(s.max(0.0)));
+    DEADLINE.with(|d| d.set(at));
+    CUT.with(|c| c.set(false));
+    LAST_ROUND.with(|r| r.set(0.0));
+}
+
+/// Whether a pass was skipped at the deadline since `set_deadline`.
+pub fn cut() -> bool {
+    CUT.with(|c| c.get())
+}
+
+/// Whether work taking `secs` more would end past the deadline; records the cut when it
+/// would. Results computed then are not memoized (`Ctx::mark_cut`).
+fn past_deadline(secs: f64, env: &Env) -> bool {
+    let Some(at) = DEADLINE.with(|d| d.get()) else { return false };
+    if std::time::Instant::now() + std::time::Duration::from_secs_f64(secs) < at {
+        return false;
+    }
+    CUT.with(|c| c.set(true));
+    env.ctx(|c| c.mark_cut());
+    true
+}
+
 /// The candidates `p` gives for `set`.
 pub fn run(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
     crate::sched::apply(env.passes);
@@ -368,6 +402,10 @@ pub fn run(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
 }
 
 fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
+    // Every candidate equals the input, so stopping anywhere keeps the result right.
+    if past_deadline(0.0, env) {
+        return Ok(set);
+    }
     match p {
         Pipe::Pass(name) => pass(name, set, env),
         Pipe::Seq(ps) => ps.iter().try_fold(set, |s, p| go(p, s, env)),
@@ -700,9 +738,13 @@ fn pass(name: &str, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
         }
         _ if name == "egglog" || name.starts_with("egglog/") => {
             let cli = env.cli(name);
+            if past_deadline(LAST_ROUND.with(|r| r.get()), env) {
+                return Ok(set);
+            }
             let roots: Vec<&str> = set.iter().map(Cand::term).collect();
             let clock = std::time::Instant::now();
             let e = crate::egglog_round(&env.egg, &roots, cli)?;
+            LAST_ROUND.with(|r| r.set(clock.elapsed().as_secs_f64()));
             stats::add(name, stats::since(clock));
             if env.trace {
                 eprintln!("{name}: root {} extracted {}", main.size(), size_of(&e));

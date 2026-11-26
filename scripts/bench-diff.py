@@ -17,8 +17,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-RANK = {"solved": 0, "badgt": 1, "partial": 1, "unchanged": 2, "timeout": 3, "error": 4, "wrong": 5}
-SIZED = {"solved", "partial", "unchanged", "badgt"}
+RANK = {"solved": 0, "badgt": 1, "partial": 1, "unchanged": 2, "cut": 2, "timeout": 3, "error": 4, "wrong": 5}
+SIZED = {"solved", "partial", "unchanged", "cut", "badgt"}
 
 
 def case_hash(text):

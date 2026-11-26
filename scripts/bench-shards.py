@@ -29,7 +29,7 @@ import threading
 import time
 from pathlib import Path
 
-STATUSES = ["solved", "partial", "unchanged", "timeout", "error", "wrong", "badgt", "total"]
+STATUSES = ["solved", "partial", "unchanged", "cut", "timeout", "error", "wrong", "badgt", "total"]
 RESULT_COLUMNS = ["type", "file", "section", "index", "hash", "status", "size_in", "size_gt", "size_out", "secs",
                   "output"]
 
@@ -220,11 +220,15 @@ def split_fails(text):
     return entries
 
 
+# Statuses of cases that ran out of time (`cut`: stopped at bench --time-limit), rerun alone.
+RETRIED = ("timeout", "cut")
+
+
 def timeout_case(ty, entry):
-    """(type, stem, section, line) of a timeout entry in a bench fails file, else None."""
+    """(type, stem, section, line) of a RETRIED entry in a bench fails file, else None."""
     lines = entry.splitlines()
     m = FAIL_HEAD.fullmatch(lines[0])
-    if not m or m.group(1) != "timeout" or len(lines) < 3:
+    if not m or m.group(1) not in RETRIED or len(lines) < 3:
         return None
     if not (lines[1].startswith("  in:  ") and lines[2].startswith("  gt:  ")):
         return None
@@ -232,11 +236,11 @@ def timeout_case(ty, entry):
 
 
 def retry_timeouts(runner):
-    """Run each timed-out case again on its own and replace its count and fail entry."""
+    """Run each case that ran out of time again on its own and replace its count and fail entry."""
     a = runner.args
     timed_out = {}
     for c, cols in runner.results.items():
-        if cols[5] == "timeout":
+        if cols[5] in RETRIED:
             timed_out.setdefault((c[0], c[1], c[2], cols[4]), []).append(c)
     todo = []
     for i, (sid, ty, entry) in enumerate(runner.fails):
@@ -267,17 +271,21 @@ def retry_timeouts(runner):
     out = Path(a.out)
     while any(t.is_alive() for t in threads):
         time.sleep(5)
-        line = f"retrying {len(todo)} timeouts, {a.retry_jobs} at a time: {retry.done_cases} done"
+        line = f"retrying {len(todo)} cases out of time, {a.retry_jobs} at a time: {retry.done_cases} done"
         (out / "progress.txt").write_text(line + "\n", encoding="utf-8")
         print(line, file=sys.stderr, flush=True)
-    ti = STATUSES.index("timeout")
+    removed = {}
+    for _, c in todo:
+        cols = runner.results.get(c)
+        status, secs = (cols[5], float(cols[9] or a.timeout)) if cols else ("timeout", a.timeout)
+        r = removed.setdefault((c[0], c[1], c[2]), ([0] * len(STATUSES), [0.0]))
+        r[0][STATUSES.index(status)] += 1
+        r[0][-1] += 1
+        r[1][0] += secs
     for key, (counts, secs) in retry.rows.items():
         old = runner.rows[key]
-        n = counts[-1]
-        fixed = [x + y for x, y in zip(old[0], counts)]
-        fixed[ti] -= n
-        fixed[-1] -= n
-        runner.rows[key] = (fixed, old[1] - n * a.timeout + secs)
+        rm, rs = removed.get(key, ([0] * len(STATUSES), [0.0]))
+        runner.rows[key] = ([x + y - z for x, y, z in zip(old[0], counts, rm)], old[1] - rs[0] + secs)
     new_fails = {}
     for sid, ty, entry in retry.fails:
         new_fails.setdefault(sid, []).append((sid, ty, entry))
@@ -288,19 +296,23 @@ def retry_timeouts(runner):
     runner.fails = kept
     runner.results.update(retry.results)
     runner.failed_shards += retry.failed_shards
-    still = sum(c[ti] for c, _ in retry.rows.values())
-    return f"retried {len(todo)} timeouts on their own, {a.retry_jobs} at a time: {still} still time out\n"
+    still = sum(c[STATUSES.index(st)] for c, _ in retry.rows.values() for st in RETRIED)
+    return f"retried {len(todo)} cases out of time on their own, {a.retry_jobs} at a time: {still} still out of time\n"
 
 
 def parse_table(text):
-    rows = {}
+    """Rows of a bench table by (dataset, section): counts in the order of STATUSES (columns
+    by the header's names, so a bench with fewer statuses reads too) and summed seconds."""
+    rows, names = {}, None
     for line in text.splitlines():
-        if not line.startswith("| ") or line.startswith("| dataset") or line.startswith("| TOTAL"):
-            continue
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cells) != 3 + len(STATUSES):
+        if line.startswith("| dataset"):
+            names = cells[2:-1]
             continue
-        counts = [int(c) for c in cells[2:2 + len(STATUSES)]]
+        if names is None or not line.startswith("| ") or line.startswith("| TOTAL") or len(cells) != 3 + len(names):
+            continue
+        got = dict(zip(names, cells[2:-1]))
+        counts = [int(got.get(s, 0)) for s in STATUSES]
         rows[(cells[0], cells[1])] = (counts, float(cells[-1]) * counts[-1])
     return rows
 

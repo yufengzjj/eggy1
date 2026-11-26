@@ -30,6 +30,10 @@ struct Args {
     /// Seconds per case.
     #[arg(short, long, default_value_t = 10.0)]
     timeout: f64,
+    /// Fraction of `--timeout` after which a case stops starting passes and gives the smallest
+    /// form so far (`eggy1 --time-limit`); such a result not solved is `cut`. 0: no limit.
+    #[arg(long, default_value_t = 0.8)]
+    time_limit: f64,
     /// Parallel cases (default: number of CPUs).
     #[arg(short, long)]
     jobs: Option<usize>,
@@ -59,7 +63,7 @@ struct Args {
 
 const RESULT_COLUMNS: &str = "type\tfile\tsection\tindex\thash\tstatus\tsize_in\tsize_gt\tsize_out\tsecs\toutput";
 
-const STATUSES: [&str; 8] = ["solved", "partial", "unchanged", "timeout", "error", "wrong", "badgt", "total"];
+const STATUSES: [&str; 9] = ["solved", "partial", "unchanged", "cut", "timeout", "error", "wrong", "badgt", "total"];
 
 struct Case {
     file: String,
@@ -245,6 +249,7 @@ fn run_child(args: &Args, case: &Case) -> Outcome {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .args(["--one", "-n", &args.num_type, "-i", &args.iter_limit.to_string(), "-m", &args.max_restarts.to_string(), "--passes", &args.passes])
+        .args(["-t", &args.timeout.to_string(), "--time-limit", &args.time_limit.to_string()])
         .env("EGGY_CASE", format!("{}\t{}\t{}\t{}", args.num_type, case.file, case.section, case.index));
     if let Some(path) = &args.stats {
         command.env("EGGY_STATS", path);
@@ -314,6 +319,7 @@ fn run_one(args: &Args) {
         max_restarts: args.max_restarts,
         trace: args.trace,
         passes: eggy1::sched::Passes::parse(&args.passes).expect("bad --passes"),
+        time_limit: (args.time_limit > 0.0).then_some(args.time_limit * args.timeout),
         expr: input.clone(),
         ..Default::default()
     };
@@ -338,6 +344,8 @@ fn run_one(args: &Args) {
         "badgt"
     } else if s_out <= s_gt {
         "solved"
+    } else if eggy1::last_run_cut() {
+        "cut"
     } else if s_out < s_in {
         "partial"
     } else {

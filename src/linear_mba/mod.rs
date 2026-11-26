@@ -115,6 +115,10 @@ impl Ctx {
     fn clustering_depth(&self) -> i64 {
         self.st.clustering.lock().unwrap().len() as i64
     }
+    /// Records that the running computation was cut short, so it is not memoized.
+    pub(crate) fn mark_cut(&self) {
+        self.read(|d| d.cut = true);
+    }
     /// Takes one from the budget `a`, or records a cut when it is used up.
     fn take_budget(&self, a: &AtomicUsize) -> bool {
         let ok = take_one(a) > 0;

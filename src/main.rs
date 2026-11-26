@@ -29,6 +29,9 @@ fn main() {
         eggy1::stats::enable();
     }
     let result = simplify(&egg_expr, &cli);
+    if eggy1::last_run_cut() {
+        eprintln!("time limit reached: the result is the smallest form found by then");
+    }
     if cli.stats {
         eprint!("{}", eggy1::stats::report(&eggy1::stats::take()));
     }
