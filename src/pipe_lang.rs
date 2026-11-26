@@ -2,8 +2,8 @@
 //! `a`, `(FORM args...)` is a combinator or a pass with arguments, conditions are
 //! expressions (`(if (mul >= 4 && shift < 1) (off small_blocks))`). Parsed into `sched::Pipe`.
 
-use crate::pipe::{COUNTS, FEATURES, is_cond, is_pass};
-use crate::sched::{Cond, INNER, LIMITS, Pipe};
+use crate::pipe::{CONDS, COUNTS, FEATURES, resolve};
+use crate::sched::{Cmp, Cond, INNER, LIMITS, Pass, Pipe, Value};
 
 #[derive(Clone, Debug, PartialEq)]
 enum Tok {
@@ -89,25 +89,60 @@ const FORMS: [&str; 22] = [
     "label", "off", "egglog",
 ];
 
-/// A literal of a condition in disjunctive normal form: negated, and a `Cond` name.
-type Lit = (bool, String);
-type Dnf = Vec<Vec<Lit>>;
-
-fn and(a: Dnf, b: Dnf) -> Dnf {
-    a.iter().flat_map(|x| b.iter().map(move |y| x.iter().chain(y).cloned().collect())).collect()
-}
-
-fn not(a: Dnf) -> Dnf {
-    a.into_iter().fold(vec![vec![]], |acc, clause| and(acc, clause.into_iter().map(|(n, l)| vec![(!n, l)]).collect()))
-}
-
-/// One side of a comparison: a number, a feature, the main candidate's size, or a
-/// register's size times `P/Q`.
+/// An expression before it is read as a condition or a value.
 #[derive(Debug)]
-enum Side {
+enum E {
+    Name(String),
     Num(u64),
-    Feature(String),
-    Reg(String, u64, u64),
+    Size(String),
+    Same(String),
+    Quant(bool, Box<E>),
+    Not(Box<E>),
+    And(Vec<E>),
+    Or(Vec<E>),
+    Cmp(Cmp, Box<E>, Box<E>),
+    Bin(char, Box<E>, Box<E>),
+}
+
+fn to_cond(e: E) -> Result<Cond, String> {
+    let all = |es: Vec<E>| es.into_iter().map(to_cond).collect::<Result<Vec<_>, _>>();
+    Ok(match e {
+        E::Name(n) => match CONDS.iter().position(|c| *c == n) {
+            Some(i) => Cond::Is(i),
+            None if FEATURES.contains(&n.as_str()) => return Err(format!("{n} is a number: compare it, as in ({n} >= 1)")),
+            None => return Err(format!("unknown condition {n}; known: {}", CONDS.join(" "))),
+        },
+        E::Same(r) => Cond::Same(r),
+        E::Quant(any, c) => {
+            let c = Box::new(to_cond(*c)?);
+            if any { Cond::Any(c) } else { Cond::All(c) }
+        }
+        E::Not(c) => Cond::Not(Box::new(to_cond(*c)?)),
+        E::And(cs) => Cond::And(all(cs)?),
+        E::Or(cs) => Cond::Or(all(cs)?),
+        E::Cmp(op, a, b) => Cond::Cmp(op, to_value(*a)?, to_value(*b)?),
+        e => return Err(format!("expected a condition, found the number {e:?}")),
+    })
+}
+
+fn to_value(e: E) -> Result<Value, String> {
+    Ok(match e {
+        E::Num(n) => Value::Num(n),
+        E::Name(n) => {
+            if let Some(i) = FEATURES.iter().position(|f| *f == n) {
+                Value::Feature(i)
+            } else if let Some(i) = COUNTS.iter().position(|c| *c == n) {
+                Value::Count(i)
+            } else if let Some(i) = LIMITS.iter().position(|(l, _)| *l == n) {
+                Value::Limit(i)
+            } else {
+                return Err(format!("unknown number {n}; known: {} {} and the limits", FEATURES.join(" "), COUNTS.join(" ")));
+            }
+        }
+        E::Size(r) => Value::Size(r),
+        E::Bin(op, a, b) => Value::Bin(op, Box::new(to_value(*a)?), Box::new(to_value(*b)?)),
+        e => return Err(format!("expected a number, found the condition {e:?}")),
+    })
 }
 
 struct Parser {
@@ -120,8 +155,8 @@ impl Parser {
         self.toks.get(self.at)
     }
 
-    fn peek2(&self) -> Option<&Tok> {
-        self.toks.get(self.at + 1)
+    fn peek_at(&self, k: usize) -> Option<&Tok> {
+        self.toks.get(self.at + k)
     }
 
     fn next(&mut self) -> Option<Tok> {
@@ -156,11 +191,10 @@ impl Parser {
     fn stage(&mut self) -> Result<Pipe, String> {
         match self.next() {
             Some(Tok::Name(n)) if FORMS.contains(&n.as_str()) && n != "egglog" => Err(format!("{n} needs parentheses: ({n} ...)")),
-            Some(Tok::Name(n)) if is_pass(&n) => Ok(Pipe::Pass(n)),
-            Some(Tok::Name(n)) => Err(format!("unknown pass {n}; known: {}", crate::pipe::names().join(" "))),
+            Some(Tok::Name(n)) => resolve(&n).map(Pipe::Pass).ok_or_else(|| format!("unknown pass {n}; known: {}", crate::pipe::names().join(" "))),
             Some(Tok::Open) => {
                 let p = match self.peek() {
-                    Some(Tok::Name(n)) if FORMS.contains(&n.as_str()) && !(n == "egglog" && self.peek2() == Some(&Tok::Close)) => {
+                    Some(Tok::Name(n)) if FORMS.contains(&n.as_str()) && !(n == "egglog" && self.peek_at(1) == Some(&Tok::Close)) => {
                         let n = n.clone();
                         self.at += 1;
                         self.form(&n)?
@@ -193,12 +227,23 @@ impl Parser {
         Ok(out)
     }
 
-    fn count(&mut self) -> Result<String, String> {
-        match self.next() {
-            Some(Tok::Num(n)) => Ok(n.to_string()),
-            Some(Tok::Name(n)) if COUNTS.contains(&n.as_str()) => Ok(n),
-            x => Err(format!("expected a number or one of {}, found {}", COUNTS.join(" "), show_tok(x.as_ref()))),
+    /// A count: a number, a name or a parenthesized expression.
+    fn count(&mut self) -> Result<Value, String> {
+        to_value(self.atom()?)
+    }
+
+    /// A condition argument: a name, `!` and a condition argument, or a parenthesized
+    /// expression.
+    fn cond(&mut self) -> Result<Cond, String> {
+        to_cond(self.cond_arg()?)
+    }
+
+    fn cond_arg(&mut self) -> Result<E, String> {
+        if self.peek() == Some(&Tok::Not) {
+            self.at += 1;
+            return Ok(E::Not(Box::new(self.cond_arg()?)));
         }
+        self.atom()
     }
 
     fn form(&mut self, f: &str) -> Result<Pipe, String> {
@@ -217,7 +262,7 @@ impl Parser {
                 let c = self.cond()?;
                 let mut ps = self.stages(f)?;
                 match (f, ps.len()) {
-                    ("if", 1) => Pipe::If(c, b(ps.remove(0)), b(Pipe::Pass("id".into()))),
+                    ("if", 1) => Pipe::If(c, b(ps.remove(0)), b(Pipe::Pass(Pass::id()))),
                     ("if", 2) => Pipe::If(c, b(ps.remove(0)), b(ps.remove(0))),
                     ("retry", 2) => Pipe::Retry(c, b(ps.remove(0)), b(ps.remove(0))),
                     _ => return Err(format!("{f} takes a condition and {} pipelines", if f == "if" { "one or two" } else { "two" })),
@@ -263,15 +308,16 @@ impl Parser {
                 let p = if set.is_empty() { p } else { Pipe::With(set, b(p)) };
                 if off.is_empty() { p } else { Pipe::Off(off, b(p)) }
             }
-            "save" | "load" | "label" | "egglog" => Pipe::Pass(format!("{f}/{}", self.name(&format!("a name after {f}"))?)),
+            "save" | "load" | "label" | "egglog" => {
+                let n = format!("{f}/{}", self.name(&format!("a name after {f}"))?);
+                Pipe::Pass(resolve(&n).unwrap())
+            }
             "off" => {
                 let mut ps = Vec::new();
                 while !self.at_close() {
                     let n = self.name("a pass name after off")?;
-                    if !INNER.contains(&n.as_str()) {
-                        return Err(format!("unknown off name {n}; known: {}", INNER.join(",")));
-                    }
-                    ps.push(Pipe::Pass(format!("off/{n}")));
+                    let p = resolve(&format!("off/{n}")).ok_or_else(|| format!("unknown off name {n}; known: {}", INNER.join(",")))?;
+                    ps.push(Pipe::Pass(p));
                 }
                 match ps.len() {
                     0 => return Err("off needs a pass name".into()),
@@ -283,137 +329,80 @@ impl Parser {
         })
     }
 
-    /// A condition argument: a name, `!` and a name, or a parenthesized expression.
-    fn cond(&mut self) -> Result<Cond, String> {
-        let d = match self.peek() {
-            Some(Tok::Open) => self.primary()?,
-            Some(Tok::Not) => {
-                self.at += 1;
-                not(if self.peek() == Some(&Tok::Open) { self.primary()? } else { self.cond_name()? })
-            }
-            _ => self.cond_name()?,
-        };
-        Ok(Cond(d))
-    }
-
-    fn cond_name(&mut self) -> Result<Dnf, String> {
-        let n = self.name("a condition")?;
-        if FEATURES.contains(&n.as_str()) || !is_cond(&n) {
-            return Err(format!("unknown condition {n}; known: {} or a comparison such as (mul >= 4)", crate::pipe::CONDS.join(" ")));
-        }
-        Ok(vec![vec![(false, n)]])
-    }
-
-    fn or(&mut self) -> Result<Dnf, String> {
-        let mut d = self.and()?;
+    fn or(&mut self) -> Result<E, String> {
+        let mut es = vec![self.and()?];
         while self.peek() == Some(&Tok::Or) {
             self.at += 1;
-            d.extend(self.and()?);
+            es.push(self.and()?);
         }
-        Ok(d)
+        Ok(if es.len() == 1 { es.pop().unwrap() } else { E::Or(es) })
     }
 
-    fn and(&mut self) -> Result<Dnf, String> {
-        let mut d = self.unary()?;
+    fn and(&mut self) -> Result<E, String> {
+        let mut es = vec![self.not()?];
         while self.peek() == Some(&Tok::And) {
             self.at += 1;
-            d = and(d, self.unary()?);
+            es.push(self.not()?);
         }
-        Ok(d)
+        Ok(if es.len() == 1 { es.pop().unwrap() } else { E::And(es) })
     }
 
-    fn unary(&mut self) -> Result<Dnf, String> {
+    fn not(&mut self) -> Result<E, String> {
         if self.peek() == Some(&Tok::Not) {
             self.at += 1;
-            return Ok(not(self.unary()?));
+            return Ok(E::Not(Box::new(self.not()?)));
         }
-        let comparison = match (self.peek(), self.peek2()) {
-            (Some(Tok::Num(_)), _) => true,
-            (Some(Tok::Name(_)), Some(Tok::Cmp(_) | Tok::Arith(_))) => true,
-            (Some(Tok::Open), Some(Tok::Name(n))) => n == "size" && matches!(self.toks.get(self.at + 2), Some(Tok::Name(_))),
-            _ => false,
-        };
-        if comparison {
-            return self.comparison();
-        }
-        match self.peek() {
-            Some(Tok::Open) => self.primary(),
-            _ => self.cond_name(),
-        }
-    }
-
-    /// `( expr )` or a quantifier.
-    fn primary(&mut self) -> Result<Dnf, String> {
-        self.expect(Tok::Open, "(")?;
-        if let Some(Tok::Name(n)) = self.peek()
-            && (n == "any" || n == "all")
-        {
-            return Err(format!("({n} ...) is not supported yet"));
-        }
-        let d = self.or()?;
-        self.expect(Tok::Close, ")")?;
-        Ok(d)
-    }
-
-    fn side(&mut self) -> Result<Side, String> {
-        let s = match self.next() {
-            Some(Tok::Num(n)) => Side::Num(n),
-            Some(Tok::Name(n)) if FEATURES.contains(&n.as_str()) => Side::Feature(n),
-            Some(Tok::Open) => {
-                let k = self.name("size")?;
-                if k != "size" {
-                    return Err(format!("expected (size R), found ({k}"));
-                }
-                let r = self.name("a register")?;
-                self.expect(Tok::Close, ")")?;
-                Side::Reg(r, 1, 1)
-            }
-            x => return Err(format!("expected a number, a feature ({}) or (size R), found {}", FEATURES.join(" "), show_tok(x.as_ref()))),
-        };
-        let Side::Reg(r, 1, 1) = s else { return Ok(s) };
-        if self.peek() != Some(&Tok::Arith('*')) {
-            return Ok(Side::Reg(r, 1, 1));
-        }
+        let a = self.sum()?;
+        let Some(Tok::Cmp(op)) = self.peek() else { return Ok(a) };
+        let op = Cmp::ALL.iter().find(|(_, s)| s == op).unwrap().0;
         self.at += 1;
-        let (Some(Tok::Num(p)), Some(Tok::Arith('/')), Some(Tok::Num(q))) = (self.next(), self.next(), self.next()) else {
-            return Err("expected (size R) * P/Q".into());
-        };
-        Ok(Side::Reg(r, p, q))
+        Ok(E::Cmp(op, Box::new(a), Box::new(self.sum()?)))
     }
 
-    /// The comparisons that are `Cond` literals: a feature against a number, `size` against
-    /// `(size R)` or `(size R) * P/Q`.
-    fn comparison(&mut self) -> Result<Dnf, String> {
-        let a = self.side()?;
-        let op = match self.next() {
-            Some(Tok::Cmp(op)) => op,
-            x => return Err(format!("expected a comparison, found {}", show_tok(x.as_ref()))),
-        };
-        let b = self.side()?;
-        let lit = |neg: bool, l: String| vec![vec![(neg, l)]];
-        Ok(match (a, op, b) {
-            (Side::Feature(f), op, Side::Num(n)) => {
-                let at = |n: u64| format!("{f}:{n}");
-                match op {
-                    ">=" => lit(false, at(n)),
-                    ">" => lit(false, at(n + 1)),
-                    "<" => lit(true, at(n)),
-                    "<=" => lit(true, at(n + 1)),
-                    "==" => and(lit(false, at(n)), lit(true, at(n + 1))),
-                    _ => not(and(lit(false, at(n)), lit(true, at(n + 1)))),
-                }
+    fn sum(&mut self) -> Result<E, String> {
+        let mut a = self.product()?;
+        while let Some(Tok::Arith(op @ ('+' | '-'))) = self.peek().cloned() {
+            self.at += 1;
+            a = E::Bin(op, Box::new(a), Box::new(self.product()?));
+        }
+        Ok(a)
+    }
+
+    fn product(&mut self) -> Result<E, String> {
+        let mut a = self.atom()?;
+        while let Some(Tok::Arith(op @ ('*' | '/'))) = self.peek().cloned() {
+            self.at += 1;
+            a = E::Bin(op, Box::new(a), Box::new(self.atom()?));
+        }
+        Ok(a)
+    }
+
+    /// A number, a name, `(size R)`, `(same R)`, `(any C)`, `(all C)` or `( expr )`.
+    fn atom(&mut self) -> Result<E, String> {
+        match self.next() {
+            Some(Tok::Num(n)) => Ok(E::Num(n)),
+            Some(Tok::Name(n)) => Ok(E::Name(n)),
+            Some(Tok::Open) => {
+                let reg = matches!(self.peek_at(1), Some(Tok::Name(_))) && self.peek_at(2) == Some(&Tok::Close);
+                let e = match self.peek() {
+                    Some(Tok::Name(k)) if reg && (k == "size" || k == "same") => {
+                        let k = k.clone();
+                        self.at += 1;
+                        let r = self.name("a register")?;
+                        if k == "size" { E::Size(r) } else { E::Same(r) }
+                    }
+                    Some(Tok::Name(k)) if k == "any" || k == "all" => {
+                        let any = k == "any";
+                        self.at += 1;
+                        E::Quant(any, Box::new(self.or()?))
+                    }
+                    _ => self.or()?,
+                };
+                self.expect(Tok::Close, ")")?;
+                Ok(e)
             }
-            (Side::Feature(f), op, Side::Reg(r, 1, 1)) if f == "size" => match op {
-                "<" => lit(false, format!("lt:{r}")),
-                ">=" => lit(true, format!("lt:{r}")),
-                ">" => lit(false, format!("gt:{r}")),
-                "<=" => lit(true, format!("gt:{r}")),
-                "==" => lit(false, format!("eq:{r}")),
-                _ => lit(true, format!("eq:{r}")),
-            },
-            (Side::Feature(f), op @ ("<=" | ">"), Side::Reg(r, p, q)) if f == "size" => lit(op == ">", format!("le:{p}/{q}:{r}")),
-            (a, op, b) => return Err(format!("comparison {a:?} {op} {b:?} is not supported yet")),
-        })
+            x => Err(format!("expected a condition or a number, found {}", show_tok(x.as_ref()))),
+        }
     }
 }
 
@@ -457,35 +446,49 @@ pub fn parse_any(s: &str) -> Result<Pipe, String> {
     if is_old_syntax(s) { Pipe::parse(s) } else { parse(s) }
 }
 
-fn show_lit((neg, l): &Lit) -> String {
-    if let Some((f, n)) = l.split_once(':')
-        && FEATURES.contains(&f)
-    {
-        return format!("{f} {} {n}", if *neg { "<" } else { ">=" });
-    }
-    let reg = |op: &str, r: &str| format!("size {op} (size {r})");
-    match l.split_once(':') {
-        Some(("lt", r)) => reg(if *neg { ">=" } else { "<" }, r),
-        Some(("gt", r)) => reg(if *neg { "<=" } else { ">" }, r),
-        Some(("eq", r)) => reg(if *neg { "!=" } else { "==" }, r),
-        Some(("le", pr)) => {
-            let (pq, r) = pr.rsplit_once(':').unwrap();
-            format!("size {} (size {r}) * {pq}", if *neg { ">" } else { "<=" })
+/// `v` where an operand of precedence `need` stands: `+ -` are 1, `* /` 2, the rest 3.
+fn show_value(v: &Value, need: u8) -> String {
+    match v {
+        Value::Num(n) => n.to_string(),
+        Value::Count(i) => COUNTS[*i].to_string(),
+        Value::Feature(i) => FEATURES[*i].to_string(),
+        Value::Size(r) => format!("(size {r})"),
+        Value::Limit(i) => LIMITS[*i].0.to_string(),
+        Value::Bin(op, a, b) => {
+            let prec = if matches!(op, '+' | '-') { 1 } else { 2 };
+            let s = format!("{} {op} {}", show_value(a, prec), show_value(b, prec + 1));
+            if prec < need { format!("({s})") } else { s }
         }
-        _ => format!("{}{l}", if *neg { "!" } else { "" }),
     }
+}
+
+/// `c` where an operand of precedence `need` stands: `||` is 1, `&&` 2, `!` 3, a comparison
+/// 4, the rest 5.
+fn show_expr(c: &Cond, need: u8) -> String {
+    let (s, prec) = match c {
+        Cond::Is(i) => (CONDS[*i].to_string(), 5),
+        Cond::Same(r) => (format!("(same {r})"), 5),
+        Cond::Any(c) => (format!("(any {})", show_expr(c, 1)), 5),
+        Cond::All(c) => (format!("(all {})", show_expr(c, 1)), 5),
+        Cond::Not(c) => (format!("!{}", show_expr(c, 5)), 3),
+        Cond::And(cs) => (cs.iter().map(|c| show_expr(c, 3)).collect::<Vec<_>>().join(" && "), 2),
+        Cond::Or(cs) => (cs.iter().map(|c| show_expr(c, 2)).collect::<Vec<_>>().join(" || "), 1),
+        Cond::Cmp(op, a, b) => (format!("{} {} {}", show_value(a, 1), op.symbol(), show_value(b, 1)), 4),
+    };
+    if prec < need { format!("({s})") } else { s }
 }
 
 /// `c` as a condition argument.
 pub fn show_cond(c: &Cond) -> String {
-    if let [clause] = c.0.as_slice()
-        && let [(neg, l)] = clause.as_slice()
-        && !l.contains(':')
-    {
-        return format!("{}{l}", if *neg { "!" } else { "" });
+    match c {
+        Cond::Not(x) => format!("!{}", show_cond(x)),
+        c => show_expr(c, 5),
     }
-    let clause = |c: &Vec<Lit>| c.iter().map(show_lit).collect::<Vec<_>>().join(" && ");
-    format!("({})", c.0.iter().map(clause).collect::<Vec<_>>().join(" || "))
+}
+
+/// `v` as a count argument.
+fn show_count(v: &Value) -> String {
+    show_value(v, 3)
 }
 
 /// `p` written as a stage: a sequence in parentheses.
@@ -500,6 +503,18 @@ fn form(head: &str, args: &[String]) -> String {
     format!("({head} {})", args.join(" "))
 }
 
+fn show_pass(p: &Pass) -> String {
+    let n = p.name();
+    match n.split_once('/') {
+        Some((h @ ("save" | "load" | "label" | "off" | "egglog"), r)) => form(h, &[r.to_string()]),
+        _ => n,
+    }
+}
+
+fn is_id(p: &Pipe) -> bool {
+    *p == Pipe::Pass(Pass::id())
+}
+
 /// `p` in the pipeline language, on one line.
 pub fn show(p: &Pipe) -> String {
     let stages = |ps: &[Pipe]| ps.iter().map(stage).collect::<Vec<_>>();
@@ -509,18 +524,15 @@ pub fn show(p: &Pipe) -> String {
         a
     };
     match p {
-        Pipe::Pass(n) => match n.split_once('/') {
-            Some((h @ ("save" | "load" | "label" | "off" | "egglog"), r)) => form(h, &[r.to_string()]),
-            _ => n.clone(),
-        },
+        Pipe::Pass(p) => show_pass(p),
         Pipe::Seq(ps) if ps.len() > 1 => stages(ps).join(" | "),
         Pipe::Seq(ps) => form("seq", &stages(ps)),
         Pipe::Union(ps) => form("union", &stages(ps)),
         Pipe::First(ps) => form("first", &stages(ps)),
-        Pipe::Best(k, ps) => form("best", &[vec![k.clone()], stages(ps)].concat()),
-        Pipe::Fix(n, p) => form("fix", &with(vec![n.clone()], p)),
-        Pipe::Wins(n, p) => form("wins", &with(vec![n.clone()], p)),
-        Pipe::If(c, a, b) if **b == Pipe::Pass("id".into()) => form("if", &[show_cond(c), stage(a)]),
+        Pipe::Best(k, ps) => form("best", &[vec![show_count(k)], stages(ps)].concat()),
+        Pipe::Fix(n, p) => form("fix", &with(vec![show_count(n)], p)),
+        Pipe::Wins(n, p) => form("wins", &with(vec![show_count(n)], p)),
+        Pipe::If(c, a, b) if is_id(b) => form("if", &[show_cond(c), stage(a)]),
         Pipe::If(c, a, b) => form("if", &[show_cond(c), stage(a), stage(b)]),
         Pipe::Retry(c, a, b) => form("retry", &[show_cond(c), stage(a), stage(b)]),
         Pipe::Smallest(p) => form("smallest", &[show(p)]),
@@ -576,10 +588,10 @@ fn pretty_at(p: &Pipe, indent: usize) -> String {
         Pipe::Seq(ps) => nested("seq", vec![], many(ps)),
         Pipe::Union(ps) => nested("union", vec![], many(ps)),
         Pipe::First(ps) => nested("first", vec![], many(ps)),
-        Pipe::Best(k, ps) => nested("best", vec![k.clone()], many(ps)),
-        Pipe::Fix(n, q) => nested("fix", vec![n.clone()], vec![(q, false)]),
-        Pipe::Wins(n, q) => nested("wins", vec![n.clone()], vec![(q, false)]),
-        Pipe::If(c, a, b) if **b == Pipe::Pass("id".into()) => nested("if", vec![show_cond(c)], vec![(a, true)]),
+        Pipe::Best(k, ps) => nested("best", vec![show_count(k)], many(ps)),
+        Pipe::Fix(n, q) => nested("fix", vec![show_count(n)], vec![(q, false)]),
+        Pipe::Wins(n, q) => nested("wins", vec![show_count(n)], vec![(q, false)]),
+        Pipe::If(c, a, b) if is_id(b) => nested("if", vec![show_cond(c)], vec![(a, true)]),
         Pipe::If(c, a, b) => nested("if", vec![show_cond(c)], vec![(a, true), (b, true)]),
         Pipe::Retry(c, a, b) => nested("retry", vec![show_cond(c)], vec![(a, true), (b, true)]),
         Pipe::Smallest(q) => nested("smallest", vec![], vec![(q, false)]),
@@ -645,10 +657,9 @@ mod tests {
         same("(seq rewrite)", "seq(rewrite)");
         same("(if mixed rewrite)", "if(mixed,rewrite,id)");
         same("(if (!minimal || tiny) (rewrite | polish) id)", "if(!minimal|tiny,seq(rewrite,polish),id)");
-        same("(if !(minimal && tiny) id)", "if(!minimal|!tiny,id)");
-        same("(filter (mul > 3 && vars <= 2))", "filter(mul:4+!vars:3)");
-        same("(filter (mul == 2))", "filter(mul:2+!mul:3)");
-        same("(filter (size >= (size t) || size == (size r)))", "filter(!lt:t|eq:r)");
+        same("(filter (mul >= 4 && vars < 3))", "filter(mul:4+!vars:3)");
+        same("(filter (size >= (size t) || (same r)))", "filter(!lt:t|eq:r)");
+        same("(filter !(same r))", "filter(!eq:r)");
         same("(filter (size > (size f) * 3/4))", "filter(!le:3/4:f)");
         same("(with off=relate,tfunc rewrites=8 rewrite)", "off(relate+tfunc,with(rewrites=8,rewrite))");
         same("(with rewrites=8 (with off=relate rewrite))", "with(rewrites=8,off(relate,rewrite))");
@@ -656,14 +667,29 @@ mod tests {
         same("(fix restarts prepass | egglog)", "fix(restarts,seq(prepass,egglog))");
         same("# comment
 (best 2 rewrite (scope relate)) # more", "best(2,rewrite,scope(relate))");
+        for ok in [
+            "(if !(minimal && tiny) id)",
+            "(filter (any (mul >= 2)))",
+            "(filter (all !tiny && size * 2 + 1 <= (size t) - vars))",
+            "(fix (restarts - 1) prepass)",
+            "(best (keep + 1) id)",
+            "(if (size < split_size) id)",
+            "(wins (2 * 4) id)",
+        ] {
+            let p = parse(ok).unwrap();
+            assert_eq!(parse(&show(&p)).unwrap(), p, "{ok}: {}", show(&p));
+        }
+        assert_eq!(show(&parse("(if !(mul < 1 || tiny) id)").unwrap()), "(if !(mul < 1 || tiny) id)");
+        assert_eq!(show(&parse("(fix (2 * (keep + 1)) id)").unwrap()), "(fix (2 * (keep + 1)) id)");
         for bad in [
             "nope",
             "(if mixed a | b)",
             "(union rewrite | relate)",
             "(fix many id)",
             "(if nope id)",
-            "(filter (any minimal))",
-            "(filter (vars < size))",
+            "(if mul id)",
+            "(filter (mul + tiny))",
+            "(fix mixed id)",
             "(with nope=1 id)",
             "(off nope)",
             "seq",

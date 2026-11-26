@@ -598,8 +598,8 @@ pub(crate) fn rewrite(t: &T, w: &Ctx) -> T {
 pub(crate) fn sub(i: usize, t: &T, w: &Ctx) -> T {
     let p = crate::sched::current();
     match &p.subs[i] {
-        crate::sched::Pipe::Pass(n) if n == "rewrite" => rewrite(t, w),
-        crate::sched::Pipe::Pass(n) if n == "rebuild" => rebuild_once(t, w),
+        crate::sched::Pipe::Pass(crate::sched::Pass::Term { name, .. }) if name == "rewrite" => rewrite(t, w),
+        crate::sched::Pipe::Pass(crate::sched::Pass::Term { name, .. }) if name == "rebuild" => rebuild_once(t, w),
         pipe => crate::pipe::run_term(pipe, t, w),
     }
 }
@@ -1009,14 +1009,12 @@ pub(crate) fn const_bitwise(t: &T, w: &Ctx) -> bool {
     has_const_bitwise(t, w)
 }
 
-/// The pass over one term named `name`: an entry of `TERM_PASSES`, or `polish/NAME` for a
-/// polish pass.
-pub(crate) fn term_pass(name: &str) -> Option<TermPass> {
-    if let Some((_, f)) = TERM_PASSES.iter().find(|(n, _)| *n == name) {
-        return Some(TermPass::Term(*f));
+/// The pass over one term at `at`.
+pub(crate) fn term_pass_at(at: crate::sched::TermAt) -> TermPass {
+    match at {
+        crate::sched::TermAt::Term(i) => TermPass::Term(TERM_PASSES[i].1),
+        crate::sched::TermAt::Polish(i) => TermPass::Polish(POLISH[i].1),
     }
-    let (_, f) = POLISH.iter().find(|(n, _)| name.strip_prefix("polish/") == Some(n))?;
-    Some(TermPass::Polish(*f))
 }
 
 #[derive(Clone, Copy)]

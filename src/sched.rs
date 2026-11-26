@@ -194,95 +194,218 @@ pub fn with_off<R>(names: &[&str], f: impl FnOnce() -> R) -> R {
 }
 
 /// A pass pipeline: every pass maps a list of equivalent candidate terms (the first is the
-/// main one) to another, so any pass can follow any other. Written `name` or
-/// `combinator(arguments)`, e.g. `seq(lowbits,rewrite,egglog,polish)`.
+/// main one) to another, so any pass can follow any other. Written in `crate::pipe_lang`
+/// (`lowbits | rewrite | (fix 3 egglog)`); `Pipe::parse` reads the old `seq(a,b)` syntax.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pipe {
-    /// A pass by name (`crate::pipe::is_pass`).
-    Pass(String),
-    /// Each in turn on the candidates of the one before (`seq(a,b,...)`).
+    /// A pass, its name resolved (`crate::pipe::resolve`).
+    Pass(Pass),
+    /// Each in turn on the candidates of the one before (`a | b`).
     Seq(Vec<Pipe>),
-    /// All on the same candidates; their candidates in order, repeats dropped
-    /// (`union(a,b,...)`).
+    /// All on the same candidates; their candidates in order, repeats dropped (`union`).
     Union(Vec<Pipe>),
     /// All on the same candidates; the `k` smallest of their candidates, the earlier of
-    /// equal ones first (`best(k,a,b,...)`; `k` as in `Fix`).
-    Best(String, Vec<Pipe>),
+    /// equal ones first (`best`).
+    Best(Value, Vec<Pipe>),
     /// The candidates of the first that gives candidates other than its input's, else the
-    /// input (`first(a,b,...)`).
+    /// input (`first`).
     First(Vec<Pipe>),
-    /// Repeated at most `n` times while the main candidate changes (`fix(n,p)`); `n` is a
-    /// number or a name of `crate::pipe::COUNTS` (`fix(restarts,p)`).
-    Fix(String, Box<Pipe>),
-    /// With the `INNER` passes named also turned off (`off(relate+tfunc,p)`).
+    /// Repeated at most `n` times while the main candidate changes (`fix`).
+    Fix(Value, Box<Pipe>),
+    /// With the `INNER` passes named also turned off (`with off=...`).
     Off(Vec<&'static str>, Box<Pipe>),
-    /// `a` where the condition holds for the candidates, else `b` (`if(c,a,b)`, `if(c,a)`
-    /// with `b` = `id`).
+    /// `a` where the condition holds for the candidates, else `b` (`if`).
     If(Cond, Box<Pipe>, Box<Pipe>),
     /// `a`, and where the condition holds for its candidates, `b` on the same input taken
-    /// instead when its main candidate is no larger (`retry(c,a,b)`).
+    /// instead when its main candidate is no larger (`retry`).
     Retry(Cond, Box<Pipe>, Box<Pipe>),
     /// The candidates of `p`, unless a pass inside gave a strictly smaller candidate than
-    /// their main one: then the first smallest (`smallest(p)`).
+    /// their main one: then the first smallest (`smallest`).
     Smallest(Box<Pipe>),
     /// `p` timed as `NAME/run`; a main candidate it changed is counted in `NAME/won/ORIGIN`
-    /// and gets origin `NAME` (`tag(NAME,p)`).
+    /// and gets origin `NAME` (`tag`).
     Tag(String, Box<Pipe>),
-    /// The candidates the condition holds for, each taken alone (`filter(c)`).
+    /// The candidates the condition holds for, each taken alone (`filter`).
     Filter(Cond),
     /// The pre-pass candidate `NAME`: `p` with its own `bit_split_budget`, timed as
     /// `pre/NAME/made`, its candidates with origin `NAME`; none when `NAME` is an entry of
-    /// `PRE` turned off (`cand(NAME,p)`).
+    /// `PRE` turned off (`cand`).
     Cand(String, Box<Pipe>),
-    /// `p` with run settings of the enclosing `scope` changed, each restored after
-    /// (`with(rewrites=128+semi_leaves=2,p)`; values are numbers or `LIMITS` names;
-    /// `crate::linear_mba::Ctx::setting`).
+    /// `p` with run settings of the enclosing `scope` changed, each restored after (`with`;
+    /// values are numbers or `LIMITS` names; `crate::linear_mba::Ctx::setting`).
     With(Vec<(String, String)>, Box<Pipe>),
-    /// `p` with its passes over one term sharing one run: memos, budgets, settings
-    /// (`scope(p)`).
+    /// `p` with its passes over one term sharing one run: memos, budgets, settings (`scope`).
     Scope(Box<Pipe>),
     /// `p`, taken only when its main candidate is smaller than the input's; timed as
     /// `NAME/run`, counted in `NAME/won` and `NAME/gain` when taken, which gives the main
-    /// candidate origin `NAME` (`smaller(NAME,p)`).
+    /// candidate origin `NAME` (`smaller`).
     Smaller(String, Box<Pipe>),
-    /// `p` repeated while the `smaller` inside take a result, until they have taken `n`
-    /// (`wins(n,p)`; `n` as in `Fix`).
-    Wins(String, Box<Pipe>),
+    /// `p` repeated while the `smaller` inside take a result, until they have taken `n` (`wins`).
+    Wins(Value, Box<Pipe>),
     /// Each candidate that is a linear region rebuilt by the first candidate of `p`, with the
     /// atom leaves of that form rewritten by `Passes::rewrite`; otherwise, or when `p` gives
-    /// none, its operands rewritten (`regions(p)`).
+    /// none, its operands rewritten (`regions`).
     Regions(Box<Pipe>),
     /// `p`, then `Passes::rewrite` again on its main candidate, kept when smaller, where it
-    /// changed a term with an arithmetic leaf of a bitwise operation (`again(p)`).
+    /// changed a term with an arithmetic leaf of a bitwise operation (`again`).
     Again(Box<Pipe>),
 }
 
-/// A condition on candidates: alternatives separated by `|`, each names of
-/// `crate::pipe::CONDS` (or `lt:R`, `gt:R`, `eq:R`, `le:P/Q:R` against register `R`) that
-/// must all hold, joined by `+`, each negated by a leading `!` (`mixed+!minimal|tiny`).
+/// A pass of a `Pipe`.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Cond(pub Vec<Vec<(bool, String)>>);
+pub enum Pass {
+    /// A pass over the candidate list, by position in `crate::pipe::SET_PASSES`.
+    Set(usize),
+    /// An egglog round, by the name it is timed as (`egglog`, `egglog/LABEL`).
+    Egglog(String),
+    Save(String),
+    Load(String),
+    Label(String),
+    /// Turns an `INNER` pass off for the rest of the run.
+    Off(&'static str),
+    /// A pass over one term; `alt` is the used bit of an alternative
+    /// (`crate::linear_mba::ALTERNATIVES`).
+    Term { name: String, at: TermAt, alt: Option<u8> },
+}
+
+/// Where a pass over one term is: `crate::linear_mba::TERM_PASSES` or `POLISH`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TermAt {
+    Term(usize),
+    Polish(usize),
+}
+
+impl Pass {
+    /// The pass `id`.
+    pub fn id() -> Pass {
+        crate::pipe::resolve("id").unwrap()
+    }
+
+    /// The name it is written and counted as.
+    pub fn name(&self) -> String {
+        match self {
+            Pass::Set(i) => crate::pipe::SET_PASSES[*i].to_string(),
+            Pass::Egglog(n) | Pass::Term { name: n, .. } => n.clone(),
+            Pass::Save(r) => format!("save/{r}"),
+            Pass::Load(r) => format!("load/{r}"),
+            Pass::Label(r) => format!("label/{r}"),
+            Pass::Off(n) => format!("off/{n}"),
+        }
+    }
+}
+
+/// A number in a pipeline: a count of `fix`, `best` or `wins`, or a side of a comparison.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Value {
+    Num(u64),
+    /// An entry of `crate::pipe::COUNTS`.
+    Count(usize),
+    /// The main candidate's entry of `crate::pipe::FEATURES` (`size` is its node count).
+    Feature(usize),
+    /// The size of the main candidate of register `R` (`(size R)`).
+    Size(String),
+    /// An entry of `LIMITS`.
+    Limit(usize),
+    /// `+ - * /` of two values.
+    Bin(char, Box<Value>, Box<Value>),
+}
+
+/// A comparison operator.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Cmp {
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+    Ne,
+}
+
+impl Cmp {
+    pub const ALL: [(Cmp, &'static str); 6] = [(Cmp::Lt, "<"), (Cmp::Le, "<="), (Cmp::Gt, ">"), (Cmp::Ge, ">="), (Cmp::Eq, "=="), (Cmp::Ne, "!=")];
+
+    pub fn symbol(self) -> &'static str {
+        Cmp::ALL.iter().find(|(c, _)| *c == self).unwrap().1
+    }
+
+    pub fn holds(self, a: u64, b: u64) -> bool {
+        match self {
+            Cmp::Lt => a < b,
+            Cmp::Le => a <= b,
+            Cmp::Gt => a > b,
+            Cmp::Ge => a >= b,
+            Cmp::Eq => a == b,
+            Cmp::Ne => a != b,
+        }
+    }
+}
+
+/// A condition on candidates. A name, `Same` and a comparison are false without a main
+/// candidate, and a comparison also when a register it reads is empty.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Cond {
+    /// An entry of `crate::pipe::CONDS`.
+    Is(usize),
+    /// The main candidate is the term of register `R`'s (`(same R)`).
+    Same(String),
+    Not(Box<Cond>),
+    And(Vec<Cond>),
+    Or(Vec<Cond>),
+    Cmp(Cmp, Value, Value),
+    /// Some candidate alone satisfies it (`(any C)`).
+    Any(Box<Cond>),
+    /// There are candidates and each alone satisfies it (`(all C)`).
+    All(Box<Cond>),
+}
 
 impl Cond {
+    /// The old syntax: alternatives separated by `|`, each names of `crate::pipe::CONDS`
+    /// (or `lt:R`, `gt:R`, `eq:R`, `le:P/Q:R` against register `R`, `FEATURE:N`) that must
+    /// all hold, joined by `+`, each negated by a leading `!` (`mixed+!minimal|tiny`).
     fn parse(s: &str) -> Result<Cond, String> {
-        let term = |t: &str| {
+        let size = || Value::Feature(0);
+        let term = |t: &str| -> Result<Cond, String> {
             let (neg, n) = match t.strip_prefix('!') {
                 Some(n) => (true, n),
                 None => (false, t),
             };
-            match crate::pipe::is_cond(n) {
-                true => Ok((neg, n.to_string())),
-                false => Err(format!("unknown condition {n}; known: {} lt:R gt:R eq:R le:P/Q:R FEATURE:N ({})", crate::pipe::CONDS.join(" "), crate::pipe::FEATURES.join(" "))),
+            let cmp = |pos: Cmp, negc: Cmp, a: Value, b: Value| Cond::Cmp(if neg { negc } else { pos }, a, b);
+            let not = |c: Cond| if neg { Cond::Not(Box::new(c)) } else { c };
+            let bad = || format!("unknown condition {n}; known: {} lt:R gt:R eq:R le:P/Q:R FEATURE:N ({})", crate::pipe::CONDS.join(" "), crate::pipe::FEATURES.join(" "));
+            if let Some(i) = crate::pipe::CONDS.iter().position(|c| *c == n) {
+                return Ok(not(Cond::Is(i)));
             }
+            let parts: Vec<&str> = n.split(':').collect();
+            Ok(match parts.as_slice() {
+                ["lt", r] if !r.is_empty() => cmp(Cmp::Lt, Cmp::Ge, size(), Value::Size(r.to_string())),
+                ["gt", r] if !r.is_empty() => cmp(Cmp::Gt, Cmp::Le, size(), Value::Size(r.to_string())),
+                ["eq", r] if !r.is_empty() => not(Cond::Same(r.to_string())),
+                ["le", pq, r] if !r.is_empty() => {
+                    let (p, q) = pq.split_once('/').and_then(|(p, q)| Some((p.parse::<u64>().ok()?, q.parse::<u64>().ok().filter(|q| *q > 0)?))).ok_or_else(bad)?;
+                    let scaled = Value::Bin('/', Box::new(Value::Bin('*', Box::new(Value::Size(r.to_string())), Box::new(Value::Num(p)))), Box::new(Value::Num(q)));
+                    cmp(Cmp::Le, Cmp::Gt, size(), scaled)
+                }
+                [f, k] => {
+                    let i = crate::pipe::FEATURES.iter().position(|x| x == f).ok_or_else(bad)?;
+                    let k = k.parse::<u64>().map_err(|_| bad())?;
+                    cmp(Cmp::Ge, Cmp::Lt, Value::Feature(i), Value::Num(k))
+                }
+                _ => return Err(bad()),
+            })
         };
-        Ok(Cond(s.split('|').map(|a| a.split('+').map(term).collect::<Result<_, _>>()).collect::<Result<_, _>>()?))
+        let one = |mut v: Vec<Cond>, f: fn(Vec<Cond>) -> Cond| if v.len() == 1 { v.pop().unwrap() } else { f(v) };
+        let alts = s.split('|').map(|a| Ok(one(a.split('+').map(term).collect::<Result<_, String>>()?, Cond::And))).collect::<Result<_, String>>()?;
+        Ok(one(alts, Cond::Or))
     }
 }
 
-fn count_ok(c: &str) -> Result<String, String> {
-    match c.parse::<usize>().is_ok() || crate::pipe::COUNTS.contains(&c) {
-        true => Ok(c.to_string()),
-        false => Err(format!("expected a number or one of {}: {c}", crate::pipe::COUNTS.join(" "))),
+fn count_ok(c: &str) -> Result<Value, String> {
+    if let Ok(n) = c.parse::<u64>() {
+        return Ok(Value::Num(n));
+    }
+    match crate::pipe::COUNTS.iter().position(|n| *n == c) {
+        Some(i) => Ok(Value::Count(i)),
+        None => Err(format!("expected a number or one of {}: {c}", crate::pipe::COUNTS.join(" "))),
     }
 }
 
@@ -303,10 +426,8 @@ impl Pipe {
             return Err(format!("expected a pass or combinator at {s}"));
         }
         let Some(mut rest) = rest.strip_prefix('(') else {
-            if !crate::pipe::is_pass(name) {
-                return Err(format!("unknown pass {name}; known: {}", crate::pipe::names().join(" ")));
-            }
-            return Ok((Pipe::Pass(name.to_string()), rest));
+            let pass = crate::pipe::resolve(name).ok_or_else(|| format!("unknown pass {name}; known: {}", crate::pipe::names().join(" ")))?;
+            return Ok((Pipe::Pass(pass), rest));
         };
         if name == "filter" {
             let end = rest.find(')').ok_or_else(|| format!("expected ) after filter: {s}"))?;
@@ -346,7 +467,7 @@ impl Pipe {
             ("if", 1 | 2) => {
                 let c = Cond::parse(first)?;
                 let a = Box::new(args.next().unwrap());
-                Pipe::If(c, a, Box::new(args.next().unwrap_or(Pipe::Pass("id".into()))))
+                Pipe::If(c, a, Box::new(args.next().unwrap_or(Pipe::Pass(Pass::id()))))
             }
             ("retry", 2) => {
                 let c = Cond::parse(first)?;
@@ -496,7 +617,7 @@ pub const SIMBA: &str = "
              (clustered | (save c))
              ((load d)
               | (if true none
-                  ((load in) | (first peel ((load c) | peel_clustered)) | (filter (size != (size in))))))))
+                  ((load in) | (first peel ((load c) | peel_clustered)) | (filter !(same in)))))))
         ((save in)
          | (if const_bitwise
              (best 1 semi_linear)
@@ -539,7 +660,7 @@ pub fn prepass() -> String {
         &format!(" | (cand first {r})"),
         // Unified operands let the regions around them share leaves, but the rebuild of the
         // input as written is sometimes smaller; dropped once it needs `unified_rewrites` rewrites.
-        "\n | (best 1 id (cand unified (load t) | unify_operands | (filter (size != (size t)))
+        "\n | (best 1 id (cand unified (load t) | unify_operands | (filter !(same t))
              | (with rewrites=unified_rewrites (first tfunc_whole (rewrite | within | cluster_regions | relate | within | tfunc)))))",
         "\n | (save r) | (union id",
         // A region rebuilt by `wide_blocks` is smaller there, but the other rebuilds can leave
@@ -548,13 +669,13 @@ pub fn prepass() -> String {
         &format!("\n (cand no_wide (if used_wide ((load t) | (with off=wide_blocks {r}) | (save n) | (filter (size < (size r)))) none))"),
         "\n (cand no_wide_abstracted (load n) | (with off=wide_blocks (union over_const_bitwise over_shared_bitwise))
              | (filter (size < (size r) && size <= (size n) * 3/4)))",
-        "\n (cand split_bits (if fits_split (split_bits | (filter (size != (size r)))) none))",
-        &format!("\n (cand halve_first halve | (filter (size != (size r))) | {rp})"),
-        "\n (cand over_products over_products | (filter (size != (size r))))",
-        "\n (cand over_const_bitwise over_const_bitwise | (filter (size != (size r))))",
-        "\n (cand over_shared_bitwise over_shared_bitwise | (filter (size != (size r))))",
+        "\n (cand split_bits (if fits_split (split_bits | (filter !(same r))) none))",
+        &format!("\n (cand halve_first halve | (filter !(same r)) | {rp})"),
+        "\n (cand over_products over_products | (filter !(same r)))",
+        "\n (cand over_const_bitwise over_const_bitwise | (filter !(same r)))",
+        "\n (cand over_shared_bitwise over_shared_bitwise | (filter !(same r)))",
         // Halving the whole input can give semi-linear regions that are slow to search.
-        &format!("\n (cand halve_input (with semi_leaves=2 (if tiny none ((load t) | halve | (filter (size != (size t))) | {rp})))))"),
+        &format!("\n (cand halve_input (with semi_leaves=2 (if tiny none ((load t) | halve | (filter !(same t)) | {rp})))))"),
         // A form from abstracted subterms only a little smaller than the first rebuild, or
         // larger, made the rules finish worse at least as often as better (Ensia, LLVM Pluto).
         "\n | finish | (save f) | (filter (!abstracted || size <= (size f) * 3/4)) | (save b) | (label b)",
@@ -704,7 +825,7 @@ impl Default for Passes {
             polish: lang::parse(&polish(&crate::linear_mba::POLISH.map(|(n, _)| n))).unwrap(),
             rewrite: lang::parse(REWRITE).unwrap(),
             simba: lang::parse(SIMBA).unwrap(),
-            subs: SUBS.iter().map(|(_, d)| Pipe::Pass(d.to_string())).collect(),
+            subs: SUBS.iter().map(|(_, d)| Pipe::Pass(crate::pipe::resolve(d).unwrap())).collect(),
         }
     }
 }
@@ -869,7 +990,115 @@ impl Passes {
         p.pre.dedup();
         p.off.sort_by_key(|n| INNER.iter().position(|k| k == n));
         p.off.dedup();
+        p.check()?;
         Ok(p)
+    }
+
+    /// Rejects pipelines that cannot run: an egglog round, `reprint` or the count `restarts`
+    /// outside `pipeline` (only a `simplify` run has them), and `prepass` or `polish` that
+    /// reach themselves.
+    fn check(&self) -> Result<(), String> {
+        let mut inner = vec![("rewrite", &self.rewrite), ("simba", &self.simba)];
+        inner.extend(SUBS.iter().map(|(n, _)| *n).zip(&self.subs));
+        let all: Vec<(&str, &Pipe)> = [("pipeline", &self.pipeline), ("prepass", &self.prepass), ("polish", &self.polish)].into_iter().chain(inner.iter().copied()).collect();
+        // The pipelines each reaches: `prepass`, `polish`, or the rebuilds of one term
+        // (`inner`), which any pass over one term may run.
+        let mut reach = std::collections::HashMap::new();
+        for (name, p) in &all {
+            let mut uses = Uses::default();
+            uses.walk(p);
+            if *name != "pipeline" {
+                if let Some(what) = uses.needs_run.first() {
+                    return Err(format!("{what} needs a simplify run and cannot be in {name}"));
+                }
+            }
+            let node = if ["pipeline", "prepass", "polish"].contains(name) { *name } else { "inner" };
+            let e: &mut Vec<&str> = reach.entry(node).or_default();
+            e.extend(uses.calls);
+        }
+        for start in ["prepass", "polish"] {
+            let (mut seen, mut todo) = (Vec::new(), reach.get(start).cloned().unwrap_or_default());
+            while let Some(n) = todo.pop() {
+                if n == start {
+                    return Err(format!("{start} reaches itself"));
+                }
+                if !seen.contains(&n) {
+                    seen.push(n);
+                    todo.extend(reach.get(n).cloned().unwrap_or_default());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What a pipeline uses, for `Passes::check`.
+#[derive(Default)]
+struct Uses {
+    /// The passes and counts in it that need a `simplify` run.
+    needs_run: Vec<String>,
+    /// The pipelines it runs: `prepass`, `polish`, `inner`.
+    calls: Vec<&'static str>,
+}
+
+impl Uses {
+    fn walk(&mut self, p: &Pipe) {
+        match p {
+            Pipe::Pass(Pass::Egglog(n)) => self.needs_run.push(n.clone()),
+            Pipe::Pass(Pass::Set(i)) => match crate::pipe::SET_PASSES[*i] {
+                "reprint" => self.needs_run.push("reprint".into()),
+                "prepass" => self.calls.push("prepass"),
+                "polish" => self.calls.push("polish"),
+                _ => {}
+            },
+            Pipe::Pass(Pass::Term { .. }) => self.calls.push("inner"),
+            Pipe::Pass(_) => {}
+            Pipe::Seq(ps) | Pipe::Union(ps) | Pipe::First(ps) => ps.iter().for_each(|p| self.walk(p)),
+            Pipe::Best(v, ps) => {
+                self.value(v);
+                ps.iter().for_each(|p| self.walk(p));
+            }
+            Pipe::Fix(v, p) | Pipe::Wins(v, p) => {
+                self.value(v);
+                self.walk(p);
+            }
+            Pipe::If(c, a, b) | Pipe::Retry(c, a, b) => {
+                self.cond(c);
+                self.walk(a);
+                self.walk(b);
+            }
+            Pipe::Filter(c) => self.cond(c),
+            Pipe::Off(_, p) | Pipe::Smallest(p) | Pipe::Tag(_, p) | Pipe::Cand(_, p) | Pipe::With(_, p) | Pipe::Scope(p) | Pipe::Smaller(_, p) => self.walk(p),
+            // Both rebuild with `Passes::rewrite`.
+            Pipe::Regions(p) | Pipe::Again(p) => {
+                self.calls.push("inner");
+                self.walk(p);
+            }
+        }
+    }
+
+    fn cond(&mut self, c: &Cond) {
+        match c {
+            Cond::Is(i) if ["opaque", "rebuilds"].contains(&crate::pipe::CONDS[*i]) => self.calls.push("prepass"),
+            Cond::Is(_) | Cond::Same(_) => {}
+            Cond::Not(c) | Cond::Any(c) | Cond::All(c) => self.cond(c),
+            Cond::And(cs) | Cond::Or(cs) => cs.iter().for_each(|c| self.cond(c)),
+            Cond::Cmp(_, a, b) => {
+                self.value(a);
+                self.value(b);
+            }
+        }
+    }
+
+    fn value(&mut self, v: &Value) {
+        match v {
+            Value::Count(i) if crate::pipe::COUNTS[*i] == "restarts" => self.needs_run.push("restarts".into()),
+            Value::Bin(_, a, b) => {
+                self.value(a);
+                self.value(b);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -903,7 +1132,7 @@ impl fmt::Display for Passes {
             write!(f, "{sep}{name}={}", show(p))?;
         }
         for ((name, default), p) in SUBS.iter().zip(&self.subs) {
-            if *p != Pipe::Pass(default.to_string()) {
+            if *p != Pipe::Pass(crate::pipe::resolve(default).unwrap()) {
                 write!(f, "{sep}sub/{name}={}", show(p))?;
             }
         }
@@ -980,11 +1209,17 @@ mod tests {
         assert_eq!(p.pipeline, Pipe::parse("fix(2,seq(prepass,egglog))").unwrap());
         assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
         let p = Passes::parse("prepass=scope(seq(save/t,with(rewrites=unified_rewrites+semi_leaves=2,rewrite),filter(lt:t|le:3/4:t+!tiny),cand(halve_input,load/t)))").unwrap();
-        assert_eq!(p.prepass.to_string(), "(scope (save t) | (with rewrites=unified_rewrites semi_leaves=2 rewrite) | (filter (size < (size t) || size <= (size t) * 3/4 && !tiny)) | (cand halve_input (load t)))");
+        assert_eq!(p.prepass.to_string(), "(scope (save t) | (with rewrites=unified_rewrites semi_leaves=2 rewrite) | (filter (size < (size t) || size <= (size t) * 3 / 4 && !tiny)) | (cand halve_input (load t)))");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         for bad in ["prepass=filter(lt)", "prepass=filter(le:3:t)", "prepass=with(rewrites=x,id)", "prepass=with(nope=1,id)", "prepass=save/", "prepass=scope(id,id)"] {
             assert!(Passes::parse(bad).is_err(), "{bad}");
         }
+        assert_eq!(Passes::default().check(), Ok(()));
+        for bad in ["prepass=egglog", "rewrite=(fix restarts rewrite)", "simba=reprint", "sub/cluster=(egglog first)", "prepass=lowbits | prepass", "polish=polish", "rewrite=(again polish)", "prepass=(if rebuilds id)"] {
+            let e = Passes::parse(bad).unwrap_err();
+            assert!(e.contains("simplify run") || e.contains("reaches itself"), "{bad}: {e}");
+        }
+        assert!(Passes::parse("pipeline=(fix restarts prepass | egglog | polish)").is_ok());
         for bad in ["pipeline=nope", "pipeline=seq(rewrite", "pipeline=best(x,rewrite)", "pipeline=fix(2,a,b)", "pipeline=off(nope,rewrite)", "pipeline=loop(rewrite)", "pipeline=fix(many,id)", "pipeline=if(nope,id)", "pipeline=if(mixed,id,id,id)", "pipeline=retry(mixed,id)"] {
             assert!(Passes::parse(bad).is_err(), "{bad}");
         }

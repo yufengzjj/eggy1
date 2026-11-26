@@ -5,14 +5,14 @@
 
 use crate::eval::{Op, Term, parse, show, size};
 use crate::linear_mba::{CLUSTERED, Ctx, WIDE};
-use crate::sched::{Cond, Limit, Passes, Pipe, limit};
+use crate::sched::{Cond, Limit, Pass, Passes, Pipe, TermAt, Value, limit};
 use crate::{Cli, Error, linear_mba, minimal, stats, width_of};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 use std::collections::HashMap;
 
 /// Passes that take the candidate list whole, besides `save/R`, `load/R` and `label/R`.
-const SET_PASSES: [&str; 9] = [
+pub const SET_PASSES: [&str; 9] = [
     // The candidates unchanged.
     "id",
     // No candidates.
@@ -87,8 +87,8 @@ pub const CONDS: [&str; 20] = [
 /// The input features of `stats::shape` that conditions `FEATURE:N` test.
 pub const FEATURES: [&str; 8] = ["size", "vars", "depth", "mul", "bitconst", "arith_in_bit", "shift", "div"];
 
-fn feature(s: &stats::Shape, name: &str) -> usize {
-    match name {
+fn feature(s: &stats::Shape, i: usize) -> usize {
+    match FEATURES[i] {
         "size" => s.size,
         "vars" => s.vars,
         "depth" => s.depth,
@@ -97,7 +97,7 @@ fn feature(s: &stats::Shape, name: &str) -> usize {
         "arith_in_bit" => s.arith_in_bit,
         "shift" => s.shift,
         "div" => s.div,
-        _ => unreachable!("feature {name}"),
+        name => unreachable!("feature {name}"),
     }
 }
 
@@ -117,23 +117,30 @@ pub fn names() -> Vec<String> {
     SET_PASSES.iter().map(|n| n.to_string()).chain(egglog).chain(regs).chain(off).chain(linear_mba::TERM_PASSES.iter().map(|(n, _)| n.to_string())).chain(polish).collect()
 }
 
-/// Whether `name` is a pass.
-pub fn is_pass(name: &str) -> bool {
-    REGISTER_PASSES.iter().any(|p| name.strip_prefix(p).is_some_and(|r| !r.is_empty())) || name.starts_with("egglog/") || names().iter().any(|n| n == name)
+/// The pass named `name` (as `names` lists them, registers filled in).
+pub fn resolve(name: &str) -> Option<Pass> {
+    for (p, f) in [("save/", Pass::Save as fn(String) -> Pass), ("load/", Pass::Load), ("label/", Pass::Label)] {
+        if let Some(r) = name.strip_prefix(p).filter(|r| !r.is_empty()) {
+            return Some(f(r.to_string()));
+        }
+    }
+    if name == "egglog" || name.strip_prefix("egglog/").is_some_and(|r| !r.is_empty()) {
+        return Some(Pass::Egglog(name.to_string()));
+    }
+    if let Some(n) = name.strip_prefix("off/") {
+        return crate::sched::INNER.iter().find(|k| **k == n).map(|k| Pass::Off(*k));
+    }
+    if let Some(i) = SET_PASSES.iter().position(|n| *n == name) {
+        return Some(Pass::Set(i));
+    }
+    let alt = linear_mba::ALTERNATIVES.iter().find(|(a, _)| *a == name).map(|(_, bit)| *bit);
+    if let Some(i) = linear_mba::TERM_PASSES.iter().position(|(n, _)| *n == name) {
+        return Some(Pass::Term { name: name.to_string(), at: TermAt::Term(i), alt });
+    }
+    let i = linear_mba::POLISH.iter().position(|(n, _)| name.strip_prefix("polish/") == Some(n))?;
+    Some(Pass::Term { name: name.to_string(), at: TermAt::Polish(i), alt })
 }
 
-/// Whether `name` is a condition.
-pub fn is_cond(name: &str) -> bool {
-    if CONDS.contains(&name) {
-        return true;
-    }
-    match name.split(':').collect::<Vec<_>>().as_slice() {
-        ["lt" | "gt" | "eq", r] => !r.is_empty(),
-        [f, n] if FEATURES.contains(f) => n.parse::<usize>().is_ok(),
-        ["le", pq, r] => !r.is_empty() && pq.split_once('/').is_some_and(|(p, q)| p.parse::<usize>().is_ok() && q.parse::<usize>().is_ok_and(|q| q > 0)),
-        _ => false,
-    }
-}
 
 /// A candidate term and the pass it came from, for `stats` (`final/ORIGIN`). The egglog
 /// text, the tree and the size are each made once, when first needed: large inputs spend
@@ -266,17 +273,43 @@ impl<'a> Env<'a> {
         self.regs.borrow().get(r).and_then(|s| s.first().cloned())
     }
 
-    fn count(&self, n: &str) -> usize {
+    fn count(&self, i: usize) -> usize {
         let p = self.passes;
-        match n {
+        match COUNTS[i] {
             "restarts" => self.cli("restarts").max_restarts.max(1) - 1,
             "extra" => p.extra,
             "printed" => p.printed.saturating_sub(1),
             "keep" => p.keep,
-            _ => n.parse().unwrap(),
+            n => unreachable!("count {n}"),
         }
     }
-}
+
+    /// `v` for the candidates `set`; `None` where it reads a candidate or register that is
+    /// not there, or divides by 0.
+    fn value(&self, v: &Value, set: &[Cand]) -> Option<u64> {
+        Some(match v {
+            Value::Num(n) => *n,
+            Value::Count(i) => self.count(*i) as u64,
+            Value::Feature(0) => set.first()?.size() as u64,
+            Value::Feature(i) => feature(&stats::shape(set.first()?.tree()), *i) as u64,
+            Value::Size(r) => self.reg_main(r)?.size() as u64,
+            Value::Limit(i) => crate::sched::limit_named(crate::sched::LIMITS[*i].0).unwrap() as u64,
+            Value::Bin(op, a, b) => {
+                let (a, b) = (self.value(a, set)?, self.value(b, set)?);
+                match op {
+                    '+' => a.wrapping_add(b),
+                    '-' => a.saturating_sub(b),
+                    '*' => a.wrapping_mul(b),
+                    _ => a.checked_div(b)?,
+                }
+            }
+        })
+    }
+
+    /// `v` as a count: 0 where it has no value.
+    fn times(&self, v: &Value, set: &[Cand]) -> usize {
+        self.value(v, set).unwrap_or(0) as usize
+    }}
 
 fn dedup(set: Vec<Cand>) -> Vec<Cand> {
     let mut out: Vec<Cand> = Vec::with_capacity(set.len());
@@ -316,23 +349,10 @@ fn proved_minimal<'s>(set: &'s [Cand], env: &Env) -> Option<&'s Cand> {
     })
 }
 
-fn cond(name: &str, set: &[Cand], env: &Env) -> bool {
+fn cond(i: usize, set: &[Cand], env: &Env) -> bool {
     let Some(main) = set.first() else { return false };
     let p = env.passes;
-    let reg = |r: &str, f: &dyn Fn(&Cand) -> bool| env.reg_main(r).is_some_and(|c| f(&c));
-    match name.split(':').collect::<Vec<_>>().as_slice() {
-        ["lt", r] => return reg(r, &|c| main.size() < c.size()),
-        [f, n] if FEATURES.contains(f) => return feature(&stats::shape(main.tree()), f) >= n.parse::<usize>().unwrap(),
-        ["gt", r] => return reg(r, &|c| main.size() > c.size()),
-        ["eq", r] => return reg(r, &|c| c.same(main)),
-        ["le", pq, r] => {
-            let (a, b) = pq.split_once('/').unwrap();
-            let (a, b): (usize, usize) = (a.parse().unwrap(), b.parse().unwrap());
-            return reg(r, &|c| b * main.size() <= a * c.size());
-        }
-        _ => {}
-    }
-    match name {
+    match CONDS[i] {
         "opaque" => opaque(main.tree()) && size_of(&env.prepass_of(main.term()).0) > linear_mba::TINY,
         "minimal" => proved_minimal(set, env).is_some(),
         "mixed" => crate::mixed(main.tree()),
@@ -353,12 +373,21 @@ fn cond(name: &str, set: &[Cand], env: &Env) -> bool {
         "wide" => env.ctx(|w| linear_mba::leaf_count(main.tree(), w) > linear_mba::MAX_LEAVES),
         "const_bitwise" => env.ctx(|w| linear_mba::const_bitwise(main.tree(), w)),
         "cofactor" => env.cofactor,
-        _ => unreachable!("condition {name}"),
+        name => unreachable!("condition {name}"),
     }
 }
 
 fn holds(c: &Cond, set: &[Cand], env: &Env) -> bool {
-    c.0.iter().any(|alt| alt.iter().all(|(neg, name)| cond(name, set, env) != *neg))
+    match c {
+        Cond::Is(i) => cond(*i, set, env),
+        Cond::Same(r) => set.first().zip(env.reg_main(r)).is_some_and(|(m, c)| c.same(m)),
+        Cond::Not(c) => !holds(c, set, env),
+        Cond::And(cs) => cs.iter().all(|c| holds(c, set, env)),
+        Cond::Or(cs) => cs.iter().any(|c| holds(c, set, env)),
+        Cond::Cmp(op, a, b) => !set.is_empty() && env.value(a, set).zip(env.value(b, set)).is_some_and(|(a, b)| op.holds(a, b)),
+        Cond::Any(c) => set.iter().any(|x| holds(c, std::slice::from_ref(x), env)),
+        Cond::All(c) => !set.is_empty() && set.iter().all(|x| holds(c, std::slice::from_ref(x), env)),
+    }
 }
 
 thread_local! {
@@ -407,7 +436,7 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
         return Ok(set);
     }
     match p {
-        Pipe::Pass(name) => pass(name, set, env),
+        Pipe::Pass(p) => pass(p, set, env),
         Pipe::Seq(ps) => ps.iter().try_fold(set, |s, p| go(p, s, env)),
         Pipe::Union(ps) => {
             let mut out = Vec::new();
@@ -426,7 +455,7 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             }
             let mut out = dedup(out);
             out.sort_by_cached_key(|c| c.size());
-            out.truncate(env.count(k).max(1));
+            out.truncate(env.times(k, &set).max(1));
             Ok(out)
         }
         Pipe::First(ps) => {
@@ -440,7 +469,7 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
         }
         Pipe::Fix(n, p) => {
             let mut set = set;
-            for _ in 0..env.count(n) {
+            for _ in 0..env.times(n, &set) {
                 let out = go(p, set.clone(), env)?;
                 let same = match (out.first(), set.first()) {
                     (Some(a), Some(b)) => a.same(b),
@@ -585,7 +614,7 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             Ok(out)
         }
         Pipe::Wins(n, p) => {
-            let (n, outer) = (env.count(n), env.wins.replace(0));
+            let (n, outer) = (env.times(n, &set), env.wins.replace(0));
             let mut set = set;
             loop {
                 let before = env.wins.get();
@@ -667,29 +696,31 @@ fn pre(e: &str) -> String {
     format!("pre/{}", stats::source_of(e).unwrap_or_else(|| "unlabeled".into()))
 }
 
-fn pass(name: &str, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
-    if let Some(r) = name.strip_prefix("save/") {
-        env.regs.borrow_mut().insert(r.to_string(), set.clone());
-        return Ok(set);
-    }
-    if let Some(r) = name.strip_prefix("load/") {
-        return Ok(env.regs.borrow().get(r).cloned().unwrap_or_default());
-    }
-    if let Some(n) = name.strip_prefix("off/") {
-        crate::sched::turn_off(n);
-        return Ok(set);
-    }
-    if let Some(f) = linear_mba::term_pass(name) {
-        return Ok(seen(dedup(term_pass(name, f, &set, env)), env));
-    }
+fn pass(p: &Pass, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
+    let name = match p {
+        Pass::Save(r) => {
+            env.regs.borrow_mut().insert(r.to_string(), set.clone());
+            return Ok(set);
+        }
+        Pass::Load(r) => return Ok(env.regs.borrow().get(r).cloned().unwrap_or_default()),
+        Pass::Off(n) => {
+            crate::sched::turn_off(n);
+            return Ok(set);
+        }
+        Pass::Term { name, at, alt } => return Ok(seen(dedup(term_pass(name, linear_mba::term_pass_at(*at), *alt, &set, env)), env)),
+        Pass::Set(i) => SET_PASSES[*i],
+        Pass::Egglog(name) => name.as_str(),
+        Pass::Label(_) => "label/",
+    };
     let Some(main) = set.first().cloned() else { return Ok(set) };
     let new = |term: String, origin: String| Cand::new(&term, &origin);
     let out = match name {
         "id" => return Ok(set),
         "none" => return Ok(Vec::new()),
         "within" => return Ok(if env.ctx(|c| c.setting("rewrites").unwrap()) > 0 { set } else { Vec::new() }),
-        _ if name.starts_with("label/") => {
-            let first = env.reg_main(&name["label/".len()..]);
+        "label/" => {
+            let Pass::Label(r) = p else { unreachable!() };
+            let first = env.reg_main(r);
             for c in set.iter().filter(|_| stats::on()) {
                 if let Some(f) = first.as_ref().filter(|f| f.origin != c.origin) {
                     stats::add(&format!("pre/{}/differs", c.origin), 0.0);
@@ -769,8 +800,7 @@ fn pass(name: &str, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
 }
 
 /// The pass over one term `f` on each candidate of `set`, which keeps its own origin.
-fn term_pass(name: &str, f: linear_mba::TermPass, set: &[Cand], env: &Env) -> Vec<Cand> {
-    let alt = linear_mba::ALTERNATIVES.iter().find(|(a, _)| *a == name).map(|(_, bit)| *bit);
+fn term_pass(name: &str, f: linear_mba::TermPass, alt: Option<u8>, set: &[Cand], env: &Env) -> Vec<Cand> {
     env.ctx(|ctx| {
         set.iter()
             .filter_map(|c| {
