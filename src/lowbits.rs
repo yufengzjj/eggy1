@@ -6,6 +6,7 @@
 //! values when the enclosing expression is proved not to change (`tfunc::equal_low`).
 
 use crate::eval::{Op, Term as T, size};
+use crate::known_bits::{self as kb, lowmask};
 use crate::linear_mba::Ctx;
 
 /// Most leaf bits enumerated for one subterm, and for a proof in context.
@@ -42,8 +43,10 @@ struct Info {
     shift: bool,
 }
 
-fn lowmask(k: u32) -> u64 {
-    if k >= 64 { u64::MAX } else { (1u64 << k) - 1 }
+impl Info {
+    fn bits(&self) -> kb::Bits {
+        kb::Bits { k0: self.k0, k1: self.k1 }
+    }
 }
 
 fn leaf_info(k0: u64, k1: u64, w: &Ctx) -> Info {
@@ -57,30 +60,7 @@ fn high(i: &Info, w: &Ctx) -> u32 {
     64 - (!(i.k0 | i.k1) & w.mask).leading_zeros()
 }
 
-/// Known bits of `a + b + cin`, bit by bit with the carry known where two of the three inputs agree.
-fn known_add(a: (u64, u64), b: (u64, u64), cin: u64, w: &Ctx) -> (u64, u64) {
-    let (mut k0, mut k1) = (0, 0);
-    let (mut c0, mut c1) = (cin ^ 1, cin);
-    for i in 0..w.w {
-        let bit = |k: u64| k >> i & 1;
-        let (a0, a1, b0, b1) = (bit(a.0), bit(a.1), bit(b.0), bit(b.1));
-        if (a0 | a1) & (b0 | b1) & (c0 | c1) == 1 {
-            let s = a1 ^ b1 ^ c1;
-            k0 |= (s ^ 1) << i;
-            k1 |= s << i;
-        }
-        (c0, c1) = (u64::from(a0 + b0 + c0 >= 2), u64::from(a1 + b1 + c1 >= 2));
-    }
-    (k0, k1)
-}
-
-fn known_low(a: &Info, b: &Info, f: impl Fn(u64, u64) -> u64, w: &Ctx) -> (u64, u64) {
-    let l = (a.k0 | a.k1).trailing_ones().min((b.k0 | b.k1).trailing_ones()).min(w.w);
-    let r = f(a.k1, b.k1) & lowmask(l);
-    (!r & lowmask(l), r)
-}
-
-/// `square`: the operands of a product are the same term, so bit 1 is 0 (`a² mod 4` is 0 or 1).
+/// `square`: the operands of a product are the same term.
 fn combine(op: Op, args: &[Info], square: bool, w: &Ctx) -> Info {
     // Leaf placeholders (`Op::Leaf`, `Op::Slot`) of the semi-linear search.
     if args.is_empty() {
@@ -88,52 +68,39 @@ fn combine(op: Op, args: &[Info], square: bool, w: &Ctx) -> Info {
     }
     let m = w.mask;
     let a: Vec<Info> = args.iter().map(|i| if i.det { *i } else { leaf_info(i.k0, i.k1, w) }).collect();
-    let tz = |i: &Info| lowmask(i.k0.trailing_ones().min(w.w));
-    let max = |i: &Info| !i.k0 & m;
-    let bound = |v: Option<u64>| v.filter(|v| *v <= m).map_or(0, |v| m & !lowmask(64 - v.leading_zeros()));
     let (x, y) = (a[0], a.get(1).copied().unwrap_or(a[0]));
+    let (bx, by) = (x.bits(), y.bits());
     let need = a.iter().map(|i| i.need).max().unwrap();
     let shift = a.iter().any(|i| i.shift);
     let mut full = a.iter().map(|i| i.full).max().unwrap();
-    let konst = |i: &Info| ((i.k0 | i.k1) & m == m).then_some(i.k1);
-    let (k0, k1) = match op {
-        Op::Not => (x.k1, x.k0),
-        Op::And => (x.k0 | y.k0, x.k1 & y.k1),
-        Op::Or => (x.k0 & y.k0, x.k1 | y.k1),
-        Op::Xor => (x.k0 & y.k0 | x.k1 & y.k1, x.k0 & y.k1 | x.k1 & y.k0),
-        Op::Neg => known_add((m, 0), (x.k1, x.k0), 1, w),
-        Op::Sub => {
-            let (k0, k1) = known_add((x.k0, x.k1), (y.k1, y.k0), 1, w);
-            (k0 | bound((x.k1 >= max(&y)).then(|| max(&x) - y.k1)), k1)
-        }
-        Op::Add => {
-            let (k0, k1) = known_add((x.k0, x.k1), (y.k0, y.k1), 0, w);
-            (k0 | bound(max(&x).checked_add(max(&y))), k1)
-        }
+    let r = match op {
+        Op::Not => kb::not(bx),
+        Op::And => kb::and(bx, by),
+        Op::Or => kb::or(bx, by),
+        Op::Xor => kb::xor(bx, by),
+        Op::Neg => kb::neg(bx, w.w),
+        Op::Sub => kb::sub(bx, by, w.w),
+        Op::Add => kb::add(bx, by, w.w),
         Op::Mul => {
-            let (k0, k1) = known_low(&x, &y, u64::wrapping_mul, w);
-            let tzs = lowmask((tz(&x).trailing_ones() + tz(&y).trailing_ones()).min(w.w));
-            if let Some((c, o)) = konst(&x).map(|c| (c, y)).or_else(|| konst(&y).map(|c| (c, x))) {
+            if let Some((c, o)) = bx.value(w.w).map(|c| (c, y)).or_else(|| by.value(w.w).map(|c| (c, x))) {
                 full = full.min(o.need.max(w.w.saturating_sub(c.trailing_zeros())));
             }
-            let sq = if square { 2 & !k1 } else { 0 };
-            (k0 | tzs | sq | bound(max(&x).checked_mul(max(&y))), k1)
+            kb::mul(bx, by, square, w.w)
         }
-        Op::Shl if (y.k0 | y.k1) & m == m => match y.k1 {
-            s if s >= w.w as u64 => (m, 0),
-            s => {
+        Op::Shl if let Some(s) = by.value(w.w) => {
+            if s < w.w as u64 {
                 full = full.min(x.need.max(w.w - s as u32));
-                ((x.k0 << s | lowmask(s as u32)) & m, x.k1 << s & m)
             }
-        },
+            kb::shl(bx, s, w.w)
+        }
         Op::Shl => {
-            let mut i = Info { k0: tz(&x), k1: 0, need: need.max(y.full), full, det: y.full <= MAX_BITS, shift: true };
+            let mut i = Info { k0: kb::shl_any(bx, w.w).k0, k1: 0, need: need.max(y.full), full, det: y.full <= MAX_BITS, shift: true };
             i.full = i.full.min(i.need.max(high(&i, w)));
             return i;
         }
         _ => return Info { k0: 0, k1: 0, need: 0, full: w.w, det: false, shift: false },
     };
-    let mut i = Info { k0: k0 & m, k1: k1 & m, need, full, det: true, shift };
+    let mut i = Info { k0: r.k0 & m, k1: r.k1 & m, need, full, det: true, shift };
     i.full = i.full.min(need.max(high(&i, w)));
     i
 }
@@ -943,6 +910,58 @@ mod tests {
                 assert!(v & i.k0 == 0 && !v & i.k1 & 0xff == 0, "{t:?} at {p:#x}: {v:#x}");
             }
         }
+    }
+
+    /// Known zeros as the egglog `kz` rules derive them: every rule that matches, joined by `|`.
+    fn kz(t: &T, w: i64, signed: bool) -> i64 {
+        use crate::known_bits::*;
+        let T::Op(op, a) = t else { return if let T::Num(c) = t { !c } else { 0 } };
+        let z: Vec<i64> = a.iter().map(|x| kz(x, w, signed)).collect();
+        let k = match a.get(1) {
+            Some(T::Num(k)) => Some(*k),
+            _ => None,
+        };
+        match op {
+            Op::And => z[0] | z[1],
+            Op::Or | Op::Xor => z[0] & z[1],
+            Op::Neg => kz_low(z[0], w),
+            Op::Add | Op::Sub => kz_add(z[0], z[1], w),
+            Op::Mul => kz_low(z[0], w) | kz_low(z[1], w) | kz_mul(z[0], z[1], w),
+            Op::Shl => {
+                let c = k.and_then(|k| Some(kz_shl(0, k, w)? | kz_shl(z[0], k, w)?)).unwrap_or(0);
+                c | kz_low(z[0], w)
+            }
+            Op::Shr => k.and_then(|k| kz_shr(z[0], k, w, signed)).unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    /// The `kz` rules and `info` agree with evaluation, and without `>>` (which only `kz`
+    /// handles) `info` knows every zero `kz` knows.
+    #[test]
+    fn known_bits_refine_egglog_kz() {
+        let w = Ctx::new(8);
+        let mut h = 0x6a09_e667_f3bc_c908u64;
+        let mut finer = 0;
+        for k in 0..600 {
+            let signed = k % 2 == 1;
+            let ty = NumType { bits: 8, signed };
+            let t = random_term(&mut h, 4);
+            let z = kz(&t, 8, signed) as u64 & 0xff;
+            for p in 0u64..1 << 16 {
+                let v = eval(&t, ty, &|n: &str| if n == "x" { p & 0xff } else { p >> 8 }).unwrap() & 0xff;
+                assert!(v & z == 0, "{t:?} at {p:#x}: {v:#x}, kz {z:#x}");
+            }
+            fn has_shr(t: &T) -> bool {
+                matches!(t, T::Op(Op::Shr, _)) || matches!(t, T::Op(_, a) if a.iter().any(has_shr))
+            }
+            if !has_shr(&t) {
+                let i = info(&t, &w);
+                assert!(z & !i.k0 == 0, "{t:?}: kz {z:#x}, k0 {:#x}", i.k0);
+                finer += (i.k0 != z) as u32;
+            }
+        }
+        assert!(finer > 15, "finer {finer}");
     }
 
     #[test]

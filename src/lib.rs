@@ -1,6 +1,7 @@
 pub mod dag;
 pub mod eval;
 pub mod expr_convert;
+pub mod known_bits;
 pub mod linear_mba;
 pub mod pipe;
 pub mod sched;
@@ -10,6 +11,7 @@ mod lowbits;
 mod minimal;
 mod tfunc;
 
+pub use crate::known_bits::{kz_add, kz_low, kz_mul, kz_shl, kz_shr};
 use crate::expr_convert::{egglog_to_infix, infix_to_egglog};
 use clap::Parser;
 use egglog::ast::Span;
@@ -506,43 +508,6 @@ fn known_bits(w: u32, signed: bool) -> String {
     )
 }
 
-fn lowmask(k: u32) -> i64 {
-    if k >= 64 { -1 } else { ((1u64 << k) - 1) as i64 }
-}
-
-/// Known-zero mask of `a << k` given known-zero mask `z` of `a`; None unless 0 <= k < w.
-pub fn kz_shl(z: i64, k: i64, w: i64) -> Option<i64> {
-    (0..w).contains(&k).then(|| (z << k) | lowmask(k as u32))
-}
-
-/// Known-zero mask of `a >> k` (arithmetic if `signed`); None unless 0 <= k < w.
-pub fn kz_shr(z: i64, k: i64, w: i64, signed: bool) -> Option<i64> {
-    (0..w).contains(&k).then(|| {
-        if signed {
-            let sh = 64 - w;
-            ((z << sh) >> sh) >> k
-        } else {
-            let m = lowmask(w as u32) as u64;
-            (((z as u64 & m) >> k) | !(m >> k)) as i64
-        }
-    })
-}
-
-/// Trailing known zeros of `z`, as a mask (kept by `-a` and by `a * b`).
-pub fn kz_low(z: i64, w: i64) -> i64 {
-    lowmask(z.trailing_ones().min(w as u32))
-}
-
-/// Known-zero mask of `a + b` or `a - b`: the shorter run of trailing known zeros.
-pub fn kz_add(za: i64, zb: i64, w: i64) -> i64 {
-    lowmask(za.trailing_ones().min(zb.trailing_ones()).min(w as u32))
-}
-
-/// Known-zero mask of `a * b`: trailing known zeros add up.
-pub fn kz_mul(za: i64, zb: i64, w: i64) -> i64 {
-    lowmask((za.trailing_ones() + zb.trailing_ones()).min(w as u32))
-}
-
 fn width_mask(w: i64) -> u64 {
     if w >= 64 { u64::MAX } else { (1u64 << w) - 1 }
 }
@@ -959,7 +924,7 @@ fn init_egg_function(eg: &mut EGraph) {
     add_primitive!(eg, "kz-low" = |z: i64, w: i64| -> i64 { kz_low(z, w) });
     add_primitive!(eg, "kz-add" = |a: i64, b: i64, w: i64| -> i64 { kz_add(a, b, w) });
     add_primitive!(eg, "kz-mul" = |a: i64, b: i64, w: i64| -> i64 { kz_mul(a, b, w) });
-    add_primitive!(eg, "all-ones" = |z: i64, w: i64| -?> () { {let m = lowmask(w as u32); (z & m == m).then_some(())} });
+    add_primitive!(eg, "all-ones" = |z: i64, w: i64| -?> () { {let m = known_bits::lowmask(w as u32) as i64; (z & m == m).then_some(())} });
 }
 /// A fresh e-graph with the primitives and the program `egg` loaded, cloned from one
 /// built once per thread.
