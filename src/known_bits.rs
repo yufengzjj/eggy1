@@ -108,6 +108,20 @@ pub fn shl(x: Bits, s: u64, w: u32) -> Bits {
     Bits { k0: (x.k0 << s | lowmask(s as u32)) & m, k1: x.k1 << s & m }
 }
 
+/// `a >> s` for a known `s < w`: arithmetic when `signed` is `Some(true)`, logical when
+/// `Some(false)`, either when `None` (the high `s` bits then known only as a known-0 sign).
+pub fn shr(x: Bits, s: u64, w: u32, signed: Option<bool>) -> Bits {
+    let m = lowmask(w);
+    let high = m & !(m >> s);
+    let sign = |k: u64| if k >> (w - 1) & 1 == 1 { high } else { 0 };
+    let (f0, f1) = match signed {
+        Some(false) => (high, 0),
+        Some(true) => (sign(x.k0), sign(x.k1)),
+        None => (sign(x.k0), 0),
+    };
+    Bits { k0: (x.k0 & m) >> s | f0, k1: (x.k1 & m) >> s | f1 }
+}
+
 /// `a << b` for any `b`: the trailing known zeros of `a` stay.
 pub fn shl_any(x: Bits, w: u32) -> Bits {
     Bits { k0: lowmask(x.tz(w)), k1: 0 }

@@ -55,6 +55,12 @@ fn leaf_info(k0: u64, k1: u64, w: &Ctx) -> Info {
     i
 }
 
+/// A subterm that is not `det` as a leaf: enumerations give its bits from `m` up as 0, so
+/// only its known high zeros lower `full`.
+fn opaque_info(k0: u64, k1: u64, w: &Ctx) -> Info {
+    Info { k0, k1, need: 0, full: 64 - (!k0 & w.mask).leading_zeros(), det: true, shift: false }
+}
+
 /// Bits from which on every bit is known.
 fn high(i: &Info, w: &Ctx) -> u32 {
     64 - (!(i.k0 | i.k1) & w.mask).leading_zeros()
@@ -67,7 +73,7 @@ fn combine(op: Op, args: &[Info], square: bool, w: &Ctx) -> Info {
         return leaf_info(0, 0, w);
     }
     let m = w.mask;
-    let a: Vec<Info> = args.iter().map(|i| if i.det { *i } else { leaf_info(i.k0, i.k1, w) }).collect();
+    let a: Vec<Info> = args.iter().map(|i| if i.det { *i } else { opaque_info(i.k0, i.k1, w) }).collect();
     let (x, y) = (a[0], a.get(1).copied().unwrap_or(a[0]));
     let (bx, by) = (x.bits(), y.bits());
     let need = a.iter().map(|i| i.need).max().unwrap();
@@ -97,6 +103,11 @@ fn combine(op: Op, args: &[Info], square: bool, w: &Ctx) -> Info {
             let mut i = Info { k0: kb::shl_any(bx, w.w).k0, k1: 0, need: need.max(y.full), full, det: y.full <= MAX_BITS, shift: true };
             i.full = i.full.min(i.need.max(high(&i, w)));
             return i;
+        }
+        // Not `det`: the low bits depend on higher bits of `a`, so it is a leaf with known bits.
+        Op::Shr if let Some(s) = by.value(w.w).filter(|s| *s < w.w as u64) => {
+            let r = kb::shr(bx, s, w.w, w.signed);
+            return Info { k0: r.k0, k1: r.k1, need: 0, full: w.w, det: false, shift: false };
         }
         _ => return Info { k0: 0, k1: 0, need: 0, full: w.w, det: false, shift: false },
     };
@@ -875,6 +886,7 @@ mod tests {
                 T::Op(Op::Mul, vec![s.clone(), s])
             }
             Some(Op::Shl) if r >> 30 & 1 == 0 => T::Op(Op::Shl, vec![sub(h), T::Op(Op::And, vec![sub(h), T::Num(7)])]),
+            Some(Op::Shr) if r >> 30 & 1 == 0 => T::Op(Op::Shr, vec![sub(h), T::Num((r >> 33) as i64 % 8)]),
             Some(op) => T::Op(op, vec![sub(h), sub(h)]),
         }
     }
@@ -899,15 +911,16 @@ mod tests {
 
     #[test]
     fn known_bits_match_evaluation() {
-        let w = Ctx::new(8);
-        let ty = NumType { bits: 8, signed: false };
         let mut h = 0x2545_f491_4f6c_dd1du64;
-        for _ in 0..300 {
+        for k in 0..600 {
+            let ty = NumType { bits: 8, signed: k % 2 == 1 };
             let t = random_term(&mut h, 4);
-            let i = info(&t, &w);
-            for p in 0u64..1 << 16 {
-                let v = eval(&t, ty, &|n: &str| if n == "x" { p & 0xff } else { p >> 8 }).unwrap() & 0xff;
-                assert!(v & i.k0 == 0 && !v & i.k1 & 0xff == 0, "{t:?} at {p:#x}: {v:#x}");
+            for w in [Ctx::new(8), Ctx::typed(8, Some(ty.signed))] {
+                let i = info(&t, &w);
+                for p in 0u64..1 << 16 {
+                    let v = eval(&t, ty, &|n: &str| if n == "x" { p & 0xff } else { p >> 8 }).unwrap() & 0xff;
+                    assert!(v & i.k0 == 0 && !v & i.k1 & 0xff == 0, "{t:?} at {p:#x}: {v:#x}");
+                }
             }
         }
     }
@@ -936,11 +949,9 @@ mod tests {
         }
     }
 
-    /// The `kz` rules and `info` agree with evaluation, and without `>>` (which only `kz`
-    /// handles) `info` knows every zero `kz` knows.
+    /// The `kz` rules and `info` agree with evaluation, and `info` knows every zero `kz` knows.
     #[test]
     fn known_bits_refine_egglog_kz() {
-        let w = Ctx::new(8);
         let mut h = 0x6a09_e667_f3bc_c908u64;
         let mut finer = 0;
         for k in 0..600 {
@@ -952,14 +963,9 @@ mod tests {
                 let v = eval(&t, ty, &|n: &str| if n == "x" { p & 0xff } else { p >> 8 }).unwrap() & 0xff;
                 assert!(v & z == 0, "{t:?} at {p:#x}: {v:#x}, kz {z:#x}");
             }
-            fn has_shr(t: &T) -> bool {
-                matches!(t, T::Op(Op::Shr, _)) || matches!(t, T::Op(_, a) if a.iter().any(has_shr))
-            }
-            if !has_shr(&t) {
-                let i = info(&t, &w);
-                assert!(z & !i.k0 == 0, "{t:?}: kz {z:#x}, k0 {:#x}", i.k0);
-                finer += (i.k0 != z) as u32;
-            }
+            let i = info(&t, &Ctx::typed(8, Some(signed)));
+            assert!(z & !i.k0 == 0, "{t:?}: kz {z:#x}, k0 {:#x}", i.k0);
+            finer += (i.k0 != z) as u32;
         }
         assert!(finer > 15, "finer {finer}");
     }

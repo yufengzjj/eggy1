@@ -51,16 +51,23 @@ pub(crate) enum Kind {
 pub(crate) struct Ctx {
     pub(crate) w: u32,
     pub(crate) mask: u64,
+    /// Whether `>>` is arithmetic; `None` where a result must hold for both.
+    pub(crate) signed: Option<bool>,
     st: std::sync::Arc<State>,
 }
 
 impl Ctx {
+    #[cfg(test)]
     pub(crate) fn new(w: u32) -> Ctx {
-        Ctx { w, mask: if w == 64 { u64::MAX } else { (1u64 << w) - 1 }, st: Default::default() }
+        Ctx::typed(w, None)
     }
-    /// The same run at width `w`, sharing its state.
+    pub(crate) fn typed(w: u32, signed: Option<bool>) -> Ctx {
+        Ctx { w, mask: if w == 64 { u64::MAX } else { (1u64 << w) - 1 }, signed, st: Default::default() }
+    }
+    /// The same run at width `w`, sharing its state; `>>` there has no signedness unless
+    /// `w` is the width of this run.
     pub(crate) fn narrow(&self, w: u32) -> Ctx {
-        Ctx { st: self.st.clone(), ..Ctx::new(w) }
+        Ctx { st: self.st.clone(), ..Ctx::typed(w, self.signed.filter(|_| w == self.w)) }
     }
     /// The run settings `crate::pipe` changes by name (`Pipe::With`): `rewrites` (calls
     /// left), `semi_leaves`, `relate_leaves`, `bit_splits` (splits left).
@@ -1036,32 +1043,32 @@ impl TermPass {
 /// MBA region, and every polynomial MBA region,
 /// rebuilt in a smaller form. Returns `egg` unchanged when nothing gets smaller.
 pub fn simplify_linear(egg: &str, w: u32) -> String {
-    simplify_linear_both(egg, w).0
+    simplify_linear_with(egg, w, None, false, &Passes::default()).0
 }
 
 /// `simplify_linear`, and the other rebuilds worth unioning: the next smallest (`egg` and
 /// its first rebuild are also rebuilt with bitwise operations of even operands halved,
 /// `halve`, and which result the rules finish best is not known) and the first rebuild
 /// without `clustered`, when that was used.
-pub fn simplify_linear_both(egg: &str, w: u32) -> (String, Vec<String>) {
-    simplify_linear_with(egg, w, false, &Passes::default())
+pub fn simplify_linear_both(egg: &str, ty: crate::eval::NumType) -> (String, Vec<String>) {
+    simplify_linear_with(egg, ty.bits, Some(ty.signed), false, &Passes::default())
 }
 
 /// `simplify_linear_both` with the candidates of `p`, printing them to stderr when `trace`
-/// is set.
-pub fn simplify_linear_with(egg: &str, w: u32, trace: bool, p: &Passes) -> (String, Vec<String>) {
+/// is set; `signed` as in `Ctx`.
+pub fn simplify_linear_with(egg: &str, w: u32, signed: Option<bool>, trace: bool, p: &Passes) -> (String, Vec<String>) {
     type Result = (String, Vec<String>);
-    type Last = Option<(String, u32, bool, Passes, Result)>;
+    type Last = Option<(String, u32, Option<bool>, bool, Passes, Result)>;
     thread_local! {
         static LAST: std::cell::RefCell<Last> = const { std::cell::RefCell::new(None) };
     }
     crate::sched::apply(p);
-    let hit = |(e, bits, t, q, _): &&(String, u32, bool, Passes, Result)| e == egg && *bits == w && *t == trace && q == p;
-    match LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.4.clone())) {
+    let hit = |(e, bits, s, t, q, _): &&(String, u32, Option<bool>, bool, Passes, Result)| e == egg && *bits == w && *s == signed && *t == trace && q == p;
+    match LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.5.clone())) {
         Some(r) => r,
         None => {
-            let r = simplify_linear_uncached(egg, w, trace, p);
-            LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, trace, p.clone(), r.clone())));
+            let r = simplify_linear_uncached(egg, w, signed, trace, p);
+            LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, signed, trace, p.clone(), r.clone())));
             r
         }
     }
@@ -1095,8 +1102,8 @@ fn drop_identities(t: &T, w: &Ctx) -> T {
 }
 
 /// The pre-pass result and the forms to union with it: `Passes::prepass` on `egg`.
-fn simplify_linear_uncached(egg: &str, w: u32, trace: bool, p: &Passes) -> (String, Vec<String>) {
-    let env = crate::pipe::Env::prepass(p, w, trace, egg);
+fn simplify_linear_uncached(egg: &str, w: u32, signed: Option<bool>, trace: bool, p: &Passes) -> (String, Vec<String>) {
+    let env = crate::pipe::Env::prepass(p, w, signed, trace, egg);
     let input = crate::pipe::Cand::new(egg, "input");
     let mut out = crate::pipe::run(&p.prepass, vec![input], &env).expect("the pre-pass runs no egglog").into_iter().map(|c| c.term().to_string());
     let main = out.next().unwrap_or_else(|| egg.to_string());

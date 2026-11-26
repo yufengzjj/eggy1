@@ -215,6 +215,7 @@ pub struct Env<'a> {
     cli: Option<&'a Cli>,
     passes: &'a Passes,
     w: u32,
+    signed: Option<bool>,
     trace: bool,
     /// The egglog program of the numeric type.
     egg: String,
@@ -237,17 +238,18 @@ pub struct Env<'a> {
 
 impl<'a> Env<'a> {
     pub fn new(cli: &'a Cli, egg: String, input: &str) -> Env<'a> {
-        Env::with(Some(cli), &cli.passes, width_of(&cli.num_type), cli.trace, egg, input)
+        let signed = crate::eval::NumType::from_name(&cli.num_type).map(|t| t.signed);
+        Env::with(Some(cli), &cli.passes, width_of(&cli.num_type), signed, cli.trace, egg, input)
     }
 
-    /// A pre-pass run on `input` at width `w`.
-    pub fn prepass(p: &'a Passes, w: u32, trace: bool, input: &str) -> Env<'a> {
-        Env::with(None, p, w, trace, String::new(), input)
+    /// A pre-pass run on `input` at width `w`, `signed` as in `linear_mba::Ctx`.
+    pub fn prepass(p: &'a Passes, w: u32, signed: Option<bool>, trace: bool, input: &str) -> Env<'a> {
+        Env::with(None, p, w, signed, trace, String::new(), input)
     }
 
-    fn with(cli: Option<&'a Cli>, passes: &'a Passes, w: u32, trace: bool, egg: String, input: &str) -> Env<'a> {
+    fn with(cli: Option<&'a Cli>, passes: &'a Passes, w: u32, signed: Option<bool>, trace: bool, egg: String, input: &str) -> Env<'a> {
         let input = input.to_string();
-        Env { cli, passes, w, trace, egg, input, moved: Cell::new(false), wins: Cell::new(0), deferred: Default::default(), cofactor: false, seen: Default::default(), regs: Default::default(), ctxs: Default::default() }
+        Env { cli, passes, w, signed, trace, egg, input, moved: Cell::new(false), wins: Cell::new(0), deferred: Default::default(), cofactor: false, seen: Default::default(), regs: Default::default(), ctxs: Default::default() }
     }
 
     fn cli(&self, pass: &str) -> &'a Cli {
@@ -255,14 +257,14 @@ impl<'a> Env<'a> {
     }
 
     fn prepass_of(&self, s: &str) -> (String, Vec<String>) {
-        linear_mba::simplify_linear_with(s, self.w, self.trace, self.passes)
+        linear_mba::simplify_linear_with(s, self.w, self.signed, self.trace, self.passes)
     }
 
     /// `f` on the run of the innermost `scope`, or on a fresh one.
     fn ctx<R>(&self, f: impl FnOnce(&Ctx) -> R) -> R {
         match self.ctxs.borrow().last() {
             Some(c) => f(c),
-            None => f(&Ctx::new(self.w)),
+            None => f(&Ctx::typed(self.w, self.signed)),
         }
     }
 
@@ -545,7 +547,7 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             out
         }
         Pipe::Scope(p) => {
-            env.ctxs.borrow_mut().push(Ctx::new(env.w));
+            env.ctxs.borrow_mut().push(Ctx::typed(env.w, env.signed));
             let out = go(p, set, env);
             env.ctxs.borrow_mut().pop();
             out
@@ -668,17 +670,17 @@ pub(crate) fn run_alt(p: &Pipe, t: &Term, w: &Ctx, cofactor: bool) -> Option<Ter
 
 fn run_on(p: &Pipe, t: &Term, w: &Ctx, cofactor: bool) -> Option<Cand> {
     let passes = crate::sched::current();
-    let mut env = Env::with(None, &passes, w.w, false, String::new(), "");
+    let mut env = Env::with(None, &passes, w.w, w.signed, false, String::new(), "");
     env.cofactor = cofactor;
     env.ctxs.borrow_mut().push(w.narrow(w.w));
     let out = go(p, vec![Cand::of(t.clone(), &Cand::new("", "input"), 0, 0)], &env).expect("a rewrite runs no egglog");
     out.into_iter().next()
 }
 
-/// `Passes::polish` of `p` on the egglog term `egg` at width `w`, and the origin of its
-/// result when that is smaller.
-pub fn polish(egg: &str, w: u32, p: &Passes) -> (String, Option<String>) {
-    let env = Env::prepass(p, w, false, egg);
+/// `Passes::polish` of `p` on the egglog term `egg` at width `w` (`signed` as in
+/// `linear_mba::Ctx`), and the origin of its result when that is smaller.
+pub fn polish(egg: &str, w: u32, signed: Option<bool>, p: &Passes) -> (String, Option<String>) {
+    let env = Env::prepass(p, w, signed, false, egg);
     polish_one(&Cand::new(egg, "input"), &env).map_or((egg.to_string(), None), |c| (c.term().to_string(), Some(c.origin)))
 }
 

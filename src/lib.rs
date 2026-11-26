@@ -946,7 +946,7 @@ fn rules_egraph(egg: &str) -> Result<EGraph, Error> {
 /// One saturate-and-extract round on `s` together with its linear-MBA rebuild, or
 /// on the rebuild alone if `keep_input` is false and the pre-pass changed `s`.
 pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result<String, Error> {
-    let (alt, other) = linear_mba::simplify_linear_with(s, width_of(&cli.num_type), cli.trace, &cli.passes);
+    let (alt, other) = linear_mba::simplify_linear_with(s, width_of(&cli.num_type), crate::eval::NumType::from_name(&cli.num_type).map(|t| t.signed), cli.trace, &cli.passes);
     let mut roots: Vec<&str> = match alt != s {
         true if !keep_input => vec![&alt],
         true => vec![s, &alt],
