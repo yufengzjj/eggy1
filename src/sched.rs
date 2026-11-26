@@ -57,7 +57,7 @@ pub const INNER: [&str; 34] = [
     "semi/short_consts",
 ];
 
-/// Switches that are off unless turned on: `cut`, a step skipped past a `(time-limit N)`
+/// Switches that are off unless turned on: `cut`, a step skipped past a `time_limit`
 /// makes the run cut (`crate::pipe::cut`).
 pub const FLAGS: [&str; 1] = ["cut"];
 
@@ -96,8 +96,9 @@ limits! {
     Related "related" = 4;
     /// Most leaf splits `bit_split` rebuilds per region.
     BitSplits "bit_splits" = 4;
-    /// Most `P op Q` pairs `bit_split` rebuilds per pre-pass candidate (`Pipe::Cand`).
-    BitSplitBudget "bit_split_budget" = 8;
+    /// Most `P op Q` pairs `bit_split` rebuilds per pre-pass candidate: `Pipe::Cand` sets
+    /// the budget `bit_split_budget` to it.
+    CandBitSplits "cand_bit_splits" = 8;
     /// Most variable bits `split_bits` tries on one term.
     Splits "splits" = 4;
     /// How deep `split_bits` nests.
@@ -120,14 +121,12 @@ limits! {
     PolyBranchMonos "poly_branch_monos" = 128;
     /// Uncached `rewrite` calls one `polish` call may make.
     PolishRewrites "polish_rewrites" = 2000;
-    /// Milliseconds the default `pipeline` gives a `simplify` run; 0: no limit.
-    TimeLimit "time_limit" = 0;
 }
 
-/// The settings `with` changes: `rewrites` (uncached `rewrite` calls left), `semi_leaves`
+/// Variables besides the limits: `rewrites` (uncached `rewrite` calls left), `semi_leaves`
 /// (most leaves of a semi-linear region rebuilt), `relate_leaves` (most leaves of a region
-/// `relate` tries), `bit_splits` (`bit_split` pairs left).
-pub const SETTINGS: [&str; 4] = ["rewrites", "semi_leaves", "relate_leaves", "bit_splits"];
+/// `relate` tries), `bit_split_budget` (`bit_split` pairs left).
+pub const SETTINGS: [&str; 4] = ["rewrites", "semi_leaves", "relate_leaves", "bit_split_budget"];
 
 /// How a binding of a variable combines with the outer ones.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -140,11 +139,11 @@ pub enum VarKind {
     Limit,
     /// `semi_leaves`, `relate_leaves`.
     Setting,
-    /// `rewrites`, `bit_splits`: a binding is at most what the outer one has left, and what
-    /// is used inside is used up outside too.
+    /// `rewrites`, `bit_split_budget`: a binding is at most what the outer one has left, and
+    /// what is used inside is used up outside too.
     Budget,
-    /// The `(time-limit N)` deadline in ns of `epoch_ns`: a binding is never later than the
-    /// outer one.
+    /// `time_limit`, a deadline in ns of `epoch_ns`: a binding is never later than the outer
+    /// one.
     Deadline,
 }
 
@@ -162,7 +161,7 @@ const SETTING0: usize = LIMIT0 + LIMITS.len();
 pub const REWRITES: usize = SETTING0;
 pub const SEMI_LEAVES: usize = SETTING0 + 1;
 pub const RELATE_LEAVES: usize = SETTING0 + 2;
-pub const BIT_SPLITS: usize = SETTING0 + 3;
+pub const BIT_SPLIT_BUDGET: usize = SETTING0 + 3;
 pub const DEADLINE: usize = SETTING0 + SETTINGS.len();
 pub const NVARS: usize = DEADLINE + 1;
 const _: () = assert!(NVARS <= 128, "the read variables are a u128");
@@ -178,13 +177,18 @@ pub const fn var(i: usize) -> Var {
         _ if i < SETTING0 => Var { name: LIMITS[i - LIMIT0].0, kind: VarKind::Limit },
         _ if i == SEMI_LEAVES || i == RELATE_LEAVES => Var { name: SETTINGS[i - SETTING0], kind: VarKind::Setting },
         _ if i < DEADLINE => Var { name: SETTINGS[i - SETTING0], kind: VarKind::Budget },
-        _ => Var { name: "time-limit", kind: VarKind::Deadline },
+        _ => Var { name: "time_limit", kind: VarKind::Deadline },
     }
 }
 
-/// The position of the `with` setting `name` in `VARS`.
-pub fn setting_index(name: &str) -> Option<usize> {
-    SETTINGS.iter().position(|k| *k == name).map(|i| SETTING0 + i)
+/// The position in `VARS` of the variable `name`.
+pub fn var_index(name: &str) -> Option<usize> {
+    (0..NVARS).find(|i| var(*i).name == name)
+}
+
+/// Whether the variable at `i` is a switch: an `INNER` pass or a `FLAGS` switch.
+pub fn is_switch(i: usize) -> bool {
+    matches!(var(i).kind, VarKind::Pass | VarKind::Flag)
 }
 
 const DEFAULTS: [u64; NVARS] = {
@@ -375,12 +379,6 @@ pub fn limit(l: Limit) -> usize {
     read(LIMIT0 + l as usize) as usize
 }
 
-/// The value on this thread of the limit named `name`.
-pub fn limit_named(name: &str) -> Option<usize> {
-    let i = LIMITS.iter().position(|(n, _)| *n == name)?;
-    Some(read(LIMIT0 + i) as usize)
-}
-
 /// `f` with the `INNER` passes `names` turned off, as `((off NAMES) | f)` would run it.
 pub fn with_off<R>(names: &[&str], f: impl FnOnce() -> R) -> R {
     in_scope(|| {
@@ -421,12 +419,10 @@ pub enum Pipe {
     Tag(String, Box<Pipe>),
     /// The candidates the condition holds for, each taken alone (`filter`).
     Filter(Cond),
-    /// The pre-pass candidate `NAME`: `p` with its own `bit_split_budget`, timed as
-    /// `pre/NAME/made`, its candidates with origin `NAME`; none when `NAME` is an entry of
-    /// `PRE` turned off (`cand`).
+    /// The pre-pass candidate `NAME`: `p` as a scope with `bit_split_budget = cand_bit_splits`
+    /// first, timed as `pre/NAME/made`, its candidates with origin `NAME`; none when `NAME`
+    /// is an entry of `PRE` turned off (`cand`).
     Cand(String, Box<Pipe>),
-    /// `p` with `SETTINGS` bound, as a scope (`with`; values are numbers or `LIMITS` names).
-    With(Vec<(String, String)>, Box<Pipe>),
     /// `p` with its passes over one term sharing one run's memos (`scope`).
     Scope(Box<Pipe>),
     /// `p`, taken only when its main candidate is smaller than the input's; timed as
@@ -459,8 +455,10 @@ pub enum Pass {
     Off(Vec<&'static str>),
     /// `Off` the other way.
     On(Vec<&'static str>),
-    /// Gives the rest of the enclosing sequence this many milliseconds; 0 clears it.
-    TimeLimit(Value),
+    /// `NAME = VALUE`: binds the variable at this position of `VARS` in the enclosing scope
+    /// to the value, evaluated on the candidates; `None` is `none` (no limit). A switch is on
+    /// for any value but 0; `time_limit` takes milliseconds from now, 0 is `none`.
+    Assign(usize, Option<Value>),
     /// A pass over one term; `alt` is the used bit of an alternative
     /// (`crate::linear_mba::ALTERNATIVES`).
     Term { name: String, at: TermAt, alt: Option<u8> },
@@ -489,7 +487,7 @@ impl Pass {
             Pass::Label(r) => format!("label/{r}"),
             Pass::Off(ns) => format!("off/{}", ns.join(" ")),
             Pass::On(ns) => format!("on/{}", ns.join(" ")),
-            Pass::TimeLimit(_) => "time-limit".into(),
+            Pass::Assign(i, _) => var(*i).name.into(),
         }
     }
 }
@@ -504,8 +502,9 @@ pub enum Value {
     Feature(usize),
     /// The size of the main candidate of register `R` (`(size R)`).
     Size(String),
-    /// An entry of `LIMITS`.
-    Limit(usize),
+    /// A variable of `VARS` that holds a number (not a switch); `time_limit` reads as the
+    /// milliseconds left.
+    Var(usize),
     /// `+ - * /` of two values.
     Bin(char, Box<Value>, Box<Value>),
 }
@@ -620,12 +619,12 @@ pub const fn sub_index(name: &str) -> usize {
 pub fn polish(names: &[&str]) -> String {
     let step = |n: &&str| {
         let run = format!("polish/{n} | drop_identities");
-        let run = if *n == "join_linear" { format!("(with semi_leaves=2 {run})") } else { run };
+        let run = if *n == "join_linear" { format!("(semi_leaves = 2 | {run})") } else { run };
         format!("(smaller polish/{n} {run})")
     };
     let steps: Vec<String> = names.iter().map(step).collect();
     let steps = if steps.len() == 1 { format!("(seq {})", steps[0]) } else { steps.join("\n  | ") };
-    format!("(scope (with rewrites=polish_rewrites (wins 8\n  {steps})))")
+    format!("(scope rewrites = polish_rewrites\n  | (wins 8\n  {steps}))")
 }
 
 fn switch_index(name: &str) -> Option<usize> {
@@ -723,6 +722,8 @@ pub struct Passes {
     pub off: Vec<&'static str>,
     /// Values of the `LIMITS`, in order.
     pub limits: Vec<usize>,
+    /// Milliseconds a `simplify` run has (`time_limit = MS` when it starts); 0: no limit.
+    pub time_limit: usize,
     /// The passes `simplify` runs on its input.
     pub pipeline: Pipe,
     /// The pre-pass on one term: its first candidate is the main rebuild, the others are
@@ -778,6 +779,7 @@ impl Passes {
             minimal: true,
             off: vec!["semi/peel_shapes"],
             limits: LIMITS.iter().map(|(_, d)| *d).collect(),
+            time_limit: 0,
             pipeline: id.clone(),
             prepass: id.clone(),
             polish: id.clone(),
@@ -818,8 +820,9 @@ impl Passes {
     /// of polish pass names, run as `polish(names)`.
     /// `(let NAME p)` defines a name for the items after it (those of `default.pipe` come
     /// first), and `file=PATH` reads the items of a file there. Items are separated by `;`,
-    /// or by white space before a `key=` or `(let` (so a pipeline may contain spaces); `#`
-    /// starts a comment to the end of the line.
+    /// or by white space before a `key=` or `(let` outside parentheses that does not follow
+    /// a `|` (so `prepass=a | split_runs=4 | b` is one item); `#` starts a comment to the end
+    /// of the line.
     pub fn parse(spec: &str) -> Result<Passes, String> {
         Passes::parse_noting(spec).map(|(p, _)| p)
     }
@@ -848,7 +851,7 @@ impl Passes {
         };
         let spec: String = spec.lines().map(|l| l.split_once('#').map_or(l, |(a, _)| a)).collect::<Vec<_>>().join("\n");
         let mut items: Vec<String> = Vec::new();
-        let (mut depth, mut cur, mut fresh) = (0i32, String::new(), true);
+        let (mut depth, mut cur, mut fresh, mut after_bar) = (0i32, String::new(), true, false);
         let mut chunks = Vec::new();
         for c in spec.chars() {
             match c {
@@ -868,13 +871,16 @@ impl Passes {
                 let key: String = chunk.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '/').collect();
                 let def = chunk.starts_with("(let");
                 let starts = def || !key.is_empty() && ["=", "+=", "-="].iter().any(|op| chunk[key.len()..].starts_with(op));
+                let bar = chunk.ends_with('|');
                 match items.last_mut() {
-                    Some(last) if !fresh && !starts => *last = format!("{last} {chunk}"),
+                    Some(last) if !fresh && (!starts || after_bar) => *last = format!("{last} {chunk}"),
                     _ => items.push(chunk),
                 }
                 fresh = def;
+                after_bar = bar;
             }
             fresh |= ends;
+            after_bar &= !ends;
         }
         for item in items.iter().map(String::as_str) {
             if item.starts_with("(let") {
@@ -971,11 +977,12 @@ impl Passes {
                 "minimal" => p.minimal = flag()?,
                 "match_limit" => p.match_limit = num()?,
                 "ban_length" => p.ban_length = num()?,
+                "time_limit" => p.time_limit = num()?,
                 _ => match LIMITS.iter().position(|(n, _)| *n == key) {
                     Some(i) => p.limits[i] = num()?,
                     None => {
                         let limits: Vec<&str> = LIMITS.iter().map(|(n, _)| *n).collect();
-                        return Err(format!("unknown key {key}; known: schedule match_limit ban_length pre keep extra rerun_input printed minimal off pipeline prepass polish rewrite simba sub/NAME file {}", limits.join(" ")));
+                        return Err(format!("unknown key {key}; known: schedule match_limit ban_length pre keep extra rerun_input printed minimal off time_limit pipeline prepass polish rewrite simba sub/NAME file {}", limits.join(" ")));
                     }
                 },
             }
@@ -1028,8 +1035,9 @@ impl Passes {
     }
 
     /// Parts of the pipelines that do nothing: a `(save R)` never read in its pipeline or
-    /// saved over before any read on every path, an `(off NAME)` followed in its sequence by
-    /// no pass over a term, and a `(time-limit N)` at the end of its sequence.
+    /// saved over before any read on every path, an assignment (also `(on NAME)`, `(off
+    /// NAME)`) that ends its sequence, and one assigned again in its sequence before any
+    /// read of it or any other step.
     pub fn warnings(&self) -> Vec<String> {
         let mut out = Vec::new();
         for (name, uses) in self.uses() {
@@ -1039,8 +1047,8 @@ impl Passes {
             let mut dead = uses.dead.clone();
             dead.dedup();
             out.extend(dead.iter().map(|r| format!("{name}: register {r} is saved again before the earlier save is read")));
-            out.extend(uses.idle_limit.iter().map(|t| format!("{name}: {t} ends its sequence and limits nothing")));
-            out.extend(uses.idle_off.iter().map(|o| format!("{name}: (off {o}) is followed in its sequence by no pass it could turn off")));
+            out.extend(uses.idle_assign.iter().map(|t| format!("{name}: {t} ends its sequence and changes nothing")));
+            out.extend(uses.reassigned.iter().map(|v| format!("{name}: {v} is assigned again before anything reads it")));
         }
         out
     }
@@ -1053,6 +1061,9 @@ impl Passes {
             .map(|(name, p)| {
                 let mut uses = Uses::default();
                 uses.walk(p);
+                if let Pipe::Pass(a @ (Pass::Assign(..) | Pass::On(_) | Pass::Off(_))) = p {
+                    uses.idle_assign.push(lang::show(&Pipe::Pass(a.clone())));
+                }
                 (name, uses)
             })
             .collect()
@@ -1079,10 +1090,10 @@ struct Uses {
     unsaved: Option<String>,
     /// Every register read, also by `pre_done` (`t0`, which it may find empty).
     reads: Vec<String>,
-    /// The names of an `(off NAME)` followed in its sequence by no pass over a term.
-    idle_off: Vec<String>,
-    /// The `(time-limit N)` that end their sequence, so limit nothing.
-    idle_limit: Vec<String>,
+    /// The assignments that end their sequence, so change nothing.
+    idle_assign: Vec<String>,
+    /// The variables assigned twice in a sequence with no read or other step between.
+    reassigned: Vec<String>,
     /// The registers saved and not read since on every path that reaches this point, from
     /// saves at the same level of `if`s and other parts that may not run.
     pending: Vec<String>,
@@ -1111,22 +1122,29 @@ impl Uses {
                 }
             }
             Pipe::Pass(Pass::Load(r) | Pass::Label(r)) => self.read(r),
-            Pipe::Pass(Pass::TimeLimit(v)) => self.value(v),
+            Pipe::Pass(Pass::Assign(_, v)) => {
+                if let Some(v) = v {
+                    self.value(v);
+                }
+            }
             Pipe::Pass(_) => {}
             Pipe::Seq(ps) => {
-                for (i, p) in ps.iter().enumerate() {
-                    if let Pipe::Pass(Pass::Off(ns)) = p {
-                        let mut rest = Uses::default();
-                        ps[i + 1..].iter().for_each(|q| rest.walk(q));
-                        let passes: Vec<&str> = ns.iter().copied().filter(|n| INNER.contains(n)).collect();
-                        if rest.calls.is_empty() && !passes.is_empty() {
-                            self.idle_off.push(passes.join(" "));
+                let mut pending: Vec<usize> = Vec::new();
+                for p in ps {
+                    match p {
+                        Pipe::Pass(Pass::Assign(i, v)) => {
+                            if v.as_ref().is_some_and(|v| reads_var(v, *i)) {
+                                pending.retain(|j| j != i);
+                            }
+                            self.assigned(&mut pending, *i);
                         }
+                        Pipe::Pass(Pass::On(ns) | Pass::Off(ns)) => ns.iter().filter_map(|n| var_index(n)).for_each(|i| self.assigned(&mut pending, i)),
+                        _ => pending.clear(),
                     }
                 }
                 ps.iter().for_each(|p| self.walk(p));
-                if let Some(Pipe::Pass(Pass::TimeLimit(v))) = ps.last().filter(|_| ps.len() > 1) {
-                    self.idle_limit.push(lang::show(&Pipe::Pass(Pass::TimeLimit(v.clone()))));
+                if let Some(Pipe::Pass(a @ (Pass::Assign(..) | Pass::On(_) | Pass::Off(_)))) = ps.last() {
+                    self.idle_assign.push(lang::show(&Pipe::Pass(a.clone())));
                 }
             }
             Pipe::Union(ps) => ps.iter().for_each(|p| self.walk(p)),
@@ -1163,7 +1181,7 @@ impl Uses {
             }
             Pipe::Cand(_, p) => self.maybe(p),
             Pipe::Filter(c) => self.cond(c),
-            Pipe::Smallest(p) | Pipe::With(_, p) | Pipe::Scope(p) | Pipe::Tag(_, p) | Pipe::Smaller(_, p) => self.walk(p),
+            Pipe::Smallest(p) | Pipe::Scope(p) | Pipe::Tag(_, p) | Pipe::Smaller(_, p) => self.walk(p),
             // Both rebuild with `Passes::rewrite`.
             Pipe::Regions(p) => {
                 self.calls.push("inner");
@@ -1173,6 +1191,14 @@ impl Uses {
                 self.calls.push("inner");
                 self.walk(p);
             }
+        }
+    }
+
+    fn assigned(&mut self, pending: &mut Vec<usize>, i: usize) {
+        if pending.contains(&i) {
+            self.reassigned.push(var(i).name.to_string());
+        } else {
+            pending.push(i);
         }
     }
 
@@ -1231,6 +1257,15 @@ impl Uses {
     }
 }
 
+/// Whether `v` reads the variable at `i`.
+fn reads_var(v: &Value, i: usize) -> bool {
+    match v {
+        Value::Var(j) => *j == i,
+        Value::Bin(_, a, b) => reads_var(a, i) || reads_var(b, i),
+        _ => false,
+    }
+}
+
 /// The spec `Passes::parse` reads back to these passes; `{:#}` puts each pipeline on its own
 /// lines.
 impl fmt::Display for Passes {
@@ -1254,6 +1289,9 @@ impl fmt::Display for Passes {
             if v != default {
                 write!(f, " {name}={v}")?;
             }
+        }
+        if self.time_limit != 0 {
+            write!(f, " time_limit={}", self.time_limit)?;
         }
         let show = if f.alternate() { lang::pretty } else { lang::show };
         let sep = if f.alternate() { "\n" } else { " " };
@@ -1361,7 +1399,7 @@ mod tests {
         assert_eq!(p.pipeline, lang::parse("(fix 2 (seq prepass egglog))").unwrap());
         assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
         let p = Passes::parse("prepass=(scope (save t) | (with rewrites=unified_rewrites semi_leaves=2 rewrite) | (filter (size < (size t) || size <= (size t) * 3 / 4 && !tiny)) | (cand halve_input (load t)))").unwrap();
-        assert_eq!(p.prepass.to_string(), "(scope (save t) | (with rewrites=unified_rewrites semi_leaves=2 rewrite) | (filter (size < (size t) || size <= (size t) * 3 / 4 && !tiny)) | (cand halve_input (load t)))");
+        assert_eq!(p.prepass.to_string(), "(scope (save t) | (rewrites = unified_rewrites | semi_leaves = 2 | rewrite) | (filter (size < (size t) || size <= (size t) * 3 / 4 && !tiny)) | (cand halve_input (load t)))");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         for bad in ["prepass=(filter lt)", "prepass=(filter (size <=))", "prepass=(with rewrites=x id)", "prepass=(with nope=1 id)", "prepass=(save)", "prepass=(scope id id)"] {
             assert!(Passes::parse(bad).is_err(), "{bad}");
@@ -1402,21 +1440,22 @@ prepass=lowbits | r2
         let mut lets = Lets::default();
         Passes::base().apply(include_str!("default.pipe"), &mut lang::Defs::new(), &mut lets).unwrap();
         assert!(lets.defined.iter().all(|n| lets.used.contains(n)), "{:?} {:?}", lets.defined, lets.used);
-        let (_, w) = Passes::parse_noting("(let foo rewrite) (let bar lowbits) prepass=bar | (save t) | (save q) | (load t) | ((off relate) | (save x) | id) | ((off relate) | rewrite)").unwrap();
+        let (_, w) = Passes::parse_noting("(let foo rewrite) (let bar lowbits) prepass=bar | (save t) | (save q) | (load t) | ((off relate) | (save x) | id) | (rewrite | (off relate))").unwrap();
         assert_eq!(w.len(), 4, "{w:?}");
-        assert!(w[0].contains("let foo") && w[1].contains("register q") && w[2].contains("register x") && w[3].contains("(off relate)"), "{w:?}");
+        assert!(w[0].contains("let foo") && w[1].contains("register q") && w[2].contains("register x") && w[3].contains("(off relate) ends"), "{w:?}");
         let (_, w) = Passes::parse_noting("prepass=(save t) | rewrite | (save t) | (load t)").unwrap();
         assert!(w.len() == 1 && w[0].contains("saved again"), "{w:?}");
         for ok in ["prepass=(save t) | (if mixed (save t)) | (load t)", "prepass=(save t) | (cand unified (save t)) | (load t)", "prepass=(fix 3 (save t) | rewrite) | (load t)", "prepass=(save t) | (filter (size < (size t))) | (save t) | (load t)", "prepass=(save t) | (first rewrite (save t)) | (load t)", "prepass=(if mixed (save t) (save t)) | (load t)"] {
             assert_eq!(Passes::parse_noting(ok).unwrap().1, Vec::<String>::new(), "{ok}");
         }
         let p = Passes::parse("prepass=rewrite | (time-limit 500) | relate | (time-limit (size-1 * 2)) | tfunc | (time-limit 0) | lowbits").unwrap();
-        assert_eq!(p.prepass.to_string(), "rewrite | (time-limit 500) | relate | (time-limit (size - 1 * 2)) | tfunc | (time-limit 0) | lowbits");
+        assert_eq!(p.prepass.to_string(), "rewrite | time_limit = 500 | relate | time_limit = size - 1 * 2 | tfunc | time_limit = none | lowbits");
+        assert_eq!(p, Passes::parse(&p.prepass.to_string().replace("rewrite |", "prepass=rewrite |")).unwrap());
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("prepass=(time-limit)").is_err() && Passes::parse("prepass=time-limit").is_err() && Passes::parse("prepass=(time-limit mixed)").is_err());
         assert!(Passes::parse("prepass=(if (size-x > 1) id)").unwrap_err().contains("size-x"));
         let (_, w) = Passes::parse_noting("prepass=rewrite | (time-limit 100)").unwrap();
-        assert!(w.len() == 1 && w[0].contains("limits nothing"), "{w:?}");
+        assert!(w.len() == 1 && w[0].contains("time_limit = 100 ends its sequence"), "{w:?}");
         assert_eq!(Passes::parse_noting("prepass=rewrite | (if mixed (time-limit 100)) | relate").unwrap().1, Vec::<String>::new());
         let flat = Passes::parse("(let g relate | tfunc) (let h (relate | tfunc)) prepass=lowbits | g | finish rewrite=lowbits | h | finish").unwrap();
         assert_eq!(flat.prepass.to_string(), "lowbits | relate | tfunc | finish");
@@ -1426,8 +1465,8 @@ prepass=lowbits | r2
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("prepass=(on nope)").is_err() && Passes::parse("prepass=(on)").is_err() && Passes::parse("prepass=on/relate").is_err());
         assert!(Passes::parse("prepass=(with off=relate rewrite)").unwrap_err().contains("(off relate)"), "with takes no off=");
-        let (_, w) = Passes::parse_noting("prepass=rewrite | (scope (with rewrites=8 (off relate) | id)) | (off cut) | lowbits").unwrap();
-        assert!(w.len() == 1 && w[0].contains("(off relate) is followed"), "{w:?}");
+        let (_, w) = Passes::parse_noting("prepass=rewrite | (scope (with rewrites=8 (off relate))) | (off cut) | lowbits").unwrap();
+        assert!(w.len() == 1 && w[0].contains("(off relate) ends its sequence"), "{w:?}");
         let (_, w) = Passes::parse_noting("prepass=(with semi_leaves=2 rewrite) polish=(scope (with semi_leaves=2 rewrite)) rewrite=(with semi_leaves=2 simba)").unwrap();
         assert!(w.is_empty(), "a with outside any scope binds too: {w:?}");
         let e = Passes::parse("prepass=save/t").unwrap_err();
@@ -1441,5 +1480,31 @@ prepass=lowbits | r2
         });
         apply(&Passes::default());
         assert!(!is_off("relate"));
+    }
+
+    #[test]
+    fn assignment_items_and_warnings() {
+        let p = Passes::parse("prepass=lowbits | split_runs=4 | rewrite").unwrap();
+        assert_eq!(p.prepass.to_string(), "lowbits | split_runs = 4 | rewrite");
+        assert_eq!(p.limits, Passes::default().limits, "an assignment after | stays in the pipeline");
+        let p = Passes::parse("prepass=lowbits split_runs=4").unwrap();
+        assert_eq!((p.prepass.to_string().as_str(), p.limits[Limit::SplitRuns as usize]), ("lowbits", 4));
+        let p = Passes::parse("prepass=lowbits | split_runs = vars * 2 | rewrite extra=0").unwrap();
+        assert_eq!((p.prepass.to_string().as_str(), p.extra), ("lowbits | split_runs = vars * 2 | rewrite", 0));
+        let p = Passes::parse("time_limit=2000 cand_bit_splits=3").unwrap();
+        assert_eq!((p.time_limit, p.limits[Limit::CandBitSplits as usize]), (2000, 3));
+        assert!(p.to_string().contains(" cand_bit_splits=3 time_limit=2000"), "{p}");
+        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
+        assert!(Passes::parse("bit_split_budget=8").is_err(), "the budget is no --passes item");
+        let warn = |s: &str| Passes::parse_noting(s).unwrap().1;
+        assert!(warn("prepass=rewrite | split_runs = 4").iter().any(|w| w.contains("split_runs = 4 ends its sequence")));
+        assert!(warn("prepass=(off relate)").iter().any(|w| w.contains("(off relate) ends")), "a pipeline is a sequence too");
+        let w = warn("prepass=split_runs = 4 | split_runs = 8 | rewrite");
+        assert!(w.len() == 1 && w[0].contains("split_runs is assigned again"), "{w:?}");
+        let w = warn("prepass=(off relate) | relate = 1 | rewrite");
+        assert!(w.len() == 1 && w[0].contains("relate is assigned again"), "{w:?}");
+        for ok in ["prepass=split_runs = 4 | rewrite | split_runs = 8 | rewrite", "prepass=split_runs = 4 | split_runs = split_runs * 2 | rewrite", "prepass=split_runs = 4 | (split_runs = 8 | rewrite) | rewrite", "prepass=cut = 1 | rewrite"] {
+            assert_eq!(warn(ok), Vec::<String>::new(), "{ok}");
+        }
     }
 }

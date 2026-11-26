@@ -768,7 +768,7 @@ fn tracked<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, u8, u128, Deps) {
 /// `f()` with nothing it changes in the run state kept: budgets, `used`, the tracked reads.
 fn isolated<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, Deps) {
     let st = &w.st;
-    let budgets = [crate::sched::REWRITES, crate::sched::BIT_SPLITS].map(|i| (i, crate::sched::get(i)));
+    let budgets = [crate::sched::REWRITES, crate::sched::BIT_SPLIT_BUDGET].map(|i| (i, crate::sched::get(i)));
     let used = st.used.load(Relaxed);
     let read = crate::sched::swap_read(0);
     let deps = st.deps.lock().unwrap().clone();
@@ -1011,7 +1011,7 @@ pub fn simplify_linear_with(egg: &str, w: u32, signed: Option<bool>, trace: bool
         static LAST: std::cell::RefCell<Last> = const { std::cell::RefCell::new(None) };
     }
     crate::sched::apply(p);
-    // A variable bound where it is called (`(off NAME)`, `with`) changes the result as `p` does.
+    // A variable bound where it is called (an assignment, `(off NAME)`) changes the result as `p` does.
     let vars = crate::sched::key();
     let hit = |(e, bits, s, t, q, v, _): &&(String, u32, Option<bool>, bool, Passes, Vec<u64>, Result)| e == egg && *bits == w && *s == signed && *t == trace && q == p && *v == vars;
     match LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.6.clone())) {

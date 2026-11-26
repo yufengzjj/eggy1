@@ -135,7 +135,7 @@ fn bit_split(groups: &[(Vec<u64>, u64)], lv: &[T], arith: bool, e0: u64, w: &Ctx
     if !(4..=6).contains(&n) || arith {
         return Vec::new();
     }
-    if crate::sched::get(crate::sched::BIT_SPLITS) == 0 {
+    if crate::sched::get(crate::sched::BIT_SPLIT_BUDGET) == 0 {
         w.read(|d| d.cut = true);
         return Vec::new();
     }
@@ -316,7 +316,7 @@ fn bit_split(groups: &[(Vec<u64>, u64)], lv: &[T], arith: bool, e0: u64, w: &Ctx
     // splits are ruled out by size before they are rebuilt.
     for &(low, op, a, b, ..) in found.iter().take(crate::sched::limit(Limit::BitSplits)) {
         for (ps, qs) in (0..5).filter_map(|v| pick(op, a, b, v)) {
-            if low as usize + 1 >= limit || !w.take_budget(crate::sched::BIT_SPLITS) {
+            if low as usize + 1 >= limit || !w.take_budget(crate::sched::BIT_SPLIT_BUDGET) {
                 return out;
             }
             let t = T::Op(op, vec![sub(sub_index("bit_split"), &side(&ps, a), w), sub(sub_index("bit_split"), &side(&qs, b), w)]);

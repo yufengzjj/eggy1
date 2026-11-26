@@ -1030,7 +1030,7 @@ pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
 }
 
 /// Whether the last `simplify` on this thread was cut short: a step skipped past a
-/// `(time-limit N)` with the switch `cut` on (the default `pipeline` with `time_limit=MS`).
+/// `time_limit` with the switch `cut` on (the default `pipeline` with `time_limit=MS`).
 pub fn last_run_cut() -> bool {
     pipe::cut()
 }

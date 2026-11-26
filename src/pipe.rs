@@ -28,7 +28,7 @@ pub const SET_PASSES: [&str; 9] = [
     "polish",
     // The main candidate printed and read back.
     "reprint",
-    // No candidates once `rewrite` has used up its calls in the enclosing `with`.
+    // No candidates once `rewrite` has used up its calls in the scope under way.
     "within",
     // The end of the pre-pass: counts the kept candidates, names their origins `pre/NAME`
     // and gives the main one as the input was written when it equals it (register `t0`).
@@ -295,7 +295,11 @@ impl<'a> Env<'a> {
             Value::Feature(0) => set.first()?.size() as u64,
             Value::Feature(i) => feature(&stats::shape(set.first()?.tree()), *i) as u64,
             Value::Size(r) => self.reg_main(r)?.size() as u64,
-            Value::Limit(i) => crate::sched::limit_named(crate::sched::LIMITS[*i].0).unwrap() as u64,
+            Value::Var(i) if *i == crate::sched::DEADLINE => match crate::sched::read(*i) {
+                crate::sched::NONE => crate::sched::NONE,
+                at => at.saturating_sub(crate::sched::epoch_ns()) / 1_000_000,
+            },
+            Value::Var(i) => crate::sched::read(*i),
             Value::Bin(op, a, b) => {
                 let (a, b) = (self.value(a, set)?, self.value(b, set)?);
                 match op {
@@ -411,7 +415,7 @@ pub fn cut() -> bool {
     CUT.with(|c| c.get())
 }
 
-/// Whether work taking `secs` more would end past the `(time-limit N)` in force; counts the
+/// Whether work taking `secs` more would end past the `time_limit` in force; counts the
 /// skipped step (`time-limit/skipped`), and records a cut of the run when the switch `cut` is
 /// on. Results computed then are not memoized (`Ctx::mark_cut`).
 fn past_deadline(secs: f64, env: &Env) -> bool {
@@ -427,26 +431,39 @@ fn past_deadline(secs: f64, env: &Env) -> bool {
     true
 }
 
-/// `f` as a scope (a sequence, `with`, `scope` or a pipeline run): a `(time-limit N)`,
-/// `(on NAME)`, `(off NAME)` or `with` setting inside it ends with it.
+/// `f` as a scope (a sequence, `scope` or a pipeline run): an assignment inside it ends
+/// with it.
 fn scoped<R>(f: impl FnOnce() -> R) -> R {
     crate::sched::in_scope(f)
 }
 
-/// The candidates `p` gives for `set`.
+/// The candidates `p` gives for `set`. A `simplify` run starts with `time_limit = MS` of
+/// `Passes::time_limit`, which the runs it calls only read.
 pub fn run(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
     scoped(|| {
         crate::sched::apply(env.passes);
+        if env.cli.is_some() {
+            assign_time_limit(env.passes.time_limit as u64);
+        }
         go(p, set, env)
     })
 }
 
+/// `time_limit = ms` in the scope under way; 0 is `none`.
+fn assign_time_limit(ms: u64) {
+    let at = match ms {
+        0 | crate::sched::NONE => crate::sched::NONE,
+        _ => crate::sched::epoch_ns().saturating_add(ms.saturating_mul(1_000_000)),
+    };
+    crate::sched::bind(crate::sched::DEADLINE, at);
+}
+
 /// Steps that only move candidates around: they run past a limit too, so that a sequence
-/// still has its registers and can go on after a `(time-limit 0)`.
+/// still has its registers and can go on after a `time_limit = none`.
 fn bookkeeping(p: &Pipe) -> bool {
     match p {
         Pipe::Seq(_) | Pipe::Filter(_) => true,
-        Pipe::Pass(Pass::Save(_) | Pass::Load(_) | Pass::Label(_) | Pass::Off(_) | Pass::On(_) | Pass::TimeLimit(_)) => true,
+        Pipe::Pass(Pass::Save(_) | Pass::Load(_) | Pass::Label(_) | Pass::Off(_) | Pass::On(_) | Pass::Assign(..)) => true,
         Pipe::Pass(Pass::Set(i)) => matches!(SET_PASSES[*i], "id" | "none" | "within" | "pre_done"),
         _ => false,
     }
@@ -542,18 +559,12 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
                 return Ok(Vec::new());
             }
             let clock = std::time::Instant::now();
-            let budget = Pipe::With(vec![("bit_splits".into(), "bit_split_budget".into())], p.clone());
-            let out = go(&budget, set, env)?;
+            let out = scoped(|| {
+                crate::sched::bind(crate::sched::BIT_SPLIT_BUDGET, limit(Limit::CandBitSplits) as u64);
+                go(p, set, env)
+            })?;
             stats::add(&format!("pre/{name}/made"), stats::since(clock));
             Ok(out.into_iter().map(|c| Cand { origin: name.clone(), ..c }).collect())
-        }
-        Pipe::With(kv, p) => {
-            let value = |v: &str| v.parse().unwrap_or_else(|_| crate::sched::limit_named(v).unwrap() as u64);
-            let vals: Vec<(usize, u64)> = kv.iter().map(|(k, v)| (crate::sched::setting_index(k).unwrap(), value(v))).collect();
-            scoped(|| {
-                vals.iter().for_each(|&(i, v)| crate::sched::bind(i, v));
-                go(p, set, env)
-            })
         }
         Pipe::Scope(p) => {
             env.ctxs.borrow_mut().push(Ctx::typed(env.w, env.signed));
@@ -722,10 +733,13 @@ fn pass(p: &Pass, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             ns.iter().for_each(|n| crate::sched::turn_on(n));
             return Ok(set);
         }
-        Pass::TimeLimit(v) => {
-            let ms = env.value(v, &set).unwrap_or(0);
-            let at = if ms > 0 { crate::sched::epoch_ns().saturating_add(ms.saturating_mul(1_000_000)) } else { crate::sched::NONE };
-            crate::sched::bind(crate::sched::DEADLINE, at);
+        Pass::Assign(i, v) => {
+            let v = v.as_ref().map_or(crate::sched::NONE, |v| env.value(v, &set).unwrap_or(0));
+            match *i {
+                crate::sched::DEADLINE => assign_time_limit(v),
+                i if crate::sched::is_switch(i) => crate::sched::bind(i, (v != 0) as u64),
+                i => crate::sched::bind(i, v),
+            }
             return Ok(set);
         }
         Pass::Term { name, at, alt } => return Ok(seen(dedup(term_pass(name, linear_mba::term_pass_at(*at), *alt, &set, env)), env)),
@@ -867,7 +881,7 @@ mod tests {
     fn time_limit_ends_with_its_sequence() {
         let passes = Passes::default();
         let env = Env::prepass(&passes, 32, None, false, "(Var \"x\")");
-        let limit = |ms| Pass::TimeLimit(Value::Num(ms));
+        let limit = |ms| Pass::Assign(crate::sched::DEADLINE, Some(Value::Num(ms)).filter(|_| ms > 0));
         let wait = || std::thread::sleep(std::time::Duration::from_millis(5));
         scoped(|| {
             pass(&limit(1), vec![], &env).unwrap();
@@ -933,6 +947,35 @@ mod tests {
             assert!(is_on("cut"));
         });
         assert!(!is_on("cut") && !is_off("tfunc"));
+    }
+
+    #[test]
+    fn assignments_bind_in_their_scope() {
+        use crate::sched::{BIT_SPLIT_BUDGET, NONE, REWRITES, get, is_off, is_on};
+        let passes = Passes::default();
+        let env = Env::prepass(&passes, 32, None, false, "(Sub (Var \"x\") (Var \"y\"))");
+        let step = |p: &str| go(&lang::parse(p).unwrap(), vec![Cand::new("(Sub (Var \"x\") (Var \"y\"))", "input")], &env).unwrap();
+        crate::sched::apply(&passes);
+        scoped(|| {
+            step("split_runs = vars * 3");
+            assert_eq!(limit(Limit::SplitRuns), 6, "the right side is evaluated on the candidates");
+            step("(split_runs = 1 | id)");
+            assert_eq!(limit(Limit::SplitRuns), 6, "a group ends its assignment");
+            step("relate = 0 | cut = 2");
+            assert!(!is_off("relate") && !is_on("cut"), "a sequence ends its assignments");
+            step("relate = 0");
+            step("cut = 2");
+            assert!(is_off("relate") && is_on("cut"), "a switch is on for any value but 0");
+            step("rewrites = 5");
+            step("rewrites = 9");
+            assert_eq!(get(REWRITES), 9);
+            step("rewrites = none");
+            assert_eq!(get(REWRITES), NONE);
+            step("(cand x (bit_split_budget = bit_split_budget + 1))");
+            assert_eq!(get(BIT_SPLIT_BUDGET), NONE, "cand is a scope");
+        });
+        assert_eq!(limit(Limit::SplitRuns), 16);
+        assert!(!is_off("relate") && !is_on("cut"));
     }
 
     #[test]
