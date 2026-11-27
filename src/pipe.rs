@@ -201,7 +201,7 @@ pub struct Env<'a> {
     trace: bool,
     /// The egglog program of the numeric type.
     egg: Rc<str>,
-    /// The run's input, registers and arguments; those of the call where a pipeline argument
+    /// The run's input, group variables and arguments; those of the call where a pipeline argument
     /// is written while it runs.
     lex: RefCell<Rc<Lex>>,
     moved: Cell<bool>,
@@ -217,10 +217,11 @@ pub struct Env<'a> {
 }
 
 /// What a pipeline argument takes along from the run where it is written (a closure): the
-/// run's input and registers and the arguments of the call that run is.
+/// run's input and group variables and the arguments of the call that run is.
 struct Lex {
     input: String,
-    /// Shared with the caller in the call of an `@inline` function, as `notes` is.
+    /// The group variables (`(save R)`, `R = p`); shared with the caller in the call of an
+    /// `@inline` function, as `notes` is.
     regs: Rc<RefCell<HashMap<String, Vec<Cand>>>>,
     /// The open note registers, newest last, and the candidate each keeps.
     notes: Rc<RefCell<Vec<(String, Option<Cand>)>>>,
@@ -497,10 +498,11 @@ fn assign_time_limit(ms: u64) {
 }
 
 /// Steps that only move candidates around: they run past a limit too, so that a sequence
-/// still has its registers and can go on after a `time_limit = none`.
+/// still has its group variables and can go on after a `time_limit = none`. A `Bind` runs
+/// its right side, whose steps are each skipped past a limit.
 fn bookkeeping(p: &Pipe) -> bool {
     match p {
-        Pipe::Seq(_) | Pipe::Filter(_) | Pipe::Param(..) => true,
+        Pipe::Seq(_) | Pipe::Filter(_) | Pipe::Param(..) | Pipe::Bind(..) => true,
         Pipe::Call(c) => c.def.inline,
         Pipe::Pass(Pass::Save(_) | Pass::Load(_) | Pass::Label(_) | Pass::Clear(_) | Pass::TakeMin(_) | Pass::Off(_) | Pass::On(_) | Pass::Assign(..)) => true,
         Pipe::Pass(Pass::Set(i)) => matches!(SET_PASSES[*i], "id" | "none" | "within" | "pre_done"),
@@ -718,6 +720,11 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             env.lex.replace(callee);
             out
         }
+        Pipe::Bind(r, p) => {
+            let group = scoped(|| go(p, set.clone(), env))?;
+            env.lex.borrow().regs.borrow_mut().insert(r.clone(), group);
+            Ok(set)
+        }
         Pipe::Wins(n, p) => {
             let n = env.times(n, &set);
             if n == 0 {
@@ -806,7 +813,7 @@ pub fn polish(egg: &str, w: u32, signed: Option<bool>, p: &Passes) -> (String, O
     in_run(p, None, input, || polish_one(&input(), &env)).map_or((egg.to_string(), None), |c| (c.term().to_string(), Some(c.origin)))
 }
 
-/// `Passes::polish` on `c` alone, as a run of its own (its registers, `smallest`, `wins`),
+/// `Passes::polish` on `c` alone, as a run of its own (its group variables, `smallest`, `wins`),
 /// when it makes it smaller.
 fn polish_one(c: &Cand, env: &Env) -> Option<Cand> {
     let run = Env::with(env.cli, env.passes, env.w, env.signed, env.trace, String::new(), c.term());
@@ -1285,6 +1292,29 @@ mod tests {
         let env = Env::prepass(&passes, 32, None, false, SUB);
         let e = crate::sched::in_default_run(|| go(&passes.prepass, vec![Cand::new(SUB, "input")], &env)).unwrap_err();
         assert!(e.to_string().contains("max_leaves is at most 6"), "{e}");
+    }
+
+    #[test]
+    fn group_variables() {
+        let step = |spec: &str| terms(&prepass_of(spec));
+        assert_eq!(step("prepass=t = (lowbits | unshift) | (filter (size == (size t))) | (load t)"), [SUB]);
+        assert_eq!(step("prepass=t = rewrite"), [SUB], "the input passes on");
+        assert_eq!(step("prepass=t = rewrite | (load t)"), [XOR]);
+        assert_eq!(step("prepass=t = rewrite | (filter (size > (size t) && !(same t)))"), [SUB]);
+        assert_eq!(step("prepass=rewrite | t = id | none | (load t)"), step("prepass=rewrite | (save t) | none | (load t)"), "(save t) is t = id");
+        assert_eq!(step("prepass=t = (relate = 0 | rewrite) | t = (union (load t) id) | (load t)"), [XOR, SUB]);
+        assert_eq!(step("(def (f) t = rewrite | (load t)) prepass=t = id | f | none | (load t)"), [SUB], "a def binds its own group variables");
+        assert_eq!(step("(def (f) rewrite) prepass=t = f | (load t)"), [XOR]);
+        assert_eq!(step("(def (f p) p | none) prepass=(f t = rewrite) | (load t)"), [XOR], "an argument binds the caller's");
+        assert_eq!(step("(def (f r p) r = p | (load r)) prepass=(f t rewrite)"), [XOR], "a group parameter names a group variable of the run");
+        assert_eq!(step("(def @inline (g r) r = rewrite) prepass=(g t) | (load t)"), [XOR], "an @inline function binds the caller's");
+        assert_eq!(step("prepass=(smallest t = rewrite)"), [XOR, SUB], "smallest notes the steps of a right side");
+        assert_eq!(step("prepass=time_limit = 0 | t = rewrite | (load t)"), [SUB], "past the limit the right side's steps are skipped");
+        assert_eq!(step("prepass=rewrite | t = id | u = t | none | (load u)"), [XOR], "a group variable on the right side");
+        assert_eq!(step("(def (f r) (save r) | u = r | (load u)) prepass=rewrite | (f t)"), [XOR]);
+        assert_eq!(step("prepass=t = (off tfunc) | tfunc"), [XOR], "the right side is a scope");
+        assert_eq!(step("prepass=(off tfunc) | tfunc"), [SUB]);
+        assert_eq!(step("prepass=t = (split_runs = 3 | id) | (if (split_runs == 3) none)"), [SUB]);
     }
 
     #[test]

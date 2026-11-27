@@ -713,6 +713,10 @@ pub enum Pipe {
     /// A pipeline parameter of the function whose body this is, by its position among the
     /// parameters, and its name: the argument of the call runs where the call is written.
     Param(usize, String),
+    /// `NAME = p`: binds the group variable `NAME` of the run to the candidates `p` gives on
+    /// the input as a scope of its own, the input passing on unchanged; `(save NAME)` is
+    /// `Pass::Save`, `NAME = U` for a group variable `U` has `p` the `Pass::Load` of `U`.
+    Bind(String, Box<Pipe>),
 }
 
 /// `(smallest p)` expanded to `(clear s) | p' | (take_min s)`, where `p'` is `p` with
@@ -738,7 +742,7 @@ impl PartialEq for Smallest {
 #[derive(Debug, PartialEq)]
 pub struct Def {
     pub name: String,
-    /// The parameters, their types inferred from the body: `pipe`, `num`, `reg` or `name`.
+    /// The parameters, their types inferred from the body: `pipe`, `num`, `group` or `name`.
     pub params: Vec<crate::builtins::Param>,
     /// The body, name parameters written as their names.
     pub body: std::sync::Arc<Pipe>,
@@ -752,7 +756,7 @@ pub struct Def {
 impl Def {
     /// Whether a parameter is a name, which a call puts in place in its own copy of the body.
     pub fn has_names(&self) -> bool {
-        self.params.iter().any(|p| matches!(p.ty, crate::builtins::Ty::Reg | crate::builtins::Ty::Name))
+        self.params.iter().any(|p| matches!(p.ty, crate::builtins::Ty::Group | crate::builtins::Ty::Name))
     }
 }
 
@@ -847,7 +851,7 @@ impl Pass {
 /// An expression of a pipeline, evaluated on the candidates to a number or `NONE`: a
 /// condition (true when not 0), a count of `fix`, `best` or `wins`, or the right side of an
 /// assignment. The functions (`Feature`, `Is`, `Size`, `Same`, `Any`, `All`) give 0 without
-/// a main candidate or register.
+/// a main candidate or group.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     /// A number; `NONE` is `none`.
@@ -856,9 +860,9 @@ pub enum Expr {
     Feature(usize),
     /// An entry of `crate::pipe::CONDS`, 1 or 0.
     Is(usize),
-    /// The size of the main candidate of register `R` (`(size R)`).
+    /// The size of the main candidate of the group variable `R` (`(size R)`).
     Size(String),
-    /// 1 when the main candidate is the term of register `R`'s (`(same R)`).
+    /// 1 when the main candidate is the term of the group variable `R`'s (`(same R)`).
     Same(String),
     /// A variable of `VARS`; `time_limit` reads as the milliseconds left, `keep` as at least 1.
     Var(usize),
@@ -1392,7 +1396,7 @@ impl Passes {
         let mut needs = std::collections::HashMap::new();
         for (name, node, uses) in self.uses() {
             if let Some(r) = uses.unsaved {
-                return Err(format!("{name} reads register {r} before any (save {r})"));
+                return Err(format!("{name} reads group variable {r} before it is bound ({r} = ... or (save {r}))"));
             }
             if let Some((what, sig)) = uses.needs_run.first() {
                 match node.as_str() {
@@ -1439,10 +1443,10 @@ impl Passes {
         for (name, _, uses) in self.uses() {
             let mut unread: Vec<&String> = uses.saved.iter().filter(|r| !uses.reads.contains(r)).collect();
             unread.dedup();
-            out.extend(unread.into_iter().map(|r| format!("{name}: register {r} is saved and never read")));
+            out.extend(unread.into_iter().map(|r| format!("{name}: group variable {r} is bound and never read")));
             let mut dead = uses.dead.clone();
             dead.dedup();
-            out.extend(dead.iter().map(|r| format!("{name}: register {r} is saved again before the earlier save is read")));
+            out.extend(dead.iter().map(|r| format!("{name}: group variable {r} is bound again before its value is read")));
             out.extend(uses.idle_assign.iter().map(|t| format!("{name}: {t} ends its sequence and changes nothing")));
             out.extend(uses.reassigned.iter().map(|v| format!("{name}: {v} is assigned again before anything reads it")));
         }
@@ -1502,7 +1506,7 @@ impl Pipe {
             Pipe::Pass(_) | Pipe::Filter(_) | Pipe::Param(..) => {}
             Pipe::Seq(ps) | Pipe::Union(ps) | Pipe::Best(_, ps) | Pipe::First(ps) => ps.iter().for_each(f),
             Pipe::Smallest(m) => f(&m.source),
-            Pipe::Fix(_, p) | Pipe::Wins(_, p) | Pipe::Tag(_, p) | Pipe::Cand(_, p) | Pipe::Scope(p) | Pipe::Smaller(_, p) | Pipe::Regions(p) | Pipe::Again(p) => f(p),
+            Pipe::Fix(_, p) | Pipe::Wins(_, p) | Pipe::Tag(_, p) | Pipe::Cand(_, p) | Pipe::Scope(p) | Pipe::Smaller(_, p) | Pipe::Regions(p) | Pipe::Again(p) | Pipe::Bind(_, p) => f(p),
             Pipe::If(_, a, b) | Pipe::Retry(_, a, b) => {
                 f(a);
                 f(b);
@@ -1533,20 +1537,22 @@ struct Uses {
     /// The functions it runs: `prepass`, `polish`, `rewrite` (also for `simba` and
     /// `sub/NAME`, which any pass over one term may run) and those `def` defines.
     calls: Vec<String>,
-    /// The registers a `(save R)` may have set by now, in run order; each pipeline has its own.
+    /// The group variables a `(save R)` or `R = p` may have bound by now, in run order; each
+    /// pipeline has its own.
     saved: Vec<String>,
-    /// The first register read where no `(save R)` can have run before.
+    /// The first group variable read where nothing can have bound it before.
     unsaved: Option<String>,
-    /// Every register read, also by `pre_done` (`t0`, which it may find empty).
+    /// Every group variable read, also by `pre_done` (`t0`, which it may find unbound).
     reads: Vec<String>,
     /// The assignments that end their sequence, so change nothing.
     idle_assign: Vec<String>,
     /// The variables assigned twice in a sequence with no read or other step between.
     reassigned: Vec<String>,
-    /// The registers saved and not read since on every path that reaches this point, from
-    /// saves at the same level of `if`s and other parts that may not run.
+    /// The group variables bound and not read since on every path that reaches this point,
+    /// from bindings at the same level of `if`s and other parts that may not run.
     pending: Vec<String>,
-    /// The registers saved again where they are `pending`: the earlier save is never read.
+    /// The group variables bound again where they are `pending`: the earlier value is never
+    /// read.
     dead: Vec<String>,
 }
 
@@ -1565,12 +1571,12 @@ impl Uses {
                 _ => {}
             },
             Pipe::Pass(Pass::Term { .. }) => self.calls.push("rewrite".into()),
-            Pipe::Pass(Pass::Save(r)) => {
-                self.saved.push(r.clone());
-                if self.pending.contains(r) {
-                    self.dead.push(r.clone());
-                } else {
-                    self.pending.push(r.clone());
+            Pipe::Pass(Pass::Save(r)) => self.bound(r),
+            Pipe::Bind(r, p) => {
+                self.walk(p);
+                self.bound(r);
+                if let Pipe::Pass(a @ (Pass::Assign(..) | Pass::On(_) | Pass::Off(_))) = &**p {
+                    self.idle_assign.push(lang::show(&Pipe::Pass(a.clone())));
                 }
             }
             Pipe::Pass(Pass::Load(r) | Pass::Label(r)) => self.read(r),
@@ -1653,7 +1659,7 @@ impl Uses {
                 c.args.iter().for_each(|a| if let CallArg::Num(e) = a { self.expr(e) });
                 self.walk(&lang::expand(c));
             }
-            // A pipeline argument runs with the caller's registers, at any point of the call
+            // A pipeline argument runs with the caller's group variables, at any point of the call
             // and any number of times.
             Pipe::Call(c) => {
                 self.calls.push(c.def.name.clone());
@@ -1689,6 +1695,15 @@ impl Uses {
         let (before, n) = (std::mem::take(&mut self.pending), self.reads.len());
         self.walk(p);
         self.pending = before.into_iter().filter(|r| !self.reads[n..].contains(r)).collect();
+    }
+
+    fn bound(&mut self, r: &str) {
+        self.saved.push(r.to_string());
+        if self.pending.iter().any(|s| s == r) {
+            self.dead.push(r.to_string());
+        } else {
+            self.pending.push(r.to_string());
+        }
     }
 
     fn seen(&mut self, r: &str) {
@@ -2074,9 +2089,13 @@ prepass=lowbits | r2
         }
         for bad in ["prepass=(load x)", "prepass=(save t) | (load u)", "prepass=(load t) | (save t)", "polish=(filter (size < (size t)))", "rewrite=(if (same t) id)", "prepass=(if mixed (save t)) | (label u)", "pipeline=(retry (size < (size t)) id (save t))"] {
             let e = Passes::parse(bad).unwrap_err();
-            assert!(e.contains("before any (save"), "{bad}: {e}");
+            assert!(e.contains("before it is bound"), "{bad}: {e}");
         }
-        for good in ["prepass=(if mixed (save t)) | (load t)", "prepass=(fix 3 (union (load t) id) | (save t))", "pipeline=(retry (size < (size t)) (save t) (load t))", "prepass=(best (size t) (save t) id)"] {
+        for bad in ["prepass=t = (load t)", "prepass=t = u | (load t)", "prepass=(load t) | t = id", "prepass=t = (u = id) | (load u) | (load v)", "(def (f) t = id) prepass=f | (load t)"] {
+            let e = Passes::parse(bad).unwrap_err();
+            assert!(e.contains("before it is bound"), "{bad}: {e}");
+        }
+        for good in ["prepass=(if mixed (save t)) | (load t)", "prepass=(fix 3 (union (load t) id) | (save t))", "pipeline=(retry (size < (size t)) (save t) (load t))", "prepass=(best (size t) (save t) id)", "prepass=t = rewrite | (load t)", "prepass=t = (u = id) | (load u) | (load t)", "(def (f p) p | none) prepass=(f t = rewrite) | (load t)"] {
             assert!(Passes::parse(good).is_ok(), "{good}");
         }
         assert_eq!(Passes::default().warnings(), Vec::<String>::new());
@@ -2085,9 +2104,13 @@ prepass=lowbits | r2
         assert!(lets.defined.iter().all(|(n, _)| lets.used.contains(n)), "{:?} {:?}", lets.defined, lets.used);
         let (_, w) = Passes::parse_noting("(let foo rewrite) (let bar lowbits) prepass=bar | (save t) | (save q) | (load t) | ((off relate) | (save x) | id) | (rewrite | (off relate))").unwrap();
         assert_eq!(w.len(), 4, "{w:?}");
-        assert!(w[0].contains("let foo") && w[1].contains("register q") && w[2].contains("register x") && w[3].contains("(off relate) ends"), "{w:?}");
+        assert!(w[0].contains("let foo") && w[1].contains("group variable q") && w[2].contains("group variable x") && w[3].contains("(off relate) ends"), "{w:?}");
         let (_, w) = Passes::parse_noting("prepass=(save t) | rewrite | (save t) | (load t)").unwrap();
-        assert!(w.len() == 1 && w[0].contains("saved again"), "{w:?}");
+        assert!(w.len() == 1 && w[0].contains("bound again"), "{w:?}");
+        let (_, w) = Passes::parse_noting("prepass=t = (off relate) | (load t)").unwrap();
+        assert!(w.len() == 1 && w[0].contains("(off relate) ends"), "the right side of a group assignment is a scope: {w:?}");
+        let (_, w) = Passes::parse_noting("prepass=t = id | t = rewrite | (load t) | u = rewrite | id").unwrap();
+        assert!(w.len() == 2 && w[0].contains("group variable u is bound and never read") && w[1].contains("group variable t is bound again"), "{w:?}");
         for ok in ["prepass=(save t) | (if mixed (save t)) | (load t)", "prepass=(save t) | (cand unified (save t)) | (load t)", "prepass=(fix 3 (save t) | rewrite) | (load t)", "prepass=(save t) | (filter (size < (size t))) | (save t) | (load t)", "prepass=(save t) | (first rewrite (save t)) | (load t)", "prepass=(if mixed (save t) (save t)) | (load t)"] {
             assert_eq!(Passes::parse_noting(ok).unwrap().1, Vec::<String>::new(), "{ok}");
         }
@@ -2185,8 +2208,8 @@ prepass=lowbits | r2
             ("(def (f) prepass) (def (g) f) prepass=lowbits | g", "prepass reaches itself"),
             ("(def (f) polish) (def (g) (if mixed f)) polish=g", "polish reaches itself"),
             ("(def (f) egglog) (def (g) f) prepass=g", "egglog needs a simplify run and cannot be in f, which prepass calls"),
-            ("(def (f) (load t))", "f reads register t before any (save t)"),
-            ("(def (f) (save t)) prepass=f | (load t)", "prepass reads register t"),
+            ("(def (f) (load t))", "f reads group variable t before it is bound"),
+            ("(def (f) (save t)) prepass=f | (load t)", "prepass reads group variable t"),
             ("(def (f) id) prepass=(f 1)", "f takes no arguments: (f g:group) group"),
             ("(def (f) id) prepass=(if f id)", "f gives candidates, not a number"),
             ("(def (f) id) prepass=f = 1", "f is a function and cannot be assigned"),
@@ -2201,7 +2224,7 @@ prepass=lowbits | r2
         let w = warn("(def (f) rewrite) (def @inline (g) rewrite) (def (h) relate) prepass=h");
         assert!(w.len() == 2 && w[0].contains("(def (f) ...) is never used") && w[1].contains("(def @inline (g) ...) is never used"), "{w:?}");
         let w = warn("(def (f) (save t) | rewrite) prepass=f");
-        assert!(w.len() == 1 && w[0].contains("f: register t is saved and never read"), "{w:?}");
+        assert!(w.len() == 1 && w[0].contains("f: group variable t is bound and never read"), "{w:?}");
     }
 
     #[test]
@@ -2209,14 +2232,14 @@ prepass=lowbits | r2
         let spec = "(def (try_without name p) (best 1 p ((off name) | p))) (def (hold r p) (save r) | p | (union id (load r))) prepass=(try_without relate rewrite) | (hold t (lowbits | rewrite))";
         let p = Passes::parse(spec).unwrap();
         let sigs: Vec<String> = p.defs.iter().map(|d| lang::def_sig(&d.name, &d.params).to_string()).collect();
-        assert_eq!(sigs, ["(try_without name:name p:pipe g:group) group", "(hold r:reg p:pipe g:group) group"]);
+        assert_eq!(sigs, ["(try_without name:name p:pipe g:group) group", "(hold r:group p:pipe g:group) group"]);
         assert_eq!(p.prepass.to_string(), "(try_without relate rewrite) | (hold t (lowbits | rewrite))");
         let Pipe::Seq(steps) = &p.prepass else { panic!() };
         let Pipe::Call(c) = &steps[0] else { panic!() };
         assert_eq!(c.body.to_string(), "(best 1 p ((off relate) | p))", "a call has its name arguments in place");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(format!("{p:#}").contains("
-# (hold r:reg p:pipe g:group) group
+# (hold r:group p:pipe g:group) group
 (def (hold r p) (save r) | p | (union id (load r)))
 "), "{p:#}");
         assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
@@ -2237,20 +2260,20 @@ prepass=lowbits | r2
         }
         for (bad, msg) in [
             ("(def (f n) (fix n n))", "parameter n is used as an expression and as a pipeline"),
-            ("(def (f n) (fix n id) | (save n))", "parameter n is used as an expression and as a register name"),
+            ("(def (f n) (fix n id) | (save n))", "parameter n is used as an expression and as a group variable"),
             ("(def (f n) (fix n id) | n = 1)", "parameter n cannot be assigned"),
             ("(def (g) (if (size <= n) id)) (def (f n) (fix n g))", "unknown name n in an expression"),
             ("(def (f n p) (fix n p)) prepass=(f id id)", "id gives candidates, not a number: (id g:group) group; an expression reads variables and number functions; f takes an expression and a pipeline: (f n:num p:pipe g:group) group"),
             ("(def (f n p) (fix n p)) prepass=(f 3 4)", "f takes an expression and a pipeline: (f n:num p:pipe g:group) group"),
             ("(def (f n p) (fix n p)) prepass=(f 3)", "f takes an expression and a pipeline"),
-            ("(def (f r n) (save r) | (fix n id)) prepass=(f 3 3)", "expected a name after f, found 3"),
+            ("(def (f r n) (save r) | (fix n id)) prepass=(f 3 3)", "expected a group variable after f, found 3"),
             ("(def (f n) (fix n id)) prepass=(f relate = 1)", "an assignment is a step"),
             ("(def (f n) (fix n id)) prepass=(f (load t))", "f takes an expression"),
-            ("(def (f n) (fix n id)) prepass=(f ((size t) + 1))", "prepass reads register t before any (save t)"),
-            ("(def @inline (f n) (load t) | (fix n id)) prepass=(f 1)", "prepass reads register t before any (save t)"),
-            ("(def (k r) (load r)) (def @inline (i n) (k t) | (fix n id)) prepass=(i 1)", "k reads register t before any (save t)"),
-            ("(def (f p) p | (save p))", "parameter p is used as a pipeline and as a register name"),
-            ("(def (f r) (save r) | (tag r id))", "parameter r is used as a register name and as a name"),
+            ("(def (f n) (fix n id)) prepass=(f ((size t) + 1))", "prepass reads group variable t before it is bound"),
+            ("(def @inline (f n) (load t) | (fix n id)) prepass=(f 1)", "prepass reads group variable t before it is bound"),
+            ("(def (k r) (load r)) (def @inline (i n) (k t) | (fix n id)) prepass=(i 1)", "k reads group variable t before it is bound"),
+            ("(def (f p) p | (save p))", "parameter p is used as a pipeline and as a group variable"),
+            ("(def (f r) (save r) | (tag r id))", "parameter r is used as a group variable and as a name"),
             ("(def (f p q) p)", "def (f p q): parameter q is never used in the body"),
             ("(def (f r) r = 1)", "parameter r cannot be assigned"),
             ("(def (f relate) id)", "parameter relate is the name of a variable, function or definition"),
@@ -2263,14 +2286,14 @@ prepass=lowbits | r2
             ("(def (f p) p) prepass=f", "f needs parentheses: (f ...); (f p:pipe g:group) group"),
             ("(def (f p) p) prepass=(f)", "f takes a pipeline: (f p:pipe g:group) group"),
             ("(def (f p) p) prepass=(f id id)", "f takes a pipeline: (f p:pipe g:group) group"),
-            ("(def (f r p) (save r) | p) prepass=(f (id) id)", "expected a name after f, found ("),
-            ("(def (f r p) (save r) | p) prepass=(f t)", "f takes a register name and a pipeline: (f r:reg p:pipe g:group) group"),
+            ("(def (f r p) (save r) | p) prepass=(f (id) id)", "expected a group variable after f, found ("),
+            ("(def (f r p) (save r) | p) prepass=(f t)", "f takes a group variable and a pipeline: (f r:group p:pipe g:group) group"),
             ("(def (f n p) (off n) | p) prepass=(f nope id)", "unknown off name nope (the argument for n)"),
             ("(def (f p) p) prepass=(if f id)", "f gives candidates, not a number: (f p:pipe g:group) group"),
             ("(def (f p) p) prepass=f = 1", "f is a function and cannot be assigned: (f p:pipe g:group) group"),
-            ("(def (f r) (load r)) prepass=(f t)", "f reads register t before any (save t)"),
-            ("(def (f a b) (save a) | (load b)) prepass=(f t u)", "f reads register u before any (save u)"),
-            ("(def (f p) id | p) prepass=(f (load t))", "prepass reads register t before any (save t)"),
+            ("(def (f r) (load r)) prepass=(f t)", "f reads group variable t before it is bound"),
+            ("(def (f a b) (save a) | (load b)) prepass=(f t u)", "f reads group variable u before it is bound"),
+            ("(def (f p) id | p) prepass=(f (load t))", "prepass reads group variable t before it is bound"),
             ("(def (g p) p) prepass=(g prepass)", "prepass reaches itself"),
             ("(def (g p) p | polish) polish=(g id)", "polish reaches itself"),
             ("(def (g p) p) (def (h q) (g q)) prepass=(h (if mixed prepass))", "prepass reaches itself"),
@@ -2282,13 +2305,13 @@ prepass=lowbits | r2
         }
         let warn = |s: &str| Passes::parse_noting(s).unwrap().1;
         let w = warn("(def (f r p) (save r) | p) prepass=(f t id)");
-        assert!(w.len() == 1 && w[0].contains("f: register t is saved and never read"), "{w:?}");
+        assert!(w.len() == 1 && w[0].contains("f: group variable t is bound and never read"), "{w:?}");
         let w = warn("(def (f p) p) (def @inline (g p) p) prepass=id");
         assert!(w.len() == 2 && w[0].contains("(def (f p) ...) is never used") && w[1].contains("(def @inline (g p) ...) is never used"), "{w:?}");
         let w = warn("(def (f p n) (fix n p)) prepass=id");
         assert!(w.len() == 1 && w[0].contains("(def (f p n) ...) is never used"), "{w:?}");
         let w = warn("(def @inline (f n) (save s) | (fix n id)) prepass=(f 2) | rewrite");
-        assert!(w.len() == 1 && w[0].contains("prepass: register s is saved and never read"), "an @inline body is checked where it is called: {w:?}");
+        assert!(w.len() == 1 && w[0].contains("prepass: group variable s is bound and never read"), "an @inline body is checked where it is called: {w:?}");
         let w = warn("(def @inline (f n) split_runs = n) prepass=rewrite | (f 2)");
         assert!(w.len() == 1 && w[0].contains("prepass: split_runs = n ends its sequence"), "{w:?}");
     }

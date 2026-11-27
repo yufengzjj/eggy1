@@ -5,9 +5,10 @@
 #
 # Types: num (an expression, evaluated where the function says), term (one candidate),
 # term? (one candidate or none), group (a list of candidates), pipe (a pipeline, run inside
-# the function), reg (a register name), name (a stats or origin name). `TYPE...` is one or
-# more, `TYPE?` may be left out. The last parameter is the implicit input, not written in a
-# call. How a function is called follows from its input and result:
+# the function), name (a stats or origin name, or a note register); as a parameter, group
+# is a group variable, written as its name. `TYPE...` is one or more, `TYPE?` may be left
+# out. The last parameter is the implicit input, not written in a call. How a function is
+# called follows from its input and result:
 #   group -> group  on the whole list
 #   term -> term    on each candidate; an unchanged result keeps the candidate
 #   term -> term?   on each candidate; no result drops it (an alternative)
@@ -54,18 +55,18 @@
 (extern (wins n:num p:pipe g:group) group)
 # The candidates c holds for, each taken alone.
 (extern @bookkeeping (filter c:num g:group) group)
-# Stores the candidates in register r.
-(extern @bookkeeping (save r:reg g:group) group)
-# The candidates of register r; none when it is empty.
-(extern @bookkeeping (load r:reg g:group) group)
-# Counts the candidates for stats against the main one of register r.
-(extern @bookkeeping (label r:reg g:group) group)
-# Opens the note register r, empty; a note register is not one of save and load.
-(extern @bookkeeping (clear r:reg g:group) group)
+# Binds the group variable r to the candidates (r = id).
+(extern @bookkeeping (save r:group g:group) group)
+# The candidates of the group variable r; none when it is unbound.
+(extern @bookkeeping (load r:group g:group) group)
+# Counts the candidates for stats against the main one of the group variable r.
+(extern @bookkeeping (label r:group g:group) group)
+# Opens the note register r, empty; note registers are not group variables.
+(extern @bookkeeping (clear r:name g:group) group)
 # Keeps the first smallest candidate in the newest open r when strictly smaller than the one there.
-(extern @uncounted (note r:reg g:group) group)
+(extern @uncounted (note r:name g:group) group)
 # Closes the newest open r: the input, with its candidate put first when strictly smaller than the main one.
-(extern @bookkeeping (take_min r:reg g:group) group)
+(extern @bookkeeping (take_min r:name g:group) group)
 
 # Passes over the whole list.
 
@@ -189,8 +190,8 @@
 
 # Number functions: features of the main candidate.
 
-# The node count of the main candidate, or of register r's main candidate (then also without candidates).
-(extern (size r:reg? t:term) num)
+# The node count of the main candidate, or of the main candidate of the group variable r (then also without candidates).
+(extern (size r:group? t:term) num)
 # The number of variables.
 (extern (vars t:term) num)
 # The depth of the tree.
@@ -208,8 +209,8 @@
 
 # Number functions that give 1 or 0.
 
-# 1 when the main candidate is the main one of register r.
-(extern (same r:reg t:term) num)
+# 1 when the main candidate is the main one of the group variable r.
+(extern (same r:group t:term) num)
 # 1 when c holds for some candidate alone.
 (extern (any c:num g:group) num)
 # 1 when there are candidates and c holds for each alone.

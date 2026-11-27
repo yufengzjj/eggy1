@@ -419,16 +419,25 @@ impl Parser<'_> {
         }
     }
 
-    /// The right side of `n = ...`: an expression up to `|`, `)` or the end.
+    /// The right side of `n = ...`: for a variable that holds a number, an expression up to
+    /// `|`, `)` or the end; otherwise, where a step that gives candidates follows, that step,
+    /// and `n` a group variable.
     fn assign(&mut self, n: &str) -> Result<Pipe, String> {
         if let Some(d) = self.defs.get(n).filter(|d| d.run) {
             return Err(format!("{n} is a function and cannot be assigned: {}", def_sig(n, &d.params)));
+        }
+        let group = self.group_ahead();
+        if var_index(n).is_none() && group {
+            return self.bind(n);
         }
         if self.param(n).is_some() {
             return Err(format!("parameter {n} cannot be assigned"));
         }
         let i = assignable(n)?;
-        let e = self.or()?;
+        let e = self.or().map_err(|e| match group {
+            true => format!("{e}; {n} is a variable that holds a number, so it cannot be bound to candidates"),
+            false => e,
+        })?;
         self.no_assign()?;
         if let Expr::Num(k) = e {
             if is_switch(i) && k == NONE {
@@ -437,6 +446,69 @@ impl Parser<'_> {
             crate::sched::check_cap(i, k)?;
         }
         Ok(Pipe::Pass(Pass::Assign(i, e)))
+    }
+
+    /// Whether a step that gives candidates is ahead, not an expression: a group variable, a
+    /// name of such a function, of a `let` or `def`, a pipeline parameter, or one of these or
+    /// an assignment after `(`.
+    fn group_ahead(&self) -> bool {
+        if self.group_var_ahead() {
+            return true;
+        }
+        let k = (0..).find(|k| self.peek_at(*k) != Some(&Tok::Open)).unwrap();
+        let Some(Tok::Name(n)) = self.peek_at(k) else { return false };
+        let step = self.defs.contains_key(n)
+            || self.param(n).is_some_and(|i| !matches!(self.params[i].ty, Some(Ty::Num | Ty::Group)))
+            || n == "on"
+            || n == "off"
+            || builtins::get(n).is_some_and(|s| !s.is_number())
+            || resolve(n).is_some();
+        step || k > 0 && self.peek_at(k + 1) == Some(&Tok::Assign)
+    }
+
+    /// Whether a group variable alone is ahead, up to `|`, `)` or the end: a name that is no
+    /// variable, function or definition, or a parameter used as a group variable.
+    fn group_var_ahead(&self) -> bool {
+        let Some(Tok::Name(n)) = self.peek() else { return false };
+        if !matches!(self.peek_at(1), None | Some(Tok::Bar | Tok::Close)) {
+            return false;
+        }
+        match self.param(n) {
+            Some(i) => self.params[i].ty == Some(Ty::Group),
+            None => !(self.defs.contains_key(n) || known_name(n) || resolve(n).is_some() || defined_builtin(n) || ["none", "true", "def", "extern"].contains(&n.as_str())),
+        }
+    }
+
+    /// `n = p` after the `=`: the step `p`, its candidates bound to the group variable `n`.
+    fn bind(&mut self, n: &str) -> Result<Pipe, String> {
+        if self.param(n).is_some() {
+            self.use_param(n, Ty::Group)?;
+        } else if self.defs.contains_key(n) {
+            return Err(format!("{n} is defined by let or def @inline and cannot be assigned"));
+        } else if known_name(n) || resolve(n).is_some() || defined_builtin(n) || ["none", "def", "extern"].contains(&n) {
+            return Err(assignable(n).err().unwrap_or_else(|| format!("{n} cannot be assigned")));
+        }
+        let p = match self.group_var_ahead() {
+            true => {
+                let u = self.name("a group variable")?;
+                self.group_name(&u)?;
+                Pipe::Pass(Pass::Load(u))
+            }
+            false => self.stage()?,
+        };
+        self.no_assign()?;
+        Ok(Pipe::Bind(n.to_string(), Box::new(p)))
+    }
+
+    /// `n` written where a group variable is: an error for a variable that holds a number.
+    fn group_name(&mut self, n: &str) -> Result<(), String> {
+        if self.param(n).is_some() {
+            return self.use_param(n, Ty::Group);
+        }
+        match var_index(n) {
+            Some(_) => Err(format!("{n} is a variable that holds a number, so it cannot name a group variable")),
+            None => Ok(()),
+        }
     }
 
     /// An error where a comparison was meant and `=` written.
@@ -514,11 +586,16 @@ impl Parser<'_> {
             let named = matches!(self.peek(), Some(Tok::Name(_)));
             args.push(match (p.ty, p.rep) {
                 (_, Rep::Opt) if self.at_close() => Arg::Absent,
-                (Ty::Name | Ty::Reg, Rep::Opt) if !named => Arg::Absent,
+                (Ty::Name | Ty::Group, Rep::Opt) if !named => Arg::Absent,
                 (_, Rep::One) if self.at_close() => return Err(arity()),
                 (Ty::Num, _) => Arg::Num(self.arg().map_err(|e| if sig { format!("{e}; {f} takes {}: {s}", s.takes()) } else { e })?),
                 (Ty::Pipe, _) if matches!(self.peek(), Some(Tok::Num(_))) => return Err(arity()),
-                (Ty::Name | Ty::Reg, _) => {
+                (Ty::Group, _) => {
+                    let n = self.name(&format!("a group variable after {f}"))?;
+                    self.group_name(&n)?;
+                    Arg::Name(n)
+                }
+                (Ty::Name, _) => {
                     let n = self.name(&format!("a name after {f}"))?;
                     self.use_param(&n, p.ty)?;
                     Arg::Name(n)
@@ -595,8 +672,8 @@ impl Parser<'_> {
                 _ if self.at_close() => return Err(format!("{f} takes {}: {s}", s.takes())),
                 Ty::Num => Arg::Num(self.or()?),
                 _ => {
-                    let n = self.name("a register")?;
-                    self.use_param(&n, p.ty)?;
+                    let n = self.name("a group variable")?;
+                    self.group_name(&n)?;
                     Arg::Name(n)
                 }
             });
@@ -753,7 +830,7 @@ fn bare(n: &str) -> Result<Pipe, String> {
         };
     }
     // `save/t` for `(save t)`: a function of one name, or a macro.
-    let one_name = |h: &str| builtins::get(h).is_some_and(|s| matches!(s.params.as_slice(), [p] if matches!(p.ty, Ty::Reg | Ty::Name)));
+    let one_name = |h: &str| builtins::get(h).is_some_and(|s| matches!(s.params.as_slice(), [p] if matches!(p.ty, Ty::Group | Ty::Name)));
     Err(match n.split_once('/') {
         _ if n == "extern" => NO_EXTERN.into(),
         _ if builtins::MACROS.contains(&n) => format!("{n} needs parentheses: ({n} ...)"),
@@ -782,6 +859,7 @@ fn hyphen_hint(e: String, s: &str) -> String {
 /// The assignment `name = val`, a `--passes` item `name=val`.
 pub fn parse_assign(name: &str, val: &str) -> Result<Pass, String> {
     let go = || {
+        assignable(name)?;
         let mut p = Parser { toks: lex(val)?, at: 0, defs: &Defs::new(), used: Vec::new(), params: Vec::new() };
         let Pipe::Pass(a) = p.assign(name)? else { unreachable!() };
         p.end()?;
@@ -1073,6 +1151,7 @@ impl<'s> Subst<'s> {
             Pipe::Smaller(n, q) => Pipe::Smaller(self.name(n), b(q)?),
             Pipe::Filter(c) => Pipe::Filter(self.expr(c)),
             Pipe::Param(i, _) => self.pipes.get(*i).copied().flatten().map_or_else(|| p.clone(), Pipe::clone),
+            Pipe::Bind(n, q) => Pipe::Bind(self.name(n), b(q)?),
             Pipe::Call(c) => {
                 let args = c
                     .args
@@ -1148,6 +1227,7 @@ fn noted(p: &Pipe, s: &str, inline: bool) -> Pipe {
         Pipe::Tag(n, q) => Pipe::Tag(n.clone(), one(q)),
         Pipe::Cand(n, q) => Pipe::Cand(n.clone(), one(q)),
         Pipe::Smaller(n, q) => Pipe::Smaller(n.clone(), one(q)),
+        Pipe::Bind(n, q) => Pipe::Bind(n.clone(), one(q)),
         Pipe::Smallest(m) => {
             let steps = noted_stages(&m.steps, s, inline);
             Pipe::Smallest(Box::new(crate::sched::Smallest { source: m.source.clone(), steps, scoped: m.scoped }))
@@ -1272,6 +1352,17 @@ pub fn show(p: &Pipe) -> String {
         Pipe::Call(c) if c.args.is_empty() => c.def.name.clone(),
         Pipe::Call(c) => form(&c.def.name, &c.args.iter().map(show_call_arg).collect::<Vec<_>>()),
         Pipe::Param(_, n) => n.clone(),
+        Pipe::Bind(n, q) => format!("{n} = {}", bound(q, show(q))),
+    }
+}
+
+/// The right side `q` of a `Bind`, written `s`, as a stage: an assignment in parentheses.
+fn bound(q: &Pipe, s: String) -> String {
+    match q {
+        Pipe::Seq(ps) if ps.len() > 1 => format!("({s})"),
+        Pipe::Bind(..) | Pipe::Pass(Pass::Assign(..)) => format!("({s})"),
+        Pipe::Pass(Pass::Load(u)) => u.clone(),
+        _ => s,
     }
 }
 
@@ -1330,6 +1421,7 @@ fn pretty_at(p: &Pipe, indent: usize) -> String {
             }
             nested(&c.def.name, c.args[..names].iter().map(show_call_arg).collect(), pipes)
         }
+        Pipe::Bind(n, q) => format!("{n} = {}", bound(q, pretty_at(q, indent + 2))),
         Pipe::Pass(_) | Pipe::Filter(_) | Pipe::Call(_) | Pipe::Param(..) => one,
     }
 }
@@ -1578,15 +1670,15 @@ mod tests {
             ("(fix)", "fix takes"),
             ("(seq)", "seq takes one or more pipelines"),
             ("(best 1)", "best takes"),
-            ("(save t x)", "save takes a register name: (save r:reg g:group) group"),
-            ("(save)", "save takes a register name"),
+            ("(save t x)", "save takes a group variable: (save r:group g:group) group"),
+            ("(save)", "save takes a group variable"),
             ("(tag)", "tag takes a name and a pipeline"),
             ("(lowbits x)", "lowbits takes no arguments: (lowbits t:term) term"),
             ("(id 1)", "id takes no arguments"),
             ("fix", "fix needs parentheses: (fix ...); (fix n:num p:pipe g:group) group"),
             ("(if any id)", "any needs parentheses"),
-            ("(if (same) id)", "same takes a register name: (same r:reg t:term) num"),
-            ("(if (same t u) id)", "same takes a register name"),
+            ("(if (same) id)", "same takes a group variable: (same r:group t:term) num"),
+            ("(if (same t u) id)", "same takes a group variable"),
             ("split_runs", "split_runs is a variable, not a step"),
             ("off", "off needs parentheses"),
             ("egglog/x", "write egglog/x as (egglog x)"),
@@ -1623,6 +1715,55 @@ mod tests {
             let e = def(bad).unwrap_err();
             assert!(e.contains(msg), "{bad}: {e}");
         }
+    }
+
+    #[test]
+    fn group_assignments() {
+        let bind = |n: &str, p: &str| Pipe::Bind(n.into(), Box::new(parse(p).unwrap()));
+        assert_eq!(parse("t = (lowbits | unshift)").unwrap(), bind("t", "lowbits | unshift"));
+        assert_eq!(parse("t = rewrite | relate").unwrap(), Pipe::Seq(vec![bind("t", "rewrite"), parse("relate").unwrap()]));
+        assert_eq!(parse("t = (load u)").unwrap(), bind("t", "(load u)"));
+        assert_eq!(parse("t = u | rewrite").unwrap(), parse("t = (load u) | rewrite").unwrap(), "t = u binds u's group");
+        assert_eq!(show(&parse("t = (load u)").unwrap()), "t = u");
+        assert_eq!(parse_definition("(def (f r) (save r) | u = r | (load u))", &Defs::new(), &mut Vec::new()).unwrap().params[0].ty, Ty::Group);
+        assert_eq!(parse("t = relate").unwrap(), bind("t", "relate"), "relate after a group variable is the pass");
+        assert_eq!(parse("t = (relate = 0 | rewrite)").unwrap(), bind("t", "relate = 0 | rewrite"));
+        assert_eq!(parse("t = (best 1 id rewrite)").unwrap(), bind("t", "(best 1 id rewrite)"));
+        assert!(matches!(parse("keep = keep + 1").unwrap(), Pipe::Pass(Pass::Assign(..))), "a variable that holds a number takes an expression");
+        assert!(matches!(parse("relate = (size > 3)").unwrap(), Pipe::Pass(Pass::Assign(..))));
+        for s in ["t = (lowbits | unshift) | (load t)", "t = rewrite | relate", "(if mixed t = rewrite) | u = (v = t) | (filter (same u))", "(seq t = (x = u))", "t = u | rewrite"] {
+            assert_eq!(show(&parse(s).unwrap()), s, "{s}");
+            assert_eq!(parse(&show(&parse(s).unwrap())).unwrap(), parse(s).unwrap(), "{s}");
+        }
+        for (bad, msg) in [
+            ("t = 1", "unknown variable t"),
+            ("t = keep", "unknown variable t"),
+            ("t = u + 1", "unknown variable t"),
+            ("t = (u)", "unknown variable t"),
+            ("keep = rewrite", "keep is a variable that holds a number, so it cannot be bound to candidates"),
+            ("(save keep)", "keep is a variable that holds a number, so it cannot name a group variable"),
+            ("(if (same relate) id)", "relate is a variable that holds a number"),
+            ("rewrite = id", "rewrite is a function and cannot be assigned"),
+            ("size = id", "cannot be assigned"),
+            ("t = rewrite = 1", "rewrite is a function and cannot be assigned"),
+        ] {
+            let e = parse(bad).unwrap_err();
+            assert!(e.contains(msg), "{bad}: {e}");
+        }
+        let lets = |item: &str| {
+            let d = parse_definition(item, &Defs::new(), &mut Vec::new()).unwrap();
+            let mut defs = Defs::new();
+            defs.insert(d.name, Named { pipe: d.pipe, flat: d.flat, run: false, params: Vec::new(), def: None });
+            defs
+        };
+        assert!(parse_with("g = id", &lets("(let g rewrite)"), &mut Vec::new()).unwrap_err().contains("defined by let"));
+        assert_eq!(parse_with("t = g", &lets("(let g rewrite | relate)"), &mut Vec::new()).unwrap(), bind("t", "rewrite | relate"));
+        let d = parse_definition("(def (f a p) a = p | (load a))", &Defs::new(), &mut Vec::new()).unwrap();
+        assert_eq!(def_sig(&d.name, &d.params).to_string(), "(f a:group p:pipe g:group) group");
+        let def_err = |s: &str| parse_definition(s, &Defs::new(), &mut Vec::new()).err().unwrap();
+        assert!(def_err("(def (f n) n = 3)").contains("parameter n cannot be assigned"));
+        assert!(def_err("(def (f n) (fix n id) | n = id)").contains("parameter n is used as an expression and as a group variable"));
+        assert!(parse_assign("t", "rewrite").unwrap_err().contains("unknown variable t"), "an entry assignment is to a variable that holds a number");
     }
 
     /// The steps `(smallest ...)` in `p` expands to, its note registers named `s`, `t`, ... in

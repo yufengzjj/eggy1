@@ -16,12 +16,11 @@ pub enum Ty {
     MaybeTerm,
     Group,
     Pipe,
-    Reg,
     Name,
 }
 
 impl Ty {
-    const WORDS: [(Ty, &'static str); 7] = [(Ty::Num, "num"), (Ty::Term, "term"), (Ty::MaybeTerm, "term?"), (Ty::Group, "group"), (Ty::Pipe, "pipe"), (Ty::Reg, "reg"), (Ty::Name, "name")];
+    const WORDS: [(Ty, &'static str); 6] = [(Ty::Num, "num"), (Ty::Term, "term"), (Ty::MaybeTerm, "term?"), (Ty::Group, "group"), (Ty::Pipe, "pipe"), (Ty::Name, "name")];
 
     pub fn word(self) -> &'static str {
         Ty::WORDS.iter().find(|(t, _)| *t == self).unwrap().1
@@ -36,7 +35,7 @@ impl Ty {
         match self {
             Ty::Num => "an expression",
             Ty::Pipe => "a pipeline",
-            Ty::Reg => "a register name",
+            Ty::Group => "a group variable",
             Ty::Name => "a name",
             _ => "a candidate",
         }
@@ -294,8 +293,8 @@ fn one(text: &str) -> Result<Sig, String> {
     }
     for p in &params {
         match (p.ty, p.rep) {
-            (Ty::Term | Ty::MaybeTerm | Ty::Group, _) => return Err(format!("{name}: {p}: only the input is a candidate")),
-            (Ty::Num | Ty::Reg | Ty::Name, Rep::Many) | (Ty::Num, Rep::Opt) => return Err(format!("{name}: {p}: only pipe takes ..., only pipe, reg and name take ?")),
+            (Ty::Term | Ty::MaybeTerm, _) => return Err(format!("{name}: {p}: only the input is a candidate")),
+            (Ty::Num | Ty::Group | Ty::Name, Rep::Many) | (Ty::Num, Rep::Opt) => return Err(format!("{name}: {p}: only pipe takes ..., only pipe, group and name take ?")),
             _ => {}
         }
     }
@@ -309,7 +308,7 @@ fn param(p: &str) -> Result<Param, String> {
         (_, Some(t)) if t != "term" => (t, Rep::Opt),
         _ => (ty, Rep::One),
     };
-    let ty = Ty::of(ty).ok_or_else(|| format!("unknown type {ty} in {p}; known: num term term? group pipe reg name"))?;
+    let ty = Ty::of(ty).ok_or_else(|| format!("unknown type {ty} in {p}; known: num term term? group pipe name"))?;
     Ok(Param { name: name.to_string(), ty, rep })
 }
 
@@ -403,7 +402,7 @@ mod tests {
         assert_eq!(get("best").unwrap().takes(), "an expression and one or more pipelines");
         assert_eq!(get("retry").unwrap().takes(), "an expression and two pipelines");
         assert_eq!(get("id").unwrap().takes(), "no arguments");
-        assert_eq!(get("save").unwrap().decl(), "(extern @bookkeeping (save r:reg g:group) group)");
+        assert_eq!(get("save").unwrap().decl(), "(extern @bookkeeping (save r:group g:group) group)");
         assert_eq!(get("simba").unwrap().kind(), Kind::Alt);
         assert_eq!(get("prepass").unwrap().kind(), Kind::Main);
         assert!(get("egglog").unwrap().simplify_only && !get("egglog").unwrap().required());
