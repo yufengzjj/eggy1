@@ -194,6 +194,9 @@ pub struct Definition {
     pub step: bool,
     /// The body when it gives a number.
     pub value: Option<Pipe>,
+    /// The input a body that gives a number reads where it is not written (`size <= k`), so
+    /// that the function takes it implicitly.
+    pub implicit: Option<Ty>,
     /// Warnings of reading it.
     pub notes: Vec<String>,
 }
@@ -225,6 +228,8 @@ struct Parser<'a> {
     params: Vec<ParamUse>,
     /// The group variables bound so far in the text, which a name alone can read as a value.
     groups: Vec<String>,
+    /// The function variables bound so far in the text (`f = size`) and their types.
+    fns: Vec<(String, Ty)>,
     /// In the body of a function that is an expression, outside any step: a function of the
     /// candidates needs its input written.
     no_input: bool,
@@ -240,7 +245,7 @@ fn seq_of(mut stages: Vec<Pipe>) -> Pipe {
 
 impl<'a> Parser<'a> {
     fn new(toks: Vec<Tok>, defs: &'a Defs) -> Parser<'a> {
-        Parser { toks, at: 0, defs, used: Vec::new(), params: Vec::new(), groups: Vec::new(), no_input: false, after_bar: false, pending: None }
+        Parser { toks, at: 0, defs, used: Vec::new(), params: Vec::new(), groups: Vec::new(), fns: Vec::new(), no_input: false, after_bar: false, pending: None }
     }
 
     /// Whether `n` is a group value: a group parameter, or a group variable bound before in
@@ -308,7 +313,7 @@ impl<'a> Parser<'a> {
         match self.peek_at(k) {
             Some(Tok::Num(_) | Tok::Not) => true,
             Some(Tok::Name(n)) if self.peek_at(k + 1) != Some(&Tok::Assign) => match self.param(n) {
-                Some(i) => self.params[i].ty == Some(Ty::Num),
+                Some(i) => self.params[i].ty.as_ref().is_some_and(Ty::is_expr),
                 None => {
                     let number_def = self.defs.get(n).and_then(|d| d.def.as_ref()).is_some_and(|d| d.value.is_some());
                     number_def || n == "none" || builtins::get(n).map_or(var_index(n).is_some() && !self.defs.contains_key(n), |s| s.is_number())
@@ -356,13 +361,140 @@ impl<'a> Parser<'a> {
         let p = &mut self.params[i];
         p.uses += 1;
         match &p.ty {
-            Some(t) if p.annotated && matches!(t, Ty::Fn(..)) && !t.is_pipe() => Err(unsupported_fn(n, t)),
-            Some(t) if *t != ty => Err(format!("parameter {n} is used as {} and as {}", t.what(), ty.what())),
-            _ => {
+            Some(t) if *t == ty || matches!(t, Ty::Fn(..)) && t.fits(&ty) => Ok(()),
+            Some(t) if p.annotated && matches!(t, Ty::Fn(..)) && !t.is_pipe() => Err(format!("parameter {n}:{t} is used where {ty} is wanted")),
+            Some(t) if t.what() == ty.what() || matches!(t, Ty::Fn(..)) && !t.is_pipe() => Err(format!("parameter {n} is used as {t} and as {ty}")),
+            Some(t) => Err(format!("parameter {n} is used as {} and as {}", t.what(), ty.what())),
+            None => {
                 p.ty = Some(ty);
                 Ok(())
             }
         }
+    }
+
+    /// The type of the function variable `n` bound before in the text.
+    fn fn_var(&self, n: &str) -> Option<Ty> {
+        self.fns.iter().rev().find(|(f, _)| f == n).map(|(_, t)| t.clone())
+    }
+
+    /// Whether `n` is a parameter or function variable that holds a function giving a number.
+    fn number_fn_name(&self, n: &str) -> bool {
+        let gives_number = |t: &Ty| matches!(t, Ty::Fn(_, b) if **b == Ty::Num);
+        match self.param(n) {
+            Some(i) => self.params[i].ty.as_ref().is_some_and(gives_number),
+            None => self.fn_var(n).as_ref().is_some_and(gives_number),
+        }
+    }
+
+    /// The function a name alone ahead stands for where a function of type `want` is wanted:
+    /// a parameter not typed otherwise, which gets that type unless annotated, or a function
+    /// variable; `None` (nothing read) for another name. `whose` names the parameter the
+    /// argument is for.
+    fn function_name(&mut self, want: &Ty, whose: &dyn Fn() -> String) -> Result<Option<Pipe>, String> {
+        let Some(Tok::Name(n)) = self.peek().cloned() else { return Ok(None) };
+        if let Some(i) = self.param(&n) {
+            if self.params[i].ty.as_ref().is_some_and(|t| !matches!(t, Ty::Fn(..))) {
+                return Ok(None);
+            }
+            self.at += 1;
+            self.use_param(&n, want.clone())?;
+            return Ok(Some(Pipe::Param(i, n)));
+        }
+        let Some(t) = self.fn_var(&n) else { return Ok(None) };
+        self.at += 1;
+        if !t.fits(want) {
+            return Err(format!("{}; {n} is {t}", whose()));
+        }
+        Ok(Some(Pipe::Fun(n)))
+    }
+
+    /// The type of the function a stage is: a built-in function without its input, a
+    /// parameter, a function variable, else `pipe`.
+    fn stage_ty(&self, p: &Pipe) -> Ty {
+        match p {
+            Pipe::App(b, _) => Ty::Fn(Box::new(b.sig.input.ty.clone()), Box::new(b.sig.result.clone())),
+            Pipe::Param(i, _) => self.params[*i].ty.clone().unwrap_or_else(Ty::pipe),
+            Pipe::Fun(n) => self.fn_var(n).unwrap_or_else(Ty::pipe),
+            _ => Ty::pipe(),
+        }
+    }
+
+    /// The input the expression `e` reads where it is not written: `term` where it reads only
+    /// the main candidate, `group` where it reads more, `None` where it reads none.
+    fn input_ty(&self, e: &Pipe) -> Option<Ty> {
+        let join = |a: Option<Ty>, b: Option<Ty>| match (a, b) {
+            (Some(Ty::Group), _) | (_, Some(Ty::Group)) => Some(Ty::Group),
+            (a, b) => a.or(b),
+        };
+        let input = |t: &Ty| match t {
+            Ty::Fn(a, _) => Some((**a).clone()),
+            _ => None,
+        };
+        let steps = |p: &Pipe| (!starts_with_value(p)).then_some(Ty::Group);
+        match e {
+            Pipe::App(b, args) => {
+                let own = match (b.name, args.as_slice()) {
+                    ("size", [_]) => None,
+                    _ => Some(b.sig.input.ty.clone()),
+                };
+                args.iter().fold(own, |acc, a| join(acc, self.input_ty(a)))
+            }
+            Pipe::Of(_, p) => steps(p),
+            Pipe::Call(c, given) => {
+                let own = match given {
+                    Some(p) => steps(p),
+                    None if c.def.step => Some(c.def.implicit.clone().unwrap_or(Ty::Group)),
+                    None => None,
+                };
+                c.args.iter().zip(&c.def.params).filter(|(_, p)| p.ty == Ty::Num).fold(own, |acc, (a, _)| join(acc, self.input_ty(a)))
+            }
+            Pipe::Param(i, _) => self.params.get(*i).and_then(|p| p.ty.as_ref()).and_then(input),
+            Pipe::Fun(n) => self.fn_var(n).as_ref().and_then(input),
+            Pipe::Not(x) => self.input_ty(x),
+            Pipe::And(xs) | Pipe::Or(xs) => xs.iter().fold(None, |a, x| join(a, self.input_ty(x))),
+            Pipe::Cmp(_, x, y) | Pipe::Bin(_, x, y) => join(self.input_ty(x), self.input_ty(y)),
+            _ => None,
+        }
+    }
+
+    /// `n:TYPE = f` after the `:`: the variable `n` bound to the function `f` of that type.
+    fn typed_bind(&mut self, n: &str) -> Result<Pipe, String> {
+        let mut t = self.name("a type after :")?;
+        while self.peek() == Some(&Tok::Arrow) {
+            self.at += 1;
+            t = format!("{t}->{}", self.name("a type after ->")?);
+        }
+        let ty = Ty::parse(&t).ok().filter(Ty::is_function).ok_or_else(|| format!("{n}:{t} = ...: a function variable takes a function type, as in term->num or term->term"))?;
+        self.expect(Tok::Assign, &format!("= after {n}:{t}"))?;
+        let f = match ty.is_step() {
+            true => {
+                self.no_bar(&format!("{n}:{t} ="))?;
+                let q = self.stage()?;
+                let have = self.stage_ty(&q);
+                if !have.fits(&ty) {
+                    return Err(format!("{n} holds {ty}; {} is {have}", stage(&q)));
+                }
+                q
+            }
+            false => self.or()?,
+        };
+        self.no_assign()?;
+        self.bind_fn(n, f, ty)
+    }
+
+    /// `n = f`: the function value `f` of type `ty` bound to the variable `n`.
+    fn bind_fn(&mut self, n: &str, f: Pipe, ty: Ty) -> Result<Pipe, String> {
+        if self.groups.iter().any(|g| g == n) {
+            return Err(format!("{n} is a group variable, so it cannot hold a function value"));
+        }
+        if self.param(n).is_some() {
+            return Err(format!("parameter {n} cannot be assigned"));
+        }
+        if self.defs.contains_key(n) || known_name(n) || resolve(n).is_some() || defined_builtin(n) || ["none", "def", "extern"].contains(&n) {
+            return Err(assignable(n).err().unwrap_or_else(|| format!("{n} cannot be assigned")));
+        }
+        self.fns.push((n.to_string(), ty.clone()));
+        Ok(Pipe::BindFn(n.to_string(), Arc::new(f), ty))
     }
 
     fn pipe(&mut self) -> Result<Pipe, String> {
@@ -379,7 +511,8 @@ impl<'a> Parser<'a> {
     fn number_step_ahead(&self) -> bool {
         let k = (0..).find(|k| self.peek_at(*k) != Some(&Tok::Open)).unwrap();
         match self.peek_at(k) {
-            Some(Tok::Name(n)) if self.peek_at(k + 1) != Some(&Tok::Assign) && self.param(n).is_none() => builtins::get(n).is_some_and(|s| s.is_number()) || self.number_def(n),
+            Some(Tok::Name(n)) if self.peek_at(k + 1) != Some(&Tok::Assign) && (self.param(n).is_some() || self.fn_var(n).is_some()) => self.number_fn_name(n),
+            Some(Tok::Name(n)) if self.peek_at(k + 1) != Some(&Tok::Assign) => builtins::get(n).is_some_and(|s| s.is_number()) || self.number_def(n),
             _ => false,
         }
     }
@@ -430,6 +563,10 @@ impl<'a> Parser<'a> {
             self.at += 2;
             return self.assign(&n);
         }
+        if let (Some(Tok::Name(n)), Some(Tok::Colon)) = (self.peek().cloned(), self.peek_at(1)) {
+            self.at += 2;
+            return self.typed_bind(&n);
+        }
         let k = usize::from(self.peek() == Some(&Tok::Open));
         if let Some(e) = self.old_form(k) {
             return Err(e.into());
@@ -446,6 +583,10 @@ impl<'a> Parser<'a> {
                 self.use_param(&n, Ty::Group)?;
                 Ok(Pipe::Value(n))
             }
+            Some(Tok::Name(n)) if self.param(&n).is_none() && self.fn_var(&n).is_some() => match self.fn_var(&n).unwrap() {
+                t if t.is_step() => Ok(Pipe::Fun(n)),
+                t => Err(format!("{n} gives a number, not candidates: it holds {t}; a step calls a function that gives candidates")),
+            },
             Some(Tok::Name(n)) if self.param(&n).is_some() => {
                 self.use_param(&n, Ty::pipe())?;
                 Ok(Pipe::Param(self.param(&n).unwrap(), n))
@@ -480,6 +621,11 @@ impl<'a> Parser<'a> {
                     Some(Tok::Name(n)) if self.defs.get(&n).is_some_and(|d| !d.params.is_empty() || d.run && args_follow(self)) => {
                         self.at += 1;
                         self.def_call(&n, after_bar)?
+                    }
+                    Some(Tok::Name(n)) if self.param(&n).is_none() && self.fn_var(&n).is_some_and(|t| t.is_step()) && args_follow(self) => {
+                        self.at += 1;
+                        let Some(input) = self.group_input(true)? else { return Err(format!("{n} takes a group value: ({n} g)")) };
+                        Pipe::Seq(vec![input, Pipe::Fun(n)])
                     }
                     Some(Tok::Name(n)) if self.param(&n).is_some_and(|i| self.params[i].ty != Some(Ty::Group)) && args_follow(self) => {
                         self.at += 1;
@@ -553,8 +699,12 @@ impl<'a> Parser<'a> {
         match rhs {
             Rhs::Num(e) if number_var => self.assign_number(n, e),
             Rhs::Num(e) if group_var => Err(format!("{n} is a group variable, so it cannot hold a number: {} gives a number", show_expr(&e, 1))),
-            Rhs::Num(_) => Err(assignable(n).unwrap_err()),
+            Rhs::Num(e) => match self.input_ty(&e) {
+                Some(t) if var_index(n).is_none() => self.bind_fn(n, e, Ty::Fn(Box::new(t), Box::new(Ty::Num))),
+                _ => Err(assignable(n).unwrap_err()),
+            },
             Rhs::Group(p) if number_var => Err(format!("{n} is a variable that holds a number, so it cannot be bound to candidates: {} gives candidates", stage(&p))),
+            Rhs::Group(p) if self.fn_var(n).is_some() => Err(format!("{n} holds a function value, so it cannot be bound to candidates: {} gives candidates", stage(&p))),
             Rhs::Group(p) => self.bind(n, p),
         }
     }
@@ -574,13 +724,14 @@ impl<'a> Parser<'a> {
         let number_fn = builtins::get(n).is_some_and(|s| s.is_number()) || self.number_def(n);
         if k > 0 && matches!(after, Some(Tok::Name(_) | Tok::Num(_) | Tok::Open | Tok::Not)) {
             return match self.param(n) {
-                Some(i) => self.params[i].ty == Some(Ty::Num),
-                None => number_fn,
+                Some(i) => self.params[i].ty.as_ref().is_some_and(Ty::is_expr),
+                None => number_fn || self.number_fn_name(n),
             };
         }
         match self.param(n) {
-            Some(i) => return self.params[i].ty.as_ref().map_or(number_var, |t| *t == Ty::Num),
-            None if number_fn => return true,
+            Some(i) => return self.params[i].ty.as_ref().map_or(number_var, Ty::is_expr),
+            None if number_fn || self.number_fn_name(n) => return true,
+            None if self.fn_var(n).is_some() => return false,
             None => {}
         }
         if self.defs.contains_key(n) || self.group_value(n) {
@@ -705,6 +856,9 @@ impl<'a> Parser<'a> {
 
     /// `n = p`: the candidates of the step `p` bound to the group variable `n`.
     fn bind(&mut self, n: &str, p: Pipe) -> Result<Pipe, String> {
+        if self.fn_var(n).is_some() {
+            return Err(format!("{n} holds a function value, so it cannot be bound to candidates"));
+        }
         if self.defs.contains_key(n) {
             return Err(format!("{n} is defined by let or def @inline and cannot be assigned"));
         } else if known_name(n) || resolve(n).is_some() || defined_builtin(n) || ["none", "def", "extern"].contains(&n) {
@@ -718,6 +872,9 @@ impl<'a> Parser<'a> {
     fn group_name(&mut self, n: &str) -> Result<(), String> {
         if self.param(n).is_some() {
             return self.use_param(n, Ty::Group);
+        }
+        if self.fn_var(n).is_some() {
+            return Err(format!("{n} holds a function value, so it cannot name a group variable"));
         }
         match var_index(n) {
             Some(_) => Err(format!("{n} is a variable that holds a number, so it cannot name a group variable")),
@@ -798,17 +955,37 @@ impl<'a> Parser<'a> {
     fn args(&mut self, s: &Sig, sig: bool) -> Result<Vec<Arg>, String> {
         let f = s.name.as_str();
         let arity = || format!("{f} takes {}: {s}", s.takes());
-        let pipes = s.params.iter().filter(|p| p.ty.is_pipe()).count();
+        let pipes = s.params.iter().filter(|p| p.ty.is_step()).count();
         let mut args = Vec::new();
         for (i, p) in s.params.iter().enumerate() {
             let whole = pipes == 1 && i + 1 == s.params.len() && p.rep == Rep::One;
             let named = matches!(self.peek(), Some(Tok::Name(_)));
+            let alone = !matches!(self.peek_at(1), Some(Tok::Bar));
+            let whose = || format!("{f} takes {p}: {s}");
+            if matches!(p.ty, Ty::Fn(..)) && !p.ty.is_pipe() && p.rep == Rep::One && alone
+                && let Some(q) = self.function_name(&p.ty, &whose)?
+            {
+                args.push(if p.ty.is_step() { Arg::Pipe(q) } else { Arg::Num(q) });
+                continue;
+            }
+            if p.ty.is_step() && !p.ty.is_pipe() && !self.at_close() {
+                let q = if whole { self.pipe()? } else {
+                    self.no_bar(f)?;
+                    self.stage()?
+                };
+                let have = self.stage_ty(&q);
+                if !have.fits(&p.ty) {
+                    return Err(format!("{}; {} is {have}", whose(), stage(&q)));
+                }
+                args.push(Arg::Pipe(q));
+                continue;
+            }
             args.push(match (&p.ty, p.rep) {
                 (_, Rep::Opt) if self.at_close() => Arg::Absent,
                 (Ty::Name | Ty::Group, Rep::Opt) if !named => Arg::Absent,
                 (_, Rep::One) if self.at_close() => return Err(arity()),
                 (t, _) if t.is_expr() => Arg::Num(self.arg().map_err(|e| if sig { format!("{e}; {f} takes {}: {s}", s.takes()) } else { e })?),
-                (t, _) if t.is_pipe() && matches!(self.peek(), Some(Tok::Num(_))) => return Err(arity()),
+                (t, _) if t.is_step() && matches!(self.peek(), Some(Tok::Num(_))) => return Err(arity()),
                 (Ty::Group, _) => {
                     let n = self.name(&format!("a group variable after {f}"))?;
                     if f == "save" {
@@ -825,9 +1002,9 @@ impl<'a> Parser<'a> {
                     self.use_param(&n, Ty::Name)?;
                     Arg::Name(n)
                 }
-                (t, Rep::Many) if t.is_pipe() => Arg::Pipes(self.stages(f, &arity)?),
-                (t, _) if t.is_pipe() && whole => Arg::Pipe(self.pipe()?),
-                (t, _) if t.is_pipe() => {
+                (t, Rep::Many) if t.is_step() => Arg::Pipes(self.stages(f, &arity)?),
+                (t, _) if t.is_step() && whole => Arg::Pipe(self.pipe()?),
+                (t, _) if t.is_step() => {
                     self.no_bar(f)?;
                     Arg::Pipe(self.stage()?)
                 }
@@ -917,6 +1094,13 @@ impl<'a> Parser<'a> {
             args.push(match &p.ty {
                 _ if self.at_close() && p.rep == Rep::Opt => Arg::Absent,
                 _ if self.at_close() => return Err(format!("{f} takes {}: {s}", s.takes())),
+                t if matches!(t, Ty::Fn(..)) && self.peek_at(1) == Some(&Tok::Close) && matches!(self.peek(), Some(Tok::Name(n)) if self.param(n).is_some() || self.fn_var(n).is_some()) => {
+                    let whose = || format!("{f} takes {p}: {s}");
+                    match self.function_name(t, &whose)? {
+                        Some(q) => Arg::Num(q),
+                        None => Arg::Num(self.or()?),
+                    }
+                }
                 t if t.is_expr() => {
                     let outer = std::mem::take(&mut self.no_input);
                     let e = self.or();
@@ -1065,8 +1249,18 @@ impl<'a> Parser<'a> {
             Some(Tok::Name(n)) => {
                 self.no_assign()?;
                 if let Some(i) = self.param(&n) {
+                    if self.no_input && self.number_fn_name(&n) {
+                        return Err(no_input(&n));
+                    }
                     self.use_param(&n, Ty::Num)?;
                     return Ok(Pipe::Param(i, n));
+                }
+                if let Some(t) = self.fn_var(&n) {
+                    return match t {
+                        _ if !self.number_fn_name(&n) => Err(format!("{n} holds {t}, which gives candidates, not a number")),
+                        _ if self.no_input => Err(no_input(&n)),
+                        _ => Ok(Pipe::Fun(n)),
+                    };
                 }
                 if self.number_def(&n) && self.defs[&n].params.is_empty() {
                     if self.no_input {
@@ -1089,6 +1283,23 @@ impl<'a> Parser<'a> {
                 Ok(e)
             }
             Some(Tok::Open) => {
+                // `(pred t)`: a function value applied to a group.
+                if let Some(Tok::Name(k)) = self.peek().cloned()
+                    && (self.param(&k).is_some_and(|i| self.params[i].ty.is_none()) || self.number_fn_name(&k))
+                    && (matches!(self.peek_at(1), Some(Tok::Name(g)) if self.input_name(g, false)) && self.peek_at(2) == Some(&Tok::Close) || self.peek_at(1) == Some(&Tok::Open))
+                {
+                    self.at += 1;
+                    let f = match self.param(&k) {
+                        Some(i) => {
+                            self.use_param(&k, Ty::Fn(Box::new(Ty::Group), Box::new(Ty::Num)))?;
+                            Pipe::Param(i, k)
+                        }
+                        None => Pipe::Fun(k),
+                    };
+                    let input = self.group_input(true)?.expect("an input ahead");
+                    self.expect(Tok::Close, ")")?;
+                    return Ok(Pipe::Of(Box::new(f), Box::new(input)));
+                }
                 // `(size)` and `(size + 1)` are parenthesized expressions, `(size r)` a call.
                 let call = match self.peek() {
                     Some(Tok::Name(k)) => builtins::get(k).filter(|s| {
@@ -1182,9 +1393,6 @@ pub fn starts_with_value(p: &Pipe) -> bool {
     }
 }
 
-fn unsupported_fn(n: &str, t: &Ty) -> String {
-    format!("parameter {n}:{t}: function types other than pipe are not supported yet (step 9b)")
-}
 
 fn not_pipe(s: &Sig) -> String {
     format!("{} is not @pipe, so | cannot give it its input: call it with all its arguments, {s}", s.name)
@@ -1206,6 +1414,9 @@ pub fn sig_of(d: &Def) -> Sig {
     sig.pipe = d.step;
     if d.value.is_some() {
         sig.result = Ty::Num;
+    }
+    if let Some(t) = &d.implicit {
+        sig.input = Param { name: if *t == Ty::Term { "t".into() } else { "g".into() }, ty: t.clone(), rep: Rep::One };
     }
     sig
 }
@@ -1333,6 +1544,7 @@ fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition
                         t = format!("{t}->{}", p.name("a type after ->")?);
                     }
                     match Ty::parse(&t) {
+                        Ok(ty) if matches!(ty, Ty::Fn(..)) && !ty.is_function() => return Err(format!("type {t} of parameter {n}: a function takes one input, term or group, and gives num, term, term? or group")),
                         Ok(ty) if !matches!(ty, Ty::Term | Ty::MaybeTerm) => Some(ty),
                         _ => return Err(format!("unknown type {t} of parameter {n}; known: pipe group num name, and A->B as in term->num")),
                     }
@@ -1397,7 +1609,7 @@ fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition
     p.params = params.into_iter().zip(types).map(|(name, ty)| ParamUse { name, annotated: ty.is_some(), ty, uses: 0, loose: 0 }).collect();
     let mut value = match kind != DefKind::Let && p.expr_ahead() {
         true => {
-            p.no_input = true;
+            p.no_input = piped;
             let e = p.or()?;
             p.no_input = false;
             kind = DefKind::Run;
@@ -1405,6 +1617,7 @@ fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition
         }
         false => None,
     };
+    let implicit = value.as_ref().filter(|_| !piped).and_then(|e| p.input_ty(e));
     let (mut pipe, flat, tail) = match value {
         Some(_) => (Pipe::id(), false, None),
         None => {
@@ -1422,7 +1635,7 @@ fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition
     if piped && value.is_none() && !starts {
         return Err(format!("{what}: the body of an @pipe function starts with a value, as in {} | ..., or is an expression", input.as_deref().unwrap()));
     }
-    let step = piped || value.is_none() && !starts;
+    let step = piped || value.is_none() && !starts || implicit.is_some();
     if let Some(e) = tail {
         if kind != DefKind::Run {
             return Err(format!("{what}: a function that gives a number is a run of its own, so it cannot be @inline or a let"));
@@ -1441,13 +1654,12 @@ fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition
     let params = params
         .into_iter()
         .map(|u| match u.ty {
-            Some(ty) if matches!(ty, Ty::Fn(..)) && !ty.is_pipe() => Err(format!("{what}: {}", unsupported_fn(&u.name, &ty))),
             Some(ty) => Ok(Param { name: u.name, ty, rep: Rep::One }),
             None => Err(format!("{what}: parameter {} is never used in the body", u.name)),
         })
         .collect::<Result<Vec<_>, String>>()?;
     used.extend(p.used);
-    Ok(Definition { name, kind, params, pipe, flat, input, step, value, notes })
+    Ok(Definition { name, kind, params, pipe, flat, input, step, value, implicit, notes })
 }
 
 /// The signature of a function `(def (NAME PARAM ...) p)`: its parameters, then the
@@ -1467,7 +1679,12 @@ pub fn def_sig(name: &str, params: &[Param]) -> Sig {
 }
 
 fn def_head(d: &Def) -> String {
-    let params = d.params.iter().map(|p| if p.ty == Ty::Group { format!("{}:group", p.name) } else { p.name.clone() });
+    let params = d.params.iter().map(|p| match &p.ty {
+        Ty::Group => format!("{}:group", p.name),
+        t @ Ty::Fn(..) if !t.is_pipe() => format!("{}:{t}", p.name),
+        _ => p.name.clone(),
+    });
+
     let head = std::iter::once(d.name.clone()).chain(params).chain(d.input.clone()).collect::<Vec<_>>().join(" ");
     match (d.inline, d.input.is_some()) {
         (true, true) => format!("@inline @pipe ({head})"),
@@ -1507,7 +1724,7 @@ fn def_body(d: &Def, s: String) -> String {
 /// The body of a call of an `@inline` function with its pipeline arguments in place, as the
 /// checks of registers and assignments see it.
 pub fn expand(c: &Call) -> Pipe {
-    let pipes = c.args.iter().zip(&c.def.params).map(|(a, p)| p.ty.is_pipe().then_some(a)).collect();
+    let pipes = c.args.iter().zip(&c.def.params).map(|(a, p)| p.ty.is_step().then_some(a)).collect();
     let s = Subst { names: Vec::new(), owned: Vec::new(), pipes, open: &|_| false };
     s.pipe(&c.body).expect("no name to put in place")
 }
@@ -1565,7 +1782,7 @@ impl<'s> Subst<'s> {
             match (&p.ty, a) {
                 (Ty::Name, Pipe::Name(n)) => s.names.push((&p.name, n)),
                 (Ty::Group, Pipe::Value(n)) if groups => s.names.push((&p.name, n)),
-                (t, q) if t.is_pipe() => {
+                (t, q) if t.is_step() => {
                     s.pipes.push(pipes.then_some(q));
                     continue;
                 }
@@ -1607,6 +1824,7 @@ impl<'s> Subst<'s> {
             Pipe::Smallest(m) => smallest(self.pipe(&m.source)?),
             Pipe::Param(i, _) => self.pipes.get(*i).copied().flatten().map_or_else(|| p.clone(), Pipe::clone),
             Pipe::Bind(n, q) => Pipe::Bind(self.name(n), b(q)?),
+            Pipe::BindFn(n, q, t) => Pipe::BindFn(n.clone(), Arc::new(self.pipe(q)?), t.clone()),
             Pipe::Assign(i, e) => Pipe::Assign(*i, b(e)?),
             Pipe::Switch(on, ns) => Pipe::Switch(*on, ns.iter().map(|n| self.switch(n, if *on { "on" } else { "off" })).collect::<Result<_, _>>()?),
             Pipe::Call(c, input) => Pipe::Call(Arc::new(self.call(c)?), input.as_deref().map(b).transpose()?),
@@ -1614,7 +1832,7 @@ impl<'s> Subst<'s> {
             Pipe::Not(c) => Pipe::Not(b(c)?),
             Pipe::Cmp(op, x, y) => Pipe::Cmp(*op, b(x)?, b(y)?),
             Pipe::Bin(op, x, y) => Pipe::Bin(*op, b(x)?, b(y)?),
-            Pipe::Num(_) | Pipe::Var(_) => p.clone(),
+            Pipe::Num(_) | Pipe::Var(_) | Pipe::Fun(_) => p.clone(),
         })
     }
 
@@ -1648,7 +1866,7 @@ pub fn smallest(p: Pipe) -> Pipe {
 /// `@inline` call, where a parameter's argument has the notes of the text it is written in.
 fn noted_stage(p: &Pipe, s: &str, inline: bool) -> Vec<Pipe> {
     let q = noted(p, s, inline);
-    if crate::pipe::computes(p) || matches!(p, Pipe::Param(..)) && !inline { vec![q, Pipe::app("note", vec![Pipe::Name(s.into())])] } else { vec![q] }
+    if crate::pipe::computes(p) || matches!(p, Pipe::Param(..) | Pipe::Fun(_)) && !inline { vec![q, Pipe::app("note", vec![Pipe::Name(s.into())])] } else { vec![q] }
 }
 
 fn noted_stages(ps: &[Pipe], s: &str, inline: bool) -> Vec<Pipe> {
@@ -1667,19 +1885,21 @@ fn noted(p: &Pipe, s: &str, inline: bool) -> Pipe {
     let b = |x: &Pipe| Box::new(noted(x, s, inline));
     match p {
         Pipe::App(f, args) => {
-            let arg = |(i, a): (usize, &Pipe)| if f.sig.param(i).ty.is_pipe() { noted_one(a, s, inline) } else { noted(a, s, inline) };
+            let arg = |(i, a): (usize, &Pipe)| if f.sig.param(i).ty.is_step() { noted_one(a, s, inline) } else { noted(a, s, inline) };
             Pipe::App(f, args.iter().enumerate().map(arg).collect())
         }
         Pipe::Assign(i, x) => Pipe::Assign(*i, b(x)),
         Pipe::Seq(ps) => Pipe::Seq(noted_stages(ps, s, inline)),
         Pipe::Bind(n, q) => Pipe::Bind(n.clone(), Box::new(noted_one(q, s, inline))),
+        Pipe::BindFn(n, q, t) if t.is_step() => Pipe::BindFn(n.clone(), Arc::new(noted_one(q, s, inline)), t.clone()),
+        Pipe::BindFn(n, q, t) => Pipe::BindFn(n.clone(), Arc::new(noted(q, s, inline)), t.clone()),
         Pipe::Smallest(m) => {
             let steps = noted_stages(&m.steps, s, inline);
             Pipe::Smallest(Box::new(crate::sched::Smallest { source: m.source.clone(), steps, scoped: m.scoped }))
         }
         Pipe::Call(c, input) => {
             let body = if c.def.inline { Arc::new(noted_one(&c.body, s, true)) } else { c.body.clone() };
-            let args = c.args.iter().zip(&c.def.params).map(|(a, q)| if q.ty.is_pipe() { noted_one(a, s, inline) } else { noted(a, s, inline) }).collect();
+            let args = c.args.iter().zip(&c.def.params).map(|(a, q)| if q.ty.is_step() { noted_one(a, s, inline) } else { noted(a, s, inline) }).collect();
             Pipe::Call(Arc::new(Call { def: c.def.clone(), args, body }), input.as_ref().map(|p| Box::new(noted_one(p, s, inline))))
         }
         Pipe::Of(x, q) if !matches!(**q, Pipe::Value(_)) => Pipe::Of(b(x), Box::new(noted_one(q, s, inline))),
@@ -1689,7 +1909,7 @@ fn noted(p: &Pipe, s: &str, inline: bool) -> Pipe {
         Pipe::Or(xs) => Pipe::Or(xs.iter().map(|x| noted(x, s, inline)).collect()),
         Pipe::Cmp(op, x, y) => Pipe::Cmp(*op, b(x), b(y)),
         Pipe::Bin(op, x, y) => Pipe::Bin(*op, b(x), b(y)),
-        Pipe::Num(_) | Pipe::Name(_) | Pipe::Var(_) | Pipe::Value(_) | Pipe::Param(..) | Pipe::Switch(..) => p.clone(),
+        Pipe::Num(_) | Pipe::Name(_) | Pipe::Var(_) | Pipe::Value(_) | Pipe::Fun(_) | Pipe::Param(..) | Pipe::Switch(..) => p.clone(),
     }
 }
 
@@ -1730,7 +1950,7 @@ fn show_expr(e: &Pipe, need: u8) -> String {
         Pipe::Var(i) => (var(*i).name.to_string(), 7),
         Pipe::Param(_, n) => (n.clone(), 7),
         Pipe::Of(e, p) => match &**p {
-            Pipe::Value(r) if matches!(&**e, Pipe::App(b, _) if b.name != "size") => {
+            Pipe::Value(r) if matches!(&**e, Pipe::App(b, _) if b.name != "size") || matches!(**e, Pipe::Param(..) | Pipe::Fun(_)) => {
                 let s = show_expr(e, 7);
                 let inner = s.strip_prefix('(').and_then(|s| s.strip_suffix(')')).unwrap_or(&s);
                 (format!("({inner} {r})"), 7)
@@ -1784,14 +2004,14 @@ fn form(head: &str, args: &[String]) -> String {
 /// argument (`false`) and, for a pipeline, whether it is written as a stage (one of several
 /// pipelines) rather than read up to `)`; an `id` for an optional pipeline left out.
 fn app_args<'p>(b: &crate::pipe::Builtin, args: &'p [Pipe]) -> Vec<(&'p Pipe, Option<bool>)> {
-    let pipes = b.sig.params.iter().filter(|p| p.ty.is_pipe()).count();
+    let pipes = b.sig.params.iter().filter(|p| p.ty.is_step()).count();
     let last = b.sig.params.len().saturating_sub(1);
     args.iter()
         .enumerate()
         .filter_map(|(i, a)| {
             let p = b.sig.param(i);
             match () {
-                _ if !p.ty.is_pipe() => Some((a, None)),
+                _ if !p.ty.is_step() => Some((a, None)),
                 _ if p.rep == Rep::Opt && a.is_id() => None,
                 _ => Some((a, Some(!(pipes == 1 && i == last && p.rep == Rep::One)))),
             }
@@ -1811,7 +2031,7 @@ fn show_fixed(a: &Pipe) -> String {
 fn show_call_arg(a: &Pipe, p: &Param) -> String {
     match (&p.ty, a) {
         (_, Pipe::Name(n)) | (Ty::Group, Pipe::Value(n)) => n.clone(),
-        (t, a) if t.is_pipe() => stage(a),
+        (t, a) if t.is_step() => stage(a),
         (_, a) => show_arg(a),
     }
 }
@@ -1838,8 +2058,11 @@ pub fn show(p: &Pipe) -> String {
             let all: Vec<String> = c.args.iter().zip(&c.def.params).map(|(a, p)| show_call_arg(a, p)).chain(input.as_deref().map(stage)).collect();
             if all.is_empty() { c.def.name.clone() } else { form(&c.def.name, &all) }
         }
-        Pipe::Param(_, n) | Pipe::Value(n) | Pipe::Name(n) => n.clone(),
+        Pipe::Param(_, n) | Pipe::Value(n) | Pipe::Fun(n) | Pipe::Name(n) => n.clone(),
         Pipe::Bind(n, q) => format!("{n} = {}", bound(q, show(q))),
+        Pipe::BindFn(n, q, t) if t.is_step() => format!("{n}:{t} = {}", stage(q)),
+        Pipe::BindFn(n, q, _) => format!("{n} = {}", show_assigned(q)),
+
         Pipe::Assign(i, v) => format!("{} = {}", var(*i).name, show_assigned(v)),
         Pipe::Switch(on, ns) => form(if *on { "on" } else { "off" }, &[ns.join(" ")]),
         e => show_expr(e, 1),
@@ -1888,7 +2111,7 @@ fn pretty_at(p: &Pipe, indent: usize) -> String {
         }
         Pipe::Seq(ps) => nested("seq", vec![], many(ps)),
         Pipe::Smallest(m) => nested("smallest", vec![], vec![(&m.source, false)]),
-        Pipe::App(b, args) if b.sig.params.iter().any(|q| q.ty.is_pipe()) => {
+        Pipe::App(b, args) if b.sig.params.iter().any(|q| q.ty.is_step()) => {
             let all = app_args(b, args);
             let fixed = all.iter().filter(|(_, at)| at.is_none()).map(|(a, _)| show_fixed(a)).collect();
             let ps = all.iter().filter_map(|(a, at)| at.map(|s| (*a, s))).collect();
@@ -1897,7 +2120,7 @@ fn pretty_at(p: &Pipe, indent: usize) -> String {
         Pipe::Call(c, None) if !c.args.is_empty() => {
             let params = &c.def.params;
             let names = params.iter().take_while(|p| matches!(p.ty, Ty::Name | Ty::Num)).count();
-            let pipes: Vec<(&Pipe, bool)> = c.args[names..].iter().zip(&params[names..]).filter(|(_, p)| p.ty.is_pipe()).map(|(q, _)| (q, true)).collect();
+            let pipes: Vec<(&Pipe, bool)> = c.args[names..].iter().zip(&params[names..]).filter(|(_, p)| p.ty.is_step()).map(|(q, _)| (q, true)).collect();
             if names + pipes.len() < c.args.len() {
                 return one;
             }
@@ -2171,11 +2394,13 @@ mod tests {
         assert_eq!(def("(def (f p:group -> group) (best 1 p))").unwrap().params[0].ty, Ty::pipe());
         assert_eq!(def("(def (f k:num) (if (size <= k) rewrite))").unwrap().params[0].ty, Ty::Num);
         for (bad, msg) in [
-            ("(def (f c:term->num) (filter c))", "parameter c:term->num: function types other than pipe are not supported yet (step 9b)"),
-            ("(def (f c:group->num) (if c rewrite))", "not supported yet (step 9b)"),
-            ("(def (f c:term->num->num) c)", "not supported yet (step 9b)"),
-            ("(def (f c:term->num) id)", "def (f c): parameter c:term->num: function types other than pipe"),
+            ("(def (f c:term->num->num) c)", "a function takes one input, term or group"),
+            ("(def (f c:num->term) c)", "a function takes one input, term or group"),
+            ("(def @pipe (f c:term->num g) g | c | rewrite)", "c gives a number; rewrite takes candidates"),
+            ("(def (f c:term->num) (best 1 c))", "parameter c:term->num is used where pipe is wanted"),
+            ("(def (f c:term->term) (filter c))", "parameter c:term->term is used where term->num is wanted"),
             ("(def (f x:term) x)", "unknown type term of parameter x"),
+
             ("(def (f x:num->) x)", "a type after ->"),
             ("(def (f x:int->num) x)", "unknown type int->num"),
         ] {

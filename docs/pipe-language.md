@@ -278,11 +278,12 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub/NAME=P   # 即 (de
 |---|---|---|---|
 | 管线参数 | `pipe` | 写在步骤位置；当函数值调用（`(p g)`、`g \| p`） | 不求值，原样传进去，是闭包（第 6.3 节），函数体里每用一次就运行一次 |
 | 数值参数 | `num` | 写在表达式里（赋值右边、`(fix N p)`、`(best K ...)`、`(if C ...)`、`filter`、`any`、`all` 的条件……） | 在调用处、对调用时的候选组求一次值（同赋值右边） |
+| 函数参数 | `term->num`、`group->num`、`term->term`…… | 单独一个名字写在函数类型的参数位置（`(filter pred)`、`(if c p)`）；被调用（表达式里的 `(pred t)`、`t \| pred`）；写注解 | 不求值，是闭包，每次用到时用在给它的输入上（第 6.8 节） |
 | 组参数 | `group` | 写在组变量位置（`(load R)`、`(label R)`、`(size R)`、`(same R)`）；作函数值或函数的显式输入（`(p r)` 的 `r`） | 按值：调用处那个组变量的候选组 |
 | 名字参数 | `name` | 写在名字位置（`(tag NAME p)`、`(cand NAME p)`、`(smaller NAME p)`、`(egglog LABEL)`、`(off NAME)`、`(on NAME)`） | 解析时代入 |
 
 - 作为参数传给另一个函数时，取那个参数的类型。
-- 可以写类型：`p:pipe`（也可写 `p:group->group`）、`r:group`、`n:num`、`x:name`；不写时第一次用到就定下。也能写别的函数类型（`pred:term->num`、`c:group->num`），但这种参数还不支持，报 `parameter pred:term->num: function types other than pipe are not supported yet`。同一个参数的用法互相矛盾（`parameter p is used as a pipeline and as a group variable`）、函数体里没用到（`parameter q is never used in the body`）都报错。
+- 可以写类型：`p:pipe`（也可写 `p:group->group`）、`r:group`、`n:num`、`x:name`，以及别的函数类型（`pred:term->num`、`c:group->num`、`f:term->term`，第 6.8 节）；不写时第一次用到就定下，之后的用法要能按第 6.8 节的转换接上。同一个参数的用法互相矛盾（`parameter p is used as a pipeline and as a group variable`、`parameter p is used as term->num and as pipe`；写了注解的 `parameter c:term->term is used where term->num is wanted`）、函数体里没用到（`parameter q is never used in the body`，写了注解的没用到不报）都报错。
 - `t = r`、函数体就是 `r` 这种位置管线和组都合适，没写类型的参数在那里按管线算；只在这种位置用到时给警告，提示写 `r:pipe` 或 `r:group`。要当组用，就写 `r:group`，或者先在组的位置用到它（`(load r)`）。
 - 参数只在函数体里看得见（词法绑定），不参与存数变量的查找，不能赋值（`(save a)`、`a = ...`、`n = 3` 都报 `parameter a cannot be assigned`）；不能和变量、函数、宏、`let` 名、`def` 名、`none`、`def`、`let`、`extern` 或函数自己同名，也不能重复。
 - 读参数的规则和内置函数一样（第 4.3 节）：数值参数是一个 `earg`（`(f size / 2)` 要写成 `(f (size / 2))`），只有一个管线参数、且它是最后一个参数时读到 `)` 为止，其他管线参数各是一个步骤，组参数和名字参数各是一个名字。个数、种类不对时报错附上签名：`f takes a group variable and a pipeline: (f r:group p:pipe g:group) group`；表达式参数处写了管线时还先给出那个表达式的错误。有参数的函数单独写出时报 `NAME needs parentheses`，没有参数的写了参数报 `f takes no arguments: (f g:group) group`。
@@ -307,7 +308,7 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub/NAME=P   # 即 (de
 - 内置函数也可以显式给输入：`(lowbits t)`、`(mixed t)`、`(same r t)`；只在写满了参数、后面又是一个值时才这样读（`(if c a u)` 的 `u` 仍是可选的管线参数）。
 - 写了参数的函数后面跟一个不是变量、函数或定义的名字时，也读成组变量（在外层绑定的、或写错的），由读写检查判断（`(f x u)` 没有绑定 `u` 时报 `reads group variable u before it is bound`，不报参数个数）；没有参数的函数后面跟这样的名字仍报 `takes no arguments`（`(lowbits x)`）。
 - 不带 `@pipe` 的函数不能写在 `|` 后面（`twice is not @pipe, so | cannot give it its input`）：它的调用是一个值，写在管线开头、赋值右边或作显式输入，`u = (twice rewrite t)`。
-- **隐式输入**：一步的参数里，少写了输入的函数取这一步的输入，所以 `(if (size <= k) p)` 里的 `size` 是 `(size <这一步的输入>)`、`(if (big 3) p)` 里的 `big` 同理。函数体是表达式时，它的顶层不在任何步骤里，没有这样的输入：那里的数值函数、返回数的函数、以数结束的管线都要写出输入（`size > k` 报 `size needs its input here`，写 `(size g) > k`、`(mixed g)`、`(g | rewrite | size)`）。
+- **隐式输入**：一步的参数里，少写了输入的函数取这一步的输入，所以 `(if (size <= k) p)` 里的 `size` 是 `(size <这一步的输入>)`、`(if (big 3) p)` 里的 `big` 同理。`@pipe` 函数的函数体是表达式时，它的顶层不在任何步骤里，没有这样的输入：那里的数值函数、返回数的函数、以数结束的管线都要写出输入（`size > k` 报 `size needs its input here`，写 `(size g) > k`、`(mixed g)`、`(g | rewrite | size)`）。不带 `@pipe` 的函数的输入本来就是隐含的，函数体是表达式而读了隐含的输入时（`(def (under k) size <= k)`），函数取隐含的输入，见第 6.8 节。
 
 **管线参数是闭包**：传进去的管线带着它写下时所在的运行，即调用处的输入、组变量和参数。它在被调用的函数里每用一次就运行一次，但：
 
@@ -360,7 +361,59 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub/NAME=P   # 即 (de
 
 只给警告：定义了却没用到的函数（`(def (f p n) ...) is never used`）；没写类型的参数只用在管线和组都合适的位置；组值写在 `|` 后面；以及第 13 节对每条管线做的那些检查，对每个 `def` 的函数体也单独做。
 
-### 6.8 例子
+### 6.8 函数类型和函数值
+
+函数值的类型是 `A->B`：输入 `A` 是 `term` 或 `group`，结果 `B` 是 `num`、`term`、`term?` 或 `group`；`pipe` 就是 `group->group`。多个输入的函数类型（`num->term`、`term->num->num`）报 `a function takes one input, term or group`。
+
+**函数值从哪里来**：
+
+- **部分应用**：带 `@pipe` 的函数少写了输入就是函数值，类型是"输入 -> 返回"：`size` 是 `term->num`，`rewrite` 是 `term->term`，`(best 1 a b)` 是 `pipe`，`(big 20)` 是 `group->num`，`(with_budget 8 rewrite)` 是 `pipe`。在步骤位置、表达式里这就是原来的写法（第 6.3 节的隐式输入）。
+- **写在函数类型位置的表达式或管线**：以隐式输入为参数的函数。`(filter (size <= 20))` 的条件对每个候选求值，`(keep_if (size <= 20))` 传进去的也是这样一个函数。
+- **函数参数**（第 6.2 节）和**函数变量**：`f = size`、`small = (size <= 20)`、`f = (under 20)`——`=` 左边不是存数的变量、右边是读了隐含输入的表达式时，`f` 存这个函数值，类型 `term->num`（只读主候选时）或 `group->num`；右边不读输入时照旧报 `unknown variable f`（`t = 1`）。别的类型写注解：`g:term->term = relate`（右边是一步，类型要接得上）。不写注解时 `t = rewrite` 照旧把候选绑定到组变量 `t`。函数变量和组变量一样按词法查找，只在本次运行里看得见；同一个名字只能存一种（`f holds a function value, so it cannot name a group variable`、`t is a group variable, so it cannot hold a number`）。
+- **返回函数的 `def`**：不带 `@pipe` 的函数，函数体是表达式而读了隐含的输入时（`(def (under k) size <= k)`），签名是 `(under k:num t:term) num`：输入只读主候选时是 `t:term`，读整组时是 `g:group`。写在要数的地方时取这一步的输入，得一个数（`(if (under 9) p)`）；写在函数类型的位置时是 `term->num` 的函数值（`(filter (under 20))`、`(keep_if (under 20))`）。函数体不读输入（`(def (f) keep + 1)`、`(def @pipe (big k g) (size g) > k)`）时照旧返回数，意思不变。
+
+**调用**：`(pred t)` 或 `t | pred`（表达式里写在括号里，`((pred t) > 5)`、`(t | pred)`），和 `(p g)` 一样；单独写在要数的地方时用在这一步的输入上（`(filter (f < 5))`）。没写注解的参数被这样调用时推成 `group->num`。函数值是闭包：它带着写下它的运行，读那里的组变量、函数变量和参数，在哪里用都一样；`(def (f n) small = (size <= n) | (keep_if small))` 里的 `small` 在 `keep_if` 里面求值时读的仍是 `f` 的 `n`。`wins`、`moved`、`scope` 的缓存这些没有名字的状态，照旧按它实际运行的位置算（第 6.3 节）。
+
+**转换**：传参、存进变量和相邻步骤用同一套规则（第 4.3 节的调用方式），给的类型能接到要的类型时隐式转换：
+
+| 要的 | 能给的 | 怎么用 |
+|---|---|---|
+| `pipe` | `term->term`、`term->term?`、`term->group` | 对每个候选；没有结果时去掉；对主候选、结果替换整组 |
+| `group->num` | `term->num` | 取主候选，组为空得 0 |
+| `term->num` | `group->num` | 用在只有这一个候选的组上 |
+| `term->term?` | `term->term` | 原样 |
+| `num` | `term->num`、`group->num` | 用在这一步的输入上 |
+
+接不上时报错写出两边的类型：`each takes f:term->term: (each f:term->term g:group) group; (best 1 rewrite) is pipe`、`keep_if takes pred:term->num: ...; f is term->term`、`f holds term->term; (best 1 rewrite) is pipe`。给数的函数值写在步骤位置报 `f gives a number, not candidates: it holds term->num`。
+
+**不做的**：多态（`(def (f p) p)` 照旧按管线算）；多个输入的函数；在语言里遍历候选。
+
+例子（各段都能读进来）：
+
+```
+(def @pipe (keep_if pred g) g | (filter pred))    # (keep_if pred:term->num g:group) group
+prepass=(union id rewrite) | (keep_if (size <= 20))
+
+(def (under k) size <= k)                        # 读隐含输入：(under k:num t:term) num
+prepass=(union id rewrite) | (filter (under 20)) | (if (under 9) relate)
+
+(def @pipe (each f:term->term g) g | f)
+prepass=(each rewrite) | f = (size <= 20) | (filter f) | g:term->term = relate | (each g)
+
+(def (pick pred) (save t) | (if ((pred t) > 5) rewrite))   # pred 推成 group->num
+prepass=(pick size)                                       # size 是 term->num：取 t 的主候选
+
+(def (with_budget n p) rewrites = n | p)
+(def @pipe (app p g) g | p)
+prepass=(app (with_budget 8 rewrite))                     # def 少写最后一个参数
+
+(def @pipe (keep_if pred g) g | (filter pred))
+(def (small_only n) small = (size <= n) | (union id rewrite) | (keep_if small))
+prepass=(small_only 20)                                   # small 在 keep_if 里读 small_only 的 n
+```
+
+### 6.9 例子
+
 
 每段是一个独立的例子：
 

@@ -41,6 +41,36 @@ impl Ty {
         }
     }
 
+    /// Whether an argument of this type is written as a step: a function that gives
+    /// candidates (`pipe`, `term->term`, `term->group`, ...).
+    pub fn is_step(&self) -> bool {
+        matches!(self, Ty::Fn(_, b) if **b != Ty::Num)
+    }
+
+    /// Whether this is a function value's type: one input, term or group, to num, term,
+    /// term? or group.
+    pub fn is_function(&self) -> bool {
+        matches!(self, Ty::Fn(a, b) if matches!(**a, Ty::Term | Ty::Group) && matches!(**b, Ty::Num | Ty::Term | Ty::MaybeTerm | Ty::Group))
+    }
+
+    /// Whether a value of this type can be given where `want` is wanted, converted as the
+    /// calling kinds convert at a joint: a function over terms runs on each candidate (or the
+    /// main one, for a group or a number), a `group->num` one on the one candidate it is given,
+    /// and a function giving a number, where a number is wanted, on the input of the step.
+    pub fn fits(&self, want: &Ty) -> bool {
+        if self == want {
+            return true;
+        }
+        match (self, want) {
+            (Ty::Fn(a, b), Ty::Fn(c, d)) => matches!(
+                (&**a, &**b, &**c, &**d),
+                (Ty::Term, Ty::Term | Ty::MaybeTerm | Ty::Group, Ty::Group, Ty::Group) | (Ty::Term, Ty::Num, Ty::Group, Ty::Num) | (Ty::Group, Ty::Num, Ty::Term, Ty::Num) | (Ty::Term, Ty::Term, Ty::Term, Ty::MaybeTerm)
+            ),
+            (Ty::Fn(_, b), Ty::Num) => **b == Ty::Num,
+            _ => false,
+        }
+    }
+
     /// Reads `num`, `pipe`, `term->num`, `term->group->num`, ...
     pub fn parse(s: &str) -> Result<Ty, String> {
         let unknown = |w: &str| format!("unknown type {w}; known: num term term? group name pipe, and A->B");
@@ -346,7 +376,7 @@ fn one(text: &str) -> Result<Sig, String> {
     for p in &params {
         match &p.ty {
             Ty::Term | Ty::MaybeTerm => return Err(format!("{name}: {p}: only the input is a candidate")),
-            t @ Ty::Fn(..) if !t.is_pipe() && !t.is_expr() => return Err(format!("{name}: {p}: function types other than pipe, term->num and group->num are not supported yet (step 9b)")),
+            t @ Ty::Fn(..) if !t.is_function() => return Err(format!("{name}: {p}: a function takes one input, term or group, and gives num, term, term? or group")),
             t if p.rep == Rep::Many && !t.is_pipe() || p.rep == Rep::Opt && t.is_expr() => return Err(format!("{name}: {p}: only pipe takes ..., only pipe, group and name take ?")),
             _ => {}
         }
@@ -513,8 +543,10 @@ mod tests {
         assert_eq!(get("filter").unwrap().takes(), "an expression");
         let sigs = parse("# a\n(extern (x c:term->num p:group->group... g:group) group)").unwrap();
         assert_eq!(sigs[0].to_string(), "(x c:term->num p:pipe... g:group) group");
+        assert_eq!(parse("# a\n(extern (x f:term->term g:group) group)").unwrap()[0].to_string(), "(x f:term->term g:group) group");
+        assert!(Ty::parse("term->term").unwrap().fits(&Ty::pipe()) && Ty::parse("term->num").unwrap().fits(&Ty::parse("group->num").unwrap()) && !Ty::pipe().fits(&Ty::parse("term->term").unwrap()));
         for (bad, msg) in [
-            ("# a\n(extern (x p:term->term g:group) group)", "function types other than pipe, term->num and group->num are not supported yet (step 9b)"),
+            ("# a\n(extern (x p:num->term g:group) group)", "a function takes one input, term or group"),
             ("# a\n(extern (x c:term->num? g:group) group)", "only pipe takes"),
             ("# a\n(extern (x g:group) term->num)", "a function gives num"),
         ] {

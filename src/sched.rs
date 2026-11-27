@@ -701,6 +701,13 @@ pub enum Pipe {
     /// `NAME = p`: binds the group variable `NAME` of the run to the candidates `p` gives on
     /// the input as a scope of its own, the input passing on unchanged.
     Bind(String, Box<Pipe>),
+    /// The function value the variable `NAME` of the run holds (`f = size`), applied to the
+    /// input.
+    Fun(String),
+    /// `NAME = f`: binds the variable `NAME` of the run to the function `f` of this type,
+    /// which takes the input implicitly, as a closure over the run (`crate::pipe::Closure`);
+    /// the input passes on unchanged.
+    BindFn(String, std::sync::Arc<Pipe>, crate::builtins::Ty),
     /// The macro `(off NAME ...)` (`false`) or `(on NAME ...)`: the `INNER` passes or `FLAGS`
     /// switches bound to 0 or 1 until the end of the enclosing sequence, also in the runs it
     /// calls.
@@ -751,6 +758,9 @@ pub struct Def {
     pub value: Option<Pipe>,
     /// `value` runs steps (`lowbits | size`), so a call is a run of its own.
     pub steps: bool,
+    /// The input `value` reads where it is not written, so that a call takes it implicitly
+    /// (`(def (under k) size <= k)`).
+    pub implicit: Option<crate::builtins::Ty>,
 }
 
 impl Def {
@@ -1209,12 +1219,12 @@ impl Passes {
                     p.define(&d.name, d.pipe)?;
                     continue;
                 }
-                let numeric = d.params.iter().any(|p| p.ty == crate::builtins::Ty::Num);
+                let numeric = d.params.iter().any(|p| p.ty.is_expr());
                 let head = std::iter::once(d.name.as_str()).chain(d.params.iter().map(|p| p.name.as_str())).collect::<Vec<_>>().join(" ");
                 let inline = d.kind == lang::DefKind::Inline && (numeric || d.input.is_some());
                 let (pipe, def) = if d.kind == lang::DefKind::Run || inline {
                     let body = std::sync::Arc::new(d.value.clone().map_or(d.pipe, |v| Pipe::app("filter", vec![v])));
-                    let def = std::sync::Arc::new(Def { name: d.name.clone(), params: d.params.clone(), body, inline, flat: inline && d.flat, input: d.input.clone(), step: d.step, steps: d.value.as_ref().is_some_and(lang::has_steps), value: d.value.clone() });
+                    let def = std::sync::Arc::new(Def { name: d.name.clone(), params: d.params.clone(), body, inline, flat: inline && d.flat, input: d.input.clone(), step: d.step, steps: d.value.as_ref().is_some_and(lang::has_steps), value: d.value.clone(), implicit: d.implicit.clone() });
                     p.defs.push(def.clone());
                     (Call::bare(&def), Some(def))
                 } else {
@@ -1449,7 +1459,7 @@ impl Pipe {
         match self {
             Pipe::App(b, args) => {
                 for (i, a) in args.iter().enumerate() {
-                    if b.sig.param(i).ty.is_pipe() {
+                    if b.sig.param(i).ty.is_step() {
                         f(a);
                     } else {
                         a.each(f);
@@ -1460,14 +1470,16 @@ impl Pipe {
             Pipe::Seq(ps) => ps.iter().for_each(f),
             Pipe::Smallest(m) => f(&m.source),
             Pipe::Bind(_, p) => f(p),
+            Pipe::BindFn(_, p, t) if t.is_step() => f(p),
+            Pipe::BindFn(_, e, _) => e.each(f),
             Pipe::Call(c, input) => {
                 if let Some(p) = input {
                     f(p);
                 }
                 for (a, p) in c.args.iter().zip(&c.def.params) {
-                    if p.ty.is_pipe() {
+                    if p.ty.is_step() {
                         f(a);
-                    } else if p.ty == crate::builtins::Ty::Num {
+                    } else if p.ty.is_expr() {
                         a.each(f);
                     }
                 }
@@ -1481,7 +1493,7 @@ impl Pipe {
                 a.each(f);
                 b.each(f);
             }
-            Pipe::Num(_) | Pipe::Name(_) | Pipe::Var(_) | Pipe::Value(_) | Pipe::Param(..) | Pipe::Switch(..) => {}
+            Pipe::Num(_) | Pipe::Name(_) | Pipe::Var(_) | Pipe::Value(_) | Pipe::Fun(_) | Pipe::Param(..) | Pipe::Switch(..) => {}
         }
     }
 }
@@ -1537,7 +1549,11 @@ impl Uses {
                     self.idle_assign.push(lang::show(p));
                 }
             }
-            Pipe::Value(r) => self.read(r),
+            Pipe::Value(r) | Pipe::Fun(r) => self.read(r),
+            Pipe::BindFn(r, p, _) => {
+                self.walk(p);
+                self.bound(r);
+            }
             Pipe::Assign(_, v) => self.expr(v),
             Pipe::Seq(ps) => {
                 let flat: Vec<Pipe>;
@@ -1575,7 +1591,7 @@ impl Uses {
             Pipe::Smallest(m) => self.walk(&m.source),
             // An `@inline` body is checked as written out where it is called.
             Pipe::Call(c, _) if c.def.inline => {
-                c.args.iter().zip(&c.def.params).for_each(|(a, p)| if p.ty == crate::builtins::Ty::Num { self.expr(a) });
+                c.args.iter().zip(&c.def.params).for_each(|(a, p)| if p.ty.is_expr() { self.expr(a) });
                 self.walk(&lang::expand(c));
             }
             // A pipeline argument runs with the caller's group variables, at any point of the call
@@ -1656,7 +1672,7 @@ impl Uses {
         use crate::builtins::Ty;
         for (a, p) in c.args.iter().zip(&c.def.params) {
             match (&p.ty, a) {
-                (Ty::Num, e) => self.expr(e),
+                (t, e) if t.is_expr() => self.expr(e),
                 (Ty::Group, Pipe::Value(r)) => self.read(r),
                 (Ty::Name | Ty::Group, _) => {}
                 (_, p) => self.repeated(p),
@@ -1731,6 +1747,7 @@ impl Uses {
                 input.iter().for_each(|p| self.walk(p));
                 self.call_args(c);
             }
+            Pipe::Fun(r) => self.read(r),
             Pipe::Not(c) => self.expr(c),
             Pipe::And(cs) | Pipe::Or(cs) => cs.iter().for_each(|c| self.expr(c)),
             Pipe::Cmp(_, a, b) | Pipe::Bin(_, a, b) => {
@@ -1747,7 +1764,7 @@ impl Uses {
 fn flat_stages(p: &Pipe) -> Vec<Pipe> {
     match p {
         Pipe::Call(c, _) if c.def.inline => {
-            let num = c.args.iter().zip(&c.def.params).filter(|(_, p)| p.ty == crate::builtins::Ty::Num);
+            let num = c.args.iter().zip(&c.def.params).filter(|(_, p)| p.ty.is_expr());
             let args = num.map(|(e, _)| Pipe::app("filter", vec![e.clone()]));
             let body = match lang::expand(c) {
                 Pipe::Seq(ps) if c.def.flat => ps.iter().flat_map(flat_stages).collect(),
@@ -1768,7 +1785,7 @@ fn reads_var(e: &Pipe, i: usize) -> bool {
         Pipe::Cmp(_, a, b) | Pipe::Bin(_, a, b) => reads_var(a, i) || reads_var(b, i),
         Pipe::Of(e, p) => !matches!(**p, Pipe::Value(_)) || reads_var(e, i),
         Pipe::Call(c, input) => {
-            let num = c.args.iter().zip(&c.def.params).filter(|(_, p)| p.ty == crate::builtins::Ty::Num);
+            let num = c.args.iter().zip(&c.def.params).filter(|(_, p)| p.ty.is_expr());
             c.def.steps || input.as_deref().is_some_and(|p| !matches!(p, Pipe::Value(_))) || num.into_iter().any(|(e, _)| reads_var(e, i))
         }
         _ => false,
@@ -2258,7 +2275,7 @@ prepass=lowbits | r2
             ("prepass=size | rewrite", "size gives a number; rewrite takes candidates"),
             ("(def @pipe (big k g) (size g) > k) prepass=big | rewrite", "big gives a number; rewrite takes candidates"),
             ("(def @pipe (big k g) (size g) > k) prepass=(big 3 (lowbits | unshift))", "big gives a number, not candidates"),
-            ("(def @pipe (big k g) (size g) > k) prepass=t = (big 3 (lowbits | unshift)) | (load t)", "unknown variable t"),
+            ("(def @pipe (big k g) (size g) > k) prepass=t = (big 3 (lowbits | unshift)) | (load t)", "t holds a function value, so it cannot name a group variable"),
             ("(def @pipe (big k g) size > k)", "size needs its input here"),
             ("(def @pipe (big k g) (mixed) || k)", "mixed needs its input here"),
             ("(def @pipe (f g) rewrite)", "the body of an @pipe function starts with a value"),
@@ -2270,7 +2287,8 @@ prepass=lowbits | r2
             ("(def @pipe (f p g) g | p) (def (h a:group) (f id a)) prepass=(h u)", "prepass reads group variable u before it is bound"),
             ("(def @pipe (f p g) g | p) prepass=(f id u)", "prepass reads group variable u before it is bound"),
             ("(def @pipe (f p g) g | p) prepass=(f id 1)", "f takes a pipeline"),
-            ("(def @pipe (big k g) (size g) > k) prepass=t = (big 3)", "unknown variable t"),
+            ("(def @pipe (big k g) (size g) > k) prepass=t = (big 3) | (load t)", "t holds a function value, so it cannot name a group variable"),
+            ("(def @pipe (big k g) (size g) > k) prepass=t = (k + 1)", "unknown variable t"),
         ] {
             let e = Passes::parse(bad).unwrap_err();
             assert!(e.contains(msg), "{bad}: {e}");
@@ -2298,7 +2316,8 @@ prepass=lowbits | r2
             ("prepass=(if ((rewrite | id) < 3) id)", "(rewrite | id) gives candidates, not a number"),
             ("(def @pipe (f g) (size g) > (rewrite | size))", "(rewrite | size) needs its input here"),
             ("(def @inline (f) rewrite | size)", "cannot be @inline"),
-            ("prepass=t = (rewrite | size)", "unknown variable t"),
+            ("prepass=t = (rewrite | size) | (save t)", "t holds a function value"),
+
             ("prepass=(save t) | t = 1 | (load t)", "t is a group variable, so it cannot hold a number: 1 gives a number"),
             ("prepass=keep = (lowbits | unshift)", "keep is a variable that holds a number, so it cannot be bound to candidates: (lowbits | unshift) gives candidates"),
             ("(def @pipe (f p g) g | p) prepass=(f id rewrite)", "f takes a pipeline"),

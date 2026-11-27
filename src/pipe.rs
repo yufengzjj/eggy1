@@ -300,13 +300,68 @@ pub struct Env<'a> {
     ctxs: RefCell<Vec<Ctx>>,
 }
 
-/// What a pipeline argument takes along from the run where it is written (a closure): the
-/// run's input and group variables and the arguments of the call that run is.
+/// What a term of the language gives: a number, candidates, or a function value.
+pub(crate) enum Value {
+    Num(u64),
+    Group(Vec<Cand>),
+    Fn(Closure),
+}
+
+impl Value {
+    fn group(self) -> Vec<Cand> {
+        match self {
+            Value::Group(g) => g,
+            _ => unreachable!("a value that is not candidates where candidates are wanted"),
+        }
+    }
+
+    fn num(self) -> u64 {
+        match self {
+            Value::Num(n) => n,
+            _ => unreachable!("a value that is not a number where a number is wanted"),
+        }
+    }
+}
+
+/// A function value: a term that takes the input implicitly (`size`, `(under 20)`,
+/// `(with_budget 8 rewrite)`) and the run it is written in, whose group variables, function
+/// values and arguments it reads wherever it is applied.
+#[derive(Clone)]
+pub(crate) struct Closure {
+    body: std::sync::Arc<Pipe>,
+    lex: Rc<Lex>,
+}
+
+/// The input a function is applied to: the candidates a step takes, or those an expression
+/// reads.
+pub(crate) enum In<'s> {
+    Own(Vec<Cand>),
+    Ref(&'s [Cand]),
+}
+
+impl In<'_> {
+    fn slice(&self) -> &[Cand] {
+        match self {
+            In::Own(v) => v,
+            In::Ref(s) => s,
+        }
+    }
+
+    fn vec(self) -> Vec<Cand> {
+        match self {
+            In::Own(v) => v,
+            In::Ref(s) => s.to_vec(),
+        }
+    }
+}
+
+/// What a function value or pipeline argument takes along from the run where it is written
+/// (a closure): the run's input and variables and the arguments of the call that run is.
 struct Lex {
     input: String,
-    /// The group variables (`(save R)`, `R = p`); shared with the caller in the call of an
-    /// `@inline` function, as `notes` is.
-    regs: Rc<RefCell<HashMap<String, Vec<Cand>>>>,
+    /// The group variables (`(save R)`, `R = p`) and function variables (`f = size`); shared
+    /// with the caller in the call of an `@inline` function, as `notes` is.
+    regs: Rc<RefCell<HashMap<String, Value>>>,
     /// The open note registers, newest last, and the candidate each keeps.
     notes: Rc<RefCell<Vec<(String, Option<Cand>)>>>,
     frame: Option<Frame>,
@@ -327,8 +382,18 @@ struct Frame {
     values: Vec<u64>,
 }
 
+/// A closure held in the run's variables holds the run, so they are let go at its end.
+impl Drop for Env<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut regs) = self.lex.get_mut().regs.try_borrow_mut() {
+            regs.clear();
+        }
+    }
+}
+
 impl<'a> Env<'a> {
-    pub fn new(cli: &'a Cli, egg: String, input: &str) -> Env<'a> {
+    pub fn new(
+cli: &'a Cli, egg: String, input: &str) -> Env<'a> {
         let signed = crate::eval::NumType::from_name(&cli.num_type).map(|t| t.signed);
         Env::with(Some(cli), &cli.passes, width_of(&cli.num_type), signed, cli.trace, egg, input)
     }
@@ -360,31 +425,70 @@ impl<'a> Env<'a> {
     }
 
     fn reg(&self, r: &str) -> Vec<Cand> {
-        self.lex.borrow().regs.borrow().get(r).cloned().unwrap_or_default()
+        match self.lex.borrow().regs.borrow().get(r) {
+            Some(Value::Group(g)) => g.clone(),
+            _ => Vec::new(),
+        }
     }
 
     fn reg_main(&self, r: &str) -> Option<Cand> {
-        self.lex.borrow().regs.borrow().get(r).and_then(|s| s.first().cloned())
+        match self.lex.borrow().regs.borrow().get(r) {
+            Some(Value::Group(g)) => g.first().cloned(),
+            _ => None,
+        }
+    }
+
+    /// The function `f` written in the run `lex` applied to `input`: a number where `number`,
+    /// else candidates. Every function value and pipeline argument is applied through it.
+    fn apply_in(&self, f: &Pipe, lex: Rc<Lex>, input: In, number: bool) -> Result<Value, Error> {
+        let outer = self.lex.replace(lex);
+        let out = match number {
+            true => Ok(Value::Num(self.value(f, input.slice()))),
+            false => go(f, input.vec(), self).map(Value::Group),
+        };
+        self.lex.replace(outer);
+        out
+    }
+
+    /// The argument of parameter `i` of the call whose body runs, applied to `input` in the
+    /// run where the call is written.
+    fn apply_param(&self, i: usize, input: In, number: bool) -> Result<Value, Error> {
+        let (call, caller) = {
+            let lex = self.lex.borrow();
+            let f = lex.frame.as_ref().expect("a parameter outside the body of its function");
+            (f.call.clone(), f.caller.clone())
+        };
+        self.apply_in(&call.args[i], caller, input, number)
+    }
+
+    /// The function value the variable `name` of the run holds applied to `input`.
+    fn apply_var(&self, name: &str, input: In, number: bool) -> Result<Value, Error> {
+        let f = match self.lex.borrow().regs.borrow().get(name) {
+            Some(Value::Fn(c)) => c.clone(),
+            _ => unreachable!("{name} holds no function value"),
+        };
+        self.apply_in(&f.body, f.lex, input, number)
     }
 
     /// `e` for the candidates `set`: a number or `NONE`.
     fn value(&self, e: &Pipe, set: &[Cand]) -> u64 {
         match e {
             Pipe::Num(n) => *n,
-            Pipe::App(b, args) => match b.imp {
-                Impl::TermNum(f) => set.first().map_or(0, |m| f(m, self)),
-                Impl::GroupNum(_) if set.is_empty() => 0,
-                Impl::GroupNum(f) => f(set, self),
-                Impl::Num(f) => f(args, set, self),
-                _ => unreachable!("{} gives no number", b.name),
-            },
+            Pipe::App(b, args) => apply(b, args, In::Ref(set), self).map_or(0, Value::num),
             Pipe::Var(i) if *i == crate::sched::DEADLINE => match crate::sched::read(*i) {
                 NONE => NONE,
                 at => at.saturating_sub(crate::sched::epoch_ns()) / 1_000_000,
             },
             Pipe::Var(i) if *i == crate::sched::KEEP => crate::sched::read(*i).max(1),
             Pipe::Var(i) => crate::sched::read(*i),
-            Pipe::Param(i, _) => self.lex.borrow().frame.as_ref().expect("a parameter outside the body of its function").values[*i],
+            Pipe::Param(i, _) => {
+                let v = match self.lex.borrow().frame.as_ref().expect("a parameter outside the body of its function") {
+                    f if f.call.def.params[*i].ty == Ty::Num => Some(f.values[*i]),
+                    _ => None,
+                };
+                v.unwrap_or_else(|| self.apply_param(*i, In::Ref(set), true).map_or(0, Value::num))
+            }
+            Pipe::Fun(n) => self.apply_var(n, In::Ref(set), true).map_or(0, Value::num),
             Pipe::Of(e, p) => self.value(e, &self.group_of(p, set)),
             Pipe::Call(c, input) => {
                 let input = input.as_ref().map(|p| self.group_of(p, set));
@@ -398,7 +502,7 @@ impl<'a> Env<'a> {
                 let lex = Lex { input: caller.input.clone(), regs: Default::default(), notes: caller.notes.clone(), frame: Some(frame) };
                 bind_args(c, &lex, set, &caller);
                 let outer = self.lex.replace(Rc::new(lex));
-                let v = self.value(c.def.value.as_ref().expect("a function whose body is an expression"), &[]);
+                let v = self.value(c.def.value.as_ref().expect("a function whose body is an expression"), set);
                 self.lex.replace(outer);
                 v
             }
@@ -615,7 +719,7 @@ fn assign_time_limit(ms: u64) {
 fn bookkeeping(p: &Pipe) -> bool {
     match p {
         Pipe::App(b, _) => b.bookkeeping,
-        Pipe::Seq(_) | Pipe::Param(..) | Pipe::Bind(..) | Pipe::Value(_) | Pipe::Assign(..) | Pipe::Switch(..) => true,
+        Pipe::Seq(_) | Pipe::Param(..) | Pipe::Fun(_) | Pipe::Bind(..) | Pipe::BindFn(..) | Pipe::Value(_) | Pipe::Assign(..) | Pipe::Switch(..) => true,
         Pipe::Call(c, _) => c.def.inline,
         _ => false,
     }
@@ -625,7 +729,7 @@ fn bookkeeping(p: &Pipe) -> bool {
 /// neither bookkeeping nor `@uncounted` and takes no pipeline.
 pub(crate) fn computes(p: &Pipe) -> bool {
     match p {
-        Pipe::App(b, _) => !b.sig.bookkeeping && !b.sig.uncounted && !b.sig.params.iter().any(|q| q.ty.is_pipe()),
+        Pipe::App(b, _) => !b.sig.bookkeeping && !b.sig.uncounted && !b.sig.params.iter().any(|q| q.ty.is_step()),
         Pipe::Call(c, _) => !c.def.inline,
         _ => false,
     }
@@ -643,7 +747,7 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Steps {
         return Ok(set);
     }
     match p {
-        Pipe::App(b, args) => apply(b, args, set, env),
+        Pipe::App(b, args) => apply(b, args, In::Own(set), env).map(Value::group),
         Pipe::Seq(ps) => scoped(|| ps.iter().try_fold(set, |s, p| go(p, s, env))),
         Pipe::Smallest(m) => {
             let steps = || m.steps.iter().try_fold(set, |s, p| go(p, s, env));
@@ -665,21 +769,17 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Steps {
             let run = env.call_env(c, &set);
             scoped(|| go(&c.body, set, &run))
         }
-        Pipe::Param(i, _) => {
-            let (call, caller) = {
-                let lex = env.lex.borrow();
-                let f = lex.frame.as_ref().expect("a parameter outside the body of its function");
-                (f.call.clone(), f.caller.clone())
-            };
-            let callee = env.lex.replace(caller);
-            let out = go(&call.args[*i], set, env);
-            env.lex.replace(callee);
-            out
-        }
+        Pipe::Param(i, _) => env.apply_param(*i, In::Own(set), false).map(Value::group),
+        Pipe::Fun(n) => env.apply_var(n, In::Own(set), false).map(Value::group),
         Pipe::Value(r) => Ok(env.reg(r)),
         Pipe::Bind(r, p) => {
             let group = scoped(|| go(p, set.clone(), env))?;
-            env.lex.borrow().regs.borrow_mut().insert(r.clone(), group);
+            env.lex.borrow().regs.borrow_mut().insert(r.clone(), Value::Group(group));
+            Ok(set)
+        }
+        Pipe::BindFn(r, p, _) => {
+            let f = Closure { body: p.clone(), lex: env.lex.borrow().clone() };
+            env.lex.borrow().regs.borrow_mut().insert(r.clone(), Value::Fn(f));
             Ok(set)
         }
         p => bind_step(p, set, env),
@@ -710,22 +810,28 @@ fn bind_step(p: &Pipe, set: Vec<Cand>, env: &Env) -> Steps {
     Ok(set)
 }
 
-/// The built-in function `b` on `set` with `args`, the input converted as its calling kind
-/// says.
-fn apply(b: &Builtin, args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
-    match b.imp {
-        Impl::Group(f) => f(args, set, env),
-        Impl::Each(f) => Ok(dedup(term_pass(b.name, f, None, &set, env))),
-        Impl::Alt(f, bit) => Ok(dedup(term_pass(b.name, f, Some(bit), &set, env))),
-        Impl::Polish(f) => Ok(dedup(term_pass(b.name, |t, w| Some(f(t, w)), None, &set, env))),
+/// The built-in function `b` applied to `args` and `input`, the input converted as its
+/// calling kind says.
+fn apply(b: &Builtin, args: &[Pipe], input: In, env: &Env) -> Result<Value, Error> {
+    let set = match b.imp {
+        Impl::TermNum(f) => return Ok(Value::Num(input.slice().first().map_or(0, |m| f(m, env)))),
+        Impl::GroupNum(f) => return Ok(Value::Num(if input.slice().is_empty() { 0 } else { f(input.slice(), env) })),
+        Impl::Num(f) => return Ok(Value::Num(f(args, input.slice(), env))),
+        _ => input.vec(),
+    };
+    Ok(Value::Group(match b.imp {
+        Impl::Group(f) => f(args, set, env)?,
+        Impl::Each(f) => dedup(term_pass(b.name, f, None, &set, env)),
+        Impl::Alt(f, bit) => dedup(term_pass(b.name, f, Some(bit), &set, env)),
+        Impl::Polish(f) => dedup(term_pass(b.name, |t, w| Some(f(t, w)), None, &set, env)),
         Impl::Main(f) => match set.first() {
-            Some(main) => Ok(kept(f(main, env)?, &set)),
-            None => Ok(set),
+            Some(main) => kept(f(main, env)?, &set),
+            None => set,
         },
-        Impl::EachCand(_) if set.is_empty() => Ok(set),
-        Impl::EachCand(f) => Ok(kept(set.iter().map(|c| f(c, env).unwrap_or_else(|| c.clone())).collect(), &set)),
+        Impl::EachCand(_) if set.is_empty() => set,
+        Impl::EachCand(f) => kept(set.iter().map(|c| f(c, env).unwrap_or_else(|| c.clone())).collect(), &set),
         _ => unreachable!("{} is not a step", b.name),
-    }
+    }))
 }
 
 /// `out` without repeats, a term given back from `set` keeping the origin it came with.
@@ -940,11 +1046,15 @@ fn bind_args(c: &crate::sched::Call, lex: &Lex, set: &[Cand], caller: &Lex) {
     let mut regs = lex.regs.borrow_mut();
     for (p, a) in c.def.params.iter().zip(&c.args) {
         if let (Ty::Group, Pipe::Value(r)) = (&p.ty, a) {
-            regs.insert(p.name.clone(), caller.regs.borrow().get(r).cloned().unwrap_or_default());
+            let g = match caller.regs.borrow().get(r) {
+                Some(Value::Group(g)) => g.clone(),
+                _ => Vec::new(),
+            };
+            regs.insert(p.name.clone(), Value::Group(g));
         }
     }
     if let Some(g) = &c.def.input {
-        regs.insert(g.clone(), set.to_vec());
+        regs.insert(g.clone(), Value::Group(set.to_vec()));
     }
 }
 
@@ -1019,7 +1129,7 @@ fn pre(e: &str) -> String {
 }
 
 fn save(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
-    env.lex.borrow().regs.borrow_mut().insert(name(&args[0]).to_string(), set.clone());
+    env.lex.borrow().regs.borrow_mut().insert(name(&args[0]).to_string(), Value::Group(set.clone()));
     Ok(set)
 }
 
@@ -1465,7 +1575,55 @@ mod tests {
     }
 
     #[test]
+    fn function_values() {
+        let step = |spec: &str| terms(&prepass_of(spec));
+        let both = "(union id rewrite)";
+        let keep_if = "(def @pipe (keep_if pred g) g | (filter pred))";
+        assert_eq!(step(&format!("{keep_if} prepass={both} | (keep_if (size <= 5))")), [XOR], "the condition is a function applied to each candidate");
+        assert_eq!(step(&format!("prepass=small = (size <= 5) | {both} | (filter small)")), [XOR], "a stored function value");
+        assert_eq!(step(&format!("prepass=f = size | {both} | (filter (f < 5))")), [XOR], "a stored function applied to the input of the step");
+        assert!(step(&format!("prepass=(save t) | f = size | {both} | (filter ((f t) < 5))")).is_empty(), "or to a group");
+        let under = "(def (under k) (size <= k))";
+        assert_eq!(step(&format!("{under} prepass={both} | (filter (under 5))")), [XOR], "a def that returns a function");
+        assert_eq!(step(&format!("{under} {keep_if} prepass={both} | (keep_if (under 5))")), [XOR]);
+        assert_eq!(step(&format!("{under} prepass=(if (under 5) rewrite)")), [SUB], "the same def called in an expression gives a number");
+        assert_eq!(step(&format!("{keep_if} (def (f n) small = (size <= n) | {both} | (keep_if small)) prepass=(f 5)")), [XOR], "a closure reads the frame of the def it is written in");
+        assert_eq!(step(&format!("{keep_if} (def (f n) small = (size <= n) | {both} | (keep_if small)) prepass=(f 9)")), [SUB, XOR]);
+        let each = "(def @pipe (each f:term->term g) g | f)";
+        assert_eq!(step(&format!("{each} prepass=(each rewrite)")), [XOR], "a built-in without its input is a function value");
+        assert_eq!(step("prepass=f:term->term = rewrite | f"), [XOR], "and can be stored");
+        assert_eq!(step("(def (with_budget n p) rewrites = n | p) (def @pipe (app p g) g | p) prepass=(app (with_budget 0 rewrite)) | (app (with_budget 8 rewrite))"), [XOR], "a def without its last argument");
+        let big = "(def @pipe (big k g) (size g) > k)";
+        assert_eq!(step(&format!("{big} {keep_if} prepass={both} | (keep_if (big 5))")), [SUB], "group->num where term->num is wanted: on each candidate alone");
+        let when = "(def (when c:group->num p) (if (c > 5) p))";
+        assert_eq!(step(&format!("{when} prepass=(when size rewrite)")), [XOR], "term->num where group->num is wanted: on the main candidate");
+        assert_eq!(step(&format!("{when} prepass=(when vars rewrite)")), [SUB]);
+        let pick = "(def (pick pred) (save t) | (if ((pred t) > 5) rewrite))";
+        assert_eq!(step(&format!("{pick} prepass=(pick size)")), [XOR], "a parameter called on a group is a function");
+        assert_eq!(step(&format!("{pick} prepass=(pick vars)")), [SUB]);
+        let spec = format!("{pick} {under} {each} {keep_if} prepass=f = (size <= 5) | g:term->term = rewrite | (each g) | (keep_if f) | (filter (under 5)) | (pick size)");
+        let p = Passes::parse(&spec).unwrap();
+        let sigs: Vec<String> = p.defs.iter().map(|d| crate::pipe_lang::sig_of(d).decl()).collect();
+        assert_eq!(sigs, ["(extern @pipe (pick pred:group->num g:group) group)", "(extern @pipe (under k:num t:term) num)", "(extern @pipe (each f:term->term g:group) group)", "(extern @pipe (keep_if pred:term->num g:group) group)"]);
+        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p, "{p}");
+        for (bad, msg) in [
+            (format!("{each} prepass=(each (best 1 rewrite))"), "each takes f:term->term: (each f:term->term g:group) group; (best 1 rewrite) is pipe"),
+            (format!("{keep_if} prepass=f:term->term = rewrite | (keep_if f)"), "keep_if takes pred:term->num: (keep_if pred:term->num g:group) group; f is term->term"),
+            (format!("prepass=f = size | {both} | f"), "| f gives a number, not candidates"),
+            (format!("prepass=f = size | (best 1 f)"), "f gives a number, not candidates: it holds term->num"),
+            ("prepass=f:term->term = (best 1 rewrite)".into(), "f holds term->term; (best 1 rewrite) is pipe"),
+            ("prepass=f = size | (save f)".into(), "f holds a function value"),
+            ("prepass=(save f) | f = size".into(), "f is a group variable, so it cannot hold a number"),
+            ("(def (f p) (filter p) | (best 1 p))".into(), "parameter p is used as term->num and as pipe"),
+        ] {
+            let e = Passes::parse(&bad).err().unwrap_or_else(|| panic!("{bad} parses"));
+            assert!(e.contains(msg), "{bad}: {e}");
+        }
+    }
+
+    #[test]
     fn group_variables() {
+
         let step = |spec: &str| terms(&prepass_of(spec));
         assert_eq!(step("prepass=t = (lowbits | unshift) | (filter (size == (size t))) | (load t)"), [SUB]);
         assert_eq!(step("prepass=t = rewrite"), [SUB], "the input passes on");
