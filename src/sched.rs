@@ -713,6 +713,9 @@ pub enum Pipe {
     /// A pipeline parameter of the function whose body this is, by its position among the
     /// parameters, and its name: the argument of the call runs where the call is written.
     Param(usize, String),
+    /// The group variable or group parameter `NAME` written as a value: its candidates,
+    /// whatever the input (`NAME | p`, `t = NAME`).
+    Value(String),
     /// `NAME = p`: binds the group variable `NAME` of the run to the candidates `p` gives on
     /// the input as a scope of its own, the input passing on unchanged; `(save NAME)` is
     /// `Pass::Save`, `NAME = U` for a group variable `U` has `p` the `Pass::Load` of `U`.
@@ -751,12 +754,27 @@ pub struct Def {
     pub inline: bool,
     /// The body of an `inline` one is written `a | b`, which joins the caller's sequence.
     pub flat: bool,
+    /// `@pipe`: the input parameter, bound to the candidates `|` gives; `None` in the form
+    /// without it, whose body runs on the input as it is.
+    pub input: Option<String>,
+    /// Written as a step: `@pipe`, or the form without an input parameter.
+    pub step: bool,
+    /// The body when it is an expression: a call gives a number (`body` is then a `filter` of
+    /// it, for the checks).
+    pub value: Option<Expr>,
 }
 
 impl Def {
-    /// Whether a parameter is a name, which a call puts in place in its own copy of the body.
+    /// Whether a parameter is a name, which a call puts in place in its own copy of the body;
+    /// a group parameter too in an `inline` one, which shares the caller's group variables.
     pub fn has_names(&self) -> bool {
-        self.params.iter().any(|p| matches!(p.ty, crate::builtins::Ty::Group | crate::builtins::Ty::Name))
+        self.params.iter().any(|p| p.ty == crate::builtins::Ty::Name || p.ty == crate::builtins::Ty::Group && self.inline)
+    }
+
+    /// The group variables bound when the body starts: the group parameters and the input.
+    pub fn bound(&self) -> Vec<String> {
+        let groups = self.params.iter().filter(|p| p.ty == crate::builtins::Ty::Group).map(|p| p.name.clone());
+        groups.chain(self.input.clone()).collect()
     }
 }
 
@@ -780,6 +798,8 @@ impl Call {
 #[derive(Clone, Debug, PartialEq)]
 pub enum CallArg {
     Name(String),
+    /// A group variable of the caller, its candidates passed by value.
+    Group(String),
     Pipe(Pipe),
     /// Evaluated once at the call, on the caller's candidates.
     Num(Expr),
@@ -879,6 +899,11 @@ pub enum Expr {
     /// A numeric parameter of the function whose body this is, by its position among the
     /// parameters, and its name: the value of the call's argument.
     Param(usize, String),
+    /// `e` on the candidates of the group variable `R` instead of the input (`(mixed R)`).
+    Of(Box<Expr>, String),
+    /// A call of a function whose body is an expression, on the group variable given as its
+    /// input, else on the candidates.
+    Call(std::sync::Arc<Call>, Option<String>),
 }
 
 /// `a op b` for `+ - * /`, `none` as +∞: `+` and `*` give `none` on overflow or a `none`
@@ -1281,7 +1306,8 @@ impl Passes {
                 let head = std::iter::once(d.name.as_str()).chain(d.params.iter().map(|p| p.name.as_str())).collect::<Vec<_>>().join(" ");
                 let inline = d.kind == lang::DefKind::Inline && numeric;
                 let (pipe, def) = if d.kind == lang::DefKind::Run || inline {
-                    let def = std::sync::Arc::new(Def { name: d.name.clone(), params: d.params.clone(), body: std::sync::Arc::new(d.pipe), inline, flat: inline && d.flat });
+                    let body = std::sync::Arc::new(d.value.clone().map_or(d.pipe, Pipe::Filter));
+                    let def = std::sync::Arc::new(Def { name: d.name.clone(), params: d.params.clone(), body, inline, flat: inline && d.flat, input: d.input.clone(), step: d.step, value: d.value.clone() });
                     p.defs.push(def.clone());
                     (Call::bare(&def), Some(def))
                 } else {
@@ -1465,16 +1491,20 @@ impl Passes {
         let roots: Vec<(String, String, &Pipe)> = builtin.chain(plain).collect();
         let mut called = Vec::new();
         roots.iter().for_each(|(_, _, p)| instances(p, &mut called));
-        let of = |p: &Pipe| {
+        let bound = |name: &str| self.defs.iter().find(|d| d.name == name).map_or_else(Vec::new, |d| d.bound());
+        let of = |p: &Pipe, name: &str| {
             let mut uses = Uses::default();
+            let bound = bound(name);
+            uses.saved.extend(bound.iter().cloned());
+            uses.reads.extend(bound);
             uses.walk(p);
             if let Pipe::Pass(a @ (Pass::Assign(..) | Pass::On(_) | Pass::Off(_))) = p {
                 uses.idle_assign.push(lang::show(&Pipe::Pass(a.clone())));
             }
             uses
         };
-        let mut out: Vec<(String, String, Uses)> = roots.iter().map(|(name, node, p)| (name.clone(), node.clone(), of(p))).collect();
-        out.extend(called.iter().map(|(name, _, body)| (name.clone(), name.clone(), of(body))));
+        let mut out: Vec<(String, String, Uses)> = roots.iter().map(|(name, node, p)| (name.clone(), node.clone(), of(p, name))).collect();
+        out.extend(called.iter().map(|(name, _, body)| (name.clone(), name.clone(), of(body, name))));
         out
     }
 }
@@ -1503,7 +1533,7 @@ impl Pipe {
     /// the body it calls).
     pub fn each<'p>(&'p self, f: &mut dyn FnMut(&'p Pipe)) {
         match self {
-            Pipe::Pass(_) | Pipe::Filter(_) | Pipe::Param(..) => {}
+            Pipe::Pass(_) | Pipe::Filter(_) | Pipe::Param(..) | Pipe::Value(_) => {}
             Pipe::Seq(ps) | Pipe::Union(ps) | Pipe::Best(_, ps) | Pipe::First(ps) => ps.iter().for_each(f),
             Pipe::Smallest(m) => f(&m.source),
             Pipe::Fix(_, p) | Pipe::Wins(_, p) | Pipe::Tag(_, p) | Pipe::Cand(_, p) | Pipe::Scope(p) | Pipe::Smaller(_, p) | Pipe::Regions(p) | Pipe::Again(p) | Pipe::Bind(_, p) => f(p),
@@ -1579,7 +1609,7 @@ impl Uses {
                     self.idle_assign.push(lang::show(&Pipe::Pass(a.clone())));
                 }
             }
-            Pipe::Pass(Pass::Load(r) | Pass::Label(r)) => self.read(r),
+            Pipe::Pass(Pass::Load(r) | Pass::Label(r)) | Pipe::Value(r) => self.read(r),
             Pipe::Pass(Pass::Assign(_, v)) => self.expr(v),
             Pipe::Pass(_) => {}
             Pipe::Seq(ps) => {
@@ -1666,6 +1696,7 @@ impl Uses {
                 c.args.iter().for_each(|a| match a {
                     CallArg::Num(e) => self.expr(e),
                     CallArg::Pipe(p) => self.repeated(p),
+                    CallArg::Group(r) => self.read(r),
                     CallArg::Name(_) => {}
                 });
             }
@@ -1722,6 +1753,19 @@ impl Uses {
         match e {
             Expr::Is(i) if ["opaque", "rebuilds"].contains(&crate::pipe::CONDS[*i]) => self.calls.push("prepass".into()),
             Expr::Size(r) | Expr::Same(r) => self.read(r),
+            Expr::Of(e, r) => {
+                self.read(r);
+                self.expr(e);
+            }
+            Expr::Call(c, input) => {
+                self.calls.push(c.def.name.clone());
+                input.iter().for_each(|r| self.read(r));
+                c.args.iter().for_each(|a| match a {
+                    CallArg::Num(e) => self.expr(e),
+                    CallArg::Group(r) => self.read(r),
+                    CallArg::Pipe(_) | CallArg::Name(_) => {}
+                });
+            }
             Expr::Not(c) | Expr::Any(c) | Expr::All(c) => self.expr(c),
             Expr::And(cs) | Expr::Or(cs) => cs.iter().for_each(|c| self.expr(c)),
             Expr::Cmp(_, a, b) | Expr::Bin(_, a, b) => {
@@ -1756,6 +1800,8 @@ fn reads_var(e: &Expr, i: usize) -> bool {
         Expr::Not(c) | Expr::Any(c) | Expr::All(c) => reads_var(c, i),
         Expr::And(cs) | Expr::Or(cs) => cs.iter().any(|c| reads_var(c, i)),
         Expr::Cmp(_, a, b) | Expr::Bin(_, a, b) => reads_var(a, i) || reads_var(b, i),
+        Expr::Of(e, _) => reads_var(e, i),
+        Expr::Call(c, _) => c.args.iter().any(|a| matches!(a, CallArg::Num(e) if reads_var(e, i))),
         Expr::Num(_) | Expr::Feature(_) | Expr::Is(_) | Expr::Size(_) | Expr::Same(_) | Expr::Param(..) => false,
     }
 }
@@ -1789,7 +1835,7 @@ impl fmt::Display for Passes {
         let sep = if f.alternate() { "\n" } else { " " };
         for d in &self.defs[self.default_defs..] {
             if f.alternate() {
-                write!(f, "\n# {}\n{}", lang::def_sig(&d.name, &d.params), lang::pretty_def(d))?;
+                write!(f, "\n# {}\n{}", lang::sig_of(d), lang::pretty_def(d))?;
             } else {
                 write!(f, " {}", lang::show_def(d))?;
             }
@@ -2082,7 +2128,7 @@ prepass=lowbits | r2
             assert!(e.contains("simplify run") || e.contains("reaches itself"), "{bad}: {e}");
         }
         assert!(Passes::parse("pipeline=(fix restarts prepass | egglog | polish)").is_ok());
-        assert!(Passes::parse("prepass=(egglog x)").unwrap_err().contains("(extern @simplify_only (egglog label:name? g:group) group)"));
+        assert!(Passes::parse("prepass=(egglog x)").unwrap_err().contains("(extern @pipe @simplify_only (egglog label:name? g:group) group)"));
         assert!(Passes::parse("polish=(if mixed reprint)").unwrap_err().contains("reprint needs a simplify run and cannot be in polish"));
         for bad in ["(extern (x g:group) group)", "keep=1 (extern (x g:group) group)", "pipeline=extern"] {
             assert!(Passes::parse(bad).unwrap_err().contains(lang::NO_EXTERN), "{bad}");
@@ -2228,22 +2274,54 @@ prepass=lowbits | r2
     }
 
     #[test]
-    fn def_parameters() {
-        let spec = "(def (try_without name p) (best 1 p ((off name) | p))) (def (hold r p) (save r) | p | (union id (load r))) prepass=(try_without relate rewrite) | (hold t (lowbits | rewrite))";
+    fn explicit_parameters() {
+        let spec = "(def @pipe (f p g) g | p) (def (twice p g) (p (p g))) (def @pipe (big k g) (size g) > k) prepass=(f rewrite) | (save t) | u = (twice relate t) | (if (big 3) (load u))";
         let p = Passes::parse(spec).unwrap();
-        let sigs: Vec<String> = p.defs.iter().map(|d| lang::def_sig(&d.name, &d.params).to_string()).collect();
+        let sigs: Vec<String> = p.defs.iter().map(|d| lang::sig_of(d).decl()).collect();
+        assert_eq!(sigs, ["(extern @pipe (f p:pipe g:group) group)", "(extern (twice p:pipe g:group) group)", "(extern @pipe (big k:num g:group) num)"]);
+        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
+        assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
+        assert!(p.to_string().contains("(def @pipe (big k g) (size g) > k)"), "{p}");
+        for ok in ["(def (k r:group n:num p:pipe x:name) (load r) | (fix n p) | (tag x id)) prepass=(save t) | (k t 2 id x)", "(def @pipe (big k g) (size g) > k) prepass=keep = (big 3) | id"] {
+            assert!(Passes::parse(ok).is_ok(), "{ok}: {:?}", Passes::parse(ok).err());
+        }
+        for (bad, msg) in [
+            ("prepass=size | rewrite", "size gives a number; rewrite takes candidates"),
+            ("(def @pipe (big k g) (size g) > k) prepass=big | rewrite", "big gives a number; rewrite takes candidates"),
+            ("(def @pipe (big k g) size > k)", "size needs its input here"),
+            ("(def @pipe (big k g) (mixed) || k)", "mixed needs its input here"),
+            ("(def @pipe (f g) rewrite)", "the body of an @pipe function starts with a value"),
+            ("(def @pipe (f n:num) id)", "the last parameter of an @pipe function is its input, a group"),
+            ("(def @inline @pipe (f g) g)", "not @inline"),
+            ("(def (f x:bogus) id)", "unknown type bogus"),
+            ("(def (f p:pipe) (fix p id))", "parameter p is used as a pipeline and as an expression"),
+            ("(def (twice p g) (p (p g))) prepass=id | (twice rewrite t)", "twice is not @pipe"),
+            ("(def @pipe (f p g) g | p) (def (h a:group) (f id a)) prepass=(h u)", "prepass reads group variable u before it is bound"),
+            ("(def @pipe (f p g) g | p) prepass=(f id u)", "f takes a pipeline"),
+            ("(def @pipe (big k g) (size g) > k) prepass=t = (big 3)", "unknown variable t"),
+        ] {
+            let e = Passes::parse(bad).unwrap_err();
+            assert!(e.contains(msg), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn def_parameters() {
+        let spec = "(def (try_without name p) (best 1 p ((off name) | p))) (def (hold r p) p | (union id (load r))) prepass=(try_without relate rewrite) | (save t) | (hold t (lowbits | rewrite))";
+        let p = Passes::parse(spec).unwrap();
+        let sigs: Vec<String> = p.defs.iter().map(|d| lang::sig_of(d).to_string()).collect();
         assert_eq!(sigs, ["(try_without name:name p:pipe g:group) group", "(hold r:group p:pipe g:group) group"]);
-        assert_eq!(p.prepass.to_string(), "(try_without relate rewrite) | (hold t (lowbits | rewrite))");
+        assert_eq!(p.prepass.to_string(), "(try_without relate rewrite) | (save t) | (hold t (lowbits | rewrite))");
         let Pipe::Seq(steps) = &p.prepass else { panic!() };
         let Pipe::Call(c) = &steps[0] else { panic!() };
         assert_eq!(c.body.to_string(), "(best 1 p ((off relate) | p))", "a call has its name arguments in place");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(format!("{p:#}").contains("
 # (hold r:group p:pipe g:group) group
-(def (hold r p) (save r) | p | (union id (load r)))
+(def (hold r:group p) p | (union id (load r)))
 "), "{p:#}");
         assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
-        let inline = Passes::parse("(def @inline (g r p) (save r) | p | (load r)) prepass=(g t rewrite) | (g u (if (size > 1) id))").unwrap();
+        let inline = Passes::parse("(def @inline (g r p) p | (load r)) prepass=(save t) | (g t rewrite) | (save u) | (g u (if (size > 1) id))").unwrap();
         assert_eq!(inline.prepass.to_string(), "(save t) | rewrite | (load t) | (save u) | (if (size > 1) id) | (load u)", "an @inline body flat in the sequence");
         let nested = Passes::parse("(def (g n q) (off n) | q) (def (h m p) (g m (p | (save x))) | (load x)) prepass=(h tfunc rewrite)").unwrap();
         let Pipe::Call(h) = &nested.prepass else { panic!() };
@@ -2251,29 +2329,29 @@ prepass=lowbits | r2
         let Pipe::Call(g) = &body[0] else { panic!() };
         assert_eq!(g.body.to_string(), "(off tfunc) | q", "a name argument passed on is put in place in the inner call too");
         for ok in [
-            "(def (f a b) (save a) | (load b)) prepass=(f t t)",
+            "(def (f a b) (load a) | (load b)) prepass=(save t) | (f t t)",
             "(def (f p) (save t) | p | (load t)) prepass=(save t) | (f ((load t) | rewrite))",
             "(def (f r) (tag r id) | (cand r id) | (smaller r id) | (egglog r)) pipeline=(f x)",
-            "(def (f r) (save r) | (if ((size r) > 1 && (same r)) id) | (label r)) prepass=(f t)",
+            "(def (f r) (if ((size r) > 1 && (same r)) id) | (label r)) prepass=(save t) | (f t)",
         ] {
             assert!(Passes::parse(ok).is_ok(), "{ok}: {:?}", Passes::parse(ok).err());
         }
         for (bad, msg) in [
             ("(def (f n) (fix n n))", "parameter n is used as an expression and as a pipeline"),
-            ("(def (f n) (fix n id) | (save n))", "parameter n is used as an expression and as a group variable"),
+            ("(def (f n) (fix n id) | (load n))", "parameter n is used as an expression and as a group variable"),
             ("(def (f n) (fix n id) | n = 1)", "parameter n cannot be assigned"),
             ("(def (g) (if (size <= n) id)) (def (f n) (fix n g))", "unknown name n in an expression"),
             ("(def (f n p) (fix n p)) prepass=(f id id)", "id gives candidates, not a number: (id g:group) group; an expression reads variables and number functions; f takes an expression and a pipeline: (f n:num p:pipe g:group) group"),
             ("(def (f n p) (fix n p)) prepass=(f 3 4)", "f takes an expression and a pipeline: (f n:num p:pipe g:group) group"),
             ("(def (f n p) (fix n p)) prepass=(f 3)", "f takes an expression and a pipeline"),
-            ("(def (f r n) (save r) | (fix n id)) prepass=(f 3 3)", "expected a group variable after f, found 3"),
+            ("(def (f r n) (load r) | (fix n id)) prepass=(f 3 3)", "expected a group variable after f, found 3"),
             ("(def (f n) (fix n id)) prepass=(f relate = 1)", "an assignment is a step"),
             ("(def (f n) (fix n id)) prepass=(f (load t))", "f takes an expression"),
             ("(def (f n) (fix n id)) prepass=(f ((size t) + 1))", "prepass reads group variable t before it is bound"),
             ("(def @inline (f n) (load t) | (fix n id)) prepass=(f 1)", "prepass reads group variable t before it is bound"),
-            ("(def (k r) (load r)) (def @inline (i n) (k t) | (fix n id)) prepass=(i 1)", "k reads group variable t before it is bound"),
-            ("(def (f p) p | (save p))", "parameter p is used as a pipeline and as a group variable"),
-            ("(def (f r) (save r) | (tag r id))", "parameter r is used as a group variable and as a name"),
+            ("(def (k r) (load r)) (def @inline (i n) (k t) | (fix n id)) prepass=(i 1)", "prepass reads group variable t before it is bound"),
+            ("(def (f p) p | (load p))", "parameter p is used as a pipeline and as a group variable"),
+            ("(def (f r) (load r) | (tag r id))", "parameter r is used as a group variable and as a name"),
             ("(def (f p q) p)", "def (f p q): parameter q is never used in the body"),
             ("(def (f r) r = 1)", "parameter r cannot be assigned"),
             ("(def (f relate) id)", "parameter relate is the name of a variable, function or definition"),
@@ -2282,17 +2360,19 @@ prepass=lowbits | r2
             ("(def (f p p) p)", "parameter p is written twice"),
             ("(def (f f) id)", "parameter f is written twice"),
             ("(def (prepass p) p)", "takes no parameters"),
-            ("(def (f p) (p id))", "parameter p takes no arguments"),
+            ("(def (f p) (p id))", "parameter p takes a group value: (p g)"),
             ("(def (f p) p) prepass=f", "f needs parentheses: (f ...); (f p:pipe g:group) group"),
             ("(def (f p) p) prepass=(f)", "f takes a pipeline: (f p:pipe g:group) group"),
             ("(def (f p) p) prepass=(f id id)", "f takes a pipeline: (f p:pipe g:group) group"),
-            ("(def (f r p) (save r) | p) prepass=(f (id) id)", "expected a group variable after f, found ("),
-            ("(def (f r p) (save r) | p) prepass=(f t)", "f takes a group variable and a pipeline: (f r:group p:pipe g:group) group"),
+            ("(def (f r p) (load r) | p) prepass=(f (id) id)", "expected a group variable after f, found ("),
+            ("(def (f r p) (load r) | p) prepass=(f t)", "f takes a group variable and a pipeline: (f r:group p:pipe g:group) group"),
             ("(def (f n p) (off n) | p) prepass=(f nope id)", "unknown off name nope (the argument for n)"),
             ("(def (f p) p) prepass=(if f id)", "f gives candidates, not a number: (f p:pipe g:group) group"),
             ("(def (f p) p) prepass=f = 1", "f is a function and cannot be assigned: (f p:pipe g:group) group"),
-            ("(def (f r) (load r)) prepass=(f t)", "f reads group variable t before it is bound"),
-            ("(def (f a b) (save a) | (load b)) prepass=(f t u)", "f reads group variable u before it is bound"),
+            ("(def (f r) (load r)) prepass=(f t)", "prepass reads group variable t before it is bound"),
+            ("(def (f a b) (load a) | (load b)) prepass=(save t) | (f t u)", "prepass reads group variable u before it is bound"),
+            ("(def (f a) (save a))", "parameter a cannot be assigned"),
+            ("(def (f a) a = rewrite)", "parameter a cannot be assigned"),
             ("(def (f p) id | p) prepass=(f (load t))", "prepass reads group variable t before it is bound"),
             ("(def (g p) p) prepass=(g prepass)", "prepass reaches itself"),
             ("(def (g p) p | polish) polish=(g id)", "polish reaches itself"),
@@ -2304,7 +2384,7 @@ prepass=lowbits | r2
             assert!(e.contains(msg), "{bad}: {e}");
         }
         let warn = |s: &str| Passes::parse_noting(s).unwrap().1;
-        let w = warn("(def (f r p) (save r) | p) prepass=(f t id)");
+        let w = warn("(def (f p) (save t) | p) prepass=(f id)");
         assert!(w.len() == 1 && w[0].contains("f: group variable t is bound and never read"), "{w:?}");
         let w = warn("(def (f p) p) (def @inline (g p) p) prepass=id");
         assert!(w.len() == 2 && w[0].contains("(def (f p) ...) is never used") && w[1].contains("(def @inline (g p) ...) is never used"), "{w:?}");
@@ -2320,7 +2400,7 @@ prepass=lowbits | r2
     fn numeric_parameters() {
         let spec = "(def (with_budget n p) rewrites = n | p) (def (if_small k p) (if (size <= k) p)) (def (g q) q | rewrite)             (def (f n) (if_small (n * 2) (g ((filter (size <= n)) | (with_budget (n + 1) rewrite)))))             (def @inline (lim n p) split_runs = n | p) (def @inline (lim2 n p) (split_runs = n | p))             prepass=(f 3) | (lim none id) | (lim2 (size - 1) (with_budget 8 rewrite))";
         let p = Passes::parse(spec).unwrap();
-        let sigs: Vec<String> = p.defs.iter().map(|d| lang::def_sig(&d.name, &d.params).to_string()).collect();
+        let sigs: Vec<String> = p.defs.iter().map(|d| lang::sig_of(d).to_string()).collect();
         assert_eq!(sigs[0], "(with_budget n:num p:pipe g:group) group");
         assert_eq!(sigs[3], "(f n:num g:group) group");
         assert_eq!(sigs[4], "(lim n:num p:pipe g:group) group", "an @inline function with a numeric parameter is a function too");

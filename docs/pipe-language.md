@@ -145,7 +145,7 @@ x = e | rest    ≡  在 x = e 之下运行 rest          （绑定）
 - 类型：`num`（表达式）、`term`（一个候选）、`term?`（一个候选或没有，只作返回类型）、`group`（一组候选）、`pipe`（管线，原样传进去，在函数里运行）、`name`（统计名、来源名或记录寄存器名）。`group` 写在参数里（不是最后一个）时是一个组变量，调用时写它的名字（`(load r:group g:group) group`）。`TYPE...` 是一个或多个，`TYPE?` 可以省略（只用于 `pipe`、`group`、`name`）。
 - 最后一个参数是**隐含输入**（`term` 或 `group`），调用时不写；返回类型写在最后。
 - 声明前紧挨着的一行注释是它的说明。
-- 属性：`@bookkeeping`：只搬动候选，过了时限照常执行（第 5.3 节）；`@simplify_only`：只能出现在 `pipeline` 里（`egglog`、`reprint`），因为只有 `simplify` 的运行才有 e-graph；`@uncounted`：过了时限照样跳过，但这次跳过不把运行记为截断，也不计入 `time_limit/skipped`（`note`），不能和 `@bookkeeping` 一起写。
+- 属性：`@pipe`：最后一个参数（输入）可以由 `|` 填入，所以能写成步骤（`a | (f x)` 即 `(f x a)`）；内置函数都带它。`@bookkeeping`：只搬动候选，过了时限照常执行（第 5.3 节）；`@simplify_only`：只能出现在 `pipeline` 里（`egglog`、`reprint`），因为只有 `simplify` 的运行才有 e-graph；`@uncounted`：过了时限照样跳过，但这次跳过不把运行记为截断，也不计入 `time_limit/skipped`（`note`），不能和 `@bookkeeping` 一起写。
 - `extern` 只能写在 `builtins.pipe` 里，写在 `--passes` 或管线里报错。宏（`let`、`on`、`off`）和赋值不是函数，没有声明（宏 `smallest` 有声明，参数照它读）；定义的函数 `pipeline`、`sub/NAME` 不能在步骤里调用，也没有声明。`def` 定义的函数的签名由函数体推出（第 5.6 节），如 `(try_without name:name p:pipe g:group) group`，没有参数时是 `(NAME g:group) group`：`--show-passes` 在它的定义前一行注释里打印，`--show-builtins` 在最后单列一节。
 
 调用方式由隐含输入和返回类型决定，第 8 节的四种由此得出：
@@ -255,7 +255,7 @@ prepass=lb | twice | finish            # 即 lowbits | relate | twice | finish
 
 - 写在步骤位置：**管线参数**（`pipe`）；
 - 写在表达式里（赋值右边、`(fix N p)`、`(best K ...)`、`(if C ...)`、`filter`、`any`、`all` 的条件等）：**数值参数**（`num`）；
-- 写在组变量位置（`(save R)`、`(load R)`、`(label R)`、`(size R)`、`(same R)`）：**组变量参数**（`group`）；赋值 `R = p` 的左边也是；
+- 写在组变量位置（`(save R)`、`(load R)`、`(label R)`、`(size R)`、`(same R)`）：**组变量参数**（`group`）；作函数值的输入（`(p r)`）也是；
 - 写在名字位置（`(tag NAME p)`、`(cand NAME p)`、`(smaller NAME p)`、`(egglog LABEL)`、`(off NAME)`、`(on NAME)`）：**名字参数**（`name`）；
 - 作为参数传给另一个带参数的函数时，取那个参数的类型。
 
@@ -264,9 +264,26 @@ prepass=lb | twice | finish            # 即 lowbits | relate | twice | finish
 - 参数只在函数体里看得见（词法绑定），不参与变量的查找，不能赋值；不能和变量、函数、宏、`let` 名、`def` 名或函数自己同名，也不能重复。
 - 同一个参数的用法互相矛盾（既是管线又是组变量，既是表达式又是管线，或既是组变量又是名字）、函数体里没用到的参数，都报错。
 - 数值参数在**调用时**求一次值：参数可以是任何表达式（`none`、第 6.2 节的运算、外层函数的参数），对调用时的候选组、在调用处求值，同赋值右边；函数体里读到的就是这个值，函数体先改了候选也不变（`(def (f n p) p | (filter (n == 7)))` 调用成 `(f size rewrite)` 时 `n` 是调用时输入的大小）。参数不是变量：被调用的函数看不到它（写了就是未知的名字），对缓存也没有影响（缓存只记 Rust 代码读的变量；参数经过赋值影响 pass 时，记下的是被赋值的变量）。赋给有上限的变量时，和其他表达式一样在执行时检查（`(def (f n) max_leaves = n | rewrite)` 调用成 `(f 8)` 时这次运行报 `max_leaves is at most 6`）。
-- 名字参数（组变量和名字）在解析时代入：每处调用得到一份把名字放进去的函数体。`(off name)` 的参数在调用处检查是不是开关。组变量的读写检查对这份函数体做，在函数自己的运行里（`(def (f r) (load r))` 调用成 `(f t)` 时报 `f reads group variable t before it is bound (t = ... or (save t))`）。
+- 名字参数在解析时代入：每处调用得到一份把名字放进去的函数体。`(off name)` 的参数在调用处检查是不是开关。
+- 组变量参数**按值**传递：调用时把调用处那个组变量的候选组交给函数，函数体里它是一个只读的组变量（`(load r)`、`(size r)`、单独写 `r`）；给参数赋值（`(save r)`、`r = ...`）报错。所以读写检查在调用处做：`(def (f r) (load r))` 调用成 `(f t)` 时报 `prepass reads group variable t before it is bound`。`@inline` 函数共用调用处的组变量，组变量参数在展开时按名字代入，意思相同。
 - 管线参数是**闭包**：传进去的管线带着调用处的运行，在函数体里每用一次就运行一次，读写的是调用处的组变量，条件 `input` 指调用处的输入，里面的参数（管线参数和数值参数）指调用处所在函数的参数（参数作为参数再往下传时，层层回到写下它的地方）：`(def (f n) (g (if (size <= n) x)))` 里的条件在 `g` 里面运行，读的仍是 `f` 的 `n`。它所在位置的 `wins`、`fix`、`scope` 照常看得到它（它在函数体里运行）；`smallest` 按文字算：写下它的地方外面的 `smallest` 看得到它里面的步骤，函数体里包住参数的 `smallest` 只看到参数返回的候选。所以组变量的读写检查对管线参数在调用处做：它可能在调用里的任何时候运行，也可能运行多次或不运行（同 `fix` 的体）。
 - `@inline` 函数的参数在展开时代入（管线参数原样放进去），展开后的样子就是调用处的一部分，共享调用处的作用域和组变量。函数体直接写成 `a | b` 时，`(NAME ARG ...)` 照样平铺进所在的序列。有数值参数的 `@inline` 函数同样不开新的运行，共享调用处的作用域、组变量和 `smallest`，只是调用时先求数值参数、带上自己的参数；它的管线参数照样是闭包，读写的检查和警告按展开后的样子在调用处做。`--show-passes` 像 `def` 一样打印它的定义（`(def @inline (lim n p) split_runs = n | p)`），调用处写成 `(lim 3 rewrite)`。
+- 参数可以写类型：`p:pipe`、`r:group`、`n:num`、`x:name`；不写时按用法推出（第一次用到时定下，所以先当管线用、后当组变量用的报矛盾；要当组变量用而第一处是 `t = r`、单独写 `r` 这种两可的位置时，写 `r:group`）。
+
+**输入写出来的函数**（`@pipe`）：
+
+```
+(def @pipe (NAME PARAM ... g) BODY)     # 最后一个参数 g 是输入，| 填入
+(def (NAME PARAM ...) BODY)              # 不带 @pipe：BODY 不以值开头时是旧写法（见下），以值开头时只能显式调用
+```
+
+- **值**：组变量、组变量参数、`@pipe` 的输入写成一个名字时是一个值，给出它的候选组，不看当前输入；以值开头的管线 `g | a | b` 是这个值依次经过各步的结果（即 `(b (a g))`）。不以值开头的管线（`a | b`）是一个函数值，就是原来的写法。单独写一个组变量名作值，要求它在文字里前面已经绑定过（`(save t)`、`t = ...`），或者是组变量参数；否则照旧读成 pass 名。
+- **函数值**：管线参数是 `group → group` 的函数值（闭包，规则同上）；`(p g)` 或 `g | p` 调用它，`(p (p g))` 调用两次。
+- **调用**：`a | (f x)` 由 `|` 填入输入；显式写全 `(f x g)` 时最后一个参数是输入（必须是值：组变量名、参数，或以值开头的括号）。不带 `@pipe` 的函数不能写在 `|` 后面（`twice is not @pipe, so | cannot give it its input`），它的调用是一个值，写在管线开头、赋值右边或作显式输入：`(def (twice p g) (p (p g)))`、`u = (twice rewrite t)`。内置函数也可以显式给输入：`(lowbits t)`、`(mixed t)`；只在写满了参数、后面又是一个值时才这样读（`(if c a u)` 的 `u` 仍是可选的管线参数 `b`）。
+- **返回数的函数**：函数体是表达式时返回数：`(def @pipe (big k g) (size g) > k)`，签名 `(big k:num g:group) num`。它只能写在要数的地方：`(if (big 3) p)`、`(filter (big 3))`、`keep = (big 3)`；输入没写时取这一步的输入（同内置的数值函数，第 6.3 节），写了时是那个组变量 `(big 3 t)`。函数体顶层没有"这一步的输入"，数值函数在那里必须写出输入：`size > k` 报 `size needs its input here`，写 `(size g) > k`、`(mixed g)`。求值不开新的运行。
+- **类型**：步骤相接时左边给出候选组，右边要候选组；数值函数写在 `|` 前面报 `size gives a number; rewrite takes candidates`。返回数的步骤只能作表达式（目前不能作管线的最后一步）。
+- **旧写法是简写**：`(def (NAME P ...) BODY)` 的 BODY 是不以值开头的管线时，就是 `(def @pipe (NAME P ... g) g | BODY)`：输入隐含，`prepass=P`、`let`、`@inline` 照旧。`@pipe` 不能和 `@inline` 一起写。`--show-passes` 照写下的样子打印（`(def @pipe (f p g) g | p)`，组变量参数带 `:group`）。
+
 - 不允许递归（第 12 节）：函数只能调用在它之前定义的函数，调用处的管线参数也只能写已经定义的名字，所以 `def` 之间成不了环；能成环的只有经过运行时取定义的 `prepass`、`polish`，管线参数里的调用算在调用处（`(def (g p) p) prepass=(g prepass)` 报 `prepass reaches itself`）。
 
 ```
@@ -663,7 +680,7 @@ prepass=(lim (size - 1) rewrite) | relate    # split_runs 的赋值作用到序�
 
 读完 `--passes` 后检查，出错时拒绝整个设置：
 
-- 名字：未知的变量、函数、`on`/`off` 名、`sub/NAME`、规则集，报错并列出已知的名字。组变量和存数的变量同名（`(save keep)`、`keep = rewrite`）报错。
+- 名字：未知的变量、函数、`on`/`off` 名、`sub/NAME`、规则集，报错并列出已知的名字。函数的参数被赋值；不带 `@pipe` 的函数写在 `|` 后面；`@pipe` 函数的最后一个参数不是组、函数体不以值开头也不是表达式；函数体顶层的数值函数没写输入；数值函数接在 `|` 前面。组变量和存数的变量同名（`(save keep)`、`keep = rewrite`）报错。
 - `let`、`def` 名和变量、函数、宏同名（第 4.1 节）；`def` 重新定义已有的 `let`、`def` 名，`let` 重新定义 `def` 名；`@inline` 用于 `prepass` 等内置的定义函数；未知的属性、未知的 `sub/NAME`。
 - `def` 的参数（第 5.6 节）：和已有的名字同名或重复、用法矛盾、没用到、被赋值；`prepass` 等内置的定义函数带参数。调用处参数的个数和种类照推出的签名检查；`(off NAME)` 的名字参数在调用处检查是不是开关。
 - 定义的函数写了参数（`f takes no arguments: (f g:group) group`）、写在表达式里或 `=` 左边。

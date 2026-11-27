@@ -15,6 +15,8 @@
 #   term -> group   on the main candidate; the result replaces the list
 #   term -> num     on the main candidate; 0 without candidates
 #   group -> num    on the whole list; 0 without candidates
+# @pipe: the last parameter, the input, is filled in by `|` (`a | (f x)` is `(f x a)`), so
+# it can be a step; every built-in function has it.
 # @bookkeeping: only moves candidates, so it still runs past the time limit.
 # @simplify_only: only in `pipeline`, since only a simplify run has an e-graph.
 # @uncounted: skipped past the time limit like other steps, but that neither makes the run
@@ -24,228 +26,228 @@
 # Combinators and forms with arguments.
 
 # Each pipeline in turn on the candidates of the one before; a scope (also written a | b).
-(extern @bookkeeping (seq p:pipe... g:group) group)
+(extern @pipe @bookkeeping (seq p:pipe... g:group) group)
 # Every pipeline on the same input, their candidates in order, repeats dropped.
-(extern (union p:pipe... g:group) group)
+(extern @pipe (union p:pipe... g:group) group)
 # Every pipeline on the same input, then the k smallest of their candidates, at least 1.
-(extern (best k:num p:pipe... g:group) group)
+(extern @pipe (best k:num p:pipe... g:group) group)
 # The first result that is not empty and differs from the input, else the input.
-(extern (first p:pipe... g:group) group)
+(extern @pipe (first p:pipe... g:group) group)
 # p repeated at most n times while the main candidate changes.
-(extern (fix n:num p:pipe g:group) group)
+(extern @pipe (fix n:num p:pipe g:group) group)
 # a where c holds for the input, else b (id when left out).
-(extern (if c:num a:pipe b:pipe? g:group) group)
+(extern @pipe (if c:num a:pipe b:pipe? g:group) group)
 # a, and where c holds for its result, b on the same input, taken when no larger.
-(extern (retry c:num a:pipe b:pipe g:group) group)
+(extern @pipe (retry c:num a:pipe b:pipe g:group) group)
 # p, with the first strictly smaller candidate a step inside gave put first.
-(extern (smallest p:pipe g:group) group)
+(extern @pipe (smallest p:pipe g:group) group)
 # p on one shared context of memos; a scope.
-(extern (scope p:pipe g:group) group)
+(extern @pipe (scope p:pipe g:group) group)
 # Each candidate that is a linear region rebuilt by p with its leaves rewritten, else its operands rewritten.
-(extern (regions p:pipe g:group) group)
+(extern @pipe (regions p:pipe g:group) group)
 # p, then rewrite again on its main candidate where it changed an arithmetic leaf of a bitwise operation.
-(extern (again p:pipe g:group) group)
+(extern @pipe (again p:pipe g:group) group)
 # p timed as n/run; a changed main candidate is counted in n/won and gets origin n.
-(extern (tag n:name p:pipe g:group) group)
+(extern @pipe (tag n:name p:pipe g:group) group)
 # A pre-pass candidate: none when n is a pre entry turned off, else p with origin n.
-(extern (cand n:name p:pipe g:group) group)
+(extern @pipe (cand n:name p:pipe g:group) group)
 # p taken only when its main candidate is smaller than the input's, with origin n.
-(extern (smaller n:name p:pipe g:group) group)
+(extern @pipe (smaller n:name p:pipe g:group) group)
 # p repeated while a smaller inside takes a result, until n are taken.
-(extern (wins n:num p:pipe g:group) group)
+(extern @pipe (wins n:num p:pipe g:group) group)
 # The candidates c holds for, each taken alone.
-(extern @bookkeeping (filter c:num g:group) group)
+(extern @pipe @bookkeeping (filter c:num g:group) group)
 # Binds the group variable r to the candidates (r = id).
-(extern @bookkeeping (save r:group g:group) group)
+(extern @pipe @bookkeeping (save r:group g:group) group)
 # The candidates of the group variable r; none when it is unbound.
-(extern @bookkeeping (load r:group g:group) group)
+(extern @pipe @bookkeeping (load r:group g:group) group)
 # Counts the candidates for stats against the main one of the group variable r.
-(extern @bookkeeping (label r:group g:group) group)
+(extern @pipe @bookkeeping (label r:group g:group) group)
 # Opens the note register r, empty; note registers are not group variables.
-(extern @bookkeeping (clear r:name g:group) group)
+(extern @pipe @bookkeeping (clear r:name g:group) group)
 # Keeps the first smallest candidate in the newest open r when strictly smaller than the one there.
-(extern @uncounted (note r:name g:group) group)
+(extern @pipe @uncounted (note r:name g:group) group)
 # Closes the newest open r: the input, with its candidate put first when strictly smaller than the main one.
-(extern @bookkeeping (take_min r:name g:group) group)
+(extern @pipe @bookkeeping (take_min r:name g:group) group)
 
 # Passes over the whole list.
 
 # The candidates unchanged.
-(extern @bookkeeping (id g:group) group)
+(extern @pipe @bookkeeping (id g:group) group)
 # No candidates.
-(extern @bookkeeping (none g:group) group)
+(extern @pipe @bookkeeping (none g:group) group)
 # The pre-pass of the main candidate: the main rebuild, then those to union with it.
-(extern (prepass t:term) group)
+(extern @pipe (prepass t:term) group)
 # One egglog round on all candidates unioned: its extraction, timed as egglog/label.
-(extern @simplify_only (egglog label:name? g:group) group)
+(extern @pipe @simplify_only (egglog label:name? g:group) group)
 # The first candidate proved minimal, else the input.
-(extern (take_minimal g:group) group)
+(extern @pipe (take_minimal g:group) group)
 # The polish pipeline on the candidate, kept when smaller.
-(extern (polish t:term) term)
+(extern @pipe (polish t:term) term)
 # The main candidate printed as infix and read back.
-(extern @simplify_only (reprint t:term) group)
+(extern @pipe @simplify_only (reprint t:term) group)
 # No candidates once the rewrites budget is used up, else the input.
-(extern @bookkeeping (within g:group) group)
+(extern @pipe @bookkeeping (within g:group) group)
 # The end of the pre-pass: counts the kept candidates and gives them origins pre/NAME.
-(extern @bookkeeping (pre_done g:group) group)
+(extern @pipe @bookkeeping (pre_done g:group) group)
 
 # Passes over one term.
 
 # Known-bits reasoning: bitwise operations on known bits as additions, low bits cut.
-(extern (lowbits t:term) term)
+(extern @pipe (lowbits t:term) term)
 # Shifts written as masks, so regions become semi-linear.
-(extern (unshift t:term) term)
+(extern @pipe (unshift t:term) term)
 # The whole term replaced by a smaller T-function form.
-(extern (tfunc_whole t:term) term)
+(extern @pipe (tfunc_whole t:term) term)
 # The rewrite pipeline, memoized.
-(extern (rewrite t:term) term)
+(extern @pipe (rewrite t:term) term)
 # rewrite, counted apart.
-(extern (rewrite_top t:term) term)
+(extern @pipe (rewrite_top t:term) term)
 # Each region of the term rebuilt in clusters of the leaves its terms use.
-(extern (cluster_regions t:term) term)
+(extern @pipe (cluster_regions t:term) term)
 # cluster_regions, counted apart.
-(extern (cluster_top t:term) term)
+(extern @pipe (cluster_top t:term) term)
 # Arithmetic leaves of bitwise operations replaced by placeholders and related to the region.
-(extern (relate t:term) term)
+(extern @pipe (relate t:term) term)
 # Subterms replaced by smaller T-function forms.
-(extern (tfunc t:term) term)
+(extern @pipe (tfunc t:term) term)
 # Operands of bitwise operations written alike, so regions share more leaves.
-(extern (unify_operands t:term) term)
+(extern @pipe (unify_operands t:term) term)
 # Sums of two products joined back into one product.
-(extern (recombine t:term) term)
+(extern @pipe (recombine t:term) term)
 # Constants of product factors cut below the other factor's trailing zeros.
-(extern (cut_products t:term) term)
+(extern @pipe (cut_products t:term) term)
 # 2^k*(a ^ K) + c written as (2^k*a) ^ (2^k*K + c).
-(extern (shifted_xor t:term) term)
+(extern @pipe (shifted_xor t:term) term)
 # The lowbits steps for rebuilt terms only, such as cut multipliers.
-(extern (simplify_rebuilt t:term) term)
+(extern @pipe (simplify_rebuilt t:term) term)
 # The end of a pre-pass rebuild: recombine, cut_products, shifted_xor, then lowbits.
-(extern (finish t:term) term)
+(extern @pipe (finish t:term) term)
 # Operands 2^k*a + c of bitwise operations split into high and low parts.
-(extern (halve t:term) term)
+(extern @pipe (halve t:term) term)
 # Bitwise operations with constants abstracted to variables, rebuilt and put back.
-(extern (over_const_bitwise t:term) term)
+(extern @pipe (over_const_bitwise t:term) term)
 # Shared bitwise subterms abstracted to variables, rebuilt and put back.
-(extern (over_shared_bitwise t:term) term)
+(extern @pipe (over_shared_bitwise t:term) term)
 # Products abstracted to variables, rebuilt and put back.
-(extern (over_products t:term) term)
+(extern @pipe (over_products t:term) term)
 # Rebuilds by cases on one bit of a variable, undoing selections.
-(extern (split_bits t:term) term)
+(extern @pipe (split_bits t:term) term)
 # Additions of 0 and multiplications by 1 dropped.
-(extern (drop_identities t:term) term)
+(extern @pipe (drop_identities t:term) term)
 # One rebuild without relate: lowbits, unshift, rewrite, cluster_regions, tfunc.
-(extern (rebuild t:term) term)
+(extern @pipe (rebuild t:term) term)
 
 # Alternatives: each gives no candidate when it finds no form.
 
 # The simba pipeline on a linear region.
-(extern (simba t:term) term?)
+(extern @pipe (simba t:term) term?)
 # One bitwise term per block of at most 3 leaves of the conjunction basis.
-(extern (small_blocks t:term) term?)
+(extern @pipe (small_blocks t:term) term?)
 # Block rebuild of a wide region.
-(extern (wide_blocks t:term) term?)
+(extern @pipe (wide_blocks t:term) term?)
 # Polynomial MBA: expanded, reduced and factored.
-(extern (poly_mba t:term) term?)
+(extern @pipe (poly_mba t:term) term?)
 # The leaves the values do not depend on set to 0, then rewritten.
-(extern (drop_unused t:term) term?)
+(extern @pipe (drop_unused t:term) term?)
 # Terms grouped by the leaves they use, each group rebuilt.
-(extern (clustered t:term) term?)
+(extern @pipe (clustered t:term) term?)
 # One term peeled off and the rest rebuilt.
-(extern (peel t:term) term?)
+(extern @pipe (peel t:term) term?)
 # peel on the clustered form.
-(extern (peel_clustered t:term) term?)
+(extern @pipe (peel_clustered t:term) term?)
 # Bit-by-bit rebuild of a region with constant masks.
-(extern (semi_linear t:term) term?)
+(extern @pipe (semi_linear t:term) term?)
 # Rebuild from the region's values on {0,1}^n.
-(extern (rebuild_values t:term) term?)
+(extern @pipe (rebuild_values t:term) term?)
 # A common multiple c*(v_1 + ... + v_k) of close coefficients pulled out.
-(extern (common_multiple t:term) term?)
+(extern @pipe (common_multiple t:term) term?)
 # Small multiples of zero relations between leaves added, then rebuilt.
-(extern (related_leaves t:term) term?)
+(extern @pipe (related_leaves t:term) term?)
 # The whole region as one bitwise term.
-(extern (one_wide_term t:term) term?)
+(extern @pipe (one_wide_term t:term) term?)
 
 # Polish passes, used in the polish pipeline.
 
 # Complements pushed inward.
-(extern (polish/push_not t:term) term)
+(extern @pipe (polish/push_not t:term) term)
 # Pairs of leaves rebuilt together with the constants.
-(extern (polish/join_constants t:term) term)
+(extern @pipe (polish/join_constants t:term) term)
 # Leaves moved between linear groups.
-(extern (polish/join_linear t:term) term)
+(extern @pipe (polish/join_linear t:term) term)
 # over_const_bitwise as a polish pass.
-(extern (polish/over_const_bitwise t:term) term)
+(extern @pipe (polish/over_const_bitwise t:term) term)
 # over_shared_bitwise as a polish pass.
-(extern (polish/over_shared_bitwise t:term) term)
+(extern @pipe (polish/over_shared_bitwise t:term) term)
 # over_products as a polish pass.
-(extern (polish/over_products t:term) term)
+(extern @pipe (polish/over_products t:term) term)
 # recombine, skipped where a product selects by one bit.
-(extern (polish/recombine t:term) term)
+(extern @pipe (polish/recombine t:term) term)
 # Rebuilds by cases on variable shift amounts.
-(extern (polish/shift_cases t:term) term)
+(extern @pipe (polish/shift_cases t:term) term)
 # Bitwise parts written as g(A) op h(B).
-(extern (polish/decompose t:term) term)
+(extern @pipe (polish/decompose t:term) term)
 # Terms of one coefficient summed under it.
-(extern (polish/factor t:term) term)
+(extern @pipe (polish/factor t:term) term)
 
 # Number functions: features of the main candidate.
 
 # The node count of the main candidate, or of the main candidate of the group variable r (then also without candidates).
-(extern (size r:group? t:term) num)
+(extern @pipe (size r:group? t:term) num)
 # The number of variables.
-(extern (vars t:term) num)
+(extern @pipe (vars t:term) num)
 # The depth of the tree.
-(extern (depth t:term) num)
+(extern @pipe (depth t:term) num)
 # The number of products.
-(extern (mul t:term) num)
+(extern @pipe (mul t:term) num)
 # The number of bitwise operations with a constant operand.
-(extern (bitconst t:term) num)
+(extern @pipe (bitconst t:term) num)
 # The number of arithmetic operations under a bitwise one.
-(extern (arith_in_bit t:term) num)
+(extern @pipe (arith_in_bit t:term) num)
 # The number of shifts.
-(extern (shift t:term) num)
+(extern @pipe (shift t:term) num)
 # The number of divisions.
-(extern (div t:term) num)
+(extern @pipe (div t:term) num)
 
 # Number functions that give 1 or 0.
 
 # 1 when the main candidate is the main one of the group variable r.
-(extern (same r:group t:term) num)
+(extern @pipe (same r:group t:term) num)
 # 1 when c holds for some candidate alone.
-(extern (any c:num g:group) num)
+(extern @pipe (any c:num g:group) num)
 # 1 when there are candidates and c holds for each alone.
-(extern (all c:num g:group) num)
+(extern @pipe (all c:num g:group) num)
 # A shift, division or mulhi, and a rebuild larger than tiny_size (runs prepass).
-(extern (opaque t:term) num)
+(extern @pipe (opaque t:term) num)
 # Some candidate is proved minimal (with prove_minimal on).
-(extern (minimal g:group) num)
+(extern @pipe (minimal g:group) num)
 # Arithmetic or a constant directly under a bitwise operation.
-(extern (mixed t:term) num)
+(extern @pipe (mixed t:term) num)
 # The pre-pass changes it (runs prepass).
-(extern (rebuilds t:term) num)
+(extern @pipe (rebuilds t:term) num)
 # The last fix stopped at its count with the main candidate still changing.
-(extern (moved g:group) num)
+(extern @pipe (moved g:group) num)
 # It is the input of the run.
-(extern (input t:term) num)
+(extern @pipe (input t:term) num)
 # At most tiny_size nodes.
-(extern (tiny t:term) num)
+(extern @pipe (tiny t:term) num)
 # At most split_size nodes.
-(extern (fits_split t:term) num)
+(extern @pipe (fits_split t:term) num)
 # wide_blocks gave a kept form in the passes that made some candidate.
-(extern (used_wide g:group) num)
+(extern @pipe (used_wide g:group) num)
 # clustered gave a kept form in the passes that made some candidate.
-(extern (used_clustered g:group) num)
+(extern @pipe (used_clustered g:group) num)
 # The passes that made it made at most unclustered_after uncached rewrite calls.
-(extern (few_rewrites t:term) num)
+(extern @pipe (few_rewrites t:term) num)
 # The whole term has a smaller T-function form.
-(extern (replaceable t:term) num)
+(extern @pipe (replaceable t:term) num)
 # It comes from a rebuild with abstracted subterms.
-(extern (abstracted t:term) num)
+(extern @pipe (abstracted t:term) num)
 # It is a linear region without leaves.
-(extern (no_leaves t:term) num)
+(extern @pipe (no_leaves t:term) num)
 # It is a linear region of more than max_leaves leaves.
-(extern (wide t:term) num)
+(extern @pipe (wide t:term) num)
 # It has a bitwise operation with a constant operand.
-(extern (const_bitwise t:term) num)
+(extern @pipe (const_bitwise t:term) num)
 # The run rebuilds a linear cofactor of poly_mba.
-(extern (cofactor g:group) num)
+(extern @pipe (cofactor g:group) num)

@@ -15,7 +15,7 @@ fn main() {
         if !cli.passes.defs.is_empty() {
             println!("\n# --- defined by def in --passes, runs of their own on the whole list (group -> group)");
             for d in &cli.passes.defs {
-                println!("{}", eggy1::pipe_lang::def_sig(&d.name, &d.params));
+                println!("{}", eggy1::pipe_lang::sig_of(d));
             }
         }
         return;
