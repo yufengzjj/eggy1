@@ -2353,6 +2353,8 @@ prepass=lowbits | r2
         for (bad, msg) in [
             ("prepass=size | rewrite", "size gives a number; rewrite takes candidates"),
             ("(def @pipe (big k g) (size g) > k) prepass=big | rewrite", "big gives a number; rewrite takes candidates"),
+            ("(def @pipe (big k g) (size g) > k) prepass=(big 3 (lowbits | unshift))", "big gives a number, not candidates"),
+            ("(def @pipe (big k g) (size g) > k) prepass=t = (big 3 (lowbits | unshift)) | (load t)", "unknown variable t"),
             ("(def @pipe (big k g) size > k)", "size needs its input here"),
             ("(def @pipe (big k g) (mixed) || k)", "mixed needs its input here"),
             ("(def @pipe (f g) rewrite)", "the body of an @pipe function starts with a value"),

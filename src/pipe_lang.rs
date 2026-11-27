@@ -282,13 +282,10 @@ struct ParamUse {
     loose: usize,
 }
 
-/// Where a parse is, to try another reading from there.
-#[derive(Clone)]
-struct Mark {
-    at: usize,
-    used: usize,
-    params: Vec<ParamUse>,
-    groups: usize,
+/// The right side of an assignment, by the type of what it gives.
+enum Rhs {
+    Num(Expr),
+    Group(Pipe),
 }
 
 struct Parser<'a> {
@@ -305,6 +302,8 @@ struct Parser<'a> {
     no_input: bool,
     /// The stage read follows a `|`.
     after_bar: bool,
+    /// An atom already read, which the expression read next starts with.
+    pending: Option<Expr>,
 }
 
 fn seq_of(mut stages: Vec<Pipe>) -> Pipe {
@@ -313,7 +312,7 @@ fn seq_of(mut stages: Vec<Pipe>) -> Pipe {
 
 impl<'a> Parser<'a> {
     fn new(toks: Vec<Tok>, defs: &'a Defs) -> Parser<'a> {
-        Parser { toks, at: 0, defs, used: Vec::new(), params: Vec::new(), groups: Vec::new(), no_input: false, after_bar: false }
+        Parser { toks, at: 0, defs, used: Vec::new(), params: Vec::new(), groups: Vec::new(), no_input: false, after_bar: false, pending: None }
     }
 
     /// Whether `n` is a group value: a group parameter, or a group variable bound before in
@@ -366,17 +365,6 @@ impl<'a> Parser<'a> {
     /// Whether `n` names no variable, function, definition or word of the language.
     fn unknown(&self, n: &str) -> bool {
         !(self.defs.contains_key(n) || known_name(n) || resolve(n).is_some() || defined_builtin(n) || ["none", "true", "def", "extern"].contains(&n))
-    }
-
-    fn mark(&self) -> Mark {
-        Mark { at: self.at, used: self.used.len(), params: self.params.clone(), groups: self.groups.len() }
-    }
-
-    fn reset(&mut self, m: Mark) {
-        self.at = m.at;
-        self.used.truncate(m.used);
-        self.params = m.params;
-        self.groups.truncate(m.groups);
     }
 
     /// The signature of the function `n` defined.
@@ -470,7 +458,17 @@ impl<'a> Parser<'a> {
     /// The stages of a pipeline `a | b | ...`, and the expression of a last step that gives a
     /// number (`a | size`).
     fn stages_of_pipe(&mut self) -> Result<(Vec<Pipe>, Option<Expr>), String> {
-        let mut stages = Vec::new();
+        self.stages_after(Vec::new())
+    }
+
+    /// The stages of a pipeline whose first `stages` are read already.
+    fn stages_after(&mut self, mut stages: Vec<Pipe>) -> Result<(Vec<Pipe>, Option<Expr>), String> {
+        if !stages.is_empty() {
+            if self.peek() != Some(&Tok::Bar) {
+                return Ok((stages, None));
+            }
+            self.at += 1;
+        }
         loop {
             if !stages.is_empty() && self.number_step_ahead() {
                 let e = self.or()?;
@@ -599,9 +597,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// The right side of `n = ...`, read as its type gives: an expression up to `|`, `)` or
-    /// the end for a variable that holds a number, one step that gives candidates for a group
-    /// variable. Where both readings work (`relate`, a parameter `r`), `n` decides.
+    /// The right side of `n = ...`, read once and taken by the type of what it gives: an
+    /// expression up to `|`, `)` or the end for a variable that holds a number, one step that
+    /// gives candidates for a group variable. Where a name fits both (`relate`, a parameter
+    /// `r`), `n` decides.
     fn assign(&mut self, n: &str) -> Result<Pipe, String> {
         if let Some(d) = self.defs.get(n).filter(|d| d.run) {
             return Err(format!("{n} is a function and cannot be assigned: {}", def_sig(n, &d.params)));
@@ -611,30 +610,126 @@ impl<'a> Parser<'a> {
         }
         let number_var = var_index(n).is_some();
         let group_var = self.groups.iter().any(|g| g == n);
-        let start = self.mark();
-        let num = self.or().and_then(|e| self.no_assign().map(|_| e));
-        let num_end = self.mark();
-        self.reset(start.clone());
-        let group = self.bound_step();
-        let group_end = self.mark();
-        match (num, group) {
-            (Ok(e), Ok(_)) if number_var => {
-                self.reset(num_end);
-                self.assign_number(n, e)
-            }
-            (Ok(_), Ok(p)) | (Err(_), Ok(p)) if !number_var => {
-                self.reset(group_end);
-                self.bind(n, p)
-            }
-            (Ok(e), _) if number_var => {
-                self.reset(num_end);
-                self.assign_number(n, e)
-            }
-            (Ok(e), _) if group_var => Err(format!("{n} is a group variable, so it cannot hold a number: {} gives a number", show_expr(&e, 1))),
-            (Ok(_), _) => Err(assignable(n).unwrap_err()),
-            (Err(_), Ok(p)) => Err(format!("{n} is a variable that holds a number, so it cannot be bound to candidates: {} gives candidates", stage(&p))),
-            (Err(a), Err(b)) => Err(if number_var || num_end.at > group_end.at { a } else if group_end.at > num_end.at || group_var { b } else { assignable(n).err().unwrap_or(b) }),
+        if let (Some(Tok::Open), Some(e)) = (self.peek(), self.old_form(1)) {
+            return Err(e.into());
         }
+        let rhs = match self.number_ahead(number_var) {
+            true => self.or().map(Rhs::Num).map_err(|e| match assignable(n) {
+                Err(a) if !group_var && !e.contains("unknown variable") => format!("{a}; the right side is not a step either: {e}"),
+                _ => e,
+            }),
+            false => self.rhs_group(number_var, true),
+        }?;
+        self.no_assign()?;
+        match rhs {
+            Rhs::Num(e) if number_var => self.assign_number(n, e),
+            Rhs::Num(e) if group_var => Err(format!("{n} is a group variable, so it cannot hold a number: {} gives a number", show_expr(&e, 1))),
+            Rhs::Num(_) => Err(assignable(n).unwrap_err()),
+            Rhs::Group(p) if number_var => Err(format!("{n} is a variable that holds a number, so it cannot be bound to candidates: {} gives candidates", stage(&p))),
+            Rhs::Group(p) => self.bind(n, p),
+        }
+    }
+
+    /// Whether the right side of an assignment reads as an expression: it starts, maybe after
+    /// `(`, with a number, `!`, a call of a function that gives a number, or a name that gives
+    /// a number (for a name that is also a step or an untyped parameter, where `number_var`,
+    /// but a step where a `|` follows it inside parentheses), or a name that names nothing,
+    /// unless written alone (`t = u` binds a group variable).
+    fn number_ahead(&self, number_var: bool) -> bool {
+        let k = (0..).find(|k| self.peek_at(*k) != Some(&Tok::Open)).unwrap();
+        let Some(Tok::Name(n)) = self.peek_at(k) else { return true };
+        let after = self.peek_at(k + 1);
+        if after == Some(&Tok::Assign) {
+            return false;
+        }
+        let number_fn = builtins::get(n).is_some_and(|s| s.is_number()) || self.number_def(n);
+        if k > 0 && matches!(after, Some(Tok::Name(_) | Tok::Num(_) | Tok::Open | Tok::Not)) {
+            return match self.param(n) {
+                Some(i) => self.params[i].ty == Some(Ty::Num),
+                None => number_fn,
+            };
+        }
+        match self.param(n) {
+            Some(i) => return self.params[i].ty.map_or(number_var, |t| t == Ty::Num),
+            None if number_fn => return true,
+            None => {}
+        }
+        if self.defs.contains_key(n) || self.group_value(n) {
+            false
+        } else if var_index(n).is_some() {
+            resolve(n).is_none() || number_var && !(k > 0 && after == Some(&Tok::Bar))
+        } else if ["none", "true", "def", "extern"].contains(&n.as_str()) || builtins::MACROS.contains(&n.as_str()) {
+            true
+        } else if !self.unknown(n) {
+            false
+        } else {
+            k > 0 || !matches!(after, None | Some(Tok::Bar | Tok::Close))
+        }
+    }
+
+    /// Whether a call form ahead starts with this `(`, as `stage` reads it: `on`, `off`, a
+    /// function with parameters or arguments, a parameter called on a group.
+    fn form_ahead(&self) -> bool {
+        let args = matches!(self.peek_at(2), Some(Tok::Name(_) | Tok::Num(_) | Tok::Open | Tok::Not));
+        match self.peek_at(1) {
+            Some(Tok::Name(n)) => {
+                n == "on"
+                    || n == "off"
+                    || self.defs.get(n).is_some_and(|d| !d.params.is_empty() || d.run && args)
+                    || self.param(n).is_some_and(|i| self.params[i].ty != Some(Ty::Group)) && args
+                    || builtins::get(n).is_some_and(|s| !s.params.is_empty() || args)
+            }
+            _ => false,
+        }
+    }
+
+    /// The right side of an assignment that does not start as an expression: a pipeline in
+    /// parentheses, which gives a number where it ends in one (`(a | size) > 3`), or one step
+    /// (`top`: as `bound_step` reads it).
+    fn rhs_group(&mut self, number_var: bool, top: bool) -> Result<Rhs, String> {
+        if self.peek() != Some(&Tok::Open) || self.form_ahead() {
+            return Ok(Rhs::Group(if top { self.bound_step()? } else { self.stage()? }));
+        }
+        if let Some(e) = self.old_form(1) {
+            return Err(e.into());
+        }
+        self.at += 1;
+        let inner = match self.peek() {
+            Some(Tok::Open) if !self.form_ahead() => match self.rhs_group(number_var, false)? {
+                Rhs::Num(e) => {
+                    let e = self.expr_from(e)?;
+                    if let (Some(Tok::Bar), Some(m)) = (self.peek(), self.peek_at(1)) {
+                        return Err(format!("{} gives a number; {} takes candidates: a step that gives a number can only end a pipeline", show_expr(&e, 1), show_tok(Some(m))));
+                    }
+                    Rhs::Num(e)
+                }
+                Rhs::Group(p) => self.pipe_rhs(vec![p])?,
+            },
+            _ => self.pipe_rhs(Vec::new())?,
+        };
+        self.expect(Tok::Close, ")")?;
+        Ok(match inner {
+            Rhs::Num(e) => Rhs::Num(self.expr_from(e)?),
+            g => g,
+        })
+    }
+
+    /// A pipeline after its `first` stages, as the number it ends in or its candidates.
+    fn pipe_rhs(&mut self, first: Vec<Pipe>) -> Result<Rhs, String> {
+        let (stages, tail) = self.stages_after(first)?;
+        let p = seq_of(stages);
+        Ok(match tail {
+            Some(e) => Rhs::Num(Expr::Of(Box::new(e), Box::new(p))),
+            None => Rhs::Group(p),
+        })
+    }
+
+    /// The expression that starts with the atom `e` read already.
+    fn expr_from(&mut self, e: Expr) -> Result<Expr, String> {
+        self.pending = Some(e);
+        let r = self.or();
+        self.pending = None;
+        r
     }
 
     /// `n = e` for the variable `n` that holds a number.
@@ -836,10 +931,10 @@ impl<'a> Parser<'a> {
         let call = self.call_of(n, args)?;
         let step = d.def.as_ref().is_none_or(|d| d.step);
         match input {
+            _ if d.def.as_ref().is_some_and(|d| d.value.is_some()) => Err(format!("{n} gives a number, not candidates: {sig}; a step calls a function that gives candidates")),
             Some(i) if step => Ok(explicit(i, call)),
             Some(_) => Err(format!("{n} takes {}: {sig}", sig.takes())),
             None if !step && after_bar => Err(not_pipe(&sig)),
-            None if d.def.as_ref().is_some_and(|d| d.value.is_some()) => Err(format!("{n} gives a number, not candidates: {sig}; a step calls a function that gives candidates")),
             None => Ok(call),
         }
     }
@@ -961,7 +1056,7 @@ impl<'a> Parser<'a> {
     }
 
     fn not(&mut self) -> Result<Expr, String> {
-        if self.peek() == Some(&Tok::Not) {
+        if self.pending.is_none() && self.peek() == Some(&Tok::Not) {
             self.at += 1;
             return Ok(Expr::Not(Box::new(self.not()?)));
         }
@@ -1034,6 +1129,9 @@ impl<'a> Parser<'a> {
     /// A number, a name, `(size R)`, `(same R)`, `(any C)`, `(all C)`, `( expr )` or a
     /// pipeline that ends in a number in parentheses.
     fn atom(&mut self) -> Result<Expr, String> {
+        if let Some(e) = self.pending.take() {
+            return Ok(e);
+        }
         match self.next() {
             Some(Tok::Num(n)) => Ok(Expr::Num(n)),
             Some(Tok::Name(n)) => {
@@ -2303,6 +2401,29 @@ mod tests {
         assert!(def_err("(def (f n) n = 3)").contains("parameter n cannot be assigned"));
         assert!(def_err("(def (f n) (fix n id) | n = id)").contains("parameter n cannot be assigned"));
         assert!(parse_assign("t", "rewrite").unwrap_err().contains("unknown variable t"), "an entry assignment is to a variable that holds a number");
+    }
+
+    #[test]
+    fn nested_assignments_parse_once() {
+        let (mut group, mut number) = ("rewrite".to_string(), "keep = 1".to_string());
+        for i in 0..24 {
+            group = format!("t{i} = ({group} | relate)");
+            number = format!("keep = (relate = 0 | ({number}) | size) + 1");
+        }
+        let start = std::time::Instant::now();
+        for s in [&group, &number] {
+            let p = parse(s).unwrap();
+            assert_eq!(parse(&show(&p)).unwrap(), p, "{s}");
+        }
+        assert!(matches!(parse(&number).unwrap(), Pipe::Pass(Pass::Assign(..))));
+        assert!(matches!(parse(&group).unwrap(), Pipe::Bind(..)));
+        assert!(start.elapsed() < std::time::Duration::from_secs(2), "{:?}", start.elapsed());
+        for (s, msg) in [("keep = ((lowbits | size) + 1)", ""), ("t = ((lowbits | unshift) | relate)", ""), ("t = ((lowbits | size) | relate)", "gives a number; relate takes candidates"), ("t = (u)", "the right side is not a step either: unknown name u"), ("t = (time-limit 3)", "write time_limit = N")] {
+            match parse(s) {
+                Ok(_) => assert!(msg.is_empty(), "{s}"),
+                Err(e) => assert!(!msg.is_empty() && e.contains(msg), "{s}: {e}"),
+            }
+        }
     }
 
     /// The steps `(smallest ...)` in `p` expands to, its note registers named `s`, `t`, ... in

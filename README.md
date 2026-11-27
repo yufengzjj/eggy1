@@ -82,10 +82,12 @@ eggy1 --passes "file=my.pipe" "expr"                      # items from a file
 
 A pipeline maps a list of equivalent candidates to another: `a | b` runs in sequence,
 `(union a b)`, `(best K a b)`, `(first a b)`, `(fix N p)`, `(if COND a b)`, assignments `NAME = VALUE` (`(split_runs = 4 | p)`), `(on NAME)`/`(off NAME)`,
-`(save R)`/`(load R)` registers, conditions such as `(mul >= 4 && !mixed)`, and
-`(let NAME p)` definitions (those of `src/default.pipe` can be reused). Pipelines are checked
-when read (unknown names, wrong arguments, register reads before any save, passes outside the
-pipeline that can run them, recursion), and parts that do nothing give warnings. The full
+group variables (`t = (lowbits | rewrite)`, `(save R)`/`(load R)`), conditions such as
+`(mul >= 4 && !mixed)`, `(let NAME p)` definitions (those of `src/default.pipe` can be reused) and
+functions with parameters, `(def (with_budget n p) rewrites = n | p)`, called like built-ins.
+Pipelines are checked when read (unknown names, wrong arguments or types, group variables read
+before they are bound, passes outside the pipeline that can run them, recursion), and parts that
+do nothing give warnings. The full
 reference, with every form, pass, condition, setting and limit, is
 [docs/pipe-language.md](docs/pipe-language.md) (in Chinese).
 

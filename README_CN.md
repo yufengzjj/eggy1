@@ -62,7 +62,7 @@ eggy1 --passes "prepass=lowbits | (if mixed rewrite)" "expr"
 eggy1 --passes "file=my.pipe" "expr"                      # 从文件读入各项
 ```
 
-管线把一组等价候选映射为另一组：`a | b` 依次执行，还有 `(union a b)`、`(best K a b)`、`(first a b)`、`(fix N p)`、`(if COND a b)`、赋值 `NAME = VALUE`（`(split_runs = 4 | p)`）、`(on NAME)`/`(off NAME)`、寄存器 `(save R)`/`(load R)`、`(mul >= 4 && !mixed)` 这样的条件，以及 `(let NAME p)` 定义（`src/default.pipe` 里定义的名字可以直接用）。读入时会检查管线（未知名字、参数不对、寄存器先读后存、pass 出现在不能运行它的管线里、递归），不起作用的部分给出警告。完整的参考（所有形式、pass、条件、设置和限值）见 [docs/pipe-language.md](docs/pipe-language.md)。
+管线把一组等价候选映射为另一组：`a | b` 依次执行，还有 `(union a b)`、`(best K a b)`、`(first a b)`、`(fix N p)`、`(if COND a b)`、赋值 `NAME = VALUE`（`(split_runs = 4 | p)`）、`(on NAME)`/`(off NAME)`、组变量（`t = (lowbits | rewrite)`、`(save R)`/`(load R)`）、`(mul >= 4 && !mixed)` 这样的条件、`(let NAME p)` 定义（`src/default.pipe` 里定义的名字可以直接用），以及带参数的函数 `(def (with_budget n p) rewrites = n | p)`，调用起来和内置函数一样。读入时会检查管线（未知名字、参数或类型不对、组变量先读后绑定、pass 出现在不能运行它的管线里、递归），不起作用的部分给出警告。完整的参考（所有形式、pass、条件、设置和限值）见 [docs/pipe-language.md](docs/pipe-language.md)。
 
 ## Benchmark 与 fuzz
 
