@@ -20,6 +20,7 @@ enum Tok {
     Num(u64),
     Name(String),
     Assign,
+    At,
 }
 
 fn name_start(c: char) -> bool {
@@ -62,6 +63,7 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
             '>' => (Tok::Cmp(">"), 1),
             '=' if two('=') => (Tok::Cmp("=="), 2),
             '=' => (Tok::Assign, 1),
+            '@' => (Tok::At, 1),
             '+' | '-' | '*' | '/' => (Tok::Arith(c), 1),
             c if c.is_ascii_digit() => {
                 let n: String = cs[i..].iter().take_while(|c| c.is_ascii_digit()).collect();
@@ -218,10 +220,39 @@ fn name_expr(n: &str) -> Result<Expr, String> {
     }
 }
 
-/// The pipelines `(let NAME p)` defined, by name.
-/// Each with whether it is written as a sequence without parentheses, which joins the
-/// sequence it is used in (`(let g a | b)`; `(let g (a | b))` stays one nested stage).
-pub type Defs = std::collections::HashMap<String, (Pipe, bool)>;
+/// What a name `(let NAME p)` or `(def ...)` defined stands for.
+#[derive(Clone)]
+pub struct Named {
+    /// The pipeline expanded where it is used: `p`, or the call of a `def`.
+    pub pipe: Pipe,
+    /// Written as a sequence without parentheses, which joins the sequence it is used in
+    /// (`(let g a | b)`; `(let g (a | b))` stays one nested stage).
+    pub flat: bool,
+    /// Defined by `(def (NAME) p)`: a function called as a run of its own.
+    pub run: bool,
+}
+
+/// The names `let` and `def` defined.
+pub type Defs = std::collections::HashMap<String, Named>;
+
+/// How a definition item defines its name.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DefKind {
+    /// `(let NAME p)`, the same as `Inline`.
+    Let,
+    /// `(def @inline (NAME) p)`: expanded where it is used.
+    Inline,
+    /// `(def (NAME) p)`: a call is a run of its own.
+    Run,
+}
+
+/// A definition item read by `parse_definition`.
+pub struct Definition {
+    pub name: String,
+    pub kind: DefKind,
+    pub pipe: Pipe,
+    pub flat: bool,
+}
 
 struct Parser<'a> {
     toks: Vec<Tok>,
@@ -269,7 +300,7 @@ impl Parser<'_> {
     fn stages_of_pipe(&mut self) -> Result<Vec<Pipe>, String> {
         let mut stages = Vec::new();
         loop {
-            let flat = matches!(self.peek(), Some(Tok::Name(n)) if self.defs.get(n).is_some_and(|d| d.1));
+            let flat = matches!(self.peek(), Some(Tok::Name(n)) if self.defs.get(n).is_some_and(|d| d.flat));
             match self.stage()? {
                 Pipe::Seq(ps) if flat => stages.extend(ps),
                 p => stages.push(p),
@@ -293,7 +324,7 @@ impl Parser<'_> {
         }
         match self.next() {
             Some(Tok::Name(n)) if self.defs.contains_key(&n) => {
-                let p = self.defs[&n].0.clone();
+                let p = self.defs[&n].pipe.clone();
                 self.used.push(n);
                 Ok(p)
             }
@@ -303,6 +334,9 @@ impl Parser<'_> {
                     Some(Tok::Name(n)) if n == "on" || n == "off" => {
                         self.at += 1;
                         self.switches(&n)?
+                    }
+                    Some(Tok::Name(n)) if self.defs.get(&n).is_some_and(|d| d.run) && matches!(self.peek_at(1), Some(Tok::Name(_) | Tok::Num(_) | Tok::Open | Tok::Not)) => {
+                        return Err(format!("{n} takes no arguments: {}", def_sig(&n)));
                     }
                     Some(Tok::Name(n)) => match builtins::get(&n) {
                         Some(s) if s.is_number() => return Err(not_a_step(s)),
@@ -338,6 +372,9 @@ impl Parser<'_> {
 
     /// The right side of `n = ...`: an expression up to `|`, `)` or the end.
     fn assign(&mut self, n: &str) -> Result<Pipe, String> {
+        if self.defs.get(n).is_some_and(|d| d.run) {
+            return Err(format!("{n} is a function and cannot be assigned: {}", def_sig(n)));
+        }
         let i = assignable(n)?;
         let e = self.or()?;
         self.no_assign()?;
@@ -529,6 +566,9 @@ impl Parser<'_> {
             Some(Tok::Num(n)) => Ok(Expr::Num(n)),
             Some(Tok::Name(n)) => {
                 self.no_assign()?;
+                if self.defs.get(&n).is_some_and(|d| d.run) {
+                    return Err(format!("{n} gives candidates, not a number: {}; an expression reads variables and number functions", def_sig(&n)));
+                }
                 name_expr(&n)
             }
             Some(Tok::Open) => {
@@ -570,6 +610,7 @@ fn show_tok(t: Option<&Tok>) -> String {
             Tok::Num(n) => n.to_string(),
             Tok::Name(n) => n.clone(),
             Tok::Assign => "=".into(),
+            Tok::At => "@".into(),
         },
     }
 }
@@ -673,34 +714,101 @@ pub fn parse_with(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Pipe, 
     Ok(pipe)
 }
 
-/// Parses the definition `(let NAME p)`: `NAME` then stands for `p`, which is expanded where
-/// it is used; the names of `defs` it expands are added to `used`.
-pub fn parse_let(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<(String, (Pipe, bool)), String> {
-    let_def(s, defs, used).map_err(|e| hyphen_hint(e, s))
+/// Whether `name` is a function the Rust code defines and calls, which `(def (NAME) p)`
+/// (written also `NAME=p`) replaces: `pipeline`, `prepass`, `polish`, `rewrite`, `simba`,
+/// `sub/NAME`.
+pub fn defined_builtin(name: &str) -> bool {
+    ["pipeline", "prepass", "polish", "rewrite", "simba"].contains(&name) || name.strip_prefix("sub/").is_some_and(|n| crate::sched::SUBS.iter().any(|(s, _)| *s == n))
 }
 
-fn let_def(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<(String, (Pipe, bool)), String> {
+/// The signature of a function `(def (NAME) p)`.
+pub fn def_sig(name: &str) -> String {
+    format!("({name} g:group) group")
+}
+
+/// Parses a definition item: `(let NAME p)`, `(def @inline (NAME) p)`, which `NAME` then
+/// stands for where it is used, or `(def (NAME) p)`, a function called as a run of its own;
+/// the names of `defs` it uses are added to `used`.
+pub fn parse_definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition, String> {
+    definition(s, defs, used).map_err(|e| hyphen_hint(e, s))
+}
+
+fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition, String> {
     let mut p = Parser { toks: lex(s)?, at: 0, defs, used: Vec::new() };
-    p.expect(Tok::Open, "(let")?;
-    if p.name("let")? != "let" {
-        return Err(format!("expected (let NAME pipeline): {s}"));
-    }
-    let name = p.name("a name after let")?;
+    p.expect(Tok::Open, "(let or (def")?;
+    let head = p.name("let or def")?;
+    let (kind, name) = match head.as_str() {
+        "let" => (DefKind::Let, p.name("a name after let")?),
+        "def" => {
+            let kind = if p.peek() == Some(&Tok::At) {
+                p.at += 1;
+                match p.name("an attribute after @")?.as_str() {
+                    "inline" => DefKind::Inline,
+                    a => return Err(format!("unknown attribute @{a} of def; known: @inline")),
+                }
+            } else {
+                DefKind::Run
+            };
+            p.expect(Tok::Open, "(NAME) after def")?;
+            let name = p.name("a name after (def (")?;
+            if p.peek() != Some(&Tok::Close) {
+                return Err(format!("def ({name} ...): functions with parameters are not read yet; write (def ({name}) p)"));
+            }
+            p.at += 1;
+            (kind, name)
+        }
+        _ => return Err(format!("expected (let NAME pipeline) or (def (NAME) pipeline): {s}")),
+    };
+    let what = match kind {
+        DefKind::Let => format!("let {name}"),
+        DefKind::Inline => format!("def @inline ({name})"),
+        DefKind::Run => format!("def ({name})"),
+    };
     let function = builtins::get(&name);
-    if function.is_some_and(|s| !s.is_number()) || resolve(&name).is_some() || builtins::MACROS.contains(&name.as_str()) || name == "extern" {
-        return Err(format!("let {name}: the name of a pass, form or macro"));
+    let replaces = kind == DefKind::Run && defined_builtin(&name);
+    if defined_builtin(&name) && !replaces {
+        return Err(format!("{what}: {name} is a function the Rust code calls, replaced only by (def ({name}) p) or {name}=p"));
     }
-    let pipeline = ["pipeline", "prepass", "polish", "rewrite", "simba"].contains(&name.as_str()) || name.strip_prefix("sub/").is_some_and(|n| crate::sched::SUBS.iter().any(|(s, _)| *s == n));
-    if var_index(&name).is_some() || function.is_some() || name == "none" || pipeline {
-        return Err(format!("let {name}: the name of a variable or function"));
+    if !replaces && (function.is_some_and(|s| !s.is_number()) || resolve(&name).is_some() || builtins::MACROS.contains(&name.as_str()) || name == "extern" || name == "def") {
+        return Err(format!("{what}: the name of a pass, form or macro"));
     }
-    let mut stages = p.stages_of_pipe()?;
+    if !replaces && (var_index(&name).is_some() || function.is_some() || name == "none") {
+        return Err(format!("{what}: the name of a variable or function"));
+    }
+    if kind == DefKind::Run && name.starts_with("sub/") && !replaces {
+        let names: Vec<&str> = crate::sched::SUBS.iter().map(|(n, _)| *n).collect();
+        return Err(format!("{what}: unknown sub/NAME; known: {}", names.join(" ")));
+    }
+    match defs.get(&name) {
+        Some(d) if d.run => return Err(format!("{what}: {name} is already a function (def ({name}) ...)")),
+        Some(_) if kind == DefKind::Run => return Err(format!("{what}: {name} is already defined by let or def @inline")),
+        _ => {}
+    }
+    let (pipe, flat) = if kind == DefKind::Run {
+        (p.pipe()?, false)
+    } else {
+        let mut stages = p.stages_of_pipe()?;
+        let flat = stages.len() > 1;
+        (if flat { Pipe::Seq(stages) } else { stages.pop().unwrap() }, flat)
+    };
     p.expect(Tok::Close, ")")?;
     p.end()?;
     used.extend(p.used);
-    let flat = stages.len() > 1;
-    let pipe = if flat { Pipe::Seq(stages) } else { stages.pop().unwrap() };
-    Ok((name, (pipe, flat)))
+    Ok(Definition { name, kind, pipe, flat })
+}
+
+/// `(def (name) body)` on one line.
+pub fn show_def(name: &str, body: &Pipe) -> String {
+    format!("(def ({name}) {})", show(body))
+}
+
+/// `show_def` over several lines when it is wider than `WIDTH`.
+pub fn pretty_def(name: &str, body: &Pipe) -> String {
+    let one = show_def(name, body);
+    if one.len() <= WIDTH {
+        return one;
+    }
+    format!("(def ({name})\n  {})", pretty_at(body, 2))
 }
 
 /// Whether `s` looks like the old `seq(a,b)` syntax, for an error message: a name directly
@@ -798,6 +906,7 @@ pub fn show(p: &Pipe) -> String {
         Pipe::Cand(n, p) => form("cand", &with(vec![n.clone()], p)),
         Pipe::Smaller(n, p) => form("smaller", &with(vec![n.clone()], p)),
         Pipe::Filter(c) => form("filter", &[show_arg(c)]),
+        Pipe::Call(d) => d.name.clone(),
     }
 }
 
@@ -848,7 +957,7 @@ fn pretty_at(p: &Pipe, indent: usize) -> String {
         Pipe::Tag(n, q) => nested("tag", vec![n.clone()], vec![(q, false)]),
         Pipe::Cand(n, q) => nested("cand", vec![n.clone()], vec![(q, false)]),
         Pipe::Smaller(n, q) => nested("smaller", vec![n.clone()], vec![(q, false)]),
-        Pipe::Pass(_) | Pipe::Filter(_) => one,
+        Pipe::Pass(_) | Pipe::Filter(_) | Pipe::Call(_) => one,
     }
 }
 
@@ -1115,10 +1224,43 @@ mod tests {
 
     #[test]
     fn let_names_are_not_variables_or_functions() {
-        let def = |s: &str| parse_let(s, &Defs::new(), &mut Vec::new()).map(|(n, _)| n);
+        let def = |s: &str| parse_definition(s, &Defs::new(), &mut Vec::new()).map(|d| d.name);
         assert_eq!(def("(let g rewrite | relate)").unwrap(), "g");
-        for name in ["split_runs", "relate_parts", "time_limit", "mixed", "mul", "size", "same", "none", "pipeline", "sub/cluster", "rewrite", "fix"] {
+        assert_eq!(def("(def (g) rewrite | relate)").unwrap(), "g");
+        assert_eq!(def("(def @inline (g) rewrite | relate)").unwrap(), "g");
+        for name in ["split_runs", "relate_parts", "time_limit", "mixed", "mul", "size", "same", "none", "pipeline", "sub/cluster", "rewrite", "fix", "on", "def", "extern"] {
             assert!(def(&format!("(let {name} id)")).is_err(), "{name}");
+            assert!(def(&format!("(def @inline ({name}) id)")).is_err(), "{name}");
         }
+        for name in ["split_runs", "mixed", "size", "none", "lowbits", "fix", "on", "def", "sub/nope", "id"] {
+            assert!(def(&format!("(def ({name}) id)")).is_err(), "{name}");
+        }
+        for name in ["pipeline", "prepass", "polish", "rewrite", "simba", "sub/cluster"] {
+            assert_eq!(def(&format!("(def ({name}) id)")).unwrap(), name, "a defined function of the Rust code is replaced");
+        }
+        for (bad, msg) in [("(def (f x) id)", "parameters"), ("(def @pure (f) id)", "unknown attribute @pure"), ("(def f id)", "expected (NAME)"), ("(def (f) id id)", "expected )")] {
+            let e = def(bad).unwrap_err();
+            assert!(e.contains(msg), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn let_is_def_inline() {
+        let mut defs = Defs::new();
+        for item in ["(let a relate | tfunc)", "(let b (relate | tfunc))"] {
+            let d = parse_definition(item, &defs, &mut Vec::new()).unwrap();
+            defs.insert(d.name, Named { pipe: d.pipe, flat: d.flat, run: false });
+        }
+        let mut inline = Defs::new();
+        for item in ["(def @inline (a) relate | tfunc)", "(def @inline (b) (relate | tfunc))"] {
+            let d = parse_definition(item, &inline, &mut Vec::new()).unwrap();
+            assert_eq!(d.kind, DefKind::Inline);
+            inline.insert(d.name, Named { pipe: d.pipe, flat: d.flat, run: false });
+        }
+        for p in ["lowbits | a | b | finish", "(best 1 a b)"] {
+            let read = |defs: &Defs| parse_with(p, defs, &mut Vec::new()).unwrap();
+            assert_eq!(read(&defs), read(&inline), "{p}");
+        }
+        assert_eq!(show(&parse_with("lowbits | a | b", &inline, &mut Vec::new()).unwrap()), "lowbits | relate | tfunc | (relate | tfunc)");
     }
 }

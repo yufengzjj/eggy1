@@ -199,7 +199,7 @@ pub struct Env<'a> {
     signed: Option<bool>,
     trace: bool,
     /// The egglog program of the numeric type.
-    egg: String,
+    egg: Rc<str>,
     /// The input of the run.
     input: String,
     moved: Cell<bool>,
@@ -230,7 +230,7 @@ impl<'a> Env<'a> {
 
     fn with(cli: Option<&'a Cli>, passes: &'a Passes, w: u32, signed: Option<bool>, trace: bool, egg: String, input: &str) -> Env<'a> {
         let input = input.to_string();
-        Env { cli, passes, w, signed, trace, egg, input, moved: Cell::new(false), wins: Cell::new(0), deferred: Default::default(), cofactor: false, seen: Default::default(), regs: Default::default(), ctxs: Default::default() }
+        Env { cli, passes, w, signed, trace, egg: egg.into(), input, moved: Cell::new(false), wins: Cell::new(0), deferred: Default::default(), cofactor: false, seen: Default::default(), regs: Default::default(), ctxs: Default::default() }
     }
 
     fn cli(&self, pass: &str) -> &'a Cli {
@@ -635,6 +635,17 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
                 }
             }
             Ok(out)
+        }
+        Pipe::Call(d) => {
+            let input = set.first().map_or_else(String::new, |c| c.term().to_string());
+            let mut run = Env::with(env.cli, env.passes, env.w, env.signed, env.trace, String::new(), &input);
+            run.egg = env.egg.clone();
+            run.cofactor = env.cofactor;
+            if let Some(c) = env.ctxs.borrow().last() {
+                run.ctxs.borrow_mut().push(c.narrow(c.w));
+            }
+            let out = scoped(|| go(&d.body, set, &run))?;
+            Ok(seen(out, env))
         }
         Pipe::Wins(n, p) => {
             let n = env.times(n, &set);
@@ -1091,6 +1102,32 @@ mod tests {
             assert_eq!(step("(save p) | polish | (load p)"), [SUB], "polish has its own registers");
             assert_eq!(step("(smallest polish)"), [SUB], "an outer smallest sees no candidate made inside polish");
             assert_eq!(step("(smallest rewrite | none | (load p))"), [XOR, SUB], "it sees those of the passes of its own run");
+        });
+    }
+
+    #[test]
+    fn def_is_a_run_of_its_own() {
+        let passes = Passes::parse("(def (f) rewrite | (save p) | split_runs = 3 | (if (split_runs == 3) (load p) none)) (def (h) rewrite | none) (def (k) (if (split_runs == 5) id none))").unwrap();
+        let env = Env::prepass(&passes, 32, None, false, SUB);
+        let mut names = lang::Defs::new();
+        for d in &passes.defs {
+            names.insert(d.name.clone(), lang::Named { pipe: Pipe::Call(d.clone()), flat: false, run: true });
+        }
+        for item in ["(def @inline (g) rewrite | (save p) | split_runs = 3)", "(def @inline (h2) rewrite | none)"] {
+            let d = lang::parse_definition(item, &names, &mut Vec::new()).unwrap();
+            names.insert(d.name, lang::Named { pipe: d.pipe, flat: d.flat, run: false });
+        }
+        let step = |p: &str| terms(&go(&lang::parse_with(p, &names, &mut Vec::new()).unwrap(), vec![Cand::new(SUB, "input")], &env).unwrap());
+        crate::sched::in_default_run(|| {
+            assert_eq!(step("f"), [XOR], "a def runs on the candidates, with its own assignments and registers");
+            assert_eq!(step("(save p) | f | (load p)"), [SUB], "a def has its own registers");
+            assert!(step("f | (if (split_runs == 3) (save s)) | (load s)").is_empty(), "an assignment in a def ends with its run");
+            assert_eq!(step("split_runs = 5 | k"), [SUB], "a def reads the caller's bindings");
+            assert_eq!(step("(save s) | (smallest h | (load s))"), [SUB], "an outer smallest sees no candidate made inside a def");
+            assert_eq!(step("(save s) | (smallest f | none | (load s))"), [XOR, SUB], "it sees what the call gives");
+            assert_eq!(step("(save p) | g | (load p)"), [XOR], "an @inline def shares the caller's registers");
+            assert_eq!(step("g | (if (split_runs == 3) (save s)) | (load s)"), [XOR], "and its sequence: the assignment reaches the steps after it");
+            assert_eq!(step("(save s) | (smallest h2 | (load s))"), [XOR, SUB], "and its smallest");
         });
     }
 
