@@ -300,10 +300,14 @@ impl<'a> Env<'a> {
             Expr::Var(i) if *i == crate::sched::KEEP => crate::sched::read(*i).max(1),
             Expr::Var(i) => crate::sched::read(*i),
             Expr::Param(i, _) => self.lex.borrow().frame.as_ref().expect("a parameter outside the body of its function").values[*i],
-            Expr::Of(e, r) => self.value(e, &self.reg(r)),
+            Expr::Of(e, p) => self.value(e, &self.group_of(p, set)),
             Expr::Call(c, input) => {
-                let input = input.as_ref().map(|r| self.reg(r));
+                let input = input.as_ref().map(|p| self.group_of(p, set));
                 let set = input.as_deref().unwrap_or(set);
+                if c.def.steps {
+                    let run = self.call_env(c, set);
+                    return scoped(|| run.value(c.def.value.as_ref().unwrap(), set));
+                }
                 let caller = self.lex.borrow().clone();
                 let frame = Frame { call: c.clone(), caller: caller.clone(), values: arg_values(c, set, self) };
                 let lex = Lex { input: caller.input.clone(), regs: Default::default(), notes: caller.notes.clone(), frame: Some(frame) };
@@ -321,6 +325,37 @@ impl<'a> Env<'a> {
             Expr::Any(c) => set.iter().any(|x| self.holds(c, std::slice::from_ref(x))) as u64,
             Expr::All(c) => (!set.is_empty() && set.iter().all(|x| self.holds(c, std::slice::from_ref(x)))) as u64,
         }
+    }
+
+    /// The candidates `p` gives on `set`: a group value, or steps of this run; none after an
+    /// error, which the run then gives.
+    fn group_of(&self, p: &Pipe, set: &[Cand]) -> Vec<Cand> {
+        match p {
+            Pipe::Value(r) => self.reg(r),
+            p => scoped(|| go(p, set.to_vec(), self)).unwrap_or_else(|e| {
+                fail(&e);
+                Vec::new()
+            }),
+        }
+    }
+
+    /// The run of a call of `c` on `set`, with its own group variables and the call's arguments.
+    fn call_env(&self, c: &std::sync::Arc<crate::sched::Call>, set: &[Cand]) -> Env<'a> {
+        let input = set.first().map_or_else(String::new, |c| c.term().to_string());
+        let mut run = Env::with(self.cli, self.passes, self.w, self.signed, self.trace, String::new(), &input);
+        run.egg = self.egg.clone();
+        run.cofactor = self.cofactor;
+        if !c.args.is_empty() || c.def.input.is_some() {
+            let caller = self.lex.borrow().clone();
+            let frame = Frame { call: c.clone(), caller: caller.clone(), values: arg_values(c, set, self) };
+            let lex = Lex::new(&input, Some(frame));
+            bind_args(c, &lex, set, &caller);
+            run.lex = RefCell::new(lex);
+        }
+        if let Some(c) = self.ctxs.borrow().last() {
+            run.ctxs.borrow_mut().push(c.narrow(c.w));
+        }
+        run
     }
 
     /// Whether `e` is not 0 for the candidates `set`.
@@ -712,20 +747,7 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             out
         }
         Pipe::Call(c) => {
-            let input = set.first().map_or_else(String::new, |c| c.term().to_string());
-            let mut run = Env::with(env.cli, env.passes, env.w, env.signed, env.trace, String::new(), &input);
-            run.egg = env.egg.clone();
-            run.cofactor = env.cofactor;
-            if !c.args.is_empty() || c.def.input.is_some() {
-                let caller = env.lex.borrow().clone();
-                let frame = Frame { call: c.clone(), caller: caller.clone(), values: arg_values(c, &set, env) };
-                let lex = Lex::new(&input, Some(frame));
-                bind_args(c, &lex, &set, &caller);
-                run.lex = RefCell::new(lex);
-            }
-            if let Some(c) = env.ctxs.borrow().last() {
-                run.ctxs.borrow_mut().push(c.narrow(c.w));
-            }
+            let run = env.call_env(c, &set);
             scoped(|| go(&c.body, set, &run))
         }
         Pipe::Param(i, _) => {
@@ -1369,6 +1391,32 @@ mod tests {
         assert_eq!(step(&format!("{big} prepass=(filter (big 9))")), Vec::<String>::new());
         assert_eq!(step("(def @pipe (m g) (mixed g) || (size g) > 100) prepass=(if (m) rewrite)"), [SUB]);
         assert_eq!(step("(def (k n:num) split_runs = n | (if (split_runs == 3) rewrite)) prepass=(k 3)"), [XOR], "an annotated parameter");
+        assert_eq!(step(&format!("{f} prepass=(f rewrite (lowbits | unshift))")), [XOR], "an input that is a pipeline on the step's input");
+        assert_eq!(step(&format!("{f} (def (h a:group) (f id a)) prepass=rewrite | (save t) | none | u = (h t) | (load u)")), [XOR], "a group parameter as an input");
+        assert_eq!(step("prepass=(if ((size (rewrite)) < size) rewrite)"), [XOR], "an input of a number function");
+        let k = "(def @inline @pipe (k p g) g | p | (union id g))";
+        assert_eq!(step(&format!("{k} prepass=(k rewrite)")), [XOR, SUB], "@inline with @pipe: the input bound in the caller's group variables");
+        assert_eq!(step(&format!("{k} prepass=(k (k rewrite))")), [XOR, SUB], "each call binds its own");
+        assert_eq!(step(&format!("{k} prepass=rewrite | (save t) | none | (k id t)")), [XOR], "an explicit input");
+        assert_eq!(step("(def @inline @pipe (k g) g | (save u)) prepass=rewrite | k | none | (load u)"), [XOR], "it shares the caller's group variables");
+    }
+
+    #[test]
+    fn pipelines_that_give_a_number() {
+        let step = |spec: &str| terms(&prepass_of(spec));
+        assert_eq!(step("prepass=(if ((rewrite | size) < size) rewrite)"), [XOR], "steps on the input, then a number");
+        assert_eq!(step("prepass=(if ((rewrite | size) > size) rewrite)"), [SUB]);
+        assert_eq!(step("prepass=split_runs = (rewrite | size) | (if (split_runs < size) rewrite)"), [XOR], "an assignment's right side");
+        assert_eq!(step("prepass=(if ((t = rewrite | size) > 0) (load t))"), [XOR], "its steps bind the caller's group variables");
+        assert_eq!(step("prepass=rewrite | (save t) | none | (if ((t | size) > 0) (load t))"), [XOR], "starting with a value");
+        assert_eq!(step("prepass=(filter ((rewrite | size) < size))"), [SUB], "on each candidate alone");
+        assert_eq!(step("prepass=(fix ((rewrite | size) - 2) id)"), [SUB]);
+        assert_eq!(step("(def (f) rewrite | size) prepass=(if (f < size) rewrite)"), [XOR], "a function that gives a number from steps");
+        assert_eq!(step("(def @pipe (f g) g | rewrite | size) prepass=(if (f < size) rewrite)"), [XOR]);
+        assert_eq!(step("(def (f) (save t) | size) prepass=rewrite | (save t) | none | (if (f == 0) (load t))"), [XOR], "a run of its own: its own group variables");
+        assert_eq!(step("prepass=(save s) | (smallest split_runs = (rewrite | size) | (load s))"), [XOR, SUB], "smallest notes its steps");
+        assert_eq!(step("(def (f) rewrite | size) prepass=(save s) | (smallest split_runs = f | (load s))"), [SUB], "but not those of a function's body");
+        assert_eq!(step("prepass=time_limit = 0 | split_runs = (rewrite | size) | time_limit = none | (if (split_runs == size) rewrite)"), [XOR], "past the limit its steps are skipped");
     }
 
     #[test]
