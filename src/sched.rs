@@ -701,13 +701,18 @@ pub enum Pipe {
     /// `NAME = p`: binds the group variable `NAME` of the run to the candidates `p` gives on
     /// the input as a scope of its own, the input passing on unchanged.
     Bind(String, Box<Pipe>),
-    /// The function value the variable `NAME` of the run holds (`f = size`), applied to the
-    /// input.
+    /// The function value the local variable `NAME` holds (`f:term->num = size`), applied to
+    /// the input.
     Fun(String),
-    /// `NAME = f`: binds the variable `NAME` of the run to the function `f` of this type,
-    /// which takes the input implicitly, as a closure over the run (`crate::pipe::Closure`);
-    /// the input passes on unchanged.
+    /// `NAME:TYPE = f`: binds the local variable `NAME` to the function `f` of this type, which
+    /// takes the input implicitly, as a closure over the values of the variables it reads
+    /// (`crate::pipe::Closure`); the input passes on unchanged.
     BindFn(String, std::sync::Arc<Pipe>, crate::builtins::Ty),
+    /// The number the local variable `NAME` holds (`n = (size * 2)`).
+    Local(String),
+    /// `NAME = VALUE` for a name not of `VARS`: binds the local variable `NAME` to the number
+    /// the expression gives on the input, which passes on unchanged.
+    BindNum(String, Box<Pipe>),
     /// The macro `(off NAME ...)` (`false`) or `(on NAME ...)`: the `INNER` passes or `FLAGS`
     /// switches bound to 0 or 1 until the end of the enclosing sequence, also in the runs it
     /// calls.
@@ -1338,8 +1343,13 @@ impl Passes {
         let mut reach: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
         let mut needs = std::collections::HashMap::new();
         for (name, node, uses) in self.uses() {
-            if let Some(r) = uses.unsaved {
-                return Err(format!("{name} reads group variable {r} before it is bound ({r} = ... or (save {r}))"));
+            if let Some(r) = &uses.unsaved {
+                let how = match uses.kind(r) {
+                    GROUP => format!("{r} = ... or (save {r})"),
+                    FUNCTION => format!("{r}:TYPE = ..."),
+                    _ => format!("{r} = ..."),
+                };
+                return Err(format!("{name} reads {} {r} before it is bound ({how})", uses.kind(r)));
             }
             if let Some((what, sig)) = uses.needs_run.first() {
                 match node.as_str() {
@@ -1386,10 +1396,10 @@ impl Passes {
         for (name, _, uses) in self.uses() {
             let mut unread: Vec<&String> = uses.saved.iter().filter(|r| !uses.reads.contains(r)).collect();
             unread.dedup();
-            out.extend(unread.into_iter().map(|r| format!("{name}: group variable {r} is bound and never read")));
+            out.extend(unread.into_iter().map(|r| format!("{name}: {} {r} is bound and never read", uses.kind(r))));
             let mut dead = uses.dead.clone();
             dead.dedup();
-            out.extend(dead.iter().map(|r| format!("{name}: group variable {r} is bound again before its value is read")));
+            out.extend(dead.iter().map(|r| format!("{name}: {} {r} is bound again before its value is read", uses.kind(r))));
             out.extend(uses.idle_assign.iter().map(|t| format!("{name}: {t} ends its sequence and changes nothing")));
             out.extend(uses.reassigned.iter().map(|v| format!("{name}: {v} is assigned again before anything reads it")));
             out.extend(uses.dropping.iter().map(|v| format!("{name}: {v} drops its input: a group value after | gives its own candidates")));
@@ -1472,6 +1482,7 @@ impl Pipe {
             Pipe::Bind(_, p) => f(p),
             Pipe::BindFn(_, p, t) if t.is_step() => f(p),
             Pipe::BindFn(_, e, _) => e.each(f),
+            Pipe::BindNum(_, e) => e.each(f),
             Pipe::Call(c, input) => {
                 if let Some(p) = input {
                     f(p);
@@ -1493,7 +1504,7 @@ impl Pipe {
                 a.each(f);
                 b.each(f);
             }
-            Pipe::Num(_) | Pipe::Name(_) | Pipe::Var(_) | Pipe::Value(_) | Pipe::Fun(_) | Pipe::Param(..) | Pipe::Switch(..) => {}
+            Pipe::Num(_) | Pipe::Name(_) | Pipe::Var(_) | Pipe::Value(_) | Pipe::Fun(_) | Pipe::Local(_) | Pipe::Param(..) | Pipe::Switch(..) => {}
         }
     }
 }
@@ -1536,7 +1547,14 @@ struct Uses {
     dead: Vec<String>,
     /// The stages after a `|` that start with a group value, so drop the candidates before.
     dropping: Vec<String>,
+    /// The local variables bound or read as numbers or function values; the others are
+    /// group variables.
+    kinds: Vec<(String, &'static str)>,
 }
+
+const GROUP: &str = "group variable";
+const NUMBER: &str = "number variable";
+const FUNCTION: &str = "function variable";
 
 impl Uses {
     fn walk(&mut self, p: &Pipe) {
@@ -1549,10 +1567,15 @@ impl Uses {
                     self.idle_assign.push(lang::show(p));
                 }
             }
-            Pipe::Value(r) | Pipe::Fun(r) => self.read(r),
+            Pipe::Value(r) => self.read(r),
+            Pipe::Fun(r) => self.read_as(r, FUNCTION),
             Pipe::BindFn(r, p, _) => {
                 self.walk(p);
-                self.bound(r);
+                self.bound_as(r, FUNCTION);
+            }
+            Pipe::BindNum(r, e) => {
+                self.expr(e);
+                self.bound_as(r, NUMBER);
             }
             Pipe::Assign(_, v) => self.expr(v),
             Pipe::Seq(ps) => {
@@ -1718,6 +1741,21 @@ impl Uses {
         self.pending.retain(|s| s != r);
     }
 
+    fn bound_as(&mut self, r: &str, kind: &'static str) {
+        self.kinds.push((r.to_string(), kind));
+        self.bound(r);
+    }
+
+    fn read_as(&mut self, r: &str, kind: &'static str) {
+        self.kinds.push((r.to_string(), kind));
+        self.read(r);
+    }
+
+    /// What `r` is, for messages: a group variable unless bound or read as another kind.
+    fn kind(&self, r: &str) -> &'static str {
+        self.kinds.iter().find(|(n, _)| n == r).map_or(GROUP, |(_, k)| k)
+    }
+
     fn read(&mut self, r: &str) {
         self.seen(r);
         if self.unsaved.is_none() && !self.saved.iter().any(|s| s == r) {
@@ -1747,7 +1785,8 @@ impl Uses {
                 input.iter().for_each(|p| self.walk(p));
                 self.call_args(c);
             }
-            Pipe::Fun(r) => self.read(r),
+            Pipe::Fun(r) => self.read_as(r, FUNCTION),
+            Pipe::Local(r) => self.read_as(r, NUMBER),
             Pipe::Not(c) => self.expr(c),
             Pipe::And(cs) | Pipe::Or(cs) => cs.iter().for_each(|c| self.expr(c)),
             Pipe::Cmp(_, a, b) | Pipe::Bin(_, a, b) => {
@@ -2085,7 +2124,7 @@ mod tests {
         let p = Passes::parse("prepass=(scope (save t) | (rewrites = unified_rewrites | semi_leaves = 2 | rewrite) | (filter (size < (size t) || size <= (size t) * 3 / 4 && !tiny)) | (cand halve_input (load t)))").unwrap();
         assert_eq!(p.prepass.to_string(), "(scope (save t) | (rewrites = unified_rewrites | semi_leaves = 2 | rewrite) | (filter (size < (size t) || size <= (size t) * 3 / 4 && !tiny)) | (cand halve_input (load t)))");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
-        for bad in ["prepass=(filter lt)", "prepass=(filter (size <=))", "prepass=(rewrites = x | id)", "prepass=(nope = 1 | id)", "prepass=(save)", "prepass=(scope id id)"] {
+        for bad in ["prepass=(filter lt)", "prepass=(filter (size <=))", "prepass=(rewrites = x | id)", "prepass=(save)", "prepass=(scope id id)"] {
             assert!(Passes::parse(bad).is_err(), "{bad}");
         }
         assert_eq!(Passes::default().check(), Ok(()));
@@ -2173,7 +2212,7 @@ prepass=lowbits | r2
         assert!(w.len() == 1 && w[0].contains("(off relate) ends its sequence"), "{w:?}");
         let e = Passes::parse("prepass=save/t").unwrap_err();
         assert!(e.contains("(save t)"), "{e}");
-        for bad in ["pipeline=nope", "pipeline=(seq rewrite", "pipeline=(best x rewrite)", "pipeline=(fix 2 a b)", "pipeline=(nope = 1 | rewrite)", "pipeline=(loop rewrite)", "pipeline=(fix many id)", "pipeline=(if nope id)", "pipeline=(if mixed id id id)", "pipeline=(retry mixed id)"] {
+        for bad in ["pipeline=nope", "pipeline=(seq rewrite", "pipeline=(best x rewrite)", "pipeline=(fix 2 a b)", "pipeline=(loop rewrite)", "pipeline=(fix many id)", "pipeline=(if nope id)", "pipeline=(if mixed id id id)", "pipeline=(retry mixed id)"] {
             assert!(Passes::parse(bad).is_err(), "{bad}");
         }
         with_off(&["relate"], || {
@@ -2275,7 +2314,7 @@ prepass=lowbits | r2
             ("prepass=size | rewrite", "size gives a number; rewrite takes candidates"),
             ("(def @pipe (big k g) (size g) > k) prepass=big | rewrite", "big gives a number; rewrite takes candidates"),
             ("(def @pipe (big k g) (size g) > k) prepass=(big 3 (lowbits | unshift))", "big gives a number, not candidates"),
-            ("(def @pipe (big k g) (size g) > k) prepass=t = (big 3 (lowbits | unshift)) | (load t)", "t holds a function value, so it cannot name a group variable"),
+            ("(def @pipe (big k g) (size g) > k) prepass=t = (big 3 (lowbits | unshift)) | (load t)", "t is a number variable, so it cannot name a group variable"),
             ("(def @pipe (big k g) size > k)", "size needs its input here"),
             ("(def @pipe (big k g) (mixed) || k)", "mixed needs its input here"),
             ("(def @pipe (f g) rewrite)", "the body of an @pipe function starts with a value"),
@@ -2287,8 +2326,8 @@ prepass=lowbits | r2
             ("(def @pipe (f p g) g | p) (def (h a:group) (f id a)) prepass=(h u)", "prepass reads group variable u before it is bound"),
             ("(def @pipe (f p g) g | p) prepass=(f id u)", "prepass reads group variable u before it is bound"),
             ("(def @pipe (f p g) g | p) prepass=(f id 1)", "f takes a pipeline"),
-            ("(def @pipe (big k g) (size g) > k) prepass=t = (big 3) | (load t)", "t holds a function value, so it cannot name a group variable"),
-            ("(def @pipe (big k g) (size g) > k) prepass=t = (k + 1)", "unknown variable t"),
+            ("(def @pipe (big k g) (size g) > k) prepass=t = (big 3) | (load t)", "t is a number variable, so it cannot name a group variable"),
+            ("(def @pipe (big k g) (size g) > k) prepass=t = (k + 1)", "unknown name k"),
         ] {
             let e = Passes::parse(bad).unwrap_err();
             assert!(e.contains(msg), "{bad}: {e}");
@@ -2316,7 +2355,7 @@ prepass=lowbits | r2
             ("prepass=(if ((rewrite | id) < 3) id)", "(rewrite | id) gives candidates, not a number"),
             ("(def @pipe (f g) (size g) > (rewrite | size))", "(rewrite | size) needs its input here"),
             ("(def @inline (f) rewrite | size)", "cannot be @inline"),
-            ("prepass=t = (rewrite | size) | (save t)", "t holds a function value"),
+            ("prepass=t = (rewrite | size) | (save t)", "t is a number variable, so it cannot name a group variable"),
 
             ("prepass=(save t) | t = 1 | (load t)", "t is a group variable, so it cannot hold a number: 1 gives a number"),
             ("prepass=keep = (lowbits | unshift)", "keep is a variable that holds a number, so it cannot be bound to candidates: (lowbits | unshift) gives candidates"),

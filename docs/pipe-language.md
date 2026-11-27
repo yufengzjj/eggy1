@@ -177,7 +177,7 @@ x = e | rest    ≡  在 x = e 之下运行 rest          （绑定）
 
 > `NAME = VALUE` 在**当前作用域**里绑定变量 `NAME`；同一作用域里再赋值，就是覆盖这个绑定。读 `NAME` 时先在当前作用域找，没有就沿**调用链**往上找，直到入口程序。作用域结束时，它的绑定随之消失。
 
-- 这条规则说的是存数的变量；存候选组的组变量按词法查找，每次运行一套（第 5.5 节）。
+- 这条规则说的是第 10 节的变量（**全局变量**，Rust 的 pass 也读它们）。给别的名字赋值是**局部变量**（第 5.5 节）：数、一组候选、函数值都可以存，按词法查找，每次运行一套，不参与这种查找。
 - **作用域**有三种：序列（`a | b | ...`，包括分组 `( ... )` 和 `(seq ...)`）、`scope`、每条管线的一次运行。其他形式（`if`、`fix`、`union`、`best`……）不是作用域：`(if C x = 1)` 的绑定落在 `if` 所在的序列里，`(if C (x = 1 | p))` 的绑定只在那条分组序列里。
 - "往上"沿调用链走（动态作用域）：`semi_leaves = 2 | polish` 里，`polish` 读到 2，除非它自己在内层再赋值。
 - 赋值原样传下候选，所以可以写在序列的任何位置。
@@ -218,9 +218,11 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 - `(off A B ...)` 展开成 `A = 0 | B = 0 | ...`，`(on A B ...)` 同理（`A = 1`）；`A`、`B` 必须是开关。它们不是函数：如果是函数，绑定会在返回时撤销。
 - `(smallest p)` 展开成 `(clear s) | p' | (take_min s)`。`s` 是宏生成的记录寄存器名（`smallest#N`，每个 `smallest` 一个，用户写不出）。`p'` 是在 `p` 的文字里每个**计算的步骤**后面插一个 `(note s)`：计算的步骤是调用不带 `@bookkeeping`、也不带管线参数的函数（`note` 本身除外；单项 pass、alternative、`prepass`、`polish`、`take_minimal`、`reprint`、`egglog`）、调用 `def` 函数，以及 `def` 函数体里的管线参数（记它返回的候选）。插入也进到高阶函数的管线参数（`fix`、`best`、`if`、`retry`、`union`、`first`、`smaller`、`wins`、`regions`、`again`、`scope`、`tag`、`cand` 的各支）、组变量绑定的右边（`t = p` 的 `p`）、传给函数的管线参数（闭包，里面的 `note` 写的是外面的 `s`）、有数值参数的 `@inline` 函数体（共享调用处的 `smallest`；体里的管线参数后面不插，参数在调用处已经插过）和里层 `smallest` 的展开里；`let` 和没有数值参数的 `@inline` 函数已展开在文字里，照样插。不进 `def` 函数体和 `prepass`、`polish` 等定义的函数里面：它们只以返回值被看到。所以 `fix` 的各轮、`best` 落选的分支给出的候选都算，输入本身不算。`p` 是序列时展开是一个作用域，否则展开的各步在所在的作用域里执行，和 `p` 不写在 `smallest` 里时一样。`--show-passes` 照原样打印 `(smallest p)`。
 
-### 5.5 组变量
+### 5.5 局部变量
 
-**组变量**存一组候选（第 10 节的变量存数）。`R = p` 在当前候选组上运行步骤 `p`，把它给出的候选绑定到 `R`，当前候选组原样传下去（同其他赋值）；`R = U`（`U` 是组变量）把 `U` 的候选组绑定到 `R`；`(save R)` 是 `R = id` 的简写，`(load R)` 给出 `R` 的候选组，`(size R)`、`(same R)`、`(label R)` 读它的主候选。
+给一个不是全局变量（第 10 节）的名字赋值，就在本次运行里新建一个**局部变量**；存什么由右边定（第 5.6 节）：一个数（**数变量**，`n = (size * 2)`，之后 `(fix n p)`、`(if (n > 3) ...)` 读它）、一组候选（**组变量**，下面）、一个函数值（**函数变量**，要写类型，`f:term->num = size`，第 6.8 节）。局部变量都按词法查找，规则同下面的组变量；一个名字只存一种（`n is a number variable, so it cannot be bound to candidates`、`f is a function variable, so it cannot hold a number`）；不能和全局变量、函数、宏、`let`、`def` 名或参数同名，所以遮不住全局变量。数变量的右边在执行到这一步时、对当时的候选组求一次值（`n = size | rewrite | (if (n > size) ...)` 比的是 `rewrite` 前后的大小）。
+
+**组变量**存一组候选。`R = p` 在当前候选组上运行步骤 `p`，把它给出的候选绑定到 `R`，当前候选组原样传下去（同其他赋值）；`R = U`（`U` 是组变量）把 `U` 的候选组绑定到 `R`；`(save R)` 是 `R = id` 的简写，`(load R)` 给出 `R` 的候选组，`(size R)`、`(same R)`、`(label R)` 读它的主候选。
 
 ```
 t = (lowbits | unshift) | rewrite | (filter (size < (size t)))   # rewrite 的结果比 t 小才留下
@@ -239,10 +241,10 @@ t = (lowbits | unshift) | rewrite | (filter (size < (size t)))   # rewrite 的�
 
 赋值右边只读一次，读完按它给出的东西定是哪一种：
 
-- 给出数（表达式，包括括号里以数结束的管线 `(prepass | size)`、`((lowbits | size) + 1)`）：赋值，左边必须是存数的变量（第 10 节）。表达式读到 `|`、`)` 或项尾为止：`split_runs = vars * 2 | split_bits`。
+- 给出数（表达式，包括括号里以数结束的管线 `(prepass | size)`、`((lowbits | size) + 1)`）：左边是全局变量（第 10 节）时给它赋值，否则绑定一个数变量（第 5.5 节）。右边的意思只由右边定：`n = size`、`t = (big 3)`、`t = (rewrite | size)` 都在当前输入上求出一个数，不是函数值；要存函数值写类型，`f:term->num = size`。表达式读到 `|`、`)` 或项尾为止：`split_runs = vars * 2 | split_bits`。
 - 给出候选：绑定组变量（第 5.5 节）。右边是**一个步骤**，读到 `|` 或 `)` 为止：`t = rewrite | relate` 是 `(t = rewrite) | relate`；含 `|` 的管线要加括号，`t = (lowbits | unshift)`、`t = (relate = 0 | rewrite)`。右边单独一个不是变量、函数或定义的名字（后面是 `|`、`)` 或项尾）是组变量：`t = u` 把 `u` 的候选组绑定到 `t`，意思同 `t = (load u)`（两种写法各照原样打印）。
 - 右边开头的名字两种都说得通时由左边定：`relate` 既是 pass 又是开关变量，`t = relate` 是 pass，`keep = relate` 是开关变量；没注解的参数 `r` 在 `keep = r` 里是数值参数，在 `t = r` 里按管线读（第 6.2 节）。
-- 类型对不上是错误，报错写出两边：`keep = (lowbits | unshift)` 报 `keep is a variable that holds a number, so it cannot be bound to candidates: (lowbits | unshift) gives candidates`；前面绑定过的组变量赋数报 `t is a group variable, so it cannot hold a number: 1 gives a number`；左边是没见过的名字、右边是数时报 `unknown variable t`（多半是存数的变量写错了）；右边像表达式却读不下去时（`t = u + 1`，`u` 不是任何名字）也报 `unknown variable t`，后面附上右边的错误。
+- 类型对不上是错误，报错写出两边：`keep = (lowbits | unshift)` 报 `keep is a variable that holds a number, so it cannot be bound to candidates: (lowbits | unshift) gives candidates`；前面绑定过的组变量赋数报 `t is a group variable, so it cannot hold a number: 1 gives a number`；右边像表达式却读不下去时报右边的错（`t = u + 1`，`u` 不是任何名字：`unknown name u in an expression`）。全局变量写错了名字（`kep = 3`）会成为一个新的数变量，由"绑定了却没读"的警告提示（`number variable kep is bound and never read`）。
 
 ## 6. 函数定义
 
@@ -369,10 +371,10 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub/NAME=P   # 即 (de
 
 - **部分应用**：带 `@pipe` 的函数少写了输入就是函数值，类型是"输入 -> 返回"：`size` 是 `term->num`，`rewrite` 是 `term->term`，`(best 1 a b)` 是 `pipe`，`(big 20)` 是 `group->num`，`(with_budget 8 rewrite)` 是 `pipe`。在步骤位置、表达式里这就是原来的写法（第 6.3 节的隐式输入）。
 - **写在函数类型位置的表达式或管线**：以隐式输入为参数的函数。`(filter (size <= 20))` 的条件对每个候选求值，`(keep_if (size <= 20))` 传进去的也是这样一个函数。
-- **函数参数**（第 6.2 节）和**函数变量**：`f = size`、`small = (size <= 20)`、`f = (under 20)`——`=` 左边不是存数的变量、右边是读了隐含输入的表达式时，`f` 存这个函数值，类型 `term->num`（只读主候选时）或 `group->num`；右边不读输入时照旧报 `unknown variable f`（`t = 1`）。别的类型写注解：`g:term->term = relate`（右边是一步，类型要接得上）。不写注解时 `t = rewrite` 照旧把候选绑定到组变量 `t`。函数变量和组变量一样按词法查找，只在本次运行里看得见；同一个名字只能存一种（`f holds a function value, so it cannot name a group variable`、`t is a group variable, so it cannot hold a number`）。
+- **函数参数**（第 6.2 节）和**函数变量**：函数变量是存函数值的局部变量（第 5.5 节），要写类型：`f:term->num = size`、`small:term->num = (size <= 20)`、`f:term->num = (under 20)`、`g:term->term = relate`（右边是表达式或一步，类型要接得上）。不写类型时右边的意思只由右边定：`f = size` 是数变量，`t = rewrite` 是组变量。同一个名字只能存一种（`f is a function variable, so it cannot name a group variable`、`t is a group variable, so it cannot hold a function value`）。
 - **返回函数的 `def`**：不带 `@pipe` 的函数，函数体是表达式而读了隐含的输入时（`(def (under k) size <= k)`），签名是 `(under k:num t:term) num`：输入只读主候选时是 `t:term`，读整组时是 `g:group`。写在要数的地方时取这一步的输入，得一个数（`(if (under 9) p)`）；写在函数类型的位置时是 `term->num` 的函数值（`(filter (under 20))`、`(keep_if (under 20))`）。函数体不读输入（`(def (f) keep + 1)`、`(def @pipe (big k g) (size g) > k)`）时照旧返回数，意思不变。
 
-**调用**：`(pred t)` 或 `t | pred`（表达式里写在括号里，`((pred t) > 5)`、`(t | pred)`），和 `(p g)` 一样；单独写在要数的地方时用在这一步的输入上（`(filter (f < 5))`）。没写注解的参数被这样调用时推成 `group->num`。函数值是闭包：它带着写下它的运行，读那里的组变量、函数变量和参数，在哪里用都一样；`(def (f n) small = (size <= n) | (keep_if small))` 里的 `small` 在 `keep_if` 里面求值时读的仍是 `f` 的 `n`。`wins`、`moved`、`scope` 的缓存这些没有名字的状态，照旧按它实际运行的位置算（第 6.3 节）。
+**调用**：`(pred t)` 或 `t | pred`（表达式里写在括号里，`((pred t) > 5)`、`(t | pred)`），和 `(p g)` 一样；单独写在要数的地方时用在这一步的输入上（`(filter (f < 5))`）。没写注解的参数被这样调用时推成 `group->num`。函数变量的值是闭包：绑定时抓下它读到的局部变量当时的值和调用的参数，在哪里用都一样，之后再给那些变量赋值也不影响它；`(def (f n) small:term->num = (size <= n) | (keep_if small))` 里的 `small` 在 `keep_if` 里面求值时读的仍是 `f` 的 `n`。函数参数传进去的是参数和写下它的运行（第 6.3 节）。`wins`、`moved`、`scope` 的缓存这些没有名字的状态，照旧按它实际运行的位置算（第 6.3 节）。
 
 **转换**：传参、存进变量和相邻步骤用同一套规则（第 4.3 节的调用方式），给的类型能接到要的类型时隐式转换：
 
@@ -398,7 +400,7 @@ prepass=(union id rewrite) | (keep_if (size <= 20))
 prepass=(union id rewrite) | (filter (under 20)) | (if (under 9) relate)
 
 (def @pipe (each f:term->term g) g | f)
-prepass=(each rewrite) | f = (size <= 20) | (filter f) | g:term->term = relate | (each g)
+prepass=(each rewrite) | f:term->num = (size <= 20) | (filter f) | g:term->term = relate | (each g)
 
 (def (pick pred) (save t) | (if ((pred t) > 5) rewrite))   # pred 推成 group->num
 prepass=(pick size)                                       # size 是 term->num：取 t 的主候选
@@ -408,12 +410,11 @@ prepass=(pick size)                                       # size 是 term->num�
 prepass=(app (with_budget 8 rewrite))                     # def 少写最后一个参数
 
 (def @pipe (keep_if pred g) g | (filter pred))
-(def (small_only n) small = (size <= n) | (union id rewrite) | (keep_if small))
+(def (small_only n) small:term->num = (size <= n) | (union id rewrite) | (keep_if small))
 prepass=(small_only 20)                                   # small 在 keep_if 里读 small_only 的 n
 ```
 
 ### 6.9 例子
-
 
 每段是一个独立的例子：
 

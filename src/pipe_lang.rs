@@ -228,8 +228,10 @@ struct Parser<'a> {
     params: Vec<ParamUse>,
     /// The group variables bound so far in the text, which a name alone can read as a value.
     groups: Vec<String>,
-    /// The function variables bound so far in the text (`f = size`) and their types.
+    /// The function variables bound so far in the text (`f:term->num = size`) and their types.
     fns: Vec<(String, Ty)>,
+    /// The local variables that hold a number bound so far in the text (`n = (size * 2)`).
+    locals: Vec<String>,
     /// In the body of a function that is an expression, outside any step: a function of the
     /// candidates needs its input written.
     no_input: bool,
@@ -245,7 +247,7 @@ fn seq_of(mut stages: Vec<Pipe>) -> Pipe {
 
 impl<'a> Parser<'a> {
     fn new(toks: Vec<Tok>, defs: &'a Defs) -> Parser<'a> {
-        Parser { toks, at: 0, defs, used: Vec::new(), params: Vec::new(), groups: Vec::new(), fns: Vec::new(), no_input: false, after_bar: false, pending: None }
+        Parser { toks, at: 0, defs, used: Vec::new(), params: Vec::new(), groups: Vec::new(), fns: Vec::new(), locals: Vec::new(), no_input: false, after_bar: false, pending: None }
     }
 
     /// Whether `n` is a group value: a group parameter, or a group variable bound before in
@@ -482,19 +484,39 @@ impl<'a> Parser<'a> {
         self.bind_fn(n, f, ty)
     }
 
-    /// `n = f`: the function value `f` of type `ty` bound to the variable `n`.
+    /// An error where `n` cannot be a new local variable: a parameter, or the name of a
+    /// variable of `VARS`, a function, a definition or a word of the language.
+    fn local_name(&self, n: &str) -> Result<(), String> {
+        if self.param(n).is_some() {
+            return Err(format!("parameter {n} cannot be assigned"));
+        }
+        if self.defs.contains_key(n) {
+            return Err(format!("{n} is defined by let or def @inline and cannot be assigned"));
+        }
+        if known_name(n) || resolve(n).is_some() || defined_builtin(n) || ["none", "def", "extern"].contains(&n) {
+            return Err(assignable(n).err().unwrap_or_else(|| format!("{n} cannot be assigned")));
+        }
+        Ok(())
+    }
+
+    /// `n = f`: the function value `f` of type `ty` bound to the local variable `n`.
     fn bind_fn(&mut self, n: &str, f: Pipe, ty: Ty) -> Result<Pipe, String> {
         if self.groups.iter().any(|g| g == n) {
             return Err(format!("{n} is a group variable, so it cannot hold a function value"));
         }
-        if self.param(n).is_some() {
-            return Err(format!("parameter {n} cannot be assigned"));
+        if self.locals.iter().any(|l| l == n) {
+            return Err(format!("{n} is a number variable, so it cannot hold a function value"));
         }
-        if self.defs.contains_key(n) || known_name(n) || resolve(n).is_some() || defined_builtin(n) || ["none", "def", "extern"].contains(&n) {
-            return Err(assignable(n).err().unwrap_or_else(|| format!("{n} cannot be assigned")));
-        }
+        self.local_name(n)?;
         self.fns.push((n.to_string(), ty.clone()));
         Ok(Pipe::BindFn(n.to_string(), Arc::new(f), ty))
+    }
+
+    /// `n = e`: the number `e` gives bound to the local variable `n`.
+    fn bind_num(&mut self, n: &str, e: Pipe) -> Result<Pipe, String> {
+        self.local_name(n)?;
+        self.locals.push(n.to_string());
+        Ok(Pipe::BindNum(n.to_string(), Box::new(e)))
     }
 
     fn pipe(&mut self) -> Result<Pipe, String> {
@@ -689,22 +711,18 @@ impl<'a> Parser<'a> {
             return Err(e.into());
         }
         let rhs = match self.number_ahead(number_var) {
-            true => self.or().map(Rhs::Num).map_err(|e| match assignable(n) {
-                Err(a) if !group_var && !e.contains("unknown variable") => format!("{a}; the right side is not a step either: {e}"),
-                _ => e,
-            }),
+            true => self.or().map(Rhs::Num),
             false => self.rhs_group(number_var, true),
         }?;
         self.no_assign()?;
         match rhs {
             Rhs::Num(e) if number_var => self.assign_number(n, e),
             Rhs::Num(e) if group_var => Err(format!("{n} is a group variable, so it cannot hold a number: {} gives a number", show_expr(&e, 1))),
-            Rhs::Num(e) => match self.input_ty(&e) {
-                Some(t) if var_index(n).is_none() => self.bind_fn(n, e, Ty::Fn(Box::new(t), Box::new(Ty::Num))),
-                _ => Err(assignable(n).unwrap_err()),
-            },
+            Rhs::Num(e) if self.fn_var(n).is_some() => Err(format!("{n} is a function variable, so it cannot hold a number: {} gives a number; write {n}:TYPE = ... for a function", show_expr(&e, 1))),
+            Rhs::Num(e) => self.bind_num(n, e),
             Rhs::Group(p) if number_var => Err(format!("{n} is a variable that holds a number, so it cannot be bound to candidates: {} gives candidates", stage(&p))),
-            Rhs::Group(p) if self.fn_var(n).is_some() => Err(format!("{n} holds a function value, so it cannot be bound to candidates: {} gives candidates", stage(&p))),
+            Rhs::Group(p) if self.locals.iter().any(|l| l == n) => Err(format!("{n} is a number variable, so it cannot be bound to candidates: {} gives candidates", stage(&p))),
+            Rhs::Group(p) if self.fn_var(n).is_some() => Err(format!("{n} is a function variable, so it cannot be bound to candidates: {} gives candidates", stage(&p))),
             Rhs::Group(p) => self.bind(n, p),
         }
     }
@@ -728,8 +746,12 @@ impl<'a> Parser<'a> {
                 None => number_fn || self.number_fn_name(n),
             };
         }
+        if self.locals.iter().any(|l| l == n) {
+            return true;
+        }
         match self.param(n) {
             Some(i) => return self.params[i].ty.as_ref().map_or(number_var, Ty::is_expr),
+
             None if number_fn || self.number_fn_name(n) => return true,
             None if self.fn_var(n).is_some() => return false,
             None => {}
@@ -857,7 +879,10 @@ impl<'a> Parser<'a> {
     /// `n = p`: the candidates of the step `p` bound to the group variable `n`.
     fn bind(&mut self, n: &str, p: Pipe) -> Result<Pipe, String> {
         if self.fn_var(n).is_some() {
-            return Err(format!("{n} holds a function value, so it cannot be bound to candidates"));
+            return Err(format!("{n} is a function variable, so it cannot be bound to candidates"));
+        }
+        if self.locals.iter().any(|l| l == n) {
+            return Err(format!("{n} is a number variable, so it cannot be bound to candidates"));
         }
         if self.defs.contains_key(n) {
             return Err(format!("{n} is defined by let or def @inline and cannot be assigned"));
@@ -874,7 +899,10 @@ impl<'a> Parser<'a> {
             return self.use_param(n, Ty::Group);
         }
         if self.fn_var(n).is_some() {
-            return Err(format!("{n} holds a function value, so it cannot name a group variable"));
+            return Err(format!("{n} is a function variable, so it cannot name a group variable"));
+        }
+        if self.locals.iter().any(|l| l == n) {
+            return Err(format!("{n} is a number variable, so it cannot name a group variable"));
         }
         match var_index(n) {
             Some(_) => Err(format!("{n} is a variable that holds a number, so it cannot name a group variable")),
@@ -1255,6 +1283,9 @@ impl<'a> Parser<'a> {
                     self.use_param(&n, Ty::Num)?;
                     return Ok(Pipe::Param(i, n));
                 }
+                if self.locals.iter().any(|l| *l == n) {
+                    return Ok(Pipe::Local(n));
+                }
                 if let Some(t) = self.fn_var(&n) {
                     return match t {
                         _ if !self.number_fn_name(&n) => Err(format!("{n} holds {t}, which gives candidates, not a number")),
@@ -1392,7 +1423,6 @@ pub fn starts_with_value(p: &Pipe) -> bool {
         _ => false,
     }
 }
-
 
 fn not_pipe(s: &Sig) -> String {
     format!("{} is not @pipe, so | cannot give it its input: call it with all its arguments, {s}", s.name)
@@ -1825,6 +1855,7 @@ impl<'s> Subst<'s> {
             Pipe::Param(i, _) => self.pipes.get(*i).copied().flatten().map_or_else(|| p.clone(), Pipe::clone),
             Pipe::Bind(n, q) => Pipe::Bind(self.name(n), b(q)?),
             Pipe::BindFn(n, q, t) => Pipe::BindFn(n.clone(), Arc::new(self.pipe(q)?), t.clone()),
+            Pipe::BindNum(n, e) => Pipe::BindNum(n.clone(), b(e)?),
             Pipe::Assign(i, e) => Pipe::Assign(*i, b(e)?),
             Pipe::Switch(on, ns) => Pipe::Switch(*on, ns.iter().map(|n| self.switch(n, if *on { "on" } else { "off" })).collect::<Result<_, _>>()?),
             Pipe::Call(c, input) => Pipe::Call(Arc::new(self.call(c)?), input.as_deref().map(b).transpose()?),
@@ -1832,7 +1863,7 @@ impl<'s> Subst<'s> {
             Pipe::Not(c) => Pipe::Not(b(c)?),
             Pipe::Cmp(op, x, y) => Pipe::Cmp(*op, b(x)?, b(y)?),
             Pipe::Bin(op, x, y) => Pipe::Bin(*op, b(x)?, b(y)?),
-            Pipe::Num(_) | Pipe::Var(_) | Pipe::Fun(_) => p.clone(),
+            Pipe::Num(_) | Pipe::Var(_) | Pipe::Fun(_) | Pipe::Local(_) => p.clone(),
         })
     }
 
@@ -1893,6 +1924,7 @@ fn noted(p: &Pipe, s: &str, inline: bool) -> Pipe {
         Pipe::Bind(n, q) => Pipe::Bind(n.clone(), Box::new(noted_one(q, s, inline))),
         Pipe::BindFn(n, q, t) if t.is_step() => Pipe::BindFn(n.clone(), Arc::new(noted_one(q, s, inline)), t.clone()),
         Pipe::BindFn(n, q, t) => Pipe::BindFn(n.clone(), Arc::new(noted(q, s, inline)), t.clone()),
+        Pipe::BindNum(n, e) => Pipe::BindNum(n.clone(), b(e)),
         Pipe::Smallest(m) => {
             let steps = noted_stages(&m.steps, s, inline);
             Pipe::Smallest(Box::new(crate::sched::Smallest { source: m.source.clone(), steps, scoped: m.scoped }))
@@ -1909,7 +1941,7 @@ fn noted(p: &Pipe, s: &str, inline: bool) -> Pipe {
         Pipe::Or(xs) => Pipe::Or(xs.iter().map(|x| noted(x, s, inline)).collect()),
         Pipe::Cmp(op, x, y) => Pipe::Cmp(*op, b(x), b(y)),
         Pipe::Bin(op, x, y) => Pipe::Bin(*op, b(x), b(y)),
-        Pipe::Num(_) | Pipe::Name(_) | Pipe::Var(_) | Pipe::Value(_) | Pipe::Fun(_) | Pipe::Param(..) | Pipe::Switch(..) => p.clone(),
+        Pipe::Num(_) | Pipe::Name(_) | Pipe::Var(_) | Pipe::Value(_) | Pipe::Fun(_) | Pipe::Local(_) | Pipe::Param(..) | Pipe::Switch(..) => p.clone(),
     }
 }
 
@@ -2058,10 +2090,11 @@ pub fn show(p: &Pipe) -> String {
             let all: Vec<String> = c.args.iter().zip(&c.def.params).map(|(a, p)| show_call_arg(a, p)).chain(input.as_deref().map(stage)).collect();
             if all.is_empty() { c.def.name.clone() } else { form(&c.def.name, &all) }
         }
-        Pipe::Param(_, n) | Pipe::Value(n) | Pipe::Fun(n) | Pipe::Name(n) => n.clone(),
+        Pipe::Param(_, n) | Pipe::Value(n) | Pipe::Fun(n) | Pipe::Local(n) | Pipe::Name(n) => n.clone(),
+        Pipe::BindNum(n, e) => format!("{n} = {}", show_assigned(e)),
         Pipe::Bind(n, q) => format!("{n} = {}", bound(q, show(q))),
         Pipe::BindFn(n, q, t) if t.is_step() => format!("{n}:{t} = {}", stage(q)),
-        Pipe::BindFn(n, q, _) => format!("{n} = {}", show_assigned(q)),
+        Pipe::BindFn(n, q, t) => format!("{n}:{t} = {}", show_assigned(q)),
 
         Pipe::Assign(i, v) => format!("{} = {}", var(*i).name, show_assigned(v)),
         Pipe::Switch(on, ns) => form(if *on { "on" } else { "off" }, &[ns.join(" ")]),
@@ -2265,7 +2298,6 @@ mod tests {
             ("(filter (vars = 2 || mul > 1))", "compare with =="),
             ("(if size = 3 id)", "compare with =="),
             ("(fix n = 3 id)", "compare with =="),
-            ("nope = 1", "unknown variable nope"),
             ("size = 1", "cannot be assigned"),
             ("mixed = 1", "cannot be assigned"),
             ("minimal = 1", "prove_minimal"),
@@ -2428,10 +2460,8 @@ mod tests {
             assert_eq!(parse(&show(&parse(s).unwrap())).unwrap(), parse(s).unwrap(), "{s}");
         }
         for (bad, msg) in [
-            ("t = 1", "unknown variable t"),
-            ("t = keep", "unknown variable t"),
-            ("t = u + 1", "unknown variable t"),
-            ("t = (u)", "unknown variable t"),
+            ("t = u + 1", "unknown name u"),
+            ("t = (u)", "unknown name u"),
             ("keep = rewrite", "keep is a variable that holds a number, so it cannot be bound to candidates"),
             ("(save keep)", "keep is a variable that holds a number, so it cannot name a group variable"),
             ("(if (same relate) id)", "relate is a variable that holds a number"),
@@ -2473,7 +2503,7 @@ mod tests {
         assert!(matches!(parse(&number).unwrap(), Pipe::Assign(..)));
         assert!(matches!(parse(&group).unwrap(), Pipe::Bind(..)));
         assert!(start.elapsed() < std::time::Duration::from_secs(2), "{:?}", start.elapsed());
-        for (s, msg) in [("keep = ((lowbits | size) + 1)", ""), ("t = ((lowbits | unshift) | relate)", ""), ("t = ((lowbits | size) | relate)", "gives a number; relate takes candidates"), ("t = (u)", "the right side is not a step either: unknown name u"), ("t = (time-limit 3)", "write time_limit = N")] {
+        for (s, msg) in [("keep = ((lowbits | size) + 1)", ""), ("t = ((lowbits | unshift) | relate)", ""), ("t = ((lowbits | size) | relate)", "gives a number; relate takes candidates"), ("t = (u)", "unknown name u in an expression"), ("t = (time-limit 3)", "write time_limit = N")] {
             match parse(s) {
                 Ok(_) => assert!(msg.is_empty(), "{s}"),
                 Err(e) => assert!(!msg.is_empty() && e.contains(msg), "{s}: {e}"),
