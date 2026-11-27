@@ -669,17 +669,17 @@ pub enum Pipe {
     Union(Vec<Pipe>),
     /// All on the same candidates; the `k` smallest of their candidates, the earlier of
     /// equal ones first (`best`).
-    Best(Value, Vec<Pipe>),
+    Best(Expr, Vec<Pipe>),
     /// The candidates of the first that gives candidates other than its input's, else the
     /// input (`first`).
     First(Vec<Pipe>),
     /// Repeated at most `n` times while the main candidate changes (`fix`).
-    Fix(Value, Box<Pipe>),
+    Fix(Expr, Box<Pipe>),
     /// `a` where the condition holds for the candidates, else `b` (`if`).
-    If(Cond, Box<Pipe>, Box<Pipe>),
+    If(Expr, Box<Pipe>, Box<Pipe>),
     /// `a`, and where the condition holds for its candidates, `b` on the same input taken
-    /// instead when its main candidate is no larger (`retry`).
-    Retry(Cond, Box<Pipe>, Box<Pipe>),
+    /// instead when it gives candidates and its main one is no larger (`retry`).
+    Retry(Expr, Box<Pipe>, Box<Pipe>),
     /// The candidates of `p`, unless a pass inside gave a strictly smaller candidate than
     /// their main one: then the first smallest (`smallest`).
     Smallest(Box<Pipe>),
@@ -687,7 +687,7 @@ pub enum Pipe {
     /// and gets origin `NAME` (`tag`).
     Tag(String, Box<Pipe>),
     /// The candidates the condition holds for, each taken alone (`filter`).
-    Filter(Cond),
+    Filter(Expr),
     /// The pre-pass candidate `NAME`: `p` as a scope with `bit_split_budget = cand_bit_splits`
     /// first, timed as `pre/NAME/made`, its candidates with origin `NAME`; none when `NAME`
     /// is an entry of `PRE` turned off (`cand`).
@@ -698,8 +698,9 @@ pub enum Pipe {
     /// `NAME/run`, counted in `NAME/won` and `NAME/gain` when taken, which gives the main
     /// candidate origin `NAME` (`smaller`).
     Smaller(String, Box<Pipe>),
-    /// `p` repeated while the `smaller` inside take a result, until they have taken `n` (`wins`).
-    Wins(Value, Box<Pipe>),
+    /// `p` repeated while the `smaller` inside take a result, until they have taken `n`; not
+    /// run for `n` 0 (`wins`).
+    Wins(Expr, Box<Pipe>),
     /// Each candidate that is a linear region rebuilt by the first candidate of `p`, with the
     /// atom leaves of that form rewritten by `Passes::rewrite`; otherwise, or when `p` gives
     /// none, its operands rewritten (`regions`).
@@ -725,9 +726,9 @@ pub enum Pass {
     /// `Off` the other way.
     On(Vec<&'static str>),
     /// `NAME = VALUE`: binds the variable at this position of `VARS` in the enclosing scope
-    /// to the value, evaluated on the candidates; `None` is `none` (no limit). A switch is on
+    /// to the value, evaluated on the candidates (`none`: no limit). A switch is on
     /// for any value but 0; `time_limit` takes milliseconds from now.
-    Assign(usize, Option<Value>),
+    Assign(usize, Expr),
     /// A pass over one term; `alt` is the used bit of an alternative
     /// (`crate::linear_mba::ALTERNATIVES`).
     Term { name: String, at: TermAt, alt: Option<u8> },
@@ -761,18 +762,52 @@ impl Pass {
     }
 }
 
-/// A number in a pipeline: a count of `fix`, `best` or `wins`, or a side of a comparison.
+/// An expression of a pipeline, evaluated on the candidates to a number or `NONE`: a
+/// condition (true when not 0), a count of `fix`, `best` or `wins`, or the right side of an
+/// assignment. The functions (`Feature`, `Is`, `Size`, `Same`, `Any`, `All`) give 0 without
+/// a main candidate or register.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Value {
+pub enum Expr {
+    /// A number; `NONE` is `none`.
     Num(u64),
     /// The main candidate's entry of `crate::pipe::FEATURES` (`size` is its node count).
     Feature(usize),
+    /// An entry of `crate::pipe::CONDS`, 1 or 0.
+    Is(usize),
     /// The size of the main candidate of register `R` (`(size R)`).
     Size(String),
+    /// 1 when the main candidate is the term of register `R`'s (`(same R)`).
+    Same(String),
     /// A variable of `VARS`; `time_limit` reads as the milliseconds left, `keep` as at least 1.
     Var(usize),
-    /// `+ - * /` of two values.
-    Bin(char, Box<Value>, Box<Value>),
+    Not(Box<Expr>),
+    And(Vec<Expr>),
+    Or(Vec<Expr>),
+    Cmp(Cmp, Box<Expr>, Box<Expr>),
+    /// `+ - * /` of two values (`arith`).
+    Bin(char, Box<Expr>, Box<Expr>),
+    /// 1 when some candidate alone gives a value other than 0 (`(any C)`).
+    Any(Box<Expr>),
+    /// 1 when there are candidates and each alone gives a value other than 0 (`(all C)`).
+    All(Box<Expr>),
+}
+
+/// `a op b` for `+ - * /`, `none` as +∞: `+` and `*` give `none` on overflow or a `none`
+/// operand, `-` stops at 0 (`n - none` is 0), `/` gives `none` for a 0 divisor and 0 for a
+/// `none` one.
+pub fn arith(op: char, a: u64, b: u64) -> u64 {
+    match op {
+        '+' if a != NONE && b != NONE => a.checked_add(b).unwrap_or(NONE),
+        '*' if a != NONE && b != NONE => a.checked_mul(b).unwrap_or(NONE),
+        '+' | '*' => NONE,
+        '-' if b == NONE => 0,
+        '-' if a == NONE => NONE,
+        '-' => a.saturating_sub(b),
+        _ if b == 0 => NONE,
+        _ if b == NONE => 0,
+        _ if a == NONE => NONE,
+        _ => a / b,
+    }
 }
 
 /// A comparison operator.
@@ -803,28 +838,6 @@ impl Cmp {
             Cmp::Ne => a != b,
         }
     }
-}
-
-/// A condition on candidates. A name, `Same` and a comparison are false without a main
-/// candidate, and a comparison also when a register it reads is empty.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Cond {
-    /// An entry of `crate::pipe::CONDS`.
-    Is(usize),
-    /// A variable of `VARS`, true when not 0 (`none` too).
-    Var(usize),
-    /// A number, true when not 0.
-    Num(u64),
-    /// The main candidate is the term of register `R`'s (`(same R)`).
-    Same(String),
-    Not(Box<Cond>),
-    And(Vec<Cond>),
-    Or(Vec<Cond>),
-    Cmp(Cmp, Value, Value),
-    /// Some candidate alone satisfies it (`(any C)`).
-    Any(Box<Cond>),
-    /// There are candidates and each alone satisfies it (`(all C)`).
-    All(Box<Cond>),
 }
 
 impl fmt::Display for Pipe {
@@ -1045,7 +1058,7 @@ impl Passes {
     /// `iter_limit = i` of the command line (`cli`), then those of `--passes`.
     pub fn entry_steps(&self, cli: Option<(usize, usize)>) -> Vec<Pass> {
         let (base, spec) = self.entry.split_at(self.defaults);
-        let num = |i: usize, n: usize| Pass::Assign(i, Some(Value::Num(n as u64)));
+        let num = |i: usize, n: usize| Pass::Assign(i, Expr::Num(n as u64));
         let cli = cli.map(|(m, i)| [num(RESTARTS, m), num(ITER_LIMIT, i)]);
         base.iter().cloned().chain(cli.into_iter().flatten()).chain(spec.iter().cloned()).collect()
     }
@@ -1371,18 +1384,14 @@ impl Uses {
                 }
             }
             Pipe::Pass(Pass::Load(r) | Pass::Label(r)) => self.read(r),
-            Pipe::Pass(Pass::Assign(_, v)) => {
-                if let Some(v) = v {
-                    self.value(v);
-                }
-            }
+            Pipe::Pass(Pass::Assign(_, v)) => self.expr(v),
             Pipe::Pass(_) => {}
             Pipe::Seq(ps) => {
                 let mut pending: Vec<usize> = Vec::new();
                 for p in ps {
                     match p {
                         Pipe::Pass(Pass::Assign(i, v)) => {
-                            if v.as_ref().is_some_and(|v| reads_var(v, *i)) {
+                            if reads_var(v, *i) {
                                 pending.retain(|j| j != i);
                             }
                             self.assigned(&mut pending, *i);
@@ -1403,14 +1412,14 @@ impl Uses {
             }
             Pipe::Best(v, ps) => {
                 ps.iter().for_each(|p| self.walk(p));
-                self.value(v);
+                self.expr(v);
             }
             Pipe::Fix(v, p) | Pipe::Wins(v, p) => {
-                self.value(v);
+                self.expr(v);
                 self.repeated(p);
             }
             Pipe::If(c, a, b) => {
-                self.cond(c);
+                self.expr(c);
                 let (before, n) = (std::mem::take(&mut self.pending), self.reads.len());
                 self.walk(a);
                 let after_a = std::mem::take(&mut self.pending);
@@ -1425,11 +1434,11 @@ impl Uses {
             }
             Pipe::Retry(c, a, b) => {
                 self.walk(a);
-                self.cond(c);
+                self.expr(c);
                 self.maybe(b);
             }
             Pipe::Cand(_, p) => self.maybe(p),
-            Pipe::Filter(c) => self.cond(c),
+            Pipe::Filter(c) => self.expr(c),
             Pipe::Smallest(p) | Pipe::Scope(p) | Pipe::Tag(_, p) | Pipe::Smaller(_, p) => self.walk(p),
             // Both rebuild with `Passes::rewrite`.
             Pipe::Regions(p) => {
@@ -1479,38 +1488,29 @@ impl Uses {
         }
     }
 
-    fn cond(&mut self, c: &Cond) {
-        match c {
-            Cond::Is(i) if ["opaque", "rebuilds"].contains(&crate::pipe::CONDS[*i]) => self.calls.push("prepass"),
-            Cond::Is(_) | Cond::Var(_) | Cond::Num(_) => {}
-            Cond::Same(r) => self.read(r),
-            Cond::Not(c) | Cond::Any(c) | Cond::All(c) => self.cond(c),
-            Cond::And(cs) | Cond::Or(cs) => cs.iter().for_each(|c| self.cond(c)),
-            Cond::Cmp(_, a, b) => {
-                self.value(a);
-                self.value(b);
+    fn expr(&mut self, e: &Expr) {
+        match e {
+            Expr::Is(i) if ["opaque", "rebuilds"].contains(&crate::pipe::CONDS[*i]) => self.calls.push("prepass"),
+            Expr::Size(r) | Expr::Same(r) => self.read(r),
+            Expr::Not(c) | Expr::Any(c) | Expr::All(c) => self.expr(c),
+            Expr::And(cs) | Expr::Or(cs) => cs.iter().for_each(|c| self.expr(c)),
+            Expr::Cmp(_, a, b) | Expr::Bin(_, a, b) => {
+                self.expr(a);
+                self.expr(b);
             }
-        }
-    }
-
-    fn value(&mut self, v: &Value) {
-        match v {
-            Value::Size(r) => self.read(r),
-            Value::Bin(_, a, b) => {
-                self.value(a);
-                self.value(b);
-            }
-            _ => {}
+            Expr::Num(_) | Expr::Feature(_) | Expr::Is(_) | Expr::Var(_) => {}
         }
     }
 }
 
-/// Whether `v` reads the variable at `i`.
-fn reads_var(v: &Value, i: usize) -> bool {
-    match v {
-        Value::Var(j) => *j == i,
-        Value::Bin(_, a, b) => reads_var(a, i) || reads_var(b, i),
-        _ => false,
+/// Whether `e` reads the variable at `i`.
+fn reads_var(e: &Expr, i: usize) -> bool {
+    match e {
+        Expr::Var(j) => *j == i,
+        Expr::Not(c) | Expr::Any(c) | Expr::All(c) => reads_var(c, i),
+        Expr::And(cs) | Expr::Or(cs) => cs.iter().any(|c| reads_var(c, i)),
+        Expr::Cmp(_, a, b) | Expr::Bin(_, a, b) => reads_var(a, i) || reads_var(b, i),
+        Expr::Num(_) | Expr::Feature(_) | Expr::Is(_) | Expr::Size(_) | Expr::Same(_) => false,
     }
 }
 

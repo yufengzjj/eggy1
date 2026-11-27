@@ -5,7 +5,7 @@
 
 use crate::eval::{Op, Term, parse, show, size};
 use crate::linear_mba::{CLUSTERED, Ctx, WIDE};
-use crate::sched::{Cond, Limit, Pass, Passes, Pipe, TermAt, Value, limit};
+use crate::sched::{Expr, Limit, NONE, Pass, Passes, Pipe, TermAt, limit};
 use crate::{Cli, Error, linear_mba, minimal, stats, width_of};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
@@ -35,8 +35,7 @@ pub const SET_PASSES: [&str; 9] = [
     "pre_done",
 ];
 
-/// The named conditions of `if`, `retry` and `filter`, on the candidates they see; the
-/// others (`(same R)`, comparisons) are `sched::Cond` forms.
+/// The functions of expressions that give 1 or 0 for the candidates they see (`Expr::Is`).
 pub const CONDS: [&str; 17] = [
     // The main candidate has a shift, division or mulhi and its rebuild is not tiny.
     "opaque",
@@ -264,36 +263,42 @@ impl<'a> Env<'a> {
         self.regs.borrow().get(r).and_then(|s| s.first().cloned())
     }
 
-    /// `v` for the candidates `set`; `None` where it reads a candidate or register that is
-    /// not there, or divides by 0.
-    fn value(&self, v: &Value, set: &[Cand]) -> Option<u64> {
-        Some(match v {
-            Value::Num(n) => *n,
-            Value::Feature(0) => set.first()?.size() as u64,
-            Value::Feature(i) => feature(&stats::shape(set.first()?.tree()), *i) as u64,
-            Value::Size(r) => self.reg_main(r)?.size() as u64,
-            Value::Var(i) if *i == crate::sched::DEADLINE => match crate::sched::read(*i) {
-                crate::sched::NONE => crate::sched::NONE,
+    /// `e` for the candidates `set`: a number or `NONE`.
+    fn value(&self, e: &Expr, set: &[Cand]) -> u64 {
+        let main = || set.first();
+        match e {
+            Expr::Num(n) => *n,
+            Expr::Feature(0) => main().map_or(0, |m| m.size() as u64),
+            Expr::Feature(i) => main().map_or(0, |m| feature(&stats::shape(m.tree()), *i) as u64),
+            Expr::Is(i) => cond(*i, set, self) as u64,
+            Expr::Size(r) => self.reg_main(r).map_or(0, |c| c.size() as u64),
+            Expr::Same(r) => main().zip(self.reg_main(r)).is_some_and(|(m, c)| c.same(m)) as u64,
+            Expr::Var(i) if *i == crate::sched::DEADLINE => match crate::sched::read(*i) {
+                NONE => NONE,
                 at => at.saturating_sub(crate::sched::epoch_ns()) / 1_000_000,
             },
-            Value::Var(i) if *i == crate::sched::KEEP => crate::sched::read(*i).max(1),
-            Value::Var(i) => crate::sched::read(*i),
-            Value::Bin(op, a, b) => {
-                let (a, b) = (self.value(a, set)?, self.value(b, set)?);
-                match op {
-                    '+' => a.wrapping_add(b),
-                    '-' => a.saturating_sub(b),
-                    '*' => a.wrapping_mul(b),
-                    _ => a.checked_div(b)?,
-                }
-            }
-        })
+            Expr::Var(i) if *i == crate::sched::KEEP => crate::sched::read(*i).max(1),
+            Expr::Var(i) => crate::sched::read(*i),
+            Expr::Not(c) => !self.holds(c, set) as u64,
+            Expr::And(cs) => cs.iter().all(|c| self.holds(c, set)) as u64,
+            Expr::Or(cs) => cs.iter().any(|c| self.holds(c, set)) as u64,
+            Expr::Cmp(op, a, b) => op.holds(self.value(a, set), self.value(b, set)) as u64,
+            Expr::Bin(op, a, b) => crate::sched::arith(*op, self.value(a, set), self.value(b, set)),
+            Expr::Any(c) => set.iter().any(|x| self.holds(c, std::slice::from_ref(x))) as u64,
+            Expr::All(c) => (!set.is_empty() && set.iter().all(|x| self.holds(c, std::slice::from_ref(x)))) as u64,
+        }
     }
 
-    /// `v` as a count: 0 where it has no value.
-    fn times(&self, v: &Value, set: &[Cand]) -> usize {
-        self.value(v, set).unwrap_or(0) as usize
-    }}
+    /// Whether `e` is not 0 for the candidates `set`.
+    fn holds(&self, e: &Expr, set: &[Cand]) -> bool {
+        self.value(e, set) != 0
+    }
+
+    /// `e` as a count: `none` is no limit.
+    fn times(&self, e: &Expr, set: &[Cand]) -> usize {
+        self.value(e, set).try_into().unwrap_or(usize::MAX)
+    }
+}
 
 fn dedup(set: Vec<Cand>) -> Vec<Cand> {
     let mut out: Vec<Cand> = Vec::with_capacity(set.len());
@@ -354,21 +359,6 @@ fn cond(i: usize, set: &[Cand], env: &Env) -> bool {
         "const_bitwise" => env.ctx(|w| linear_mba::const_bitwise(main.tree(), w)),
         "cofactor" => env.cofactor,
         name => unreachable!("condition {name}"),
-    }
-}
-
-fn holds(c: &Cond, set: &[Cand], env: &Env) -> bool {
-    match c {
-        Cond::Is(i) => cond(*i, set, env),
-        Cond::Var(i) => env.value(&Value::Var(*i), set) != Some(0),
-        Cond::Num(n) => *n != 0,
-        Cond::Same(r) => set.first().zip(env.reg_main(r)).is_some_and(|(m, c)| c.same(m)),
-        Cond::Not(c) => !holds(c, set, env),
-        Cond::And(cs) => cs.iter().all(|c| holds(c, set, env)),
-        Cond::Or(cs) => cs.iter().any(|c| holds(c, set, env)),
-        Cond::Cmp(op, a, b) => !set.is_empty() && env.value(a, set).zip(env.value(b, set)).is_some_and(|(a, b)| op.holds(a, b)),
-        Cond::Any(c) => set.iter().any(|x| holds(c, std::slice::from_ref(x), env)),
-        Cond::All(c) => !set.is_empty() && set.iter().all(|x| holds(c, std::slice::from_ref(x), env)),
     }
 }
 
@@ -543,15 +533,18 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             }
             Ok(set)
         }
-        Pipe::If(c, a, b) => go(if holds(c, &set, env) { a } else { b }, set, env),
+        Pipe::If(c, a, b) => go(if env.holds(c, &set) { a } else { b }, set, env),
         Pipe::Retry(c, a, b) => {
             let out = go(a, set.clone(), env)?;
-            if !holds(c, &out, env) {
+            if !env.holds(c, &out) {
                 return Ok(out);
             }
             let again = go(b, set, env)?;
-            let n = |s: &[Cand]| s.first().map(Cand::size);
-            Ok(if n(&again) <= n(&out) { again } else { out })
+            let take = match (again.first(), out.first()) {
+                (Some(b), Some(a)) => b.size() <= a.size(),
+                (b, _) => b.is_some(),
+            };
+            Ok(if take { again } else { out })
         }
         Pipe::Smallest(p) => {
             env.seen.borrow_mut().push(None);
@@ -574,7 +567,7 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             }
             Ok(out)
         }
-        Pipe::Filter(c) => Ok(set.into_iter().filter(|x| holds(c, std::slice::from_ref(x), env)).collect()),
+        Pipe::Filter(c) => Ok(set.into_iter().filter(|x| env.holds(c, std::slice::from_ref(x))).collect()),
         Pipe::Cand(name, p) => {
             if crate::sched::PRE.contains(&name.as_str()) && !env.passes.pre_on(name) {
                 return Ok(Vec::new());
@@ -654,7 +647,11 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             Ok(out)
         }
         Pipe::Wins(n, p) => {
-            let (n, outer) = (env.times(n, &set), env.wins.replace(0));
+            let n = env.times(n, &set);
+            if n == 0 {
+                return Ok(set);
+            }
+            let outer = env.wins.replace(0);
             let mut set = set;
             loop {
                 let before = env.wins.get();
@@ -727,9 +724,11 @@ pub fn polish(egg: &str, w: u32, signed: Option<bool>, p: &Passes) -> (String, O
     in_run(p, None, input, || polish_one(&input(), &env)).map_or((egg.to_string(), None), |c| (c.term().to_string(), Some(c.origin)))
 }
 
-/// `Passes::polish` on `c` alone, when it makes it smaller.
+/// `Passes::polish` on `c` alone, as a run of its own (its registers, `smallest`, `wins`),
+/// when it makes it smaller.
 fn polish_one(c: &Cand, env: &Env) -> Option<Cand> {
-    let out = scoped(|| go(&env.passes.polish, vec![c.clone()], env));
+    let run = Env::with(env.cli, env.passes, env.w, env.signed, env.trace, String::new(), c.term());
+    let out = scoped(|| go(&env.passes.polish, vec![c.clone()], &run));
     out.inspect_err(fail).ok()?.into_iter().next().filter(|r| r.size() < c.size())
 }
 
@@ -753,7 +752,7 @@ fn pass(p: &Pass, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             return Ok(set);
         }
         Pass::Assign(i, v) => {
-            let v = v.as_ref().map_or(crate::sched::NONE, |v| env.value(v, &set).unwrap_or(0));
+            let v = env.value(v, &set);
             match *i {
                 crate::sched::DEADLINE => assign_time_limit(v),
                 i if crate::sched::is_switch(i) => crate::sched::bind(i, (v != 0) as u64),
@@ -906,7 +905,7 @@ mod tests {
     fn time_limit_ends_with_its_sequence() {
         let passes = Passes::default();
         let env = Env::prepass(&passes, 32, None, false, "(Var \"x\")");
-        let limit = |ms| Pass::Assign(crate::sched::DEADLINE, Some(Value::Num(ms)).filter(|_| ms > 0));
+        let limit = |ms| Pass::Assign(crate::sched::DEADLINE, Expr::Num(if ms > 0 { ms } else { NONE }));
         let wait = || std::thread::sleep(std::time::Duration::from_millis(5));
         crate::sched::in_default_run(|| {
             pass(&limit(1), vec![], &env).unwrap();
@@ -1066,6 +1065,128 @@ mod tests {
         }
         start();
         assert!(!cut());
+    }
+
+    const SUB: &str = "(Sub (Or (Var \"x\") (Var \"y\")) (And (Var \"x\") (Var \"y\")))";
+    const XOR: &str = "(Xor (Var \"x\") (Var \"y\"))";
+
+    fn terms(set: &[Cand]) -> Vec<String> {
+        set.iter().map(|c| c.term().to_string()).collect()
+    }
+
+    fn expr(s: &str) -> Expr {
+        let Pipe::Filter(e) = lang::parse(&format!("(filter ({s}))")).unwrap() else { unreachable!() };
+        e
+    }
+
+    #[test]
+    fn retry_keeps_a_when_b_gives_none() {
+        let passes = Passes::default();
+        let env = Env::prepass(&passes, 32, None, false, SUB);
+        let step = |p: &str| terms(&go(&lang::parse(p).unwrap(), vec![Cand::new(SUB, "input")], &env).unwrap());
+        crate::sched::in_default_run(|| {
+            assert_eq!(step("(retry 1 rewrite none)"), [XOR]);
+            assert_eq!(step("(retry 1 id rewrite)"), [XOR], "b no larger is taken");
+            assert_eq!(step("(retry 1 none rewrite)"), [XOR], "b is taken where a gives none");
+            assert_eq!(step("(retry 0 id rewrite)"), [SUB]);
+        });
+    }
+
+    #[test]
+    fn polish_is_a_run_of_its_own() {
+        let passes = Passes::parse("polish=rewrite | (save p) | none").unwrap();
+        let env = Env::prepass(&passes, 32, None, false, SUB);
+        let step = |p: &str| terms(&go(&lang::parse(p).unwrap(), vec![Cand::new(SUB, "input")], &env).unwrap());
+        crate::sched::in_default_run(|| {
+            assert_eq!(step("(save p) | polish | (load p)"), [SUB], "polish has its own registers");
+            assert_eq!(step("(smallest polish)"), [SUB], "an outer smallest sees no candidate made inside polish");
+            assert_eq!(step("(smallest rewrite | none | (load p))"), [XOR, SUB], "it sees those of the passes of its own run");
+        });
+    }
+
+    #[test]
+    fn wins_zero_runs_nothing() {
+        let passes = Passes::default();
+        let env = Env::prepass(&passes, 32, None, false, SUB);
+        let step = |p: &str| terms(&go(&lang::parse(p).unwrap(), vec![Cand::new(SUB, "input")], &env).unwrap());
+        crate::sched::in_default_run(|| {
+            assert_eq!(step("(wins 0 (smaller s rewrite))"), [SUB]);
+            assert_eq!(step("(wins 0 none)"), [SUB]);
+            assert_eq!(step("(wins 1 (smaller s rewrite))"), [XOR]);
+        });
+    }
+
+    #[test]
+    fn functions_give_zero_on_no_candidates() {
+        let passes = Passes::default();
+        let env = Env::prepass(&passes, 32, None, false, SUB);
+        crate::sched::in_default_run(|| {
+            for f in ["size", "mul", "vars", "mixed", "input", "moved", "tiny", "(size r)", "(same r)", "(any 1)", "(all 1)"] {
+                assert_eq!(env.value(&expr(f), &[]), 0, "{f}");
+            }
+            assert_eq!(env.value(&expr("!tiny"), &[]), 1);
+            assert_eq!(env.value(&expr("size < (size r) + 1"), &[]), 1, "a comparison compares the zeros");
+            assert_eq!(env.value(&expr("size > (size r)"), &[]), 0);
+            let x = [Cand::new(SUB, "input")];
+            assert_eq!(env.value(&expr("(size r)"), &x), 0, "an empty register");
+            assert_eq!(env.value(&expr("size"), &x), 7);
+            assert_eq!(env.value(&expr("split_runs"), &[]), 16, "a variable is read without candidates too");
+        });
+    }
+
+    #[test]
+    fn conditions_are_numbers() {
+        let passes = Passes::default();
+        let env = Env::prepass(&passes, 32, None, false, SUB);
+        let x = [Cand::new(SUB, "input")];
+        let mul = [Cand::new("(Mul (Var \"x\") (Mul (Var \"x\") (Var \"y\")))", "input")];
+        crate::sched::in_default_run(|| {
+            let v = |s: &str, set: &[Cand]| env.value(&expr(s), set);
+            assert_eq!(v("mul", &mul), 2);
+            assert_eq!(v("(mul >= 1) + (vars == 2) * 4", &mul), 5);
+            assert_eq!(v("!3", &x), 0);
+            assert_eq!(v("!!3", &x), 1);
+            assert_eq!(v("2 && 5", &x), 1);
+            assert_eq!(v("0 || 7", &x), 1);
+            assert_eq!(v("vars * (mixed || 1)", &x), 2);
+            let step = |p: &str, set: &[Cand]| go(&lang::parse(p).unwrap(), set.to_vec(), &env).unwrap().len();
+            assert_eq!(step("(if mul none)", &mul), 0, "a number holds where it is not 0");
+            assert_eq!(step("(if mul none)", &x), 1);
+            assert_eq!(step("(fix (mul < 1) rewrite) | (filter (size == 5))", &x), 0, "a comparison counts as 1");
+        });
+    }
+
+    #[test]
+    fn none_in_arithmetic() {
+        let passes = Passes::default();
+        let env = Env::prepass(&passes, 32, None, false, SUB);
+        crate::sched::in_default_run(|| {
+            let v = |s: &str| env.value(&expr(s), &[]);
+            for (e, want) in [
+                ("none + 1", NONE),
+                ("1 + none", NONE),
+                ("none * 0", NONE),
+                ("none - 1", NONE),
+                ("0 - none", 0),
+                ("none - none", 0),
+                ("3 - 5", 0),
+                ("7 / 2", 3),
+                ("5 / 0", NONE),
+                ("5 / none", 0),
+                ("none / 2", NONE),
+                ("18446744073709551614 + 1", NONE),
+                ("4294967296 * 4294967296", NONE),
+                ("none > 18446744073709551614", 1),
+                ("none == none", 1),
+                ("none != split_runs", 1),
+                ("rewrites", NONE),
+                ("rewrites == none", 1),
+                ("!none", 0),
+            ] {
+                assert_eq!(v(e), want, "{e}");
+            }
+            assert_eq!(env.times(&expr("none"), &[]), usize::MAX, "none as a count is no limit");
+        });
     }
 
     #[test]

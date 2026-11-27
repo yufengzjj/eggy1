@@ -1,121 +1,166 @@
 # 管线语言参考
 
-eggy1 的化简流程由几条管线描述，默认的写在 `src/default.pipe` 里，`--passes` 可以替换或改写它们，`--show-passes` 打印当前的全部设置。本文是这门语言的参考：数据模型、语法、形式、赋值、pass、条件、变量、`--passes` 的写法、静态检查。
+eggy1 的化简流程由几条管线描述，默认的写在 `src/default.pipe` 里，`--passes` 可以替换或改写它们，`--show-passes` 打印当前的全部设置。本文是这门语言的参考：名字、数据模型、语法、变量与作用域、表达式、函数、`--passes` 的写法、静态检查。
 
-一次运行执行一个**入口程序**：
+## 1. 概览
+
+语言里的名字只有三类：**变量**（第 5 节）、**函数**（第 6.3、7、8 节）、**宏**（第 5.4 节）。函数以当前候选组为隐含参数，返回一个数或一组候选；eggy1 的化简流程由几个**定义的函数**（管线）描述。一次运行执行一个**入口程序**：
 
 ```
-<default.pipe 的赋值> | restarts = M | iter_limit = I | <--passes 的赋值> | pipeline
+<default.pipe 的赋值> | <命令行的赋值> | pipeline
 ```
 
-`default.pipe` 和 `--passes` 里的 `NAME=VALUE` 项、`off` 项（第 8 节）按出现的顺序成为赋值步骤，`-m M`、`-i I` 是其中的 `restarts = M`、`iter_limit = I`。它们在最外层运行的最外层作用域里执行，所以运行结束时全部撤销，下一次运行（下一个表达式）重新从头执行。从 Rust 直接进入别的管线时（测试和 `fuzz --prepass` 调用 `simplify_linear_with` 即 `prepass`、`polish`，不在任何运行里的 `rewrite`），前面接同一段赋值（没有 `-m`、`-i` 那两步），入口换成那条管线。已经在一次运行里时，嵌套的运行不再执行它们。
+- `src/default.pipe` 定义各个函数（管线）和 `let` 名字，并给所有变量赋默认值。
+- 命令行：先是 `-m N`（`restarts = N`）、`-i N`（`iter_limit = N`），再是 `--passes` 的 `NAME=VALUE` 项、`off` 列表项，按出现顺序，都排在 `default.pipe` 的赋值之后（第 11 节）。所以 `--passes restarts=5` 盖过 `-m`。
+- 从 Rust 直接进入别的管线时（测试和 `fuzz --prepass` 调用 `simplify_linear_with` 即 `prepass`、`polish`，不在任何运行里的 `rewrite`），入口换成那条管线，前面接同一段赋值（没有 `-m`、`-i` 那两步）。已经在一次运行里时，嵌套的运行不再执行它们。
+- 每次 `simplify` 都从头执行入口程序，结束时撤销所有绑定，下一个表达式重新开始。
 
-## 1. 数据模型
+`--show-passes` 先打印一行注释 `# A run: <入口程序的各步> | pipeline`，再打印 `--passes` 写法的全部设置（只含命令行那部分赋值），所以它的输出可以原样传给 `--passes`。
 
-- 管线处理一组**候选**：彼此等价的项，第一个是**主候选**。每一步拿到一组候选，给出另一组，所以任何 pass 都能接在任何 pass 后面。
-- 候选记着**来源**（origin，产生它的 pass 或 `cand` 名，`--stats` 按它计数）、哪些 pass 给过它被保留的形式（`used_wide`、`used_clustered`），以及产生它用了多少次未缓存的 `rewrite`（`few_rewrites`）。
-- 一组候选可以是空的。空组照常往下传：大多数 pass 对空组什么也不做，条件在空组上为假。
-- 每条管线的一次运行有自己的一套**寄存器**（`save`/`load`），运行之间、管线之间不共享。
-- 超过时限（第 4.2 节的 `time_limit = N`；`--passes time_limit=MS` 是入口程序里的这一步，给整次运行设一个）后，干活的步骤原样返回输入，所以任何时候停下来结果都正确。只搬动候选的步骤照常执行：`seq` 本身、赋值（包括 `on`、`off`）、`save`、`load`、`label`、`filter`、`id`、`none`、`within`、`pre_done`，所以寄存器照常可用，清除时限后管线能接着往下走。时限只在步骤之间检查，打断不了正在运行的单个步骤（一轮 egglog、一次大的 `poly_mba` 展开）。
+### 1.1 定义的函数（管线）
 
-### 管线
+`prepass=P` 这样的项定义一个函数，函数体是管线 `P`。函数名写在步骤位置就是调用它。每个函数有固定的调用方式：
 
-| 名字 | 谁运行它 | 输入 | 说明 |
+| 函数 | 调用方式 | 谁调用 | 说明 |
 |---|---|---|---|
-| `pipeline` | `simplify` | 输入表达式 | 整个化简：预处理、egglog 各轮、polish、从打印结果再跑一遍 |
-| `prepass` | `prepass` pass、条件 `opaque`/`rebuilds` | 一个项 | 预处理：造出几个重建候选，按大小排好 |
-| `polish` | `polish` pass | 每个候选单独 | 局部改写，只在变小时保留 |
-| `rewrite` | 单项 pass 内部、`regions`、`again` | 一个项或子项 | 带缓存的重建，单项 pass 对子项也用它 |
-| `simba` | `simba` 候选、`poly_mba` 的线性余因子 | 一个线性区域 | 线性区域的各种重建方法 |
-| `sub/NAME` | 重建子项的单项 pass | 一个子项 | 见第 7 节 |
+| `pipeline` | 整组 | 入口程序 | 整个化简：预处理、egglog 各轮、polish、从打印结果再跑一遍 |
+| `prepass` | 对主候选调用，结果替换整组 | 步骤 `prepass`；函数 `opaque`、`rebuilds`；Rust 的 `simplify_linear_with` | 预处理：造出几个重建候选，按大小排好 |
+| `polish` | 对每个候选单独调用，变小才替换 | 步骤 `polish`；Rust 的 `pipe::polish` | 局部改写，只在变小时保留 |
+| `rewrite` | 单项（第 8.2 节） | 步骤 `rewrite`；单项函数内部、`regions`、`again` | 带缓存的重建 |
+| `simba` | alternative（第 8.3 节） | 步骤 `simba`；`poly_mba` 的线性余因子 | 线性区域的各种重建方法 |
+| `sub/NAME` | 单项 | 只在单项函数内部，重建子项时 | 第 10 节 |
 
-## 2. 词法
+调用一个定义的函数是一次**运行**：它是作用域，有自己的寄存器，`smallest` 也只看本次运行里的步骤，看不到它调用的定义函数里面；`wins` 只数本次运行里 `smaller` 采用的结果，`moved` 只看本次运行里的 `fix`。`polish` 对每个候选是一次单独的运行。
+
+## 2. 数据模型
+
+### 2.1 候选
+
+- **候选**是一个项，以及附带的信息。一组候选彼此等价，第一个是**主候选**。每一步拿到一组候选，给出另一组，所以任何步骤都能接在任何步骤后面。
+- **大小**是项的树节点数：每个变量、常数、运算各算 1，共享的子项按出现次数重复计算。
+- **相同**指两个项结构完全相同：不按交换律、结合律归一，常数按值比较。`union`、`best` 去重，`fix` 判断"不再变化"，`same` 判断"同一个项"，用的都是这个标准。
+- 一组候选可以是空的。空组照常往下传，各步骤遇到空组时怎么办，见第 6、7 节。
+
+### 2.2 附带信息
+
+| 信息 | 含义 | 谁会改它 |
+|---|---|---|
+| **来源**（origin） | 产生它的 pass、`cand` 名等；`--stats` 按它计数，函数 `abstracted` 读它 | alternative、`cand`、`tag`、`smaller`、`pre_done`、`prepass`、`egglog` |
+| `used` | 产生它的 pass 里，`wide_blocks`/`clustered` 是否给过被保留的形式；函数 `used_wide`、`used_clustered` 读它 | 单项 pass 和 `regions` 并入新的位 |
+| `rewrites` | 产生它用了多少次未缓存的 `rewrite`；函数 `few_rewrites` 读它 | 单项 pass 累加 |
+
+规则：
+- 单项 pass 的结果继承输入候选的信息，再并入这次的 `used` 和 `rewrites`。
+- 列表 pass 给出的项如果和某个输入候选相同，就用那个输入候选（连同它的信息）。
+
+来源会影响结果：`abstracted` 读它，`first` 比较"与输入不同"时也比较来源。
+
+## 3. 词法
 
 - 空白只用来分隔；`#` 到行尾是注释。
-- **名字**以字母或 `_` 开头，可以含字母、数字、`_`、`/`：`polish/factor`、`semi/bit_split`、`split_runs`。所以 `/` 两边是名字时必须留空格：`x / 2`；`3/4` 是三个记号 `3` `/` `4`，只有在两边都是数时才不必留空格。`-` 不能出现在名字里，总是减号：`size-mul` 就是 `size - mul`，`restarts-1` 就是 `restarts - 1`。
-- **数**是十进制非负整数。
-- 其他记号：`( ) | = || && ! + - * / < <= > >= == !=`。`=` 是赋值（第 4.1 节），`==` 是比较；`=` 两边可以有空格，也可以没有。`--passes` 的各项（`extra=0`、`prepass=...`）是在语言之外分项的（第 8 节）。
+- **名字**以字母或 `_` 开头，可以含字母、数字、`_`、`/`：`polish/factor`、`semi/bit_split`、`split_runs`。`-` 不能出现在名字里，所以 `size-mul` 是 `size - mul`。`/` 两边是名字时要留空格：`x / 2`，因为 `x/2` 读成名字 `x/2`。
+- **数**是十进制非负整数，最大 18446744073709551614（2^64 - 2；再大报 `number too large`）。
+- 内置的值只有 `none`（第 5.2 节）。`on`、`off` 是宏名（第 5.4 节），不是值。
+- 其他记号：`( ) | = || && ! + - * / < <= > >= == !=`。`=` 是赋值，`==` 是比较。
 
-## 3. 语法
+## 4. 语法
 
 ```
-pipe   := stage ('|' stage)*               # 依次执行
-stage  := NAME                             # 不带参数的 pass，或 let 定义的名字
-        | NAME '=' rhs                     # 赋值，第 4.1 节
-        | '(' FORM arg* ')'                # 形式
-        | '(' pipe ')'                     # 分组
-rhs    := 'none' | value                   # value 读到 |、) 或结尾为止
-cond   := NAME | NUM | '!' cond | '(' expr ')'
-expr   := expr '||' expr | expr '&&' expr | '!' expr
-        | value CMP value | NAME | NUM
-        | '(' 'any' expr ')' | '(' 'all' expr ')' | '(' 'same' REG ')'
-        | '(' expr ')'
-value  := value ('+'|'-') value | value ('*'|'/') value
-        | NUM | NAME | '(' 'size' REG ')' | '(' value ')'
-count  := NUM | NAME | '(' value ')'
-CMP    := '<' | '<=' | '>' | '>=' | '==' | '!='
+program := step ('|' step)*                # 一条序列（seq）
+step    := NAME                            # 不带参数的函数，或 let 名（第 4.1 节）
+         | NAME '=' expr                   # 赋值（第 5 节）
+         | '(' FUNC arg+ ')'               # 带参数的函数（第 7 节），或宏 on/off
+         | '(' program ')'                 # 分组：一条嵌套的序列
+expr    := expr '||' expr | expr '&&' expr | '!' expr
+         | sum CMP sum | sum
+sum     := sum ('+' | '-') sum | sum ('*' | '/') sum | atom
+atom    := NUM | 'none'
+         | NAME                            # 变量，或不带参数的函数
+         | '(' 'size' REG ')' | '(' 'same' REG ')' | '(' 'any' expr ')' | '(' 'all' expr ')'   # 第 6.3 节
+         | '(' expr ')'
+earg    := atom | '!' earg                 # 带参数的函数里的表达式参数
+CMP     := '<' | '<=' | '>' | '>=' | '==' | '!='
 ```
 
-- 优先级从低到高：`|`（管道）；条件里 `||`、`&&`、`!`、比较、`+ -`、`* /`。同级左结合。
-- `(` 后面紧跟形式关键字（第 4 节）时是一个形式，否则是分组。关键字是保留字，不能用作 `let` 的名字，单独出现时报 `NAME needs parentheses`（`egglog` 除外，它也可以不带参数）。
-- 形式里作为参数的管线如果含 `|`，要加括号：`(best 1 (a | b) c)`。
-- 条件和数是两种不同的东西：条件位置写数的表达式、或把特征当布尔用（`(if mul ...)`），解析时报错。只有数字本身可以作条件：非 0 为真，与候选无关，空组上也一样（`(if 1 a b)` 总是运行 `a`）。条件或次数里写 `=`（`(if (size = 3) ...)`）报错：赋值是一个步骤，比较要写 `==`。
+- 优先级从低到高：`|`；表达式里 `||`、`&&`、`!`、比较、`+ -`、`* /`。同级左结合；比较不能连写（`a < b < c` 报错），`!a < b` 是 `!(a < b)`。
+- 带参数的函数里，表达式参数（`if`、`retry`、`filter` 的条件，`fix`、`wins`、`best` 的次数）是一个 `earg`：数、名字、`!` 加一个参数，或括号里的表达式。所以写 `(if (mul < 1) ...)`、`(fix (restarts - 1) ...)`，不写 `(if mul < 1 ...)`。
+- 序列的每一步可以是任何 `step`：函数调用、赋值、宏、分组都能接在一起。
+- 赋值右边的表达式读到 `|`、`)` 或项尾为止：`split_runs = vars * 2 | split_bits`。
+- 表达式只有一种：条件和数是同一种东西（第 6 节）。
+- `(` 后面紧跟带参数的内置函数名或宏名时是调用，否则是分组。这些名字是保留字，不能用作 `let` 名或变量名；单独写出时报 `NAME needs parentheses`（`egglog` 除外，它也可以不带参数）。
+- 作为参数的管线如果含 `|`，要加括号：`(best 1 (a | b) c)`。
 
-## 4. 形式
+### 4.1 名字
 
-下表中 `p`、`a`、`b` 是管线，`C` 是条件，`N`、`K` 是次数（第 6 节），`R` 是寄存器名。
+语言里的名字只有三类：
 
-| 形式 | 含义 |
+- **变量**有绑定，按作用域查找（第 5 节），能赋值。
+- **函数**没有绑定，以当前候选组为隐含参数，按返回的东西分：
+  - **数值函数**返回一个数：`mixed`、`size`、`(size R)`、`(any C)`（第 6.3 节）。
+  - **候选组函数**返回一组候选：不带参数的 `lowbits`、`rewrite`、`egglog`（第 8 节，习惯上叫 pass）；带参数的 `(save R)`、`(egglog LABEL)`，以及参数里有管线的**高阶函数** `(best K a b)`、`(fix N p)`、`(if C a b)`（第 7 节）。
+  - 内置函数之外，还有**定义的函数**：`prepass=P` 等项定义的管线（第 1.1 节）。
+- **宏**在解析时展开：`let`、`on`、`off`（第 5.4 节）。
+
+名字按位置解释，放错位置是类型错误，解析时报出：
+
+| 位置 | 要的是 |
 |---|---|
-| `a \| b`、`(seq a b ...)` | 依次执行，前一步的候选交给后一步 |
-| `(union a b ...)` | 每个都在同一组输入上运行，输出合并、去重 |
-| `(best K a b ...)` | 同 `union`，再按大小排序，保留最小的 `K` 个（至少 1 个）。保留的候选来自某个 alternative 时，记它一次 `won` |
-| `(first a b ...)` | 依次运行，返回第一个给出非空且与输入不同的结果；都没有就返回输入 |
-| `(fix N p)` | 重复 `p` 至多 `N` 次，主候选不再变化时停。停在次数上（还在变）时，条件 `moved` 为真 |
-| `(if C a)`、`(if C a b)` | 对输入求 `C`，真时运行 `a`，否则运行 `b`（省略时是 `id`） |
-| `(retry C a b)` | 运行 `a`；`C` 对 `a` 的结果成立时，在原输入上运行 `b`，`b` 的主候选不比 `a` 的大时取 `b` |
-| `(filter C)` | 对每个候选单独求 `C`，只保留成立的 |
-| `(smallest p)` | 运行 `p`；`p` 里任何一步出现过比结果更小的候选时，把其中第一个最小的放到结果最前面 |
-| `(smaller NAME p)` | 运行 `p`，主候选变小才采用，否则返回输入。采用时来源改为 `NAME`，记 `NAME/won` 和 `NAME/gain` |
-| `(wins N p)` | 重复 `p`，直到其中的 `smaller` 不再采用结果，或一共采用了 `N` 次 |
-| `(tag NAME p)` | 运行 `p`，记时间 `NAME/run`；主候选变了时记 `NAME/won/来源`，来源改为 `NAME` |
-| `(cand NAME p)` | 一个预处理候选：`NAME` 是 `pre` 列表（第 8 节）里的名字且被关掉时给出空组；否则运行 `(bit_split_budget = cand_bit_splits \| p)`，结果来源改为 `NAME`，记 `pre/NAME/made` |
-| `(scope p)` | `p` 里对同一个项的各 pass 共用一个运行上下文（缓存）。也是作用域（第 4.1 节）；变量沿用外面的值 |
-| `(regions p)` | 对每个候选：如果它是一个线性区域，叶子先用 `rewrite` 重建，整体用 `p` 的主候选；否则对它的操作数用 `rewrite` |
-| `(again p)` | 运行 `p`；主候选在"位运算的算术叶子"处有变化时，对它再做一次 `rewrite`，变小才保留 |
-| `(save R)` | 把当前候选组存进寄存器 `R`，原样往下传 |
-| `(load R)` | 把当前候选组换成寄存器 `R` 的内容（空寄存器给出空组）。可以反复读 |
-| `(label R)` | 只做统计：每个候选记 `stats::label`，与寄存器 `R` 的主候选来源不同时记 `pre/来源/differs` 和 `pre/来源/gain`；`--trace` 时打印候选 |
-| `(off NAME ...)` | `NAME = 0 \| ...` 的简写：关掉内部 pass 或开关（第 5.5 节），直到所在的 seq 结束，见第 4.1 节 |
-| `(on NAME ...)` | `NAME = 1 \| ...` 的简写：重新打开内部 pass，或打开开关 |
-| `(egglog LABEL)`、`egglog` | 一轮 egglog：所有候选合并进一个 e-graph，饱和，提取。调度重复 `iter_limit` 次，back-off 调度用当时的 `match_limit`、`ban_length`。统计计在 `egglog/LABEL` 下，默认用 `first`、`later`、`rerun_input` |
+| 步骤 | 候选组函数、`let` 名或宏 |
+| `=` 左边 | 变量 |
+| 表达式里 | 变量或数值函数 |
 
-`(let NAME p)` 不是形式，而是 `--passes` 的一项（第 8 节）：之后写到 `NAME` 的地方展开成 `p`。定义体直接写成 `a | b` 时，展开后平铺进所在的 seq，和直接写出来一样；定义体整个包在括号里，写成 `(a | b)` 时，展开成一条嵌套的 seq，于是它里面的赋值只在这里面有效。
+函数不建作用域，只有定义的函数例外（调用它是一次运行）。内置函数不绑定任何变量，所以这不影响什么；`on`、`off` 必须是宏，就是因为函数里的绑定会在返回时撤销。
 
-### 4.1 赋值与作用域
+名字不能重复：变量、函数、`let` 名互不同名。只有一个例外：内部 pass 的函数和它的开关变量同名。`relate` 写在步骤位置时调用这个函数，写在表达式里或 `=` 左边时是它的开关变量。`let` 名和变量、函数（包括定义的函数 `pipeline`、`prepass`、`polish`、`rewrite`、`simba`、`sub/NAME`）、宏同名时，读到定义就报错。
 
-`NAME = VALUE` 是一个步骤：它在**当前作用域**里给变量 `NAME`（第 7 节）绑定一个值，原样传下候选，作用到所在作用域结束；同一作用域里再赋值就覆盖这个绑定。这期间调用的管线（`prepass`、`polish`、`rewrite`……）和新的 `scope` 也读到这个值（按调用链动态绑定）。
+### 4.2 管线
 
-- 右边是第 6.3 节的数，一直读到 `|`、`)` 或结尾：`split_runs = vars * 2 | split_bits`。执行到这一步时对当时的候选求值，没有值时（空组、空寄存器、除以 0）为 0。
-- 开关（内部 pass、`cut`、`rerun_input`、`prove_minimal`，第 5.5 节）的值也是数：0 是关，其他是开。`relate = 0` 关掉 `relate`，`cut = 1` 打开 `cut`。`(off A B)` 是 `A = 0 | B = 0` 的简写，`(on A B)` 是 `A = 1 | B = 1` 的简写，同一作用域里以后写的为准。
-- `none` 只能单独写在右边，表示不限：预算（`rewrites = none`）、限值、时限（`time_limit = none`）都可以；开关不收 `none`。每个变量在赋值之前都是 `none`（开关为开）。
-- 有上限的变量（第 7.3 节表里写了上限的，如 `max_leaves` 最多 6，因为真值表是 `u64`）赋更大的值或 `none` 时报错，报错信息写明上限；右边是数字时解析时就报，是表达式时执行到这一步时报（这次运行停下，返回这个错误，如 `max_leaves = 8: max_leaves is at most 6`）。
-- 不能赋值的名字：特征、条件名，写了报错。其他变量（包括运行设置 `keep`、`extra`、`printed`、`match_limit`、`ban_length` 和 `restarts`、`iter_limit`）都能在任何地方赋值，下次读到时生效。
-- 赋值属于只搬动候选的步骤：过了时限照常执行。
+**管线**是一串步骤（`a | b | c`），整体的值是一个 `group → group` 的匿名函数；签名里的 `pipe` 类型就是它。每一步是两种之一：
 
-**作用域**有三种：seq（`a | b | ...` 形成的一条序列，包括括号里的 `( ... )`、`(seq ...)`），`scope`，以及每条管线的一次运行。其他形式（`if`、`fix`、`union`、`best`、`first`、`retry`……）都不是作用域：`(if C split_runs = 4)` 那一支只有一步，绑定落在 `if` 所在的 seq 里；`(if C (split_runs = 4 | x))` 那一支是一条 seq，绑定只在里面有效。`default.pipe` 的 `gates` 写成 `(if (mul < 1) (off poly_mba)) | ...`，平铺进 `prepass` 的顶层 seq，所以一直关到这次预处理结束。
+- **函数**（`group → group`）：把当前候选组交给它，结果交给下一步。
+- **赋值**（`x = e`）：对当前候选组求 `e`，在**这一步之后的部分**里绑定 `x`，候选组原样传下去。
 
-普通变量以最内层的绑定为准。预算（`rewrites`、`bit_split_budget`）和时限是链上所有绑定都起作用：内层的预算不超过外层剩下的，用掉的次数退出时也从外层扣除；内层的时限不晚于外层。缓存的结果只在它读过的变量（预算和时限除外）都与当时相同的地方复用。
+宏解析时展开成这两种步骤（`on`、`off` 的名字只能是开关：内部 pass 和第 9.1 节的其他开关）；表达式只出现在赋值右边和函数参数里，单独作一步是类型错误。语义：
 
-### 4.2 时限：`time_limit = N`
+```
+f | rest        ≡  先 f，再 rest                  （复合）
+x = e | rest    ≡  在 x = e 之下运行 rest          （绑定）
+```
 
-- 从这一步起，这条 seq 剩下的步骤共有 `N` 毫秒；到期后剩下干活的步骤都被跳过（计入 `time_limit/skipped`），这条 seq 很快结束，外面的步骤照常运行。
-- `time_limit = none` 回到进入这条 seq 时的时限（外层设的仍然有效）。`time_limit = 0` 是 0 毫秒：从此刻起就已到期。
-- 时限叠加：外层 seq、外层管线的时限同时有效，取最早到期的。内层不能把时限延长到外层之后。
-- 在数里读 `time_limit`，得到剩下的毫秒数：`time_limit = time_limit / 2`。
-- `--passes time_limit=MS` 是入口程序里的一步赋值，在最外层运行开始时执行：从那一刻起计时，`prepass`、`polish` 这些嵌套的运行只读到同一个截止时刻，不重新计时。`time_limit=none` 不设截止。
-- 时限到期时开关 `cut` 开着，就算整次运行被截断：`eggy1` 打印提示，bench 把没解出的用例记作 `cut`。默认 `pipeline` 开头是 `cut = 1`，所以 `--passes time_limit=MS` 设的总时限到期时算截断。`cut` 会被内层继承，所以里面再设的时限到期也算；不想算的地方写 `cut = 0`。
-- 截断后得到的结果不进缓存。
+同 Haskell 的 do 块：`do { f; let x = e; rest }` 里的 `let` 不是函数，作用到块尾。由此得出：序列是作用域（第 5.1 节）；赋值作最后一步什么也影响不到（第 12 节的警告）；`on`、`off` 只能是宏。
+
+作为参数传给函数的管线（`best` 的分支等）在调用处所在的运行里执行，读写的是这次运行的寄存器。
+
+## 5. 变量与作用域
+
+### 5.1 一条规则
+
+> `NAME = VALUE` 在**当前作用域**里绑定变量 `NAME`；同一作用域里再赋值，就是覆盖这个绑定。读 `NAME` 时先在当前作用域找，没有就沿**调用链**往上找，直到入口程序。作用域结束时，它的绑定随之消失。
+
+- **作用域**有三种：序列（`a | b | ...`，包括分组 `( ... )` 和 `(seq ...)`）、`scope`、每条管线的一次运行。其他形式（`if`、`fix`、`union`、`best`……）不是作用域：`(if C x = 1)` 的绑定落在 `if` 所在的序列里，`(if C (x = 1 | p))` 的绑定只在那条分组序列里。
+- "往上"沿调用链走（动态作用域）：`semi_leaves = 2 | polish` 里，`polish` 读到 2，除非它自己在内层再赋值。
+- 赋值原样传下候选，所以可以写在序列的任何位置。
+- 赋值右边在执行到这一步时求值，读的是当时的候选组。
+
+普通变量是**最内层的绑定起作用**。预算和时限是**链上所有绑定都起作用**：
+
+- **预算**（`rewrites`、`bit_split_budget`）：每用掉一次，链上每一层的绑定都减 1，任何一层到 0 就停。所以退出时外层已经减去了里面用掉的次数，里面赋得再大也超不过外层剩下的。
+- **时限**（`time_limit`）：赋值时从此刻起计时，得到一个截止时刻。链上最早的截止时刻起作用，所以里层不能晚于外层。
+
+### 5.2 值
+
+- 变量的值是非负整数，或 `none`。每个变量开始时都是 `none`。
+- `none` 比所有整数都大（+∞）。上限类变量（`split_runs`、预算、`time_limit`……）读到 `none` 就是不限。
+- 布尔值就是数：开关写 1（开）或 0（关），非 0 都算开，比如 `relate = 0`、`cut = 1`。`none` 不是 0，所以作开关时算开：内部 pass 不赋值就是开着的。
+- 有上限的变量（`max_leaves` 最多 6），赋超过上限的值时报错，`none` 也一样。右边是数字或 `none` 时解析时就报；是表达式时执行到这一步时报，这次运行停下，返回这个错误（`max_leaves = 8: max_leaves is at most 6`）。
+- 开关不收字面的 `none`（解析时报错）；右边是表达式、算出 `none` 时，开关为开。
+
+### 5.3 时限
+
+- 过了截止时刻，干活的步骤原样返回输入，所以任何时候停下来结果都正确。只搬动候选的步骤照常执行：序列本身、赋值、`save`、`load`、`label`、`filter`、`id`、`none`、`within`、`pre_done`。所以寄存器照常可用，时限所在的作用域结束后，外面的步骤接着运行。
+- 时限只在步骤之间检查，打断不了正在运行的单个步骤（一轮 egglog、一次大的 `poly_mba` 展开）。一轮 egglog 开始前，按上一轮用的时间估计：估计会超过截止时刻就跳过。
+- 开关 `cut` 开着时，因时限跳过的步骤会把整次运行记为截断：`eggy1` 打印提示，bench 把没解出的用例记作 `cut`。默认 `pipeline` 开头写 `cut = 1`。不想算的地方写 `cut = 0`。
+- 截断时得到的结果不进缓存。
 
 ```
 a | time_limit = 1000 | b | time_limit = none | c    # 只限 b
@@ -124,11 +169,110 @@ a | time_limit = 1000 | b | c                       # b、c 共用 1000 ms
 a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 200 ms
 ```
 
-寄存器属于整条管线的一次运行，不受作用域限制。
+### 5.4 宏：`let`、`on`、`off`
 
-## 5. Pass
+宏在解析时展开，不建新作用域：
 
-### 5.1 列表 pass
+- `(let NAME p)` 是一项定义，之后写到 `NAME` 的地方展开成 `p`。`p` 直接写成 `a | b` 时，展开后平铺进所在的序列；整个包在括号里写成 `(a | b)` 时，展开成一条嵌套的序列，里面的赋值只在这里面有效。名字在**读到定义那一项时**展开：重新定义 `gates` 不会改变已经读好的 `prepass`。
+- `(off A B ...)` 展开成 `A = 0 | B = 0 | ...`，`(on A B ...)` 同理（`A = 1`）；`A`、`B` 必须是开关。它们不是函数：如果是函数，绑定会在返回时撤销。
+
+`let` 展开后，里面的寄存器属于使用它的那次运行。
+
+### 5.5 寄存器
+
+`(save R)` 把当前候选组存进寄存器 `R`，`(load R)` 取出。寄存器属于一次运行，不受作用域限制，也不是变量：存的是候选组，不是数。
+
+## 6. 表达式
+
+### 6.1 求值
+
+- 表达式在执行到它的那一刻、对当时的候选组求值，结果是一个数或 `none`。
+- `if` 的条件对输入求值；`retry` 的条件对 `a` 的结果求值；`filter`、`any`、`all` 对每个候选单独求值；`fix`、`wins` 的次数在进入形式时求值，`best` 的个数在各支运行之后求值。
+- 作条件用时，非 0 为真（`none` 为真）。
+- 作次数用时，`none` 是不限。
+
+### 6.2 运算
+
+| 运算 | 规则 |
+|---|---|
+| `a + b`、`a * b` | 溢出或有一边是 `none` 时得 `none` |
+| `a - b` | 饱和：小于 0 时得 0；`none - n` 是 `none`，`n - none` 是 0（`none - none` 也是 0） |
+| `a / b` | 向下取整；`b` 为 0 时得 `none`（`none / 0` 也是）；`n / none` 是 0（`none / none` 也是），`none / n` 是 `none` |
+| 比较 | 照常比较，`none` 大于所有整数，`none == none` |
+| `!a` | `a` 为 0 时得 1，否则得 0 |
+| `a && b`、`a \|\| b` | 得 1 或 0 |
+
+### 6.3 数值函数
+
+数值函数对当前候选组现算，什么都不存。**候选组为空时，数值函数都得 0**：没有候选可算。（`none` 只表示变量没赋值，数值函数不会得 `none`。）
+
+**形状**（主候选的数）：`size`（节点数）、`vars`、`depth`、`mul`（乘积数）、`bitconst`（与常数的位运算数）、`arith_in_bit`（位运算下的算术数）、`shift`、`div`。
+
+**性质**（1 或 0；除另有说明外看主候选）：
+
+| 名字 | 为 1 时 |
+|---|---|
+| `opaque` | 有移位、除法或 `mulhi`，且它的重建大于 `tiny_size` 个节点（会运行 `prepass`） |
+| `rebuilds` | 预处理会改变它（会运行 `prepass`） |
+| `minimal` | 某个候选被证明最小：没有更小的项与它相等（`prove_minimal` 开着时才证明） |
+| `mixed` | 位运算下直接有算术或常数 |
+| `moved` | 上一个 `fix` 停在次数上，主候选还在变 |
+| `input` | 它就是本次运行的输入：`pipeline` 里是 `simplify` 的输入，`prepass` 里是预处理的那个项，`polish` 里是那个候选；`rewrite`、`simba`、`sub/NAME` 里总是 0 |
+| `tiny` | 至多 `tiny_size` 个节点 |
+| `fits_split` | 至多 `split_size` 个节点 |
+| `used_wide`、`used_clustered` | 有一个候选的 `used` 里有这一位（看整组） |
+| `few_rewrites` | 它的 `rewrites` 至多 `unclustered_after` |
+| `replaceable` | 整体有更小的 T-函数形式 |
+| `abstracted` | 来源是抽象了子项的重建（`over_const_bitwise`、`over_shared_bitwise`） |
+| `no_leaves` | 是没有叶子的线性区域 |
+| `wide` | 是叶子多于 `max_leaves` 个的线性区域 |
+| `const_bitwise` | 有与常数的位运算 |
+| `cofactor` | 本次运行在重建 `poly_mba` 的线性余因子 |
+
+性质之中，`opaque`、`rebuilds` 要跑一次 `prepass`，比较贵；其余只看项本身或候选的附带信息。
+
+**带参数的函数**：
+- `(size R)`：寄存器 `R` 主候选的大小；寄存器为空时得 0。
+- `(same R)`：主候选和 `R` 的主候选相同时为 1；有一边为空时为 0。
+- `(any C)`：有一个候选单独满足 `C`；`(all C)`：有候选，且每个都单独满足。
+
+比较照常比较这些 0：`size < (size r)` 在 `r` 为空时为假，`size > (size m)` 在 `m` 为空时（主候选不空）为真；空组上 `(0 < 1)` 照样为真。默认管线读的寄存器在读时都不为空。
+
+变量（第 9 节）在表达式里读当前绑定的值：`(if rerun_input ...)`、`(fix (restarts - 1) later)`、`(filter (size <= split_size))`。
+
+## 7. 带参数的候选组函数
+
+下表中 `p`、`a`、`b` 是管线，`C` 是条件，`N`、`K` 是次数，`R` 是寄存器名。参数里有管线的是高阶函数；`a | b` 是序列，不是函数，列在这里是为了对照 `(seq ...)`。
+
+| 函数 | 含义 | 空组、顺序 |
+|---|---|---|
+| `a \| b`、`(seq a b ...)` | 依次执行，前一步的候选交给后一步；是作用域 | — |
+| `(union a b ...)` | 每个都在同一组输入上运行，输出按分支顺序连起来，去重时留先出现的 | 某支给出空组时只是不贡献 |
+| `(best K a b ...)` | 同 `union`，再按大小排序（同样大小时保持原来的先后），保留最小的 `K` 个，至少 1 个。保留的主候选来自某个 alternative 时，记它一次 `won` | — |
+| `(first a b ...)` | 依次运行，返回第一个非空、且与输入不同的结果；都没有就返回输入。"不同"比较项和来源 | — |
+| `(fix N p)` | 重复 `p` 至多 `N` 次，主候选不再变化时停；停在次数上（还在变）时 `moved` 为 1 | 输入和结果都空算不变 |
+| `(if C a)`、`(if C a b)` | 对输入求 `C`，真时运行 `a`，否则运行 `b`（省略时是 `id`） | — |
+| `(retry C a b)` | 运行 `a`；`C` 对 `a` 的结果成立时，在原输入上运行 `b`，`b` 的主候选不比 `a` 的大时取 `b` | `b` 给出空组时取 `a`；`a` 给出空组、`b` 不空时取 `b` |
+| `(filter C)` | 对每个候选单独求 `C`，只保留成立的 | — |
+| `(smallest p)` | 运行 `p`；本次运行里 `p` 中的 pass（单项 pass、`prepass`、`polish`、`take_minimal`、`reprint`、`egglog`，不算 `id`、`save`、`load` 这些只搬动候选的）给出过比结果主候选严格更小的候选时，把其中第一个最小的放到结果最前面（去重） | 结果为空时原样返回 |
+| `(smaller NAME p)` | 运行 `p`，主候选严格变小才采用，否则返回输入。采用时来源改为 `NAME`，记 `NAME/won`、`NAME/gain` | 输入或结果为空时返回输入 |
+| `(wins N p)` | 重复 `p`，直到其中的 `smaller` 这一遍没有采用结果，或一共采用了 `N` 次 | `N` 为 0 时不运行 `p`，原样返回 |
+| `(tag NAME p)` | 运行 `p`，记时间 `NAME/run`；主候选变了时记 `NAME/won/来源`，来源改为 `NAME` | — |
+| `(cand NAME p)` | 一个预处理候选：`NAME` 是 `PRE` 的名字（第 11.2 节的 `pre`）且被关掉时给出空组；否则运行 `(bit_split_budget = cand_bit_splits \| p)`（所以也是作用域），结果来源都改为 `NAME`，记 `pre/NAME/made` | — |
+| `(scope p)` | `p` 里对同一个项的各 pass 共用一个运行上下文（缓存）；是作用域 | — |
+| `(regions p)` | 对每个候选：如果它是一个线性区域，叶子先用 `rewrite` 重建，整体用 `p` 的主候选；否则对它的操作数用 `rewrite` | — |
+| `(again p)` | 运行 `p`；主候选在"位运算的算术叶子"处有变化时，对它再做一次 `rewrite`，变小才保留 | — |
+| `(save R)`、`(load R)` | 第 5.5 节；`load` 一个空寄存器给出空组，可以反复读 | — |
+| `(label R)` | 只做统计：每个候选记 `stats::label`，与寄存器 `R` 的主候选来源不同时记 `pre/来源/differs`、`pre/来源/gain`；`--trace` 时打印候选 | — |
+| `(egglog LABEL)`、`egglog` | 一轮 egglog：所有候选并入一个 e-graph，饱和，提取出一个候选。统计计在 `egglog/LABEL` 下 | — |
+
+`tag`、`label`、`smaller`、`cand` 记的统计不影响结果；它们改的来源会影响结果（第 2.2 节）。
+
+## 8. 不带参数的候选组函数（pass）
+
+这些函数习惯上叫 pass。按调用方式分四种：整组、单项、alternative、polish。
+
+### 8.1 整组
 
 对整组候选操作。组为空时，除 `none` 外都原样返回。
 
@@ -136,16 +280,16 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 |---|---|
 | `id` | 原样返回 |
 | `none` | 给出空组 |
-| `prepass` | 对主候选运行 `prepass` 管线，给出它的结果：第一个是主重建，其后是要一起并入 e-graph 的 |
-| `polish` | 对每个候选单独运行 `polish` 管线，变小时替换 |
-| `take_minimal` | 第一个被证明最小的候选（条件 `minimal`）；没有就原样返回 |
-| `reprint` | 主候选打印成中缀再读回 |
+| `prepass` | 对主候选运行 `prepass` 管线，用它的结果替换整组：第一个是主重建，其后是要一起并入 e-graph 的 |
+| `polish` | 对每个候选单独运行 `polish` 管线（每次是一次单独的运行），结果的主候选变小时替换 |
+| `take_minimal` | 第一个被证明最小的候选（`minimal`）；没有就原样返回 |
+| `reprint` | 主候选打印成中缀再读回，只留这一个 |
 | `within` | 当前的 `rewrites` 用完时给出空组，否则原样返回 |
-| `pre_done` | 预处理的结尾：统计保留的候选，来源改为 `pre/来源`；主候选与输入是同一个项时，按寄存器 `t0` 里输入原来的写法给出 |
+| `pre_done` | 预处理的结尾：统计保留的候选，来源改为 `pre/来源`；主候选与输入相同时，按寄存器 `t0` 里输入原来的写法给出 |
 
-### 5.2 单项 pass
+### 8.2 单项
 
-对每个候选单独运行，用结果替换它。没有结果或结果不变时保留原候选（alternative 除外）。
+对每个候选单独运行，用结果替换它；没有结果或结果不变时保留原候选（alternative 除外）。
 
 | pass | 含义 |
 |---|---|
@@ -170,18 +314,18 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `drop_identities` | 去掉加 0、乘 1 |
 | `rebuild` | 不带 `relate` 的一次重建（`lowbits`、`unshift`、`rewrite`、`cluster_regions`、`tfunc`） |
 
-### 5.3 Alternative
+### 8.3 Alternative
 
-也是单项 pass，但对候选整体运行。找不到形式时**不给出候选**（而不是保留原候选），给出的候选来源是自己的名字，所以 `best` 能记哪一个胜出。
+也是单项函数，但对候选整体运行。找不到形式时**不给出候选**（而不是保留原候选）；给出的候选来源是自己的名字，所以 `best` 能记哪一个胜出。
 
 | pass | 含义 |
 |---|---|
 | `simba` | 运行 `simba` 管线 |
 | `small_blocks` | 按合取基里的块（≤ 3 个叶子）逐块重建 |
-| `wide_blocks` | 宽区域的分块重建；被保留时置 `used_wide` |
+| `wide_blocks` | 宽区域的分块重建；被保留时置 `used` 的 wide 位 |
 | `poly_mba` | 多项式 MBA 的展开、约化和因式分解 |
 | `drop_unused` | 把值不依赖的叶子置 0 后重建 |
-| `clustered` | 按用到的叶子把项分组，各组分别重建；被保留时置 `used_clustered` |
+| `clustered` | 按用到的叶子把项分组，各组分别重建；被保留时置 `used` 的 clustered 位 |
 | `peel`、`peel_clustered` | 剥掉一个项再重建其余部分 |
 | `semi_linear` | 带常数掩码区域的逐位重建 |
 | `rebuild_values` | 按区域在 {0,1}^n 上的取值重建 |
@@ -189,103 +333,55 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `related_leaves` | 加上叶子间零关系的小倍数后重建 |
 | `one_wide_term` | 整个区域写成一个位运算项 |
 
-### 5.4 Polish pass
+### 8.4 Polish
 
-写作 `polish/NAME`，单项 pass，用在 `polish` 管线里：`push_not`、`join_constants`、`join_linear`、`over_const_bitwise`、`over_shared_bitwise`、`over_products`、`recombine`、`shift_cases`、`decompose`、`factor`。`--passes` 的 `polish=a,b,...` 是这些名字的简写（第 8 节）。
+写作 `polish/NAME`，单项函数，用在 `polish` 函数里：`push_not`、`join_constants`、`join_linear`、`over_const_bitwise`、`over_shared_bitwise`、`over_products`、`recombine`、`shift_cases`、`decompose`、`factor`。`--passes` 的 `polish=a,b,...` 是这些名字的简写（第 11 节）。
 
-### 5.5 内部 pass 名与开关
+## 9. 变量
 
-下列名字是开关变量：`relate = 0`（或 `(off relate)`）关掉它，`relate = 1`（或 `(on relate)`）重新打开；`--passes` 的 `off=` 也接受它们。关掉之后，它在一串步骤里时返回输入，作为 alternative 时不给出形式。它们大多同时也是 pass 名；`poly/masked`、`semi/*` 只是内部步骤：
+### 9.1 开关
+
+每个内部 pass 是一个开关变量，值为 0 时它被关掉：在一串步骤里返回输入，作为 alternative 时不给出形式。大多数同时也是 pass 名；`poly/masked`、`semi/*` 只是内部步骤：
 
 `lowbits unshift tfunc_whole relate tfunc unify_operands recombine cut_products shifted_xor simplify_rebuilt cluster_regions simba small_blocks wide_blocks poly_mba poly/masked rebuild_values common_multiple related_leaves one_wide_term semi_linear drop_unused clustered peel peel_clustered semi/grouped semi/peel_grouped semi/shapes semi/pairs semi/peel_shapes semi/semi_split semi/scaled semi/bit_split semi/short_consts`
 
-默认关掉的是 `semi/peel_shapes`。
+`default.pipe` 关掉的是 `semi/peel_shapes`。
 
-另外有这些**开关**：
+其他开关：
 
 | 名字 | 默认 | 含义 |
 |---|---|---|
-| `cut` | 0 | 开着时，时限到期而跳过的步骤会把整次运行记为截断（第 4.2 节） |
-| `rerun_input` | 1 | 默认 `pipeline` 的第一轮：结果是 `mixed` 时带上原输入重跑（`(retry (rerun_input && ...) ...)`） |
-| `prove_minimal` | 1 | 尝试证明候选最小（条件 `minimal`、pass `take_minimal`）；0 时什么都不证明 |
+| `cut` | 0（默认 `pipeline` 里设成 1） | 开着时，因时限跳过的步骤把整次运行记为截断 |
+| `rerun_input` | 1 | 结果是 `mixed` 时带上原输入重跑第一轮 |
+| `prove_minimal` | 1 | 尝试证明候选最小 |
 | `relate_parts` | 1 | `relate` 对叶子多于 `relate_leaves` 的区域也按部分处理；不带 `clustered` 的重建里设成 0 |
 
-这些默认值和 `semi/peel_shapes = 0` 都写在 `default.pipe` 开头，是入口程序的赋值。
-
-## 6. 条件与数
-
-### 6.1 条件名
-
-除另有说明外看主候选。下面的条件名在空组上为假（`!` 照常取反）；"有候选"写作 `(any 1)`。条件里也可以写变量名（第 5.5 节的开关和第 7 节的变量）：值不为 0 时成立，`none` 也成立，与候选无关，空组上也一样：`(if rerun_input ...)`、`(if (printed && !input) ...)`、`(if !relate ...)`。
-
-| 名字 | 成立时 |
-|---|---|
-| `opaque` | 有移位、除法或 `mulhi`，且它的重建大于 `tiny_size`（会运行 `prepass`） |
-| `rebuilds` | 预处理会改变它（会运行 `prepass`） |
-| `minimal` | 某个候选被证明最小：没有更小的项与它相等（`prove_minimal` 开着时才证明） |
-| `mixed` | 位运算下直接有算术或常数 |
-| `moved` | 上一个 `fix` 停在次数上，主候选还在变 |
-| `input` | 它就是 `simplify` 的输入 |
-| `tiny` | 至多 `tiny_size`（3）个节点 |
-| `fits_split` | 至多 `split_size` 个节点 |
-| `used_wide`、`used_clustered` | 产生某个候选的 pass 里，`wide_blocks`/`clustered` 给过被保留的形式（看整组） |
-| `few_rewrites` | 产生它的 pass 至多做了 `unclustered_after` 次未缓存的 `rewrite` |
-| `replaceable` | 整体有更小的 T-函数形式 |
-| `abstracted` | 来自抽象了子项的重建（`over_const_bitwise`、`over_shared_bitwise`） |
-| `no_leaves` | 是没有叶子的线性区域 |
-| `wide` | 是叶子多于 6 个的线性区域 |
-| `const_bitwise` | 有与常数的位运算 |
-| `cofactor` | 本次运行在重建 `poly_mba` 的线性余因子 |
-
-### 6.2 组合与比较
-
-- `C && D`、`C || D`、`!C`、括号，任意嵌套。
-- `(same R)`：主候选和寄存器 `R` 的主候选是同一个项（结构相同，不只是大小相同）。
-- `(any C)`：有一个候选单独满足 `C`；`(all C)`：有候选，且每个都单独满足。
-- 比较 `V CMP W`：两边有一边没有值（如空寄存器）时为假。
-
-### 6.3 数
-
-- **特征**（主候选的形状）：`size`（节点数）、`vars`、`depth`、`mul`（乘积数）、`bitconst`（与常数的位运算数）、`arith_in_bit`（位运算下的算术数）、`shift`、`div`。
-- `(size R)`：寄存器 `R` 主候选的大小。
-- **变量**：第 5.5 节的开关和第 7 节表里的任一名字，取当前的绑定（开关是 0 或 1），存的是什么就读到什么；只有 `time_limit` 取剩下的毫秒数，`keep` 至少读作 1。默认 `pipeline` 的第一轮单独写出，所以写 `(fix (restarts - 1) later)`、`(fix (printed - 1) later)`。
-- 算术在非负整数上：`-` 小于 0 时取 0，`/` 向下取整，除以 0 没有值。`size <= (size f) * 3 / 4` 就是 `4·size ≤ 3·(size f)`，因为 `size` 是整数。
-- `fix`、`best`、`wins` 的次数在进入形式时对当时的候选求值（`best` 在各支运行之后），没有值时为 0。
-
-## 7. 变量
-
-变量在管线里用 `NAME = VALUE` 赋值（第 4.1 节），在数和条件里读（第 6 节），在 `--passes` 里写成 `NAME=VALUE` 项（第 8 节）。开关见第 5.5 节。
-
-### 7.1 运行设置
-
-默认值写在 `default.pipe` 开头（入口程序的赋值）；`restarts`、`iter_limit` 来自命令行。没有赋值时是 `none`。
+### 9.2 运行
 
 | 名字 | 默认 | 含义 |
 |---|---|---|
-| `restarts` | `-m`（2） | 总轮数；默认 `pipeline` 写 `(fix (restarts - 1) later)`，因为第一轮单独写出 |
-| `iter_limit` | `-i`（10） | 每轮 egglog 重复调度几次 |
-| `keep` | 2 | 预处理保留几个候选（至少读作 1） |
+| `restarts` | 来自 `-m` | 总轮数；默认 `pipeline` 写 `(fix (restarts - 1) later)`，因为第一轮单独写出。从 Rust 直接进入的运行没有命令行，它和 `iter_limit` 是 `none` |
+| `iter_limit` | 来自 `-i` | 每轮 egglog 重复调度几次 |
+| `keep` | 2 | 预处理保留几个候选；读出时至少是 1（`keep = 0` 读作 1） |
 | `extra` | 2 | 预处理还在改变结果时，额外跑几轮 |
 | `printed` | 2 | 从打印结果再跑几轮（0 不跑）；默认 `pipeline` 写 `(fix (printed - 1) later)` |
 | `match_limit` | 64 | back-off 调度：一条规则每次运行最多匹配几次，超过就被禁用；下一轮 egglog 起生效 |
 | `ban_length` | 3 | back-off 调度：被禁用的规则先停几次运行；下一轮 egglog 起生效 |
 
-### 7.2 预算、时限和设置
+### 9.3 预算与时限
 
 | 名字 | 默认 | 含义 |
 |---|---|---|
-| `rewrites` | 不限 | 预算：剩下的未缓存 `rewrite` 调用次数，用完后 `rewrite` 原样返回；里面用掉的次数也从外层扣除 |
-| `bit_split_budget` | 不限 | 预算：剩下的 `bit_split` 拆分对数；每个 `cand` 设成 `cand_bit_splits`，同 `rewrites` 也从外层扣除 |
-| `time_limit` | 不限 | 时限，赋值时从此刻起计毫秒（第 4.2 节），`none` 不限。`--passes time_limit=MS` 是入口程序里的赋值；bench 用 `-t` 乘以它的 `--time-limit` 比例（默认 0.8，0 时传 `none`）设置，写在 `--passes` 里的 `time_limit=` 在它之后，所以优先 |
+| `rewrites` | `none` | 剩下的未缓存 `rewrite` 调用次数，用完后 `rewrite` 原样返回（第 5.1 节） |
+| `bit_split_budget` | `none` | 剩下的 `bit_split` 拆分对数；每个 `cand` 设成 `cand_bit_splits` |
+| `time_limit` | `none` | 截止时刻，赋值时从此刻起计毫秒（第 5.3 节）。bench 用 `-t` 乘以它的 `--time-limit` 比例（默认 0.8）设置，比例为 0 时传 `none`；写在 `--passes` 里的在它之后，所以优先。`time_limit = 0` 是 0 毫秒，立即到期 |
+
+### 9.4 限值
+
+| 名字 | 默认 | 含义 |
+|---|---|---|
 | `semi_leaves` | `max_leaves` | 半线性区域最多几个叶子才重建 |
 | `relate_leaves` | `max_wide_leaves` | `relate` 只处理叶子不多于此的区域 |
-
-### 7.3 限值
-
-默认值写在 `default.pipe` 开头（入口程序的赋值），Rust 里只有名字和上限；`--passes` 的 `NAME=VALUE` 项排在它们之后，所以覆盖默认值。`default.pipe` 漏写的变量是 `none`，测试 `default_pipe_assigns_every_variable` 检查执行完入口赋值后仍是 `none` 的只有 `rewrites`、`bit_split_budget`、`time_limit`（和没有命令行时的 `restarts`、`iter_limit`）。
-
-| 名字 | 默认 | 含义 |
-|---|---|---|
 | `unclustered_relate_leaves` | 10 | 不带 `clustered` 的重建里，`relate` 只处理这么多叶子以内的区域 |
 | `unclustered_rewrites` | 256 | 不带 `clustered` 的重建最多调用 `rewrite` 的次数，超过就放弃 |
 | `unclustered_after` | 1024 | 其他重建的 `rewrite` 次数不超过此值时，才尝试不带 `clustered` 的重建 |
@@ -293,7 +389,7 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `related_rebuilds` | 8 | `related_leaves` 最多重建几种组合 |
 | `related` | 4 | `relate` 每个区域最多试几个算术叶子 |
 | `bit_splits` | 4 | `bit_split` 每个区域最多重建几种拆分 |
-| `cand_bit_splits` | 8 | 每个预处理候选最多几对 `P op Q`（`cand` 把预算 `bit_split_budget` 设成它） |
+| `cand_bit_splits` | 8 | 每个预处理候选最多几对 `P op Q` |
 | `splits` | 4 | `split_bits` 对一个项最多试几个变量位 |
 | `split_depth` | 2 | `split_bits` 最多嵌套几层 |
 | `split_runs` | 16 | 一次 `split_bits` 最多几次重建 |
@@ -309,7 +405,7 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `poly_branch_monos` | 128 | 展开的单项式多于此时，从一开始就每层只取第一种 |
 | `polish_rewrites` | 2000 | 一次 `polish` 最多几次未缓存的 `rewrite` |
 | `polish_wins` | 8 | 默认 `polish`（和 `polish=a,b,...`）最多采用几次 `smaller` 的结果 |
-| `tiny_size` | 3 | 不大于此的重建不再细找：条件 `tiny`，`opaque` 要求重建大于它 |
+| `tiny_size` | 3 | 不大于此的重建不再细找：函数 `tiny`，`opaque` 要求重建大于它 |
 | `max_leaves` | 6，上限 6 | 线性区域最多几个叶子才按 {0,1}^n 上的值重建（真值表是 `u64`） |
 | `max_wide_leaves` | 16，上限 64 | 宽区域最多几个叶子才整体求值（`drop_unused`、`relate`、`peel`；用到的叶子是 `u64` 掩码） |
 | `lowbits_max_bits` | 18，上限 63 | `lowbits`：一个子项最多枚举几个叶子位 |
@@ -403,11 +499,13 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `minimal_max_size_4bit` | 7 | 只含 `+ - * & \| ^ ~ neg` 的最小性证明：在 4 位里证明的项最大多大 |
 | `minimal_max_size_8bit` | 5 | 只含 `+ - * & \| ^ ~ neg` 的最小性证明：在 8 位里证明的项最大多大 |
 
+`lowbits_budget`、`lowbits_wide_budget`、`lowbits_refine_budget` 是普通变量（每次 `lowbits` 调用从它们开始计数），不是第 5.1 节的预算。`poly_mba` 的变量在每次展开开始时读一次；`poly_factor_tries` 只用于整个多项式那一层，下层总是只试一个公因子。
 `decompose_max_vars`、`decompose_min_free_size`、`decompose_max_free_classes`、`decompose_fill_max_vars`、`decompose_xor_max_shared` 决定最短位运算式的搜索；线程级的真值表缓存按这五个值分开存，所以不同作用域里的不同值各建一份表。`memo_contexts` 只决定缓存留多少结果，不改变结果，所以不记入缓存读过的变量。
 `wide_blocks_cache_size` 和 `memo_contexts` 一样只决定缓存留多少，不记入读过的变量；`wide_blocks` 的缓存键里有全部限值的哈希。带自由常数的位运算式按大小逐层建表，进程内共用；表里的式子与 `shapes_max_size` 无关，只是最大那一层的式子不当操作数，不存它们的真值表列表，所以值小时少建几层，值大时补上那一层的列表再接着建。
 `tfunc` 的查找表进程内共用，按位宽、变量数和 `tfunc_max_vars`、`tfunc_max_size`、`tfunc_points` 分开建，所以不同作用域里的不同值各建一份，正常运行只建默认那一份；没用到的求值点上变量都是 0，值和第 0 个点相同，不改变查表的结果。`tfunc_max_carries`、`tfunc_max_states`、`tfunc_max_factor` 也决定 `lowbits` 在上下文里的证明，每次 `lowbits` 调用读一次。
 
-### 7.4 `sub/NAME`
+
+## 10. `sub/NAME`
 
 单项 pass 重建子项时调用的管线，默认是 `rewrite`（带缓存）或 `rebuild`（直接一次重建）。
 
@@ -427,54 +525,58 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `sub/over_bitwise` | `rebuild` | `over_const_bitwise`、`over_shared_bitwise` 的项 |
 | `sub/shift_cases` | `rebuild` | `shift_cases` 的各种情况 |
 
-## 8. `--passes`
+## 11. `--passes` 和命令行
 
-`--passes` 的值是若干**项**，依次作用在 `src/default.pipe` 之上（`default.pipe` 本身也是这样一串项）。项分两种：赋值项（`NAME=VALUE`、`off` 项）按出现的顺序排进入口程序，每次运行时执行（见开头）；其他的是定义，读到时生效。
+`--passes` 的值是若干**项**，依次作用在 `src/default.pipe` 之上（`default.pipe` 本身也是这样一串项）。
 
-### 8.1 分项
+### 11.1 分项
 
 - `;` 总是分项。
-- 括号外的空白：后面一段形如 `KEY=`、`KEY+=`、`KEY-=` 或以 `(let` 开头，且前一段不以 `|` 结尾时，开始新的一项，否则接在上一项后面。所以 `prepass=lowbits | rewrite extra=0` 是两项，管线里可以有空格；`prepass=a | split_runs=4 | b` 是一项，`split_runs=4` 是管线里的赋值。
+- 括号外的空白：后面一段以 `KEY=`、`KEY+=`、`KEY-=` 或 `(let` 开头，且前一段不以 `|` 结尾时，开始新的一项，否则接在上一项后面。所以 `prepass=a | split_runs=4 | b` 是一项，`prepass=a split_runs=4` 是两项。
 - `#` 到行尾是注释。
 
-### 8.2 项
+### 11.2 项
 
 | 项 | 含义 |
 |---|---|
-| `pipeline=P`、`prepass=P`、`polish=P`、`rewrite=P`、`simba=P`、`sub/NAME=P` | 替换这条管线 |
+| `NAME=VALUE` | 入口程序里 `pipeline` 前的一步赋值。值同管线里的写法，可以是表达式。项里的空格只在后一段不像新的一项（不以 `KEY=` 开头）时才接在这一项里：`keep=keep + 1` 是一项（`Display` 就这样写），`keep=keep +1` 也是；要稳妥就不写空格 |
+| `off=a,b`、`off+=a`、`off-=a` | 也是赋值：`off+=a` 是 `a = 0`，`off-=a` 是 `a = 1`，`off=a,b` 是把内部 pass 都设成 1 再关 `a`、`b` |
+| `pipeline=P`、`prepass=P`、`polish=P`、`rewrite=P`、`simba=P`、`sub/NAME=P` | 替换这条管线的定义 |
 | `polish=a,b,...` | 全是 polish pass 名时：依次尝试这些 `polish/NAME`，变小才保留，有一个变小就重来，至多保留 `polish_wins` 次 |
-| `(let NAME P)` | 定义名字，之后的项里写到 `NAME` 的地方展开为 `P`（`a | b` 平铺，`(a | b)` 嵌套，见第 4 节）。`default.pipe` 定义的名字（`first_round`、`later`、`gates`、`rebuild_main`……）也能用 |
+| `(let NAME P)` | 定义名字（第 5.4 节）。`default.pipe` 定义的名字（`first_round`、`later`、`gates`、`rebuild_main`……）也能用 |
 | `file=PATH` | 在此处读入文件里的各项 |
 | `pre=a,b`、`pre+=`、`pre-=` | 造哪些预处理候选：`unified no_wide split_bits halve_first over_products over_const_bitwise over_shared_bitwise halve_input unclustered` |
-| `off=a,b`、`off+=a`、`off-=a` | 内部 pass 的赋值（第 5.5 节）：`off+=a,b` 是 `(off a b)`，`off-=a` 是 `(on a)`，`off=a,b` 先把所有内部 pass 打开（`(on ...)`），再关掉 `a`、`b`；`off=` 只是全部打开 |
 | `schedule=...`、`schedule+=`、`schedule-=` | 每轮 egglog 的步骤，逗号分隔的 `run:RS`（back-off 调度）、`once:RS`、`sat:RS`（饱和），`RS` 是 `default-ruleset canonicalization constant-folding analysis identity-zero-element simplify` 之一 |
-| `NAME=VALUE` | 入口程序里的赋值 `NAME = VALUE`：任一变量或开关（第 5.5、7 节），如 `extra=0`、`prove_minimal=0`、`split_runs=8`、`time_limit=2000`、`time_limit=none`。值同管线里的写法（第 4.1 节），可以是表达式，对输入求值：`split_runs=vars*2`；后面的项可以读前面赋的值：`keep=keep+1`。同一个变量写两次，后一次为准 |
 
-注意名字是**在读到那一项时展开**的：重新定义 `gates` 不会改变已经读好的 `prepass`，要再写一次 `prepass=...`。
+赋值和 `off` 项按出现顺序排进入口程序；定义项（管线、`let`、`pre`、`schedule`）在读到时生效。
 
-## 9. 检查与警告
+命令行的 `-m N`、`-i N` 也是入口程序里的赋值（`restarts = N`、`iter_limit = N`）；`-n`（数值类型）决定建哪个 egglog 程序，不是变量。
+
+## 12. 检查与警告
 
 读完 `--passes` 后检查，出错时拒绝整个设置：
 
-- 名字：未知的 pass、条件、数、变量、`on`/`off` 名、`sub/NAME`、规则集，都报错并列出已知的名字。
-- 赋值：给特征、条件名赋值（`minimal=` 提示运行设置叫 `prove_minimal`）；开关赋 `none`；`none` 不是单独写在右边；条件或次数里写 `=`（提示比较用 `==`）。
-- 形式的参数：个数、种类（条件、数、管线）不对。
-- 旧写法报错并提示新写法：单名写法 `save/t`、`off/NAME`、`egglog/LABEL`（提示括号写法）；`seq(a,b)` 语法；`(with KEY=VALUE ... p)`（提示 `(KEY = VALUE | ... | p)`，它的 `bit_splits` 是现在的 `bit_split_budget`）；`(time-limit N)`（提示 `time_limit = N`，不限写 `time_limit = none`）；条件名 `true`（提示 `1`，只在有候选时为真的写 `(any 1)`）；名字里的 `-`：解析出错时，如果写了 `a-b` 这样的词，提示它读作 `a - b`、名字用 `_`，`a_b` 是已知名字时提示写 `a_b`（`--passes tfunc-whole=0` 也一样）。
+- 名字：未知的变量、函数、`on`/`off` 名、`sub/NAME`、规则集，报错并列出已知的名字。
+- `let` 名和变量、函数、宏同名（第 4.1 节）。
+- 赋值：给函数赋值；值超过变量的上限。
+- 条件里写了 `=`（`(if (size = 3) ...)`）：报错 "an assignment is a step; compare with =="。
+- 类型：步骤位置写了数值函数或变量，表达式里写了候选组函数；函数参数的个数、种类（表达式、管线、寄存器名）不对。
+- 旧写法报错并提示新写法：`(with KEY=VALUE ... p)`（提示 `(KEY = VALUE | ... | p)`，它的 `bit_splits` 是 `bit_split_budget`）、`(time-limit N)`（提示 `time_limit = N`、`time_limit = none`）、条件名 `true`（提示 `1`，只在有候选时为真的写 `(any 1)`）、单名写法 `save/t`、`off/NAME`、`egglog/LABEL`、`seq(a,b)` 语法。`with` 外面的 `KEY=VALUE` 就是赋值 `KEY = VALUE`，不报错。名字里的 `-` 读作减号，没法单独报错；解析出错时，如果写了 `a-b` 这样的词，错误后面加上"`a-b` 读作 `a - b`，名字用 `_`"，`a_b` 是已知名字时提示写 `a_b`。
+- 开关赋 `none`：开关只收数，0 是关。
 - `egglog`、`reprint` 只能出现在 `pipeline` 里：只有 `simplify` 的运行才有 e-graph。
-- `prepass` 和 `polish` 不能经过别的管线回到自己。调用关系：`prepass` pass 和条件 `opaque`、`rebuilds` 调用 `prepass`；`polish` pass 调用 `polish`；单项 pass、`regions`、`again` 调用 `rewrite`、`simba`、`sub/NAME` 这一组（这一组内部本来就是递归的）。
-- 寄存器的读（`load`、`label`、`size`、`same`）前面必须有可能先执行的同名 `save`。按执行顺序算：`if` 的两支都算，`retry` 的条件在 `a` 之后，`best` 的次数在各支之后；`fix`、`wins`、`regions` 的体会重复执行，体里任何地方的 `save` 对整个体都算。这条检查找的是写错名字和顺序，不保证运行时一定有值。
+- `prepass` 和 `polish` 不能经过别的管线回到自己。调用关系：`prepass` pass 和函数 `opaque`、`rebuilds` 调用 `prepass`；`polish` pass 调用 `polish`；单项 pass、`regions`、`again` 调用 `rewrite`、`simba`、`sub/NAME` 这一组（这一组内部本来就是递归的）。
+- 寄存器的读（`load`、`label`、`size`、`same`）前面必须有可能先执行的同名 `save`。按执行顺序算：`if` 的两支都算，`retry` 的条件在 `a` 之后，`best` 的个数在各支之后；`fix`、`wins`、`regions` 的体会重复执行，体里任何地方的 `save` 对整个体都算。这条检查找的是写错名字和顺序，不保证运行时一定有值。
 
 以下只给警告：`eggy1` 和 `bench` 的父进程打印到 stderr，`bench --one` 子进程不打印。
 
 - `--passes` 里定义了却没用到的 `let`。
-- 存了却从不读的寄存器。
-- 死存储：同一层又 `save` 了一次，中间没读。写在 `if`、`cand`、`first` 的后几支、`retry` 的 `b` 或循环体里的 `save` 不和外面的比较，所以 `(save t) | (if c (save t))` 这种先存默认值再覆盖的写法不算。
-- 赋值（包括 `(on NAME)`、`(off NAME)`）是所在 seq（或整条管线）的最后一步：什么也影响不到。
-- 同一条 seq 里同一个变量连赋两次，中间没有读它，也没有别的步骤。
+- 存了却从不读的寄存器；同一层又 `save` 了一次、中间没读的死存储（写在 `if`、`cand`、`first` 的后几支、`retry` 的 `b` 或循环体里的 `save` 不和外面的比较，所以 `(save t) | (if c (save t))` 这种先存默认值再覆盖的写法不算）。
+- 赋值（包括 `(on NAME)`、`(off NAME)`）是所在序列（或整条管线）的最后一步：什么也影响不到。
+- 同一条序列里同一个变量连赋两次，中间只有赋值，也没有读它。
 
-默认管线没有警告，`default.pipe` 的 `let` 都用到了（有测试检查）。
+默认管线没有警告，`default.pipe` 的 `let` 都用到了，执行完 `default.pipe` 后仍为 `none` 的变量（内部 pass 的开关除外）正好是 `rewrites`、`bit_split_budget`、`time_limit`，没有命令行时还有 `restarts`、`iter_limit`（都有测试检查）。
 
-## 10. 例子
+## 13. 例子
 
 ```
 # 只在没有乘积时关掉 poly_mba（按输入形状选 pass）
