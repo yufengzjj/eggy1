@@ -423,13 +423,14 @@ pub const ITER_LIMIT: usize = RUN0 + 4;
 pub const DEADLINE: usize = RUN0 + RUN.len();
 /// The variables the Rust code reads; those the source files define besides follow them.
 pub const RUST_VARS: usize = DEADLINE + 1;
-/// Room for all variables; the bit after them stands for all the `LIMITS` (`limits_key`).
-const MAX_VARS: usize = 191;
-const LIMITS_BIT: usize = MAX_VARS;
-const READ_WORDS: usize = (MAX_VARS + 1).div_ceil(64);
+/// The read bit that stands for all the `LIMITS` (`limits_key`).
+const LIMITS_BIT: usize = RUST_VARS;
+/// The read bit that stands for all the variables past `RUST_VARS` (`globals_hash`).
+const GLOBALS_BIT: usize = RUST_VARS + 1;
+const READ_WORDS: usize = (RUST_VARS + 2).div_ceil(64);
 
-/// A set of variables (positions, and `LIMITS_BIT`), as the memos record what a computation
-/// read.
+/// A set of variables below `RUST_VARS`, `LIMITS_BIT` and `GLOBALS_BIT`, as the memos record
+/// what a computation read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReadSet([u64; READ_WORDS]);
 
@@ -534,12 +535,11 @@ fn parsing<R>(globals: &mut Vec<usize>, f: impl FnOnce() -> R) -> R {
 
 /// The position of a variable past `RUST_VARS` named `name`, given one when it has none, and
 /// recorded as defined by the parse under way.
-fn global_slot(name: &str) -> Result<usize, String> {
+fn global_slot(name: &str) -> usize {
     let i = {
         let mut g = GLOBALS.write().unwrap();
         match g.iter().position(|n| *n == name) {
             Some(i) => RUST_VARS + i,
-            None if RUST_VARS + g.len() >= MAX_VARS => return Err(format!("{name}: at most {} variables can be defined", MAX_VARS - RUST_VARS)),
             None => {
                 g.push(lang::intern(name));
                 RUST_VARS + g.len() - 1
@@ -547,7 +547,7 @@ fn global_slot(name: &str) -> Result<usize, String> {
         }
     };
     PARSED.with(|p| p.borrow_mut().get_or_insert_with(Vec::new).push(i));
-    Ok(i)
+    i
 }
 
 /// The names of all variables `var_index` finds, in order.
@@ -575,7 +575,12 @@ pub fn check_cap(i: usize, v: u64) -> Result<u64, String> {
 thread_local! {
     /// The current value of each variable. Shallow binding: `bind` keeps the outer value in
     /// the innermost scope of `FRAMES`, which puts it back when it ends.
-    static VARS: [std::cell::Cell<u64>; MAX_VARS] = const { [const { std::cell::Cell::new(NONE) }; MAX_VARS] };
+    static VARS: [std::cell::Cell<u64>; RUST_VARS] = const { [const { std::cell::Cell::new(NONE) }; RUST_VARS] };
+    /// The values of the variables past `RUST_VARS`, by position less `RUST_VARS`; `none`
+    /// past the end.
+    static GLOBAL_VALS: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// A hash of `GLOBAL_VALS`, made when first needed after a `set` of one of them.
+    static GLOBALS_HASH: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     /// A hash of the values of the `LIMITS`, kept up to date by `set`.
     static LIMITS_HASH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// The scopes under way, innermost last: each variable bound there, its value outside and
@@ -604,12 +609,12 @@ pub fn set_current(p: &Passes) {
 
 /// The value of variable `i`, not recorded as read.
 pub fn get(i: usize) -> u64 {
-    VARS.with(|v| v[i].get())
+    if i < RUST_VARS { VARS.with(|v| v[i].get()) } else { GLOBAL_VALS.with(|g| g.borrow().get(i - RUST_VARS).copied().unwrap_or(NONE)) }
 }
 
 /// The value of variable `i`, recorded as read for the memos (`swap_read`).
 pub fn read(i: usize) -> u64 {
-    mark_read(i);
+    mark_read(if i < RUST_VARS { i } else { GLOBALS_BIT });
     get(i)
 }
 
@@ -627,6 +632,18 @@ fn mark_read(i: usize) {
 
 /// Sets variable `i` outside any binding: a scope that binds it later restores this value.
 pub fn set(i: usize, v: u64) {
+    if i >= RUST_VARS {
+        GLOBAL_VALS.with(|g| {
+            let mut g = g.borrow_mut();
+            let k = i - RUST_VARS;
+            if k >= g.len() {
+                g.resize(k + 1, NONE);
+            }
+            g[k] = v;
+        });
+        GLOBALS_HASH.with(|c| c.set(None));
+        return;
+    }
     VARS.with(|a| {
         a[i].set(v);
         if (LIMIT0..SETTING0).contains(&i) {
@@ -707,14 +724,33 @@ pub fn same_values(bits: ReadSet, vals: &[u64]) -> bool {
     VARS.with(|a| bits.ones().zip(vals).all(|(i, v)| value_at(a, i) == *v))
 }
 
-fn value_at(a: &[std::cell::Cell<u64>; MAX_VARS], i: usize) -> u64 {
-    if i == LIMITS_BIT { LIMITS_HASH.with(|c| c.get()) } else { a[i].get() }
+fn value_at(a: &[std::cell::Cell<u64>; RUST_VARS], i: usize) -> u64 {
+    match i {
+        LIMITS_BIT => LIMITS_HASH.with(|c| c.get()),
+        GLOBALS_BIT => globals_hash(),
+        _ => a[i].get(),
+    }
+}
+
+/// A hash of the values of the variables past `RUST_VARS` on this thread.
+fn globals_hash() -> u64 {
+    GLOBALS_HASH.with(|c| {
+        if let Some(v) = c.get() {
+            return v;
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        GLOBAL_VALS.with(|g| g.borrow().iter().enumerate().filter(|(_, v)| **v != NONE).for_each(|e| e.hash(&mut h)));
+        let v = h.finish();
+        c.set(Some(v));
+        v
+    })
 }
 
 /// The values of all variables but the budgets and the deadline, which a result depends on
 /// only where they cut it short.
 pub fn key() -> Vec<u64> {
-    VARS.with(|a| (0..count()).filter(|i| !matches!(kind(*i), VarKind::Budget | VarKind::Deadline)).map(|i| a[i].get()).collect())
+    (0..count()).filter(|i| !matches!(kind(*i), VarKind::Budget | VarKind::Deadline)).map(get).collect()
 }
 
 /// A hash of the `LIMITS` on this thread, for the key of a memo that may depend on any of
@@ -1501,7 +1537,7 @@ impl Passes {
                 if !lang::free_name(name) || defs.contains_key(name) {
                     return Err(format!("{name} names a function or a definition, not a variable"));
                 }
-                global_slot(name)?;
+                global_slot(name);
                 true
             }
         };
@@ -2270,6 +2306,37 @@ mod tests {
         let cli = crate::Cli { passes: p, ..crate::Cli::default() };
         let r = crate::simplify(input.term(), &cli);
         assert_eq!(r.err().map(|e| e.to_string()).as_deref(), Some("max_leaves = 8: max_leaves is at most 6"), "a pre-pass run inside the pipeline gives its error");
+    }
+
+    #[test]
+    fn any_number_of_globals() {
+        let dir = std::env::temp_dir().join(format!("eggy1-globals-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("many.pipe");
+        let mut text: String = (0..300).map(|i| format!("many_g{i} = {i}\n")).collect();
+        text.push_str("(def (prepass) (fix (many_g299 - many_g298) rewrite) | (if many_g150 lowbits))\n");
+        std::fs::write(&f, text).unwrap();
+        let p = Passes::parse(&format!("file={}", f.display())).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!([after_entry(&p, "many_g0"), after_entry(&p, "many_g150"), after_entry(&p, "many_g299")], [0, 150, 299]);
+        let r = crate::pipe::in_run(&p, None, x, || crate::pipe::run(&p.prepass, vec![x()], &crate::pipe::Env::prepass(&p, 64, None, false, x().term())).unwrap());
+        assert_eq!(r[0].term().to_string(), x().term().to_string());
+    }
+
+    #[test]
+    fn memo_keys_hold_source_globals() {
+        let dir = std::env::temp_dir().join(format!("eggy1-memo-globals-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("memo.pipe");
+        std::fs::write(&f, "pick = 0
+(def (rewrite) (if pick (again (best 1 (regions (best 1 simba small_blocks wide_blocks)) poly_mba)) id))
+(def (prepass) (scope pick = 0 | rewrite | pick = 1 | rewrite))
+").unwrap();
+        let p = Passes::parse(&format!("file={}", f.display())).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let t = || crate::pipe::Cand::new("(Add (And (Var \"x\") (Var \"y\")) (Or (Var \"x\") (Var \"y\")))", "input");
+        let r = crate::pipe::in_run(&p, None, t, || crate::pipe::run(&p.prepass, vec![t()], &crate::pipe::Env::prepass(&p, 64, None, false, t().term())).unwrap());
+        assert_eq!(r[0].term(), "(Add (Var \"x\") (Var \"y\"))", "the rewrite memoized with pick = 0 is not reused with pick = 1");
     }
 
     #[test]
