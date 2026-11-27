@@ -80,7 +80,7 @@ expr    := expr '||' expr | expr '&&' expr | '!' expr
 sum     := sum ('+' | '-') sum | sum ('*' | '/') sum | atom
 atom    := NUM | 'none'
          | NAME                            # 变量，或不带参数、返回数的函数
-         | '(' NUMFUNC arg* input? ')'     # 数值函数的调用：(size R)、(same R)、(any C)、(mixed t)、(big 3)（第 7.3 节）
+         | '(' NUMFUNC arg* input? ')'     # 数值函数的调用：(size (main R))、(same (main R))、(any C)、(minimal g)、(big 3)（第 7.3 节）
          | '(' expr ')'
          | '(' numpipe ')'                 # 括号里在最外层有 | 时
 earg    := atom | '!' earg                 # 带参数的函数里的表达式参数
@@ -96,7 +96,7 @@ body    := program | numpipe | expr
 - 带参数的函数里，表达式参数（`if`、`retry`、`filter` 的条件，`fix`、`wins`、`best` 的次数，`def` 的数值参数）是一个 `earg`：数、名字、`!` 加一个参数，或括号里的表达式。所以写 `(if (mul < 1) ...)`、`(fix (restarts - 1) ...)`、`(f (size / 2))`，不写 `(if mul < 1 ...)`。
 - 序列的每一步可以是任何 `step`：函数调用、赋值、宏、分组都能接在一起。
 - 表达式只有一种：条件和数是同一种东西（第 7 节）。
-- `(` 后面紧跟有参数的函数名（签名里写了参数，第 4.3 节；包括带参数的 `def`）或宏名时是调用，否则是分组。表达式里只有可选参数的数值函数没写参数时也是分组：`(size)`、`(size + 1)` 是表达式，`(size r)`、`(size (rewrite))`、`(mixed t)` 是调用（后面是一个组变量或 `(` 时）。内置函数名、宏名、`extern` 和 `def` 是保留字，不能用作 `let`、`def` 名；必须写参数的函数单独写出时报 `NAME needs parentheses`（只有可选参数的，如 `egglog`，也可以不带参数）；没有参数的函数后面跟了参数（`(lowbits x)`）报 `NAME takes no arguments`。
+- `(` 后面紧跟有参数的函数名（签名里写了参数，第 4.3 节；包括带参数的 `def`）或宏名时是调用，否则是分组。表达式里只有可选参数的数值函数没写参数时也是分组：`(size)`、`(size + 1)` 是表达式，`(size (main r))`、`(minimal t)` 是调用（后面是一个组变量、名字或 `(` 时）。内置函数名、宏名、`extern` 和 `def` 是保留字，不能用作 `let`、`def` 名；必须写参数的函数单独写出时报 `NAME needs parentheses`（只有可选参数的，如 `egglog`，也可以不带参数）；没有参数的函数后面跟了参数（`(lowbits x)`）报 `NAME takes no arguments`。
 - 作为参数的管线如果含 `|`，要加括号：`(best 1 (a | b) c)`。只有一个管线参数、且它是最后一个参数的函数（`fix`、`wins`、`tag`、`smallest`……）例外：这个参数读到 `)` 为止，`(fix 3 a | b)` 就是 `(fix 3 (a | b))`。
 
 ### 4.1 名字
@@ -105,7 +105,7 @@ body    := program | numpipe | expr
 
 - **变量**有绑定，能赋值：存数的变量按作用域查找（第 5.1 节），组变量按词法查找（第 5.5 节）。
 - **函数**没有绑定，最后一个参数是输入，按返回的东西分：
-  - **数值函数**返回一个数：`mixed`、`size`、`(size R)`、`(any C)`（第 7.3 节）。
+  - **数值函数**返回一个数：`mixed`、`size`、`(size (main R))`、`(any C)`（第 7.3 节）。
   - **候选组函数**返回一组候选：不带参数的 `lowbits`、`rewrite`、`egglog`（第 9 节，习惯上叫 pass）；带参数的 `(save R)`、`(egglog LABEL)`，以及参数里有管线的**高阶函数** `(best K a b)`、`(fix N p)`、`(if C a b)`（第 8 节）。
   - 内置函数分哪一类、怎么调用、带什么参数，都由 `src/builtins.pipe` 里的签名决定（第 4.3 节）；`def` 定义的函数的签名由函数体推出（第 6 节）。
 - **宏**在解析时展开：`let`、`on`、`off`、`smallest`（第 5.4 节）。
@@ -148,11 +148,12 @@ x = e | rest    ≡  在 x = e 之下运行 rest          （绑定）
 (extern [@ATTR ...] (NAME PARAM:TYPE ... INPUT:TYPE) RESULT)
 ```
 
-- 类型：`num`（一个数）、`term`（一个候选）、`term?`（一个候选或没有，只作返回类型）、`group`（一组候选）、`name`（统计名、来源名或记录寄存器名）、`text`（一个字符串，写成字符串字面量）、`any`（只用来格式化的值，见 `print`；只能是最后一个参数 `x:any...`，不是多态），以及函数类型 `A->B`（`A->B->C` 是 `A->(B->C)`）。`pipe` 是 `group->group` 的简写：管线，原样传进去，在函数里运行；两种写法相同，打印成 `pipe`。`group` 写在参数里（不是最后一个）时是一个组变量，调用时写它的名字（`(load r:group g:group) group`）。`TYPE...` 是一个或多个，`TYPE?` 可以省略（只用于 `pipe`、`group`、`name`）。
+- 类型：`num`（一个数）、`term`（一个候选）、`term?`（一个候选或没有：作返回类型，或返回数的函数声明成 `term?` 的参数和输入，写成 `(main g)`、`(index i g)`；组从不当作候选，要一个组的候选就写 `main`、`index`）、`group`（一组候选）、`name`（统计名、来源名或记录寄存器名）、`text`（一个字符串，写成字符串字面量）、`any`（只用来格式化的值，见 `print`；只能是最后一个参数 `x:any...`，不是多态），以及函数类型 `A->B`（`A->B->C` 是 `A->(B->C)`）。`pipe` 是 `group->group` 的简写：管线，原样传进去，在函数里运行；两种写法相同，打印成 `pipe`。`group` 写在参数里（不是最后一个）时是一个组变量，调用时写它的名字（`(load r:group g:group) group`）。`TYPE...` 是一个或多个，`TYPE?` 可以省略（只用于 `pipe`、`group`、`name`）。
 - 作参数时，`num` 是调用时对输入求一次值的表达式（`best` 的个数、`fix` 和 `wins` 的次数）；`term->num` 是对每个候选单独求值的条件（`filter`、`any`、`all`）；`group->num` 是对一组候选求值的条件（`if` 对输入，`retry` 对 `a` 的结果）。这两种函数类型的参数也写成表达式，就是以隐式输入为参数的函数（第 6.3 节的隐式输入），所以写法和 `num` 参数一样。内置函数的参数只用 `pipe`、`term->num`、`group->num` 这几种函数类型，其他函数类型的参数还不支持。
 - 最后一个参数是**输入**（`term` 或 `group`），写在管线里时由 `|` 填入，不写；也可以显式写出（第 6.3 节）。返回类型写在最后。
 - 声明前紧挨着的一行注释是它的说明。
-- 属性：`@pipe`：输入可以由 `|` 填入，所以能写成步骤（`a | (f x)` 即 `(f x a)`）；内置函数都带它。`@bookkeeping`：只搬动候选，过了时限照常执行（第 5.3 节）；`@simplify_only`：只能出现在 `pipeline` 里（`egglog`、`reprint`），因为只有 `simplify` 的运行才有 e-graph；`@uncounted`：过了时限照样跳过，但这次跳过不把运行记为截断，也不计入 `time_limit/skipped`（`note`），不能和 `@bookkeeping` 一起写。
+- 属性：`@pipe`：输入可以由 `|` 填入，所以能写成步骤（`a | (f x)` 即 `(f x a)`）；运算符以外的内置函数都带它。`@bookkeeping`：只搬动候选，过了时限照常执行（第 5.3 节）；`@simplify_only`：只能出现在 `pipeline` 里（`egglog`、`reprint`），因为只有 `simplify` 的运行才有 e-graph；`@uncounted`：过了时限照样跳过，但这次跳过不把运行记为截断，也不计入 `time_limit/skipped`（`note`），不能和 `@bookkeeping` 一起写。
+- **运算符**：第 7.2 节的 `+ - * / < <= > >= == != && || !` 也是内置函数，名字是这些符号的声明就是运算符：`(extern (+ a:num b:num) num)`、`(extern (! a:num) num)`。运算符没有输入，参数全部写出，不带属性，只在表达式里照第 7.2 节写成中缀（`!` 写在前面），不能按名字调用（`(+ 1 2)` 报错）。`&&`、`||` 声明成 `(extern (&& a:num b:group->num...) num)`：第一个操作数是数，后面的是以输入为参数的函数，由运算符决定调不调用——从左到右求值，结果一旦确定（`&&` 遇到 0、`||` 遇到非 0）就不再求后面的（短路）；其余运算符每个操作数都求值。
 - `extern` 只能写在 `builtins.pipe` 里，写在 `--passes` 或管线里报错。宏 `let`、`on`、`off` 和赋值不是函数，没有声明（宏 `smallest` 有声明，参数照它读）；第 1.1 节的 `pipeline`、`sub/NAME` 不能在步骤里调用，也没有声明。
 
 调用方式由输入和返回类型决定，第 9 节的四种由此得出：
@@ -164,13 +165,18 @@ x = e | rest    ≡  在 x = e 之下运行 rest          （绑定）
 | `term → term?` | 对每个候选调用；没有结果时去掉这个候选（alternative） |
 | `term → group` | 对主候选调用，结果替换整组（`prepass`、`reprint`） |
 | `term → num` | 对主候选求值；组为空时得 0 |
+| `term? → num` | 对那个候选求值；没有时得 0（`size`、`mixed` 等形状和性质） |
 | `group → num` | 对整组求值；组为空时得 0（`any`、`all`、`minimal`、`used_wide`、`used_clustered`，以及不看候选的 `moved`、`cofactor`） |
+| `group → term?` | 从整组里取一个候选，没有时为空（`main`、`index`） |
+| 没有输入 | 运算符：在所在表达式的输入上对操作数求值 |
 
-例外：`(size R)` 读组变量 `R` 的主候选，不看输入，所以输入为空时也不得 0。
+没有隐式的组到候选的转换：声明成 `term` 或 `term?` 的参数和显式输入只收 `(main g)`、`(index i g)` 这种候选，写一个组（组变量、括号里的管线）报 `size takes t:term?; r is a group — write (main r)`；`term?` 也只给声明成 `term?` 的地方（`same takes t:term; (main u) is term?, which may be none`）。步骤之间仍按上表的调用方式接：`a | size` 里 `size` 对 `a` 给出的主候选求值。
 
 解析照签名读参数：`num`、`term->num`、`group->num` 参数是一个 `earg`（数值函数 `any`、`all` 的参数是整个表达式），`group`、`name` 参数是一个名字，`pipe...` 是一个或多个步骤，第 4 节末尾说的那种 `pipe` 参数读到 `)` 为止，其他 `pipe` 参数各是一个步骤。位置、参数个数和种类的检查都照签名做（第 13 节），报错时附上签名。
 
-解析后，每个内置函数的调用（包括 `best`、`fix`、`if` 这些带管线参数的函数和数值函数）都是“函数 + 参数”的一次应用，`def` 的调用也一样；运行时按上表的调用方式转换输入，再经 Rust 里的一张分派表（`pipe::BUILTINS`，每个声明一项）调用它的实现。`seq` 解析成序列，`smallest` 是宏，它们在表里没有实现。测试检查每个声明都有调用方式相符的实现，每个实现都有声明。
+解析后，每个内置函数的调用（包括 `best`、`fix`、`if` 这些带管线参数的函数、数值函数和运算符）都是“函数 + 参数”的一次应用，`def` 的调用也是同一种应用，应用的是那个 `def`；运行时按上表的调用方式转换输入，再经 Rust 里的一张分派表（`pipe::BUILTINS`，每个声明一项）调用它的实现，运算符的表项由求值直接算（不经函数指针，没有分配）。`seq` 解析成序列，`smallest` 是宏，它们在表里没有实现。测试检查每个声明都有调用方式相符的实现，每个实现都有声明。
+
+解析结果（`sched::Pipe`）只有这几种节点：应用（内置函数或 `def`；返回数的函数写出的输入跟在参数后面，`(size (main r))`；不带参数写在 `print` 里时是函数值）、字面量（数、名字、字符串）、变量的读（全局变量按下标，局部变量按名字并记下它存的是数、组还是函数值，参数按位置）、管线字面量（序列；最后一步返回数时整个序列返回数，`(lowbits | size)`：前面的步骤作为一个作用域在当前运行里跑完，再在它们的结果上求最后一步）、一种绑定 `x = e`（全局变量、局部数变量、组变量、函数变量都是它，种类在解析时由左边和右边的类型定，第 5.5、5.6 节）和宏展开（第 5.4 节）。
 
 ## 5. 变量与作用域
 
@@ -219,6 +225,8 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 - `(off A B ...)` 展开成 `A = 0 | B = 0 | ...`，`(on A B ...)` 同理（`A = 1`）；`A`、`B` 必须是开关。它们不是函数：如果是函数，绑定会在返回时撤销。
 - `(smallest p)` 展开成 `(clear s) | p' | (take_min s)`。`s` 是宏生成的记录寄存器名（`smallest#N`，每个 `smallest` 一个，用户写不出）。`p'` 是在 `p` 的文字里每个**计算的步骤**后面插一个 `(note s)`：计算的步骤是调用不带 `@bookkeeping`、也不带管线参数的函数（`note` 本身除外；单项 pass、alternative、`prepass`、`polish`、`take_minimal`、`reprint`、`egglog`）、调用 `def` 函数，以及 `def` 函数体里的管线参数（记它返回的候选）。插入也进到高阶函数的管线参数（`fix`、`best`、`if`、`retry`、`union`、`first`、`smaller`、`wins`、`regions`、`again`、`scope`、`tag`、`cand` 的各支）、组变量绑定的右边（`t = p` 的 `p`）、传给函数的管线参数（闭包，里面的 `note` 写的是外面的 `s`）、有数值参数的 `@inline` 函数体（共享调用处的 `smallest`；体里的管线参数后面不插，参数在调用处已经插过）和里层 `smallest` 的展开里；`let` 和没有数值参数的 `@inline` 函数已展开在文字里，照样插。不进 `def` 函数体和 `prepass`、`polish` 等定义的函数里面：它们只以返回值被看到。所以 `fix` 的各轮、`best` 落选的分支给出的候选都算，输入本身不算。`p` 是序列时展开是一个作用域，否则展开的各步在所在的作用域里执行，和 `p` 不写在 `smallest` 里时一样。`--show-passes` 照原样打印 `(smallest p)`。
 
+每个宏调用（`on`、`off`、`smallest`；`let` 和 `@inline` 函数的展开直接是所在的文字）解析成一个宏展开节点，记着原样（宏名和参数）和展开后的步骤：运行只跑展开，`--show-passes`、报错、检查和警告看原样。命令行的 `off=a,b`、`off+=`、`off-=` 也展开成这种节点（`(on ...)`、`(off ...)`）。
+
 ### 5.5 局部变量
 
 给一个不是全局变量（第 10 节）的名字赋值，就在本次运行里新建一个**局部变量**；存什么由右边定（第 5.6 节）：一个数（**数变量**，`n = (size * 2)`，之后 `(fix n p)`、`(if (n > 3) ...)` 读它）、一组候选（**组变量**，下面）、一个函数值（**函数变量**，要写类型，`f:term->num = size`，第 6.8 节）。局部变量都按词法查找，规则同下面的组变量；一个名字只存一种（`n is a number variable, so it cannot be bound to candidates`、`f is a function variable, so it cannot hold a number`）；不能和全局变量、函数、宏、`let`、`def` 名或参数同名，所以遮不住全局变量。数变量的右边在执行到这一步时、对当时的候选组求一次值（`n = size | rewrite | (if (n > size) ...)` 比的是 `rewrite` 前后的大小）。
@@ -226,7 +234,7 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 **组变量**存一组候选。`R = p` 在当前候选组上运行步骤 `p`，把它给出的候选绑定到 `R`，当前候选组原样传下去（同其他赋值）；`R = U`（`U` 是组变量）把 `U` 的候选组绑定到 `R`；`(save R)` 是 `R = id` 的简写，`(load R)` 给出 `R` 的候选组，`(size R)`、`(same R)`、`(label R)` 读它的主候选。
 
 ```
-t = (lowbits | unshift) | rewrite | (filter (size < (size t)))   # rewrite 的结果比 t 小才留下
+t = (lowbits | unshift) | rewrite | (filter (size < (size (main t))))   # rewrite 的结果比 t 小才留下
 (save t) | rewrite | t = (union (load t) id)                     # t 是 rewrite 前后的候选
 (save t) | u = t | (load u)                                      # u 和 t 是同一组
 ```
@@ -282,7 +290,7 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub/NAME=P   # 即 (de
 | 管线参数 | `pipe` | 写在步骤位置；当函数值调用（`(p g)`、`g \| p`） | 不求值，原样传进去，是闭包（第 6.3 节），函数体里每用一次就运行一次 |
 | 数值参数 | `num` | 写在表达式里（赋值右边、`(fix N p)`、`(best K ...)`、`(if C ...)`、`filter`、`any`、`all` 的条件……） | 在调用处、对调用时的候选组求一次值（同赋值右边） |
 | 函数参数 | `term->num`、`group->num`、`term->term`…… | 单独一个名字写在函数类型的参数位置（`(filter pred)`、`(if c p)`）；被调用（表达式里的 `(pred t)`、`t \| pred`）；写注解 | 不求值，是闭包，每次用到时用在给它的输入上（第 6.8 节） |
-| 组参数 | `group` | 写在组变量位置（`(load R)`、`(label R)`、`(size R)`、`(same R)`）；作函数值或函数的显式输入（`(p r)` 的 `r`） | 按值：调用处那个组变量的候选组 |
+| 组参数 | `group` | 写在组变量位置（`(load R)`、`(label R)`、`(size (main R))`、`(same (main R))`）；作函数值或函数的显式输入（`(p r)` 的 `r`） | 按值：调用处那个组变量的候选组 |
 | 名字参数 | `name` | 写在名字位置（`(tag NAME p)`、`(cand NAME p)`、`(smaller NAME p)`、`(egglog LABEL)`、`(off NAME)`、`(on NAME)`） | 解析时代入 |
 
 - 作为参数传给另一个函数时，取那个参数的类型。
@@ -295,7 +303,7 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub/NAME=P   # 即 (de
 
 **名字参数**在解析时代入：每处调用得到一份把名字放进去的函数体，`(off name)` 的参数在调用处检查是不是开关（`unknown off name nope (the argument for n)`）。
 
-**组参数**在函数体里是一个只读的组变量（`(load r)`、`(size r)`、单独写 `r`）。调用时把调用处那个组变量的候选组交给函数，所以读写检查在调用处做：`(def (f r) (load r))` 调用成 `(f t)` 而 `t` 没绑定时报 `prepass reads group variable t before it is bound`。`@inline` 函数共用调用处的组变量，组参数在展开时按名字代入，意思相同。
+**组参数**在函数体里是一个只读的组变量（`(load r)`、`(size (main r))`、单独写 `r`）。调用时把调用处那个组变量的候选组交给函数，所以读写检查在调用处做：`(def (f r) (load r))` 调用成 `(f t)` 而 `t` 没绑定时报 `prepass reads group variable t before it is bound`。`@inline` 函数共用调用处的组变量，组参数在展开时按名字代入，意思相同。
 
 ### 6.3 值、调用和闭包
 
@@ -308,10 +316,10 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub/NAME=P   # 即 (de
 **调用**：
 
 - `a | (f x)` 由 `|` 填入输入；显式写全 `(f x g)` 时最后一个参数是输入，可以是组变量名、组参数，或括号里的一步（`(f x (lowbits | unshift))`：以值开头时是那个值经过各步，否则是这一步的输入经过各步，即 `lowbits | unshift | (f x)`）。
-- 内置函数也可以显式给输入：`(lowbits t)`、`(mixed t)`、`(same r t)`；只在写满了参数、后面又是一个值时才这样读（`(if c a u)` 的 `u` 仍是可选的管线参数）。
+- 内置函数也可以显式给输入：`(lowbits t)`、`(minimal t)`、`(mixed (main t))`（输入是 `term?` 时写候选，第 4.3 节）；只在写满了参数、后面又是一个值时才这样读（`(if c a u)` 的 `u` 仍是可选的管线参数）。
 - 写了参数的函数后面跟一个不是变量、函数或定义的名字时，也读成组变量（在外层绑定的、或写错的），由读写检查判断（`(f x u)` 没有绑定 `u` 时报 `reads group variable u before it is bound`，不报参数个数）；没有参数的函数后面跟这样的名字仍报 `takes no arguments`（`(lowbits x)`）。
 - 不带 `@pipe` 的函数不能写在 `|` 后面（`twice is not @pipe, so | cannot give it its input`）：它的调用是一个值，写在管线开头、赋值右边或作显式输入，`u = (twice rewrite t)`。
-- **隐式输入**：一步的参数里，少写了输入的函数取这一步的输入，所以 `(if (size <= k) p)` 里的 `size` 是 `(size <这一步的输入>)`、`(if (big 3) p)` 里的 `big` 同理。`@pipe` 函数的函数体是表达式时，它的顶层不在任何步骤里，没有这样的输入：那里的数值函数、返回数的函数、以数结束的管线都要写出输入（`size > k` 报 `size needs its input here`，写 `(size g) > k`、`(mixed g)`、`(g | rewrite | size)`）。不带 `@pipe` 的函数的输入本来就是隐含的，函数体是表达式而读了隐含的输入时（`(def (under k) size <= k)`），函数取隐含的输入，见第 6.8 节。
+- **隐式输入**：一步的参数里，少写了输入的函数取这一步的输入，所以 `(if (size <= k) p)` 里的 `size` 是 `(size <这一步的输入>)`、`(if (big 3) p)` 里的 `big` 同理。`@pipe` 函数的函数体是表达式时，它的顶层不在任何步骤里，没有这样的输入：那里的数值函数、返回数的函数、以数结束的管线都要写出输入（`size > k` 报 `size needs its input here`，写 `(size (main g)) > k`、`(mixed (main g))`、`(g | rewrite | size)`）。不带 `@pipe` 的函数的输入本来就是隐含的，函数体是表达式而读了隐含的输入时（`(def (under k) size <= k)`），函数取隐含的输入，见第 6.8 节。
 
 **管线参数是闭包**：传进去的管线带着它写下时所在的运行，即调用处的输入、组变量和参数。它在被调用的函数里每用一次就运行一次，但：
 
@@ -373,7 +381,7 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub/NAME=P   # 即 (de
 - **部分应用**：带 `@pipe` 的函数少写了输入就是函数值，类型是"输入 -> 返回"：`size` 是 `term->num`，`rewrite` 是 `term->term`，`(best 1 a b)` 是 `pipe`，`(big 20)` 是 `group->num`，`(with_budget 8 rewrite)` 是 `pipe`。在步骤位置、表达式里这就是原来的写法（第 6.3 节的隐式输入）。
 - **写在函数类型位置的表达式或管线**：以隐式输入为参数的函数。`(filter (size <= 20))` 的条件对每个候选求值，`(keep_if (size <= 20))` 传进去的也是这样一个函数。
 - **函数参数**（第 6.2 节）和**函数变量**：函数变量是存函数值的局部变量（第 5.5 节），要写类型：`f:term->num = size`、`small:term->num = (size <= 20)`、`f:term->num = (under 20)`、`g:term->term = relate`（右边是表达式或一步，类型要接得上）。不写类型时右边的意思只由右边定：`f = size` 是数变量，`t = rewrite` 是组变量。同一个名字只能存一种（`f is a function variable, so it cannot name a group variable`、`t is a group variable, so it cannot hold a function value`）。
-- **返回函数的 `def`**：不带 `@pipe` 的函数，函数体是表达式而读了隐含的输入时（`(def (under k) size <= k)`），签名是 `(under k:num t:term) num`：输入只读主候选时是 `t:term`，读整组时是 `g:group`。写在要数的地方时取这一步的输入，得一个数（`(if (under 9) p)`）；写在函数类型的位置时是 `term->num` 的函数值（`(filter (under 20))`、`(keep_if (under 20))`）。函数体不读输入（`(def (f) keep + 1)`、`(def @pipe (big k g) (size g) > k)`）时照旧返回数，意思不变。
+- **返回函数的 `def`**：不带 `@pipe` 的函数，函数体是表达式而读了隐含的输入时（`(def (under k) size <= k)`），签名是 `(under k:num t:term) num`：输入只读主候选时是 `t:term`，读整组时是 `g:group`。写在要数的地方时取这一步的输入，得一个数（`(if (under 9) p)`）；写在函数类型的位置时是 `term->num` 的函数值（`(filter (under 20))`、`(keep_if (under 20))`）。函数体不读输入（`(def (f) keep + 1)`、`(def @pipe (big k g) (size (main g)) > k)`）时照旧返回数，意思不变。
 
 **调用**：`(pred t)` 或 `t | pred`（表达式里写在括号里，`((pred t) > 5)`、`(t | pred)`），和 `(p g)` 一样；单独写在要数的地方时用在这一步的输入上（`(filter (f < 5))`）。没写注解的参数被这样调用时推成 `group->num`。函数变量的值是闭包：绑定时抓下它读到的局部变量当时的值和调用的参数，在哪里用都一样，之后再给那些变量赋值也不影响它；`(def (f n) small:term->num = (size <= n) | (keep_if small))` 里的 `small` 在 `keep_if` 里面求值时读的仍是 `f` 的 `n`。函数参数传进去的是参数和写下它的运行（第 6.3 节）。`wins`、`moved`、`scope` 的缓存这些没有名字的状态，照旧按它实际运行的位置算（第 6.3 节）。
 
@@ -386,6 +394,8 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub/NAME=P   # 即 (de
 | `term->num` | `group->num` | 用在只有这一个候选的组上 |
 | `term->term?` | `term->term` | 原样 |
 | `num` | `term->num`、`group->num` | 用在这一步的输入上 |
+
+这些是函数值之间的转换（调用方式用在函数值上）；参数本身不转换：组不会隐式当作候选，要候选的参数写 `(main g)`、`(index i g)`（第 4.3 节）。`size` 声明成 `term?->num` 时作函数值仍是 `term->num`。
 
 接不上时报错写出两边的类型：`each takes f:term->term: (each f:term->term g:group) group; (best 1 rewrite) is pipe`、`keep_if takes pred:term->num: ...; f is term->term`、`f holds term->term; (best 1 rewrite) is pipe`。给数的函数值写在步骤位置报 `f gives a number, not candidates: it holds term->num`。
 
@@ -443,7 +453,7 @@ prepass=(lim (size - 1) rewrite) | relate    # split_runs 的赋值作用到序�
 
 (def @pipe (f p g) g | p)
 (def (twice p g) (p (p g)))                  # 不带 @pipe：只能写全参数调用
-(def @pipe (big k g) (size g) > k)           # (big k:num g:group) num
+(def @pipe (big k g) (size (main g)) > k)    # (big k:num g:group) num
 prepass=(f rewrite) | (save t) | u = (twice relate t) | (if (big 3) (load u))
 
 (def (size_after) rewrite | size)            # 以数结束的管线：(size_after g:group) num
@@ -470,7 +480,9 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 | `a / b` | 向下取整；`b` 为 0 时得 `none`（`none / 0` 也是）；`n / none` 是 0（`none / none` 也是），`none / n` 是 `none` |
 | 比较 | 照常比较，`none` 大于所有整数，`none == none` |
 | `!a` | `a` 为 0 时得 1，否则得 0 |
-| `a && b`、`a \|\| b` | 得 1 或 0 |
+| `a && b`、`a \|\| b` | 得 1 或 0；从左到右，结果确定后不再求后面的操作数 |
+
+这些运算是第 4.3 节说的运算符，签名在 `--show-builtins` 的 operators 一组里。
 
 ### 7.3 数值函数
 
@@ -502,11 +514,11 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 性质之中，`opaque`、`rebuilds` 要跑一次 `prepass`，比较贵；其余只看项本身或候选的附带信息。
 
 **带参数的函数**：
-- `(size R)`：组变量 `R` 主候选的大小；`R` 为空或没绑定时得 0。
-- `(same R)`：主候选和 `R` 的主候选相同时为 1；有一边为空时为 0。
+- `(size (main R))`：组变量 `R` 主候选的大小；`R` 为空或没绑定时得 0（`main` 给出 `none`，`size` 对 `none` 得 0）。`(size (index I R))` 是第 `I` 个（从 0 起）候选的大小。
+- `(same (main R))`：主候选和 `R` 的主候选相同时为 1；有一边为空时为 0。
 - `(any C)`：有一个候选单独满足 `C`；`(all C)`：有候选，且每个都单独满足（`C` 是 `term->num`）。
 
-比较照常比较这些 0：`size < (size r)` 在 `r` 为空时为假，`size > (size m)` 在 `m` 为空时（主候选不空）为真；空组上 `(0 < 1)` 照样为真。默认管线读的组变量在读时都不为空。
+比较照常比较这些 0：`size < (size (main r))` 在 `r` 为空时为假，`size > (size (main m))` 在 `m` 为空时（主候选不空）为真；空组上 `(0 < 1)` 照样为真。默认管线读的组变量在读时都不为空。
 
 变量（第 10 节）在表达式里读当前绑定的值：`(if rerun_input ...)`、`(fix (restarts - 1) later)`、`(filter (size <= split_size))`。
 
@@ -514,7 +526,7 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 
 - 在当前输入上运行（以值开头的 `(t | rewrite | size)` 从那个值开始），各步是所在运行的步骤：读写所在运行的组变量和参数（`((t = rewrite | size) > 0)` 之后 `t` 可读），外面的 `smallest` 在它的计算步骤后面照样插 `note`，过了截止时刻各步照常跳过，最后的数在当时的候选组上算。管线本身是一个作用域，里面的赋值不漏出来。
 - 在 `filter`、`any`、`all` 里对每个候选单独运行。
-- 函数体顶层没有"这一步的输入"，那里的这种管线必须以值开头（`(size g) > (g | rewrite | size)`）。
+- 函数体顶层没有"这一步的输入"，那里的这种管线必须以值开头（`(size (main g)) > (g | rewrite | size)`）。
 - `--show-passes` 照写下的样子打印；`(mixed (lowbits | unshift))` 这样给数值函数显式写的管线输入打印成 `(lowbits | unshift | mixed)`，意思相同。
 
 ## 8. 带参数的候选组函数
@@ -874,7 +886,7 @@ rewrites = none
 读完 `--passes` 后检查，出错时拒绝整个设置：
 
 - 名字：未知的变量、函数、`on`/`off` 名、`sub/NAME`、规则集，报错并列出已知的名字。名字里的 `-` 读作减号，没法单独报错；解析出错时，如果写了 `a-b` 这样的词，错误后面加上"`a-b` 读作 `a - b`，名字用 `_`"，`a_b` 是已知名字时提示写 `a_b`。
-- 类型，照签名（第 4.3 节；`def` 的签名见第 6.5 节）检查，报错时附上签名：步骤位置写了数值函数或变量（`mixed gives a number, not candidates: (mixed t:term) num`），表达式里写了候选组函数（`egglog gives candidates, not a number`）；参数的个数、种类（表达式、管线、组变量、名字）不对（`retry takes an expression and two pipelines: (retry c:group->num a:pipe b:pipe g:group) group`）；没有参数的函数写了参数；给出数的步骤接在 `|` 前面；以数结束的管线写在要候选的地方，或括号里的管线写在要数的地方却不以数结束；不带 `@pipe` 的函数写在 `|` 后面；函数体顶层的函数没写输入。
+- 类型，照签名（第 4.3 节；`def` 的签名见第 6.5 节）检查，报错时附上签名：步骤位置写了数值函数或变量（`mixed gives a number, not candidates: (mixed t:term?) num`），表达式里写了候选组函数（`egglog gives candidates, not a number`）；参数的个数、种类（表达式、管线、组变量、名字）不对（`retry takes an expression and two pipelines: (retry c:group->num a:pipe b:pipe g:group) group`）；没有参数的函数写了参数；给出数的步骤接在 `|` 前面；以数结束的管线写在要候选的地方，或括号里的管线写在要数的地方却不以数结束；不带 `@pipe` 的函数写在 `|` 后面；函数体顶层的函数没写输入。
 - 赋值（第 5.6 节）：给函数、参数赋值；开关赋 `none`（开关只收数，0 是关）；右边的类型和左边不合（存数的变量给了候选，组变量给了数，报错写出两边）；组变量和存数的变量同名（`(save keep)`、`keep = rewrite`）。条件里写了 `=`（`(if (size = 3) ...)`）报 "an assignment is a step; compare with =="。
 - 定义（第 6 节）：`let`、`def` 名和变量、函数、宏同名，`def` 重新定义已有的 `let`、`def` 名，`let` 重新定义 `def` 名；第 1.1 节的函数带参数或 `@inline`，未知的 `sub/NAME`；未知的属性、类型；`def` 的参数和已有的名字同名或重复、用法矛盾、没用到；`@pipe` 函数的最后一个参数不是组、函数体不以值开头也不是表达式；返回数的管线带 `@inline` 或写成 `let`。`(off NAME)` 的名字参数在调用处检查是不是开关。
 - `extern` 写在 `src/builtins.pipe` 以外。
@@ -909,13 +921,13 @@ rewrites = none
 (save t) | (best 1 rewrite ((load t) | (off clustered) | rewrite))
 
 # 另一种重建，只在它确实不同且更小时作为候选
-(save t) | (union id (cand halve_input (load t) | halve | (filter (!(same t) && size < (size t))) | rebuild))
+(save t) | (union id (cand halve_input (load t) | halve | (filter (!(same (main t)) && size < (size (main t)))) | rebuild))
 
 # 先存默认值，条件满足时覆盖
 (save b) | (if mixed (rewrite | (save b))) | (load b)
 
 # 组变量存另一条管线的结果，当前候选组原样传下去
-t = (lowbits | unshift) | rewrite | (filter (size < (size t)))
+t = (lowbits | unshift) | rewrite | (filter (size < (size (main t))))
 
 # 给一段步骤限时，到期后跳过它们，接着运行后面的
 lowbits | time_limit = 500 | relate | tfunc | time_limit = none | finish

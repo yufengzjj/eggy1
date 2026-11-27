@@ -566,8 +566,8 @@ pub(crate) fn rewrite(t: &T, w: &Ctx) -> T {
 pub(crate) fn sub(i: usize, t: &T, w: &Ctx) -> T {
     let p = crate::sched::current();
     match &p.subs[i] {
-        crate::sched::Pipe::App(b, _) if b.name == "rewrite" => rewrite(t, w),
-        crate::sched::Pipe::App(b, _) if b.name == "rebuild" => rebuild_once(t, w),
+        crate::sched::Pipe::App(crate::sched::Fun::Builtin(b), _) if b.name == "rewrite" => rewrite(t, w),
+        crate::sched::Pipe::App(crate::sched::Fun::Builtin(b), _) if b.name == "rebuild" => rebuild_once(t, w),
         pipe => crate::pipe::run_term(pipe, t, w),
     }
 }

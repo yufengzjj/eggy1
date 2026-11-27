@@ -3,8 +3,9 @@
 #
 #   (extern [@ATTR ...] (NAME PARAM:TYPE ... INPUT:TYPE) RESULT)
 #
-# Types: num (a number), term (one candidate), term? (one candidate or none, only a
-# result), group (a list of candidates), name (a stats or origin name, or a note register),
+# Types: num (a number), term (one candidate), term? (one candidate or none: a result, or
+# a parameter of a function that gives a number, written as (main g) or (index i g); a
+# group is never taken as a term), group (a list of candidates), name (a stats or origin name, or a note register),
 # text (a string literal "...", with \" and \\ the only escapes), any (a value only
 # formatted, as print does: a number, a text, a name, candidates as infix, a function as
 # its signature; only as a last parameter any...), and functions A->B (A->B->C is
@@ -20,8 +21,14 @@
 #   term -> group   on the main candidate; the result replaces the list
 #   term -> num     on the main candidate; 0 without candidates
 #   group -> num    on the whole list; 0 without candidates
+#   term? -> num    on the candidate; 0 for none
+#   group -> term?  on the whole list; the candidate picked, or none, replacing it
+#   no input        an operator, on the input of the expression it is in
 # @pipe: the last parameter, the input, is filled in by `|` (`a | (f x)` is `(f x a)`), so
-# it can be a step; every built-in function has it.
+# it can be a step; every built-in function but an operator has it.
+# An operator (a name such as + or <=) has no input: all its operands are written. Only its
+# last parameter may be group->num..., operands it evaluates on its own input only while
+# the result is still open (&& and || stop at the first that decides it).
 # @bookkeeping: only moves candidates, so it still runs past the time limit.
 # @simplify_only: only in `pipeline`, since only a simplify run has an e-graph.
 # @uncounted: skipped past the time limit like other steps, but that neither makes the run
@@ -204,62 +211,101 @@
 
 # Number functions: features of the main candidate.
 
-# The node count of the main candidate, or of the main candidate of the group variable r (then also without candidates).
-(extern @pipe (size r:group? t:term) num)
+# The node count; (size (main r)) of the main candidate of the group variable r.
+(extern @pipe (size t:term?) num)
 # The number of variables.
-(extern @pipe (vars t:term) num)
+(extern @pipe (vars t:term?) num)
 # The depth of the tree.
-(extern @pipe (depth t:term) num)
+(extern @pipe (depth t:term?) num)
 # The number of products.
-(extern @pipe (mul t:term) num)
+(extern @pipe (mul t:term?) num)
 # The number of bitwise operations with a constant operand.
-(extern @pipe (bitconst t:term) num)
+(extern @pipe (bitconst t:term?) num)
 # The number of arithmetic operations under a bitwise one.
-(extern @pipe (arith_in_bit t:term) num)
+(extern @pipe (arith_in_bit t:term?) num)
 # The number of shifts.
-(extern @pipe (shift t:term) num)
+(extern @pipe (shift t:term?) num)
 # The number of divisions.
-(extern @pipe (div t:term) num)
+(extern @pipe (div t:term?) num)
 
 # Number functions that give 1 or 0.
 
-# 1 when the main candidate is the main one of the group variable r.
-(extern @pipe (same r:group t:term) num)
+# 1 when the candidate is r, as in (same (main r)); 0 when r is none.
+(extern @pipe (same r:term? t:term) num)
 # 1 when c holds for some candidate alone.
 (extern @pipe (any c:term->num g:group) num)
 # 1 when there are candidates and c holds for each alone.
 (extern @pipe (all c:term->num g:group) num)
 # A shift, division or mulhi, and a rebuild larger than tiny_size (runs prepass).
-(extern @pipe (opaque t:term) num)
+(extern @pipe (opaque t:term?) num)
 # Some candidate is proved minimal (with prove_minimal on).
 (extern @pipe (minimal g:group) num)
 # Arithmetic or a constant directly under a bitwise operation.
-(extern @pipe (mixed t:term) num)
+(extern @pipe (mixed t:term?) num)
 # The pre-pass changes it (runs prepass).
-(extern @pipe (rebuilds t:term) num)
+(extern @pipe (rebuilds t:term?) num)
 # The last fix stopped at its count with the main candidate still changing.
 (extern @pipe (moved g:group) num)
 # It is the input of the run.
-(extern @pipe (input t:term) num)
+(extern @pipe (input t:term?) num)
 # At most tiny_size nodes.
-(extern @pipe (tiny t:term) num)
+(extern @pipe (tiny t:term?) num)
 # At most split_size nodes.
-(extern @pipe (fits_split t:term) num)
+(extern @pipe (fits_split t:term?) num)
 # wide_blocks gave a kept form in the passes that made some candidate.
 (extern @pipe (used_wide g:group) num)
 # clustered gave a kept form in the passes that made some candidate.
 (extern @pipe (used_clustered g:group) num)
 # The passes that made it made at most unclustered_after uncached rewrite calls.
-(extern @pipe (few_rewrites t:term) num)
+(extern @pipe (few_rewrites t:term?) num)
 # The whole term has a smaller T-function form.
-(extern @pipe (replaceable t:term) num)
+(extern @pipe (replaceable t:term?) num)
 # It comes from a rebuild with abstracted subterms.
-(extern @pipe (abstracted t:term) num)
+(extern @pipe (abstracted t:term?) num)
 # It is a linear region without leaves.
-(extern @pipe (no_leaves t:term) num)
+(extern @pipe (no_leaves t:term?) num)
 # It is a linear region of more than max_leaves leaves.
-(extern @pipe (wide t:term) num)
+(extern @pipe (wide t:term?) num)
 # It has a bitwise operation with a constant operand.
-(extern @pipe (const_bitwise t:term) num)
+(extern @pipe (const_bitwise t:term?) num)
 # The run rebuilds a linear cofactor of poly_mba.
 (extern @pipe (cofactor g:group) num)
+
+# Candidates of a group, as an argument a function takes as term?.
+
+# The main candidate; none without candidates.
+(extern @pipe @bookkeeping (main g:group) term?)
+# The candidate at position i, from 0; none past the last or for i none.
+(extern @pipe @bookkeeping (index i:num g:group) term?)
+
+# Operators, written infix as in a + b (! before its operand) and evaluated on the input of
+# the expression they are in. Arithmetic takes none as +infinity: + and * give none on
+# overflow or a none operand, - stops at 0 (n - none is 0), / gives none for a 0 divisor and
+# 0 for a none one. A comparison or !, &&, || gives 1 or 0.
+
+# a plus b.
+(extern (+ a:num b:num) num)
+# a minus b, at least 0.
+(extern (- a:num b:num) num)
+# a times b.
+(extern (* a:num b:num) num)
+# a divided by b, rounded down.
+(extern (/ a:num b:num) num)
+# 1 when a is less than b.
+(extern (< a:num b:num) num)
+# 1 when a is at most b.
+(extern (<= a:num b:num) num)
+# 1 when a is greater than b.
+(extern (> a:num b:num) num)
+# 1 when a is at least b.
+(extern (>= a:num b:num) num)
+# 1 when a equals b.
+(extern (== a:num b:num) num)
+# 1 when a differs from b.
+(extern (!= a:num b:num) num)
+# 1 when a and each b are not 0; each b is evaluated only while all before are not 0.
+(extern (&& a:num b:group->num...) num)
+# 1 when a or some b is not 0; each b is evaluated only while all before are 0.
+(extern (|| a:num b:group->num...) num)
+# 1 when a is 0.
+(extern (! a:num) num)

@@ -247,7 +247,7 @@ minimal_max_size_8bit = 5
     # input as written is sometimes smaller; dropped once it needs `unified_rewrites` rewrites.
     | (best 1 id
         (cand unified
-          (load t) | unify_operands | (filter !(same t))
+          (load t) | unify_operands | (filter !(same (main t)))
           | (rewrites = unified_rewrites
              | (first tfunc_whole (rewrite | within | cluster_regions | relate | within | tfunc)))))
     | (save r)
@@ -257,24 +257,24 @@ minimal_max_size_8bit = 5
         # beside the first rebuild made the rules finish worse as often as better.
         (cand no_wide
           (if used_wide
-            ((load t) | ((off wide_blocks) | rebuild_main) | (save n) | (filter (size < (size r))))
+            ((load t) | ((off wide_blocks) | rebuild_main) | (save n) | (filter (size < (size (main r)))))
             none))
         (cand no_wide_abstracted
           (load n)
           | ((off wide_blocks) | (union over_const_bitwise over_shared_bitwise))
-          | (filter (size < (size r) && size <= (size n) * 3 / 4)))
-        (cand split_bits (if fits_split (split_bits | (filter !(same r))) none))
-        (cand halve_first halve | (filter !(same r)) | rebuild_plain)
-        (cand over_products over_products | (filter !(same r)))
-        (cand over_const_bitwise over_const_bitwise | (filter !(same r)))
-        (cand over_shared_bitwise over_shared_bitwise | (filter !(same r)))
+          | (filter (size < (size (main r)) && size <= (size (main n)) * 3 / 4)))
+        (cand split_bits (if fits_split (split_bits | (filter !(same (main r)))) none))
+        (cand halve_first halve | (filter !(same (main r))) | rebuild_plain)
+        (cand over_products over_products | (filter !(same (main r))))
+        (cand over_const_bitwise over_const_bitwise | (filter !(same (main r))))
+        (cand over_shared_bitwise over_shared_bitwise | (filter !(same (main r))))
         # Halving the whole input can give semi-linear regions that are slow to search.
         (cand halve_input
           (semi_leaves = 2
-           | (if tiny none ((load t) | halve | (filter !(same t)) | rebuild_plain)))))
+           | (if tiny none ((load t) | halve | (filter !(same (main t))) | rebuild_plain)))))
     # A form from abstracted subterms only a little smaller than the first rebuild, or
     # larger, made the rules finish worse at least as often as better (Ensia, LLVM Pluto).
-    | finish | (save f) | (filter (!abstracted || size <= (size f) * 3 / 4)) | (save b) | (label b)
+    | finish | (save f) | (filter (!abstracted || size <= (size (main f)) * 3 / 4)) | (save b) | (label b)
     # A region rebuilt in clusters is smaller there but can leave the rules a worse start
     # than rebuilding it whole.
     | (cand unclustered
@@ -291,9 +291,9 @@ minimal_max_size_8bit = 5
     # An equal-size one can take the extraction from the first rebuild with nothing gained.
     | (label b) | (save u) | (load b) | (best keep id) | (save m)
     | (union
-        ((load u) | (filter (size < (size m))))
+        ((load u) | (filter (size < (size (main m)))))
         (load m)
-        ((load u) | (filter (size > (size m) && size < (size t0)))))
+        ((load u) | (filter (size > (size (main m)) && size < (size (main t0))))))
     | pre_done))
 
 # The final polish, on one candidate: the polish passes in turn, each kept when smaller,
@@ -335,9 +335,9 @@ minimal_max_size_8bit = 5
            (clustered | (save c))
            ((load d)
             | (if (any 1) none
-                ((load in) | (first peel ((load c) | peel_clustered)) | (filter !(same in)))))))
+                ((load in) | (first peel ((load c) | peel_clustered)) | (filter !(same (main in))))))))
       ((save in)
        | (if const_bitwise
            (best 1 semi_linear)
            (best 1 rebuild_values common_multiple related_leaves (if !cofactor one_wide_term none)))
-       | (filter (size < (size in)))))))
+       | (filter (size < (size (main in))))))))

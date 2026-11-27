@@ -166,16 +166,22 @@ pub enum Kind {
     TermNum,
     /// `group -> num`: on the whole list, 0 without candidates.
     GroupNum,
+    /// `group -> term?`: on the whole list, the candidate picked or none replacing it.
+    Pick,
+    /// An operator: no input, every operand written.
+    Op,
 }
 
 impl Kind {
-    pub const ALL: [(Kind, &'static str); 6] = [
+    pub const ALL: [(Kind, &'static str); 8] = [
         (Kind::Group, "on the whole list (group -> group)"),
         (Kind::Each, "on each candidate (term -> term)"),
         (Kind::Alt, "alternatives, on each candidate, none when no form is found (term -> term?)"),
         (Kind::Main, "on the main candidate, the result replacing the list (term -> group)"),
         (Kind::TermNum, "numbers of the main candidate (term -> num)"),
         (Kind::GroupNum, "numbers of the whole list (group -> num)"),
+        (Kind::Pick, "one candidate of the list, or none (group -> term?)"),
+        (Kind::Op, "operators, written between their operands (! before its one)"),
     ];
 
     fn of(input: &Ty, result: &Ty) -> Option<Kind> {
@@ -184,8 +190,9 @@ impl Kind {
             (Ty::Term, Ty::Term) => Kind::Each,
             (Ty::Term, Ty::MaybeTerm) => Kind::Alt,
             (Ty::Term, Ty::Group) => Kind::Main,
-            (Ty::Term, Ty::Num) => Kind::TermNum,
+            (Ty::Term | Ty::MaybeTerm, Ty::Num) => Kind::TermNum,
             (Ty::Group, Ty::Num) => Kind::GroupNum,
+            (Ty::Group, Ty::MaybeTerm) => Kind::Pick,
             _ => return None,
         })
     }
@@ -197,8 +204,8 @@ pub struct Sig {
     pub name: String,
     /// The parameters written in a call.
     pub params: Vec<Param>,
-    /// The implicit input, `term` or `group`.
-    pub input: Param,
+    /// The implicit input, `term` or `group`; `None` for an operator.
+    pub input: Option<Param>,
     pub result: Ty,
     /// `@pipe`: `|` fills in the input, so it can be a step.
     pub pipe: bool,
@@ -217,7 +224,12 @@ pub struct Sig {
 
 impl Sig {
     pub fn kind(&self) -> Kind {
-        Kind::of(&self.input.ty, &self.result).unwrap()
+        self.input.as_ref().map_or(Kind::Op, |i| Kind::of(&i.ty, &self.result).unwrap())
+    }
+
+    /// Whether it is an operator, written infix (`a + b`) or prefix (`!a`), not by name.
+    pub fn is_op(&self) -> bool {
+        self.input.is_none()
     }
 
     /// Whether it gives a number, so belongs in expressions, not steps.
@@ -290,7 +302,7 @@ impl Sig {
 impl fmt::Display for Sig {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "({}", self.name)?;
-        for p in self.params.iter().chain([&self.input]) {
+        for p in self.params.iter().chain(&self.input) {
             write!(f, " {p}")?;
         }
         write!(f, ") {}", self.result)
@@ -375,9 +387,12 @@ fn one(text: &str) -> Result<Sig, String> {
     if rest.next() != Some(")") || rest.next().is_some() {
         return Err(bad());
     }
+    if OPERATORS.contains(&name.as_str()) {
+        return operator(name, params, result, pipe || bookkeeping || simplify_only || uncounted || switch);
+    }
     let input = params.pop().ok_or_else(|| format!("{name}: the last parameter is the input, term or group"))?;
-    if input.rep != Rep::One || !matches!(input.ty, Ty::Term | Ty::Group) {
-        return Err(format!("{name}: the input {input} must be term or group"));
+    if input.rep != Rep::One || !matches!(input.ty, Ty::Term | Ty::Group) && !(input.ty == Ty::MaybeTerm && result == Ty::Num) {
+        return Err(format!("{name}: the input {input} must be term or group, or term? for a function that gives a number"));
     }
     if !matches!(result, Ty::Num | Ty::Term | Ty::MaybeTerm | Ty::Group) {
         return Err(format!("{name}: a function gives num, term, term? or group"));
@@ -387,7 +402,8 @@ fn one(text: &str) -> Result<Sig, String> {
     }
     for (i, p) in params.iter().enumerate() {
         match &p.ty {
-            Ty::Term | Ty::MaybeTerm => return Err(format!("{name}: {p}: only the input is a candidate")),
+            Ty::MaybeTerm if result == Ty::Num => {}
+            Ty::Term | Ty::MaybeTerm => return Err(format!("{name}: {p}: only the input is a candidate, or a term? parameter of a function that gives a number")),
             t @ Ty::Fn(..) if !t.is_function() => return Err(format!("{name}: {p}: a function takes one input, term or group, and gives num, term, term? or group")),
             Ty::Any if p.rep != Rep::Many || i + 1 != params.len() => return Err(format!("{name}: {p}: any is only for a last parameter any...")),
             t if p.rep == Rep::Many && !t.is_pipe() && *t != Ty::Any || p.rep == Rep::Opt && (t.is_expr() || *t == Ty::Text) => return Err(format!("{name}: {p}: only pipe and any take ..., only pipe, group and name take ?")),
@@ -397,7 +413,23 @@ fn one(text: &str) -> Result<Sig, String> {
     if switch && !matches!(input.ty, Ty::Term) {
         return Err(format!("{name}: @switch is for a pass over one term"));
     }
-    Ok(Sig { name, params, input, result, pipe, bookkeeping, simplify_only, uncounted, switch, doc: String::new() })
+    Ok(Sig { name, params, input: Some(input), result, pipe, bookkeeping, simplify_only, uncounted, switch, doc: String::new() })
+}
+
+/// The operators of the language, as the parser reads them.
+pub const OPERATORS: [&str; 13] = ["+", "-", "*", "/", "<", "<=", ">", ">=", "==", "!=", "&&", "||", "!"];
+
+/// The declaration of an operator: numbers to a number, no input and no attribute; only the
+/// last operand may be `group->num...`, a function of the operator's own input that it
+/// calls while the result is still open (`&&`, `||`).
+fn operator(name: String, params: Vec<Param>, result: Ty, attrs: bool) -> Result<Sig, String> {
+    let lazy = |p: &Param| p.rep == Rep::Many && p.ty == Ty::Fn(Box::new(Ty::Group), Box::new(Ty::Num));
+    let n = params.len();
+    let operand = |(i, p): (usize, &Param)| p.ty == Ty::Num && p.rep == Rep::One || i + 1 == n && lazy(p);
+    if attrs || result != Ty::Num || params.is_empty() || !params.iter().enumerate().all(operand) {
+        return Err(format!("{name}: an operator takes numbers to num, without attributes; only its last operand may be group->num..."));
+    }
+    Ok(Sig { name, params, input: None, result, pipe: false, bookkeeping: false, simplify_only: false, uncounted: false, switch: false, doc: String::new() })
 }
 
 fn param(p: &str) -> Result<Param, String> {
@@ -446,7 +478,7 @@ pub fn step_names() -> Vec<String> {
 
 /// The functions an expression can call, for error messages.
 pub fn number_names() -> Vec<String> {
-    all().iter().filter(|s| s.is_number()).map(|s| if s.required() { format!("({} ...)", s.name) } else { s.name.clone() }).collect()
+    all().iter().filter(|s| s.is_number() && !s.is_op()).map(|s| if s.required() { format!("({} ...)", s.name) } else { s.name.clone() }).collect()
 }
 
 /// Every declaration with its description, grouped by calling kind (`--show-builtins`).
@@ -464,6 +496,11 @@ pub fn listing() -> String {
 /// A call of `s` with placeholder arguments: `1`, `x`, `id`; optional ones left out.
 #[cfg(test)]
 pub(crate) fn sample(s: &Sig) -> String {
+    match s.name.as_str() {
+        "!" => return "!1".into(),
+        op if s.is_op() => return format!("(1 {op} 1)"),
+        _ => {}
+    }
     let args: Vec<&str> = s
         .params
         .iter()
@@ -473,6 +510,7 @@ pub(crate) fn sample(s: &Sig) -> String {
             t if t.is_pipe() => "id",
             Ty::Text => "\"m\"",
             Ty::Any => "1",
+            Ty::MaybeTerm => "(main x)",
             _ => "x",
         })
         .collect();
@@ -494,7 +532,10 @@ mod tests {
         assert_eq!(get("save").unwrap().decl(), "(extern @pipe @bookkeeping (save r:group g:group) group)");
         assert_eq!(get("relate").unwrap().decl(), "(extern @pipe @switch (relate t:term) term)");
         assert!(get("simba").unwrap().switch && !get("finish").unwrap().switch);
-        assert!(all().iter().all(|s| s.pipe), "every built-in can be a step");
+        assert!(all().iter().all(|s| s.pipe != s.is_op()), "every built-in but an operator can be a step");
+        assert_eq!(get("&&").unwrap().decl(), "(extern (&& a:num b:group->num...) num)");
+        assert_eq!(get("!").unwrap().kind(), Kind::Op);
+        assert_eq!(all().iter().filter(|s| s.is_op()).map(|s| s.name.as_str()).collect::<Vec<_>>(), OPERATORS);
         assert_eq!(get("simba").unwrap().kind(), Kind::Alt);
         assert_eq!(get("prepass").unwrap().kind(), Kind::Main);
         assert!(get("egglog").unwrap().simplify_only && !get("egglog").unwrap().required());
@@ -516,6 +557,12 @@ mod tests {
             ("# a\n(extern @switch (x g:group) group)", "@switch is for a pass over one term"),
             ("# a\n(extern (x g:group) group", "unclosed"),
             ("# a\n(def (x g:group) group)", "expected (extern"),
+            ("# a
+(extern @pipe (+ a:num b:num) num)", "an operator takes"),
+            ("# a
+(extern (+ a:num g:group) num)", "an operator takes"),
+            ("# a
+(extern (+ a:group->num... b:num) num)", "an operator takes"),
         ] {
             let e = parse(bad).unwrap_err();
             assert!(e.contains(msg), "{bad}: {e}");

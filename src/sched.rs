@@ -766,8 +766,8 @@ pub fn with_off<R>(names: &[&str], f: impl FnOnce() -> R) -> R {
 /// A term of the pipeline language (`crate::pipe_lang`): a step, which maps a list of
 /// equivalent candidate terms (the first is the main one) to another, so any step can follow
 /// any other (`lowbits | rewrite | (fix 3 egglog)`), or an expression, evaluated on the
-/// candidates to a number or `NONE` (true when not 0). Every built-in function is an `App`,
-/// run through its entry of `crate::pipe::BUILTINS`.
+/// candidates to a number or `NONE` (true when not 0). Every function, built-in (the
+/// operators too) or defined, is applied by an `App`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pipe {
     /// A number; `NONE` is `none`.
@@ -777,78 +777,113 @@ pub enum Pipe {
     Name(String),
     /// A string literal (`text`), its escapes read.
     Text(String),
-    /// A function written as a value where it is only formatted (`print`): its name and
-    /// signature.
-    Sig(String, String),
-    /// A variable of `VARS`; `time_limit` reads as the milliseconds left, `keep` as at least 1.
-    Var(usize),
-    /// The group variable or group parameter `NAME` written as a value: its candidates,
-    /// whatever the input (`NAME | p`, `t = NAME`).
-    Value(String),
-    /// A parameter of the function whose body this is, by its position among the parameters,
-    /// and its name: a pipeline argument runs where the call is written, a numeric one gives
-    /// the value it had at the call.
-    Param(usize, String),
-    /// A built-in function applied to its arguments in the order of its parameters; an
-    /// optional one not written is left out, except the second branch of `if`, which is `id`.
-    App(&'static crate::pipe::Builtin, Vec<Pipe>),
-    /// A call of a function `(def (NAME PARAM ...) body)` defined, and for one whose body gives
-    /// a number the input written, else the candidates.
-    Call(std::sync::Arc<Call>, Option<Box<Pipe>>),
-    /// Each in turn on the candidates of the one before (`a | b`), as a scope.
+    /// A read of a variable or parameter.
+    Var(Slot),
+    /// A function applied to its arguments in the order of its parameters. For a built-in,
+    /// an optional one not written is left out, except the second branch of `if`, which is
+    /// `id`; for a function that gives a number, the input written follows the arguments
+    /// (`(mixed g)`, `(size (rewrite))`; `pipe::Builtin::input_at`). Written without the
+    /// arguments it is a function value (`print`).
+    App(Fun, std::sync::Arc<[Pipe]>),
+    /// Each in turn on the candidates of the one before (`a | b`), as a scope. Where the last
+    /// gives a number (`(lowbits | size)`), so does the sequence: the last on what the others
+    /// give, those as a scope that ends before it.
     Seq(Vec<Pipe>),
-    /// The number the first gives on the candidates the second gives on the input: a group
-    /// value (`(mixed R)`), or steps of the run under way (`(lowbits | size)`).
-    Of(Box<Pipe>, Box<Pipe>),
-    Not(Box<Pipe>),
-    And(Vec<Pipe>),
-    Or(Vec<Pipe>),
-    Cmp(Cmp, Box<Pipe>, Box<Pipe>),
-    /// `+ - * /` of two values (`arith`).
-    Bin(char, Box<Pipe>, Box<Pipe>),
-    /// `NAME = VALUE`: binds the variable at this position of `VARS` in the enclosing scope to
-    /// the value, evaluated on the candidates (`none`: no limit). A switch is on for any value
-    /// but 0; `time_limit` takes milliseconds from now.
-    Assign(usize, Box<Pipe>),
-    /// `NAME = p`: binds the group variable `NAME` of the run to the candidates `p` gives on
-    /// the input as a scope of its own, the input passing on unchanged.
-    Bind(String, Box<Pipe>),
-    /// The function value the local variable `NAME` holds (`f:term->num = size`), applied to
-    /// the input.
-    Fun(String),
-    /// `NAME:TYPE = f`: binds the local variable `NAME` to the function `f` of this type, which
-    /// takes the input implicitly, as a closure over the values of the variables it reads
-    /// (`crate::pipe::Closure`); the input passes on unchanged.
-    BindFn(String, std::sync::Arc<Pipe>, crate::builtins::Ty),
-    /// The number the local variable `NAME` holds (`n = (size * 2)`).
-    Local(String),
-    /// `NAME = VALUE` for a name not of `VARS`: binds the local variable `NAME` to the number
-    /// the expression gives on the input, which passes on unchanged.
-    BindNum(String, Box<Pipe>),
-    /// The macro `(off NAME ...)` (`false`) or `(on NAME ...)`: the `INNER` passes or `FLAGS`
-    /// switches bound to 0 or 1 until the end of the enclosing sequence, also in the runs it
-    /// calls.
-    Switch(bool, Vec<&'static str>),
-    /// The macro `(smallest p)`: `p` as written, run as its expansion.
-    Smallest(Box<Smallest>),
+    /// `NAME = VALUE`, the input passing on unchanged. A global binds in the enclosing scope
+    /// to the number the right side gives (a switch is on for any value but 0, `time_limit`
+    /// takes milliseconds from now), a local number variable likewise in the run's table, a
+    /// group variable to the candidates the right side gives as a scope of its own, a
+    /// function variable to the right side as a closure over the values of the variables it
+    /// reads (`crate::pipe::Closure`).
+    Bind(Slot, std::sync::Arc<Pipe>),
+    /// A macro call as written and what it expands to, which is what runs.
+    Expanded(Box<Expanded>),
 }
 
-/// `(smallest p)` expanded to `(clear s) | p' | (take_min s)`, where `p'` is `p` with
-/// `(note s)` after each step that computes candidates (`crate::pipe_lang::smallest`).
+/// A variable or parameter, resolved when parsed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Slot {
+    /// A global variable, by its position in `VARS`, looked up along the calls; `time_limit`
+    /// reads as the milliseconds left, `keep` as at least 1.
+    Global(usize),
+    /// A local variable of the run, looked up in the text. A group variable read gives its
+    /// candidates whatever the input; a function variable is applied to the input.
+    Local(String, Holds),
+    /// A parameter of the function whose body this is, by its position, and its name: a
+    /// pipeline argument runs where the call is written, a numeric one gives the value it had
+    /// at the call.
+    Param(usize, String),
+}
+
+/// What a local variable holds.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Holds {
+    Num,
+    Group,
+    Fn(crate::builtins::Ty),
+}
+
+/// The function an `App` applies: a built-in, an operator (a built-in too, its `Impl` held
+/// in the node so that evaluating it reads nothing else) or a `def`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Fun {
+    Builtin(&'static crate::pipe::Builtin),
+    Op(crate::pipe::Operator, &'static crate::pipe::Builtin),
+    Def(std::sync::Arc<Call>),
+}
+
+impl Fun {
+    /// The type of the parameter argument `i` of `args` is for; `None` for the input written
+    /// after the arguments of a function that gives a number.
+    pub fn param_ty(&self, args: &[Pipe], i: usize) -> Option<&crate::builtins::Ty> {
+        match self {
+            Fun::Builtin(b) if b.input_at(args) == Some(i) => None,
+            Fun::Builtin(b) | Fun::Op(_, b) => Some(&b.sig.param(i).ty),
+            Fun::Def(c) => c.def.params.get(i).map(|p| &p.ty),
+        }
+    }
+}
+
+/// A macro call (`(smallest p)`, `(off NAME ...)`, `(on NAME ...)`) as written, `head` and
+/// `args`, which `--show-passes`, errors, checks and warnings read, and its expansion, which
+/// runs.
 #[derive(Clone, Debug)]
-pub struct Smallest {
-    /// `p` as written, which `--show-passes` prints and the checks walk.
-    pub source: Pipe,
-    /// The expansion's steps, in turn.
+pub struct Expanded {
+    pub head: &'static str,
+    pub args: Vec<Pipe>,
     pub steps: Vec<Pipe>,
-    /// `p` is a sequence, so the steps are a scope; otherwise they run in the enclosing one,
-    /// as `p` would.
+    /// The steps are a scope; otherwise they run in the enclosing one, as the call would.
     pub scoped: bool,
+    /// Runs past the time limit too: its steps only bind.
+    pub bookkeeping: bool,
 }
 
-impl PartialEq for Smallest {
-    fn eq(&self, o: &Smallest) -> bool {
-        self.source == o.source
+impl PartialEq for Expanded {
+    fn eq(&self, o: &Expanded) -> bool {
+        self.head == o.head && self.args == o.args
+    }
+}
+
+impl Expanded {
+    /// `(off NAME ...)` (`on` false) or `(on NAME ...)`: `NAME = 0 | ...` or `NAME = 1 | ...`
+    /// for the `INNER` passes and `FLAGS` switches named, in the enclosing sequence. A name
+    /// that is no switch (a parameter until a call puts its argument in place) expands to
+    /// nothing.
+    pub fn switches(on: bool, names: &[&str]) -> Pipe {
+        let steps = names.iter().filter_map(|n| switch_index(n)).map(|i| Pipe::Bind(Slot::Global(i), std::sync::Arc::new(Pipe::Num(on as u64)))).collect();
+        let args = names.iter().map(|n| Pipe::Name(n.to_string())).collect();
+        Pipe::Expanded(Box::new(Expanded { head: if on { "on" } else { "off" }, args, steps, scoped: false, bookkeeping: true }))
+    }
+
+    /// For `on` and `off`: whether it is `on`, and the names.
+    pub fn switch_names(&self) -> Option<(bool, Vec<&str>)> {
+        let on = match self.head {
+            "on" => true,
+            "off" => false,
+            _ => return None,
+        };
+        let names = self.args.iter().map(|a| if let Pipe::Name(n) = a { n.as_str() } else { unreachable!("a switch name") });
+        Some((on, names.collect()))
     }
 }
 
@@ -894,37 +929,39 @@ impl Def {
     }
 }
 
-/// A call of a `Def`.
+/// The `Def` an `App` calls, and its body with the name arguments in place of the name
+/// parameters. The `App`'s arguments are one per parameter, as its type reads it: a name as
+/// `Pipe::Name`, a group variable of the caller (passed by value) as its read, a pipeline,
+/// or an expression evaluated once at the call on the caller's candidates.
 #[derive(Debug)]
 pub struct Call {
     pub def: std::sync::Arc<Def>,
-    /// One per parameter, as its type reads it: a name as `Pipe::Name`, a group variable of
-    /// the caller (passed by value) as `Pipe::Value`, a pipeline, or an expression evaluated
-    /// once at the call on the caller's candidates.
-    pub args: Vec<Pipe>,
-    /// The body with the name arguments in place of the name parameters.
     pub body: std::sync::Arc<Pipe>,
 }
 
-/// The body is made from the function and the arguments; an `@inline` one with an input
-/// binds it under a name of its own for each call.
+/// The body is made from the function and the arguments (an `@inline` one with an input
+/// binds it under a name of its own for each call); the `App` compares the arguments.
 impl PartialEq for Call {
     fn eq(&self, o: &Call) -> bool {
-        self.def == o.def && self.args == o.args
+        self.def == o.def
     }
 }
 
 impl Call {
     /// The call of `def` without arguments.
     pub fn bare(def: &std::sync::Arc<Def>) -> Pipe {
-        Pipe::Call(std::sync::Arc::new(Call { def: def.clone(), args: Vec::new(), body: def.body.clone() }), None)
+        Pipe::App(Fun::Def(std::sync::Arc::new(Call { def: def.clone(), body: def.body.clone() })), Vec::new().into())
     }
 }
 
 impl Pipe {
     /// The built-in function `name` applied to `args`; `name` must be declared.
     pub fn app(name: &str, args: Vec<Pipe>) -> Pipe {
-        Pipe::App(crate::pipe::builtin(name).unwrap_or_else(|| panic!("no built-in {name}")), args)
+        let b = crate::pipe::builtin(name).unwrap_or_else(|| panic!("no built-in {name}"));
+        match b.imp {
+            crate::pipe::Impl::Operator(o) => Pipe::App(Fun::Op(o, b), args.into()),
+            _ => Pipe::App(Fun::Builtin(b), args.into()),
+        }
     }
 
     /// The step `id`.
@@ -934,7 +971,42 @@ impl Pipe {
 
     /// Whether this is the step `id`.
     pub fn is_id(&self) -> bool {
-        matches!(self, Pipe::App(b, _) if b.name == "id")
+        matches!(self, Pipe::App(Fun::Builtin(b), _) if b.name == "id")
+    }
+
+    /// The `Def` this calls, and the arguments.
+    pub fn call(&self) -> Option<(&std::sync::Arc<Call>, &[Pipe])> {
+        match self {
+            Pipe::App(Fun::Def(c), args) => Some((c, args)),
+            _ => None,
+        }
+    }
+
+    /// Whether this is a function written as a value, without arguments, that gives
+    /// candidates, or a function variable: `print` writes its signature.
+    pub fn is_function_value(&self) -> bool {
+        match self {
+            Pipe::Var(Slot::Local(_, Holds::Fn(_))) => true,
+            Pipe::App(Fun::Builtin(b), _) => !b.sig.is_number(),
+            Pipe::App(Fun::Def(c), _) => c.def.value.is_none(),
+            _ => false,
+        }
+    }
+
+    /// Whether this gives a term? (`(main r)`, `(index i r)`): steps whose last picks one
+    /// candidate of a group.
+    pub fn picks(&self) -> bool {
+        matches!(self, Pipe::Seq(ps) if matches!(ps.last(), Some(Pipe::App(Fun::Builtin(b), _)) if b.sig.kind() == crate::builtins::Kind::Pick))
+    }
+
+    /// The global variable at `i`, read.
+    pub fn global(i: usize) -> Pipe {
+        Pipe::Var(Slot::Global(i))
+    }
+
+    /// `x = e` for the global variable at `i`.
+    pub fn assign(i: usize, e: Pipe) -> Pipe {
+        Pipe::Bind(Slot::Global(i), std::sync::Arc::new(e))
     }
 }
 
@@ -1132,7 +1204,7 @@ pub struct Passes {
     pub schedule: Vec<(Step, &'static str)>,
     /// Enabled entries of `PRE`.
     pub pre: Vec<&'static str>,
-    /// The assignments (`Pipe::Assign`, `Pipe::Switch`) a run starts with, in order: the
+    /// The assignments (`Pipe::Bind` of globals, `on` and `off`) a run starts with, in order: the
     /// first `defaults` from `default.pipe`, the rest from `--passes` (`entry_steps`).
     pub entry: Vec<Pipe>,
     pub defaults: usize,
@@ -1237,7 +1309,7 @@ impl Passes {
     /// `iter_limit = i` of the command line (`cli`), then those of `--passes`.
     pub fn entry_steps(&self, cli: Option<(usize, usize)>) -> Vec<Pipe> {
         let (base, spec) = self.entry.split_at(self.defaults);
-        let num = |i: usize, n: usize| Pipe::Assign(i, Box::new(Pipe::Num(n as u64)));
+        let num = |i: usize, n: usize| Pipe::assign(i, Pipe::Num(n as u64));
         let cli = cli.map(|(m, i)| [num(RESTARTS, m), num(ITER_LIMIT, i)]);
         base.iter().cloned().chain(cli.into_iter().flatten()).chain(spec.iter().cloned()).collect()
     }
@@ -1406,10 +1478,10 @@ impl Passes {
             if key == "off" {
                 let ns = names(&INNER)?;
                 if op == "=" {
-                    p.entry.push(Pipe::Switch(true, INNER.to_vec()));
+                    p.entry.push(Expanded::switches(true, &INNER));
                 }
                 if !ns.is_empty() {
-                    p.entry.push(Pipe::Switch(op == "-=", ns));
+                    p.entry.push(Expanded::switches(op == "-=", &ns));
                 }
                 continue;
             }
@@ -1663,7 +1735,7 @@ impl Passes {
     /// The variables the `--passes` source files define that neither the Rust code nor any
     /// pipeline or entry assignment reads.
     fn unread_globals(&self) -> Vec<&'static str> {
-        let mut text: Vec<String> = self.entry.iter().map(|e| if let Pipe::Assign(_, v) = e { lang::show(v) } else { lang::show(e) }).collect();
+        let mut text: Vec<String> = self.entry.iter().map(|e| if let Pipe::Bind(Slot::Global(_), v) = e { lang::show(v) } else { lang::show(e) }).collect();
         let main = [&self.pipeline, &self.prepass, &self.polish, &self.rewrite, &self.simba];
         text.extend(main.into_iter().chain(&self.subs).map(lang::show));
         text.extend(self.defs.iter().map(|d| lang::show_def(d)));
@@ -1742,14 +1814,14 @@ fn is_name(s: &str) -> bool {
 /// once per function and name arguments: the function's name, the name arguments, the body.
 fn instances(p: &Pipe, out: &mut Vec<(String, Vec<String>, std::sync::Arc<Pipe>)>) {
     p.each(&mut |q| instances(q, out));
-    if let Pipe::Call(c, _) = p
+    if let Some((c, _)) = p.call()
         && c.def.inline
     {
         instances(&c.body, out);
-    } else if let Pipe::Call(c, _) = p
+    } else if let Some((c, args)) = p.call()
         && c.def.has_names()
     {
-        let names: Vec<String> = c.args.iter().filter_map(|a| if let Pipe::Name(n) = a { Some(n.clone()) } else { None }).collect();
+        let names: Vec<String> = args.iter().filter_map(|a| if let Pipe::Name(n) = a { Some(n.clone()) } else { None }).collect();
         if !out.iter().any(|(n, ns, _)| *n == c.def.name && *ns == names) {
             out.push((c.def.name.clone(), names, c.body.clone()));
             instances(&c.body, out);
@@ -1757,55 +1829,48 @@ fn instances(p: &Pipe, out: &mut Vec<(String, Vec<String>, std::sync::Arc<Pipe>)
     }
 }
 
-/// Whether `p` only binds: an assignment, `(on NAME)` or `(off NAME)`.
+/// Whether `p` only binds globals: an assignment, `(on NAME)` or `(off NAME)`.
 fn binds(p: &Pipe) -> bool {
-    matches!(p, Pipe::Assign(..) | Pipe::Switch(..))
+    match p {
+        Pipe::Bind(x, _) => matches!(x, Slot::Global(_)),
+        Pipe::Expanded(m) => m.switch_names().is_some(),
+        _ => false,
+    }
 }
 
 impl Pipe {
     /// `f` on each pipeline directly inside `self`, also inside its expressions: the
-    /// pipeline arguments, the steps and inputs of `Of` and `Call`, the pipeline arguments of
-    /// a call (not the body it calls).
+    /// pipeline arguments, the steps of a sequence and the inputs written of calls, the
+    /// pipeline arguments of a call (not the body it calls).
     pub fn each<'p>(&'p self, f: &mut dyn FnMut(&'p Pipe)) {
         match self {
-            Pipe::App(b, args) => {
+            Pipe::App(fun, args) => {
                 for (i, a) in args.iter().enumerate() {
-                    if b.sig.param(i).ty.is_step() {
-                        f(a);
-                    } else {
-                        a.each(f);
+                    match fun.param_ty(args, i) {
+                        Some(t) if !t.is_step() => a.each_in_expr(f),
+                        _ => f(a),
                     }
                 }
             }
-            Pipe::Assign(_, e) | Pipe::Not(e) => e.each(f),
             Pipe::Seq(ps) => ps.iter().for_each(f),
-            Pipe::Smallest(m) => f(&m.source),
-            Pipe::Bind(_, p) => f(p),
-            Pipe::BindFn(_, p, t) if t.is_step() => f(p),
-            Pipe::BindFn(_, e, _) => e.each(f),
-            Pipe::BindNum(_, e) => e.each(f),
-            Pipe::Call(c, input) => {
-                if let Some(p) = input {
-                    f(p);
-                }
-                for (a, p) in c.args.iter().zip(&c.def.params) {
-                    if p.ty.is_step() {
-                        f(a);
-                    } else if p.ty.is_expr() {
-                        a.each(f);
-                    }
-                }
+            Pipe::Expanded(m) => m.args.iter().filter(|a| !matches!(a, Pipe::Name(_))).for_each(f),
+            Pipe::Bind(Slot::Local(_, Holds::Group), p) => f(p),
+            Pipe::Bind(Slot::Local(_, Holds::Fn(t)), p) if t.is_step() => f(p),
+            Pipe::Bind(_, e) => e.each_in_expr(f),
+            Pipe::Num(_) | Pipe::Name(_) | Pipe::Text(_) | Pipe::Var(_) => {}
+        }
+    }
+
+    /// `each` for the expression `self`, where a sequence gives a number: its steps before the
+    /// last are pipelines, the last an expression.
+    fn each_in_expr<'p>(&'p self, f: &mut dyn FnMut(&'p Pipe)) {
+        match self {
+            Pipe::Seq(ps) => {
+                let (e, steps) = ps.split_last().expect("a sequence that gives a number has a last step");
+                steps.iter().for_each(&mut *f);
+                e.each_in_expr(f);
             }
-            Pipe::Of(e, p) => {
-                f(p);
-                e.each(f);
-            }
-            Pipe::And(cs) | Pipe::Or(cs) => cs.iter().for_each(|c| c.each(f)),
-            Pipe::Cmp(_, a, b) | Pipe::Bin(_, a, b) => {
-                a.each(f);
-                b.each(f);
-            }
-            Pipe::Num(_) | Pipe::Name(_) | Pipe::Text(_) | Pipe::Sig(..) | Pipe::Var(_) | Pipe::Value(_) | Pipe::Fun(_) | Pipe::Local(_) | Pipe::Param(..) | Pipe::Switch(..) => {}
+            e => e.each(f),
         }
     }
 }
@@ -1860,72 +1925,79 @@ const FUNCTION: &str = "function variable";
 impl Uses {
     fn walk(&mut self, p: &Pipe) {
         match p {
-            Pipe::App(b, args) => self.app(b, args),
-            Pipe::Bind(r, p) => {
+            Pipe::App(Fun::Builtin(b), args) => self.app(b, args),
+            Pipe::Bind(Slot::Local(r, Holds::Group), p) => {
                 self.walk(p);
                 self.bound(r);
                 if binds(p) {
                     self.idle_assign.push(lang::show(p));
                 }
             }
-            Pipe::Value(r) => self.read(r),
-            Pipe::Fun(r) => self.read_as(r, FUNCTION),
-            Pipe::BindFn(r, p, _) => {
-                self.walk(p);
+            Pipe::Var(Slot::Local(r, Holds::Group)) => self.read(r),
+            Pipe::Var(Slot::Local(r, Holds::Fn(_))) => self.read_as(r, FUNCTION),
+            Pipe::Bind(Slot::Local(r, Holds::Fn(t)), p) => {
+                match &**p {
+                    Pipe::Seq(_) if !t.is_step() => self.expr(p),
+                    p => self.walk(p),
+                }
                 self.bound_as(r, FUNCTION);
             }
-            Pipe::BindNum(r, e) => {
+            Pipe::Bind(Slot::Local(r, Holds::Num), e) => {
                 self.expr(e);
                 self.bound_as(r, NUMBER);
             }
-            Pipe::Assign(_, v) => self.expr(v),
-            Pipe::Seq(ps) => {
-                let flat: Vec<Pipe>;
-                let ps = match ps.iter().any(|p| matches!(p, Pipe::Call(c, _) if c.def.inline)) {
-                    true => {
-                        flat = ps.iter().flat_map(flat_stages).collect();
-                        &flat
-                    }
-                    false => ps,
-                };
-                let mut pending: Vec<usize> = Vec::new();
-                for p in ps {
-                    match p {
-                        Pipe::Assign(i, v) => {
-                            if reads_var(v, *i) {
-                                pending.retain(|j| j != i);
-                            }
-                            self.assigned(&mut pending, *i);
-                        }
-                        Pipe::Switch(_, ns) => ns.iter().filter_map(|n| var_index(n)).for_each(|i| self.assigned(&mut pending, i)),
-                        _ => pending.clear(),
-                    }
-                }
-                ps.iter().for_each(|p| self.walk(p));
-                for p in ps.iter().skip(1).filter(|p| lang::starts_with_value(p)) {
-                    let s = lang::show_stage(p);
-                    if !s.contains('#') {
-                        self.dropping.push(s);
-                    }
-                }
-                if let Some(a) = ps.last().filter(|p| binds(p)) {
-                    self.idle_assign.push(lang::show(a));
-                }
-            }
-            Pipe::Smallest(m) => self.walk(&m.source),
+            Pipe::Bind(_, v) => self.expr(v),
+            Pipe::Seq(ps) => self.seq(ps),
+            Pipe::Expanded(m) if m.switch_names().is_some() => {}
+            Pipe::Expanded(m) => m.args.iter().for_each(|a| self.walk(a)),
             // An `@inline` body is checked as written out where it is called.
-            Pipe::Call(c, _) if c.def.inline => {
-                c.args.iter().zip(&c.def.params).for_each(|(a, p)| if p.ty.is_expr() { self.expr(a) });
-                self.walk(&lang::expand(c));
+            Pipe::App(Fun::Def(c), args) if c.def.inline => {
+                args.iter().zip(&c.def.params).for_each(|(a, p)| if p.ty.is_expr() { self.expr(a) });
+                self.walk(&lang::expand(c, args));
             }
             // A pipeline argument runs with the caller's group variables, at any point of the call
             // and any number of times.
-            Pipe::Call(c, _) => {
+            Pipe::App(Fun::Def(c), args) => {
                 self.calls.push(c.def.name.clone());
-                self.call_args(c);
+                self.call_args(c, args);
             }
-            Pipe::Switch(..) | Pipe::Param(..) => {}
+            Pipe::Var(Slot::Param(..)) => {}
             e => self.expr(e),
+        }
+    }
+
+    /// The steps `ps` of a sequence.
+    fn seq(&mut self, ps: &[Pipe]) {
+        let flat: Vec<Pipe>;
+        let ps = match ps.iter().any(|p| p.call().is_some_and(|(c, _)| c.def.inline)) {
+            true => {
+                flat = ps.iter().flat_map(flat_stages).collect();
+                &flat
+            }
+            false => ps,
+        };
+        let mut pending: Vec<usize> = Vec::new();
+        for p in ps {
+            match p {
+                Pipe::Bind(Slot::Global(i), v) => {
+                    if reads_var(v, *i) {
+                        pending.retain(|j| j != i);
+                    }
+                    self.assigned(&mut pending, *i);
+                }
+                Pipe::Expanded(m) if m.switch_names().is_some() => m.switch_names().unwrap().1.into_iter().filter_map(var_index).for_each(|i| self.assigned(&mut pending, i)),
+                _ => pending.clear(),
+            }
+        }
+        ps.iter().for_each(|p| self.walk(p));
+        for p in ps.iter().skip(1).filter(|p| lang::starts_with_value(p)) {
+            let s = lang::show_stage(p);
+            if !s.contains('#') {
+                self.dropping.push(s);
+            }
+        }
+        if let Some(a) = ps.last().filter(|p| binds(p)) {
+            self.idle_assign.push(lang::show(a));
         }
     }
 
@@ -1977,8 +2049,9 @@ impl Uses {
             "cand" => self.maybe(&args[1]),
             "filter" | "assert" => self.expr(&args[0]),
             "print" => args.iter().for_each(|a| match a {
-                Pipe::Value(r) => self.read(r),
-                Pipe::Name(_) | Pipe::Text(_) | Pipe::Sig(..) => {}
+                Pipe::Var(Slot::Local(r, Holds::Group)) => self.read(r),
+                Pipe::Name(_) | Pipe::Text(_) => {}
+                f if f.is_function_value() => {}
                 e => self.expr(e),
             }),
             "scope" => self.walk(&args[0]),
@@ -1997,12 +2070,12 @@ impl Uses {
         }
     }
 
-    fn call_args(&mut self, c: &Call) {
+    fn call_args(&mut self, c: &Call, args: &[Pipe]) {
         use crate::builtins::Ty;
-        for (a, p) in c.args.iter().zip(&c.def.params) {
+        for (a, p) in args.iter().zip(&c.def.params) {
             match (&p.ty, a) {
                 (t, e) if t.is_expr() => self.expr(e),
-                (Ty::Group, Pipe::Value(r)) => self.read(r),
+                (Ty::Group, Pipe::Var(Slot::Local(r, _))) => self.read(r),
                 (Ty::Name | Ty::Group, _) => {}
                 (_, p) => self.repeated(p),
             }
@@ -2071,34 +2144,40 @@ impl Uses {
 
     fn expr(&mut self, e: &Pipe) {
         match e {
-            Pipe::App(b, args) => {
+            Pipe::App(Fun::Builtin(b), args) => {
+                let args = match b.input_at(args) {
+                    Some(k) => {
+                        self.walk(&args[k]);
+                        &args[..k]
+                    }
+                    None => &args[..],
+                };
                 if ["opaque", "rebuilds"].contains(&b.name) {
                     self.calls.push("prepass".into());
                 }
-                for a in args {
+                for a in args.iter() {
                     match a {
                         Pipe::Name(r) => self.read(r),
                         a => self.expr(a),
                     }
                 }
             }
-            Pipe::Of(e, p) => {
-                self.walk(p);
+            Pipe::App(Fun::Op(..), args) => args.iter().for_each(|a| self.expr(a)),
+            Pipe::Seq(ps) => {
+                let (e, steps) = ps.split_last().expect("a sequence that gives a number has a last step");
+                match steps {
+                    [p] => self.walk(p),
+                    ps => self.seq(ps),
+                }
                 self.expr(e);
             }
-            Pipe::Call(c, input) => {
+            Pipe::App(Fun::Def(c), args) => {
                 self.calls.push(c.def.name.clone());
-                input.iter().for_each(|p| self.walk(p));
-                self.call_args(c);
+                args.get(c.def.params.len()).iter().for_each(|p| self.walk(p));
+                self.call_args(c, args);
             }
-            Pipe::Fun(r) => self.read_as(r, FUNCTION),
-            Pipe::Local(r) => self.read_as(r, NUMBER),
-            Pipe::Not(c) => self.expr(c),
-            Pipe::And(cs) | Pipe::Or(cs) => cs.iter().for_each(|c| self.expr(c)),
-            Pipe::Cmp(_, a, b) | Pipe::Bin(_, a, b) => {
-                self.expr(a);
-                self.expr(b);
-            }
+            Pipe::Var(Slot::Local(r, Holds::Fn(_))) => self.read_as(r, FUNCTION),
+            Pipe::Var(Slot::Local(r, Holds::Num)) => self.read_as(r, NUMBER),
             _ => {}
         }
     }
@@ -2108,14 +2187,14 @@ impl Uses {
 /// out, after a `filter` of each numeric argument (read at the call, a step there).
 fn flat_stages(p: &Pipe) -> Vec<Pipe> {
     match p {
-        Pipe::Call(c, _) if c.def.inline => {
-            let num = c.args.iter().zip(&c.def.params).filter(|(_, p)| p.ty.is_expr());
-            let args = num.map(|(e, _)| Pipe::app("filter", vec![e.clone()]));
-            let body = match lang::expand(c) {
+        Pipe::App(Fun::Def(c), args) if c.def.inline => {
+            let num = args.iter().zip(&c.def.params).filter(|(_, p)| p.ty.is_expr());
+            let filters = num.map(|(e, _)| Pipe::app("filter", vec![e.clone()]));
+            let body = match lang::expand(c, args) {
                 Pipe::Seq(ps) if c.def.flat => ps.iter().flat_map(flat_stages).collect(),
                 q => flat_stages(&q),
             };
-            args.chain(body).collect()
+            filters.chain(body).collect()
         }
         _ => vec![p.clone()],
     }
@@ -2123,15 +2202,18 @@ fn flat_stages(p: &Pipe) -> Vec<Pipe> {
 
 /// Whether `e` reads the variable at `i`.
 fn reads_var(e: &Pipe, i: usize) -> bool {
+    let group = |p: &Pipe| matches!(p, Pipe::Var(Slot::Local(_, Holds::Group)));
     match e {
-        Pipe::Var(j) => *j == i,
-        Pipe::Not(c) => reads_var(c, i),
-        Pipe::App(_, cs) | Pipe::And(cs) | Pipe::Or(cs) => cs.iter().any(|c| reads_var(c, i)),
-        Pipe::Cmp(_, a, b) | Pipe::Bin(_, a, b) => reads_var(a, i) || reads_var(b, i),
-        Pipe::Of(e, p) => !matches!(**p, Pipe::Value(_)) || reads_var(e, i),
-        Pipe::Call(c, input) => {
-            let num = c.args.iter().zip(&c.def.params).filter(|(_, p)| p.ty.is_expr());
-            c.def.steps || input.as_deref().is_some_and(|p| !matches!(p, Pipe::Value(_))) || num.into_iter().any(|(e, _)| reads_var(e, i))
+        Pipe::Var(Slot::Global(j)) => *j == i,
+        Pipe::App(Fun::Builtin(b), cs) => match b.input_at(cs) {
+            Some(k) => !group(&cs[k]) && (!cs[k].picks() || reads_var(&cs[k], i)) || cs[..k].iter().any(|c| reads_var(c, i)),
+            None => cs.iter().any(|c| reads_var(c, i)),
+        },
+        Pipe::App(Fun::Op(..), cs) => cs.iter().any(|c| reads_var(c, i)),
+        Pipe::Seq(ps) => !matches!(&ps[..ps.len() - 1], [p] if group(p)) || reads_var(&ps[ps.len() - 1], i),
+        Pipe::App(Fun::Def(c), args) => {
+            let num = args.iter().zip(&c.def.params).filter(|(_, p)| p.ty.is_expr());
+            c.def.steps || args.get(c.def.params.len()).is_some_and(|p| !group(p)) || num.into_iter().any(|(e, _)| reads_var(e, i))
         }
         _ => false,
     }
@@ -2147,19 +2229,25 @@ impl fmt::Display for Passes {
         let mut i = 0;
         while i < spec.len() {
             let names = |ns: &[&str]| ns.join(",");
-            match &spec[i] {
-                Pipe::Switch(true, ns) if *ns == INNER => match spec.get(i + 1) {
-                    Some(Pipe::Switch(false, off)) if off.iter().all(|n| INNER.contains(n)) => {
-                        write!(f, " off={}", names(off))?;
+            fn switches(p: Option<&Pipe>) -> Option<(bool, Vec<&str>)> {
+                match p {
+                    Some(Pipe::Expanded(m)) => m.switch_names(),
+                    _ => None,
+                }
+            }
+            match (&spec[i], switches(spec.get(i))) {
+                (_, Some((true, ns))) if ns == INNER => match switches(spec.get(i + 1)) {
+                    Some((false, off)) if off.iter().all(|n| INNER.contains(n)) => {
+                        write!(f, " off={}", names(&off))?;
                         i += 1;
                     }
                     _ => write!(f, " off=")?,
                 },
-                Pipe::Switch(false, ns) => write!(f, " off+={}", names(ns))?,
-                Pipe::Switch(true, ns) => write!(f, " off-={}", names(ns))?,
-                Pipe::Assign(..) if self.defines.contains(&(self.defaults + i)) => write!(f, " {}", lang::show(&spec[i]))?,
-                Pipe::Assign(v, val) => write!(f, " {}={}", var(*v).name, lang::show_assigned(val))?,
-                p => unreachable!("entry step {p:?}"),
+                (_, Some((false, ns))) => write!(f, " off+={}", names(&ns))?,
+                (_, Some((true, ns))) => write!(f, " off-={}", names(&ns))?,
+                (Pipe::Bind(Slot::Global(_), _), _) if self.defines.contains(&(self.defaults + i)) => write!(f, " {}", lang::show(&spec[i]))?,
+                (Pipe::Bind(Slot::Global(v), val), _) => write!(f, " {}={}", var(*v).name, lang::show_assigned(val))?,
+                (p, _) => unreachable!("entry step {p:?}"),
             }
             i += 1;
         }
@@ -2236,7 +2324,7 @@ mod tests {
         assert_eq!([after_entry(&p, "keep"), after_entry(&p, "prove_minimal"), after_entry(&p, "restarts")], [0, 0, 7]);
         assert!(crate::pipe::in_run(&p, None, x, || p.egglog_schedule().contains(":match-limit 9 :ban-length 3")));
         let p = Passes::parse("off=").unwrap();
-        assert_eq!(p.entry[p.defaults..], [Pipe::Switch(true, INNER.to_vec())]);
+        assert_eq!(p.entry[p.defaults..], [Expanded::switches(true, &INNER)]);
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         let cli = crate::Cli { max_restarts: 5, iter_limit: 3, passes: Passes::parse("iter_limit=iter_limit*2").unwrap(), ..Default::default() };
         let (m, i) = crate::pipe::in_run(&cli.passes, Some(&cli), x, || (get(RESTARTS), get(ITER_LIMIT)));
@@ -2281,7 +2369,7 @@ mod tests {
         }
         let r = crate::pipe::in_run(&p, None, x, || {
             swap_read(ReadSet::EMPTY);
-            let e = Pipe::Var(var_index("memo_contexts").unwrap());
+            let e = Pipe::global(var_index("memo_contexts").unwrap());
             let env = crate::pipe::Env::prepass(&p, 64, None, false, x().term());
             crate::pipe::run(&Pipe::app("filter", vec![e]), vec![x()], &env).unwrap();
             swap_read(ReadSet::EMPTY)
@@ -2480,7 +2568,7 @@ mod tests {
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("pre+=nope").is_err() && Passes::parse("keep+=1").is_err());
         let p = Passes::parse("off=semi/bit_split,relate").unwrap();
-        assert_eq!(p.entry[p.defaults..], [Pipe::Switch(true, INNER.to_vec()), Pipe::Switch(false, vec!["semi/bit_split", "relate"])]);
+        assert_eq!(p.entry[p.defaults..], [Expanded::switches(true, &INNER), Expanded::switches(false, &["semi/bit_split", "relate"])]);
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(crate::pipe::in_run(&p, None, x, || is_off("relate") && !is_off("simba")));
         assert!(!is_off("relate"));
@@ -2524,8 +2612,8 @@ mod tests {
         assert_eq!(p.prepass, lang::parse("(seq lowbits (if mixed rewrite id) polish)").unwrap());
         assert_eq!(p.pipeline, lang::parse("(fix 2 (seq prepass egglog))").unwrap());
         assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
-        let p = Passes::parse("prepass=(scope (save t) | (rewrites = unified_rewrites | semi_leaves = 2 | rewrite) | (filter (size < (size t) || size <= (size t) * 3 / 4 && !tiny)) | (cand halve_input (load t)))").unwrap();
-        assert_eq!(p.prepass.to_string(), "(scope (save t) | (rewrites = unified_rewrites | semi_leaves = 2 | rewrite) | (filter (size < (size t) || size <= (size t) * 3 / 4 && !tiny)) | (cand halve_input (load t)))");
+        let p = Passes::parse("prepass=(scope (save t) | (rewrites = unified_rewrites | semi_leaves = 2 | rewrite) | (filter (size < (size (main t)) || size <= (size (main t)) * 3 / 4 && !tiny)) | (cand halve_input (load t)))").unwrap();
+        assert_eq!(p.prepass.to_string(), "(scope (save t) | (rewrites = unified_rewrites | semi_leaves = 2 | rewrite) | (filter (size < (size (main t)) || size <= (size (main t)) * 3 / 4 && !tiny)) | (cand halve_input (load t)))");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         for bad in ["prepass=(filter lt)", "prepass=(filter (size <=))", "prepass=(rewrites = x | id)", "prepass=(save)", "prepass=(scope id id)"] {
             assert!(Passes::parse(bad).is_err(), "{bad}");
@@ -2582,7 +2670,7 @@ times = extra + 1 # a new variable
         for bad in ["(extern (x g:group) group)", "keep=1 (extern (x g:group) group)", "pipeline=extern"] {
             assert!(Passes::parse(bad).unwrap_err().contains(lang::NO_EXTERN), "{bad}");
         }
-        for bad in ["prepass=(load x)", "prepass=(save t) | (load u)", "prepass=(load t) | (save t)", "polish=(filter (size < (size t)))", "rewrite=(if (same t) id)", "prepass=(if mixed (save t)) | (label u)", "pipeline=(retry (size < (size t)) id (save t))"] {
+        for bad in ["prepass=(load x)", "prepass=(save t) | (load u)", "prepass=(load t) | (save t)", "polish=(filter (size < (size (main t))))", "rewrite=(if (same (main t)) id)", "prepass=(if mixed (save t)) | (label u)", "pipeline=(retry (size < (size (main t))) id (save t))"] {
             let e = Passes::parse(bad).unwrap_err();
             assert!(e.contains("before it is bound"), "{bad}: {e}");
         }
@@ -2590,7 +2678,7 @@ times = extra + 1 # a new variable
             let e = Passes::parse(bad).unwrap_err();
             assert!(e.contains("before it is bound"), "{bad}: {e}");
         }
-        for good in ["prepass=(if mixed (save t)) | (load t)", "prepass=(fix 3 (union (load t) id) | (save t))", "pipeline=(retry (size < (size t)) (save t) (load t))", "prepass=(best (size t) (save t) id)", "prepass=t = rewrite | (load t)", "prepass=t = (u = id) | (load u) | (load t)", "(def (f p) p | none) prepass=(f t = rewrite) | (load t)"] {
+        for good in ["prepass=(if mixed (save t)) | (load t)", "prepass=(fix 3 (union (load t) id) | (save t))", "pipeline=(retry (size < (size (main t))) (save t) (load t))", "prepass=(best (size (main t)) (save t) id)", "prepass=t = rewrite | (load t)", "prepass=t = (u = id) | (load u) | (load t)", "(def (f p) p | none) prepass=(f t = rewrite) | (load t)"] {
             assert!(Passes::parse(good).is_ok(), "{good}");
         }
         assert_eq!(Passes::default().warnings(), Vec::<String>::new());
@@ -2606,7 +2694,7 @@ times = extra + 1 # a new variable
         assert!(w.len() == 1 && w[0].contains("(off relate) ends"), "the right side of a group assignment is a scope: {w:?}");
         let (_, w) = Passes::parse_noting("prepass=t = id | t = rewrite | (load t) | u = rewrite | id").unwrap();
         assert!(w.len() == 2 && w[0].contains("group variable u is bound and never read") && w[1].contains("group variable t is bound again"), "{w:?}");
-        for ok in ["prepass=(save t) | (if mixed (save t)) | (load t)", "prepass=(save t) | (cand unified (save t)) | (load t)", "prepass=(fix 3 (save t) | rewrite) | (load t)", "prepass=(save t) | (filter (size < (size t))) | (save t) | (load t)", "prepass=(save t) | (first rewrite (save t)) | (load t)", "prepass=(if mixed (save t) (save t)) | (load t)"] {
+        for ok in ["prepass=(save t) | (if mixed (save t)) | (load t)", "prepass=(save t) | (cand unified (save t)) | (load t)", "prepass=(fix 3 (save t) | rewrite) | (load t)", "prepass=(save t) | (filter (size < (size (main t)))) | (save t) | (load t)", "prepass=(save t) | (first rewrite (save t)) | (load t)", "prepass=(if mixed (save t) (save t)) | (load t)"] {
             assert_eq!(Passes::parse_noting(ok).unwrap().1, Vec::<String>::new(), "{ok}");
         }
         let p = Passes::parse("prepass=rewrite | time_limit = 500 | relate | time_limit = size-1 * 2 | tfunc | time_limit = none | lowbits").unwrap();
@@ -2737,21 +2825,21 @@ times = extra + 1 # a new variable
 
     #[test]
     fn explicit_parameters() {
-        let spec = "(def @pipe (f p g) g | p) (def (twice p g) (p (p g))) (def @pipe (big k g) (size g) > k) prepass=(f rewrite) | (save t) | u = (twice relate t) | (if (big 3) (load u))";
+        let spec = "(def @pipe (f p g) g | p) (def (twice p g) (p (p g))) (def @pipe (big k g) (size (main g)) > k) prepass=(f rewrite) | (save t) | u = (twice relate t) | (if (big 3) (load u))";
         let p = Passes::parse(spec).unwrap();
         let sigs: Vec<String> = p.defs.iter().map(|d| lang::sig_of(d).decl()).collect();
         assert_eq!(sigs, ["(extern @pipe (f p:pipe g:group) group)", "(extern (twice p:pipe g:group) group)", "(extern @pipe (big k:num g:group) num)"]);
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
-        assert!(p.to_string().contains("(def @pipe (big k g) (size g) > k)"), "{p}");
-        for ok in ["(def (k r:group n:num p:pipe x:name) (load r) | (fix n p) | (tag x id)) prepass=(save t) | (k t 2 id x)", "(def @pipe (big k g) (size g) > k) prepass=keep = (big 3) | id"] {
+        assert!(p.to_string().contains("(def @pipe (big k g) (size (main g)) > k)"), "{p}");
+        for ok in ["(def (k r:group n:num p:pipe x:name) (load r) | (fix n p) | (tag x id)) prepass=(save t) | (k t 2 id x)", "(def @pipe (big k g) (size (main g)) > k) prepass=keep = (big 3) | id"] {
             assert!(Passes::parse(ok).is_ok(), "{ok}: {:?}", Passes::parse(ok).err());
         }
         for (bad, msg) in [
             ("prepass=size | rewrite", "size gives a number; rewrite takes candidates"),
-            ("(def @pipe (big k g) (size g) > k) prepass=big | rewrite", "big gives a number; rewrite takes candidates"),
-            ("(def @pipe (big k g) (size g) > k) prepass=(big 3 (lowbits | unshift))", "big gives a number, not candidates"),
-            ("(def @pipe (big k g) (size g) > k) prepass=t = (big 3 (lowbits | unshift)) | (load t)", "t is a number variable, so it cannot name a group variable"),
+            ("(def @pipe (big k g) (size (main g)) > k) prepass=big | rewrite", "big gives a number; rewrite takes candidates"),
+            ("(def @pipe (big k g) (size (main g)) > k) prepass=(big 3 (lowbits | unshift))", "big gives a number, not candidates"),
+            ("(def @pipe (big k g) (size (main g)) > k) prepass=t = (big 3 (lowbits | unshift)) | (load t)", "t is a number variable, so it cannot name a group variable"),
             ("(def @pipe (big k g) size > k)", "size needs its input here"),
             ("(def @pipe (big k g) (mixed) || k)", "mixed needs its input here"),
             ("(def @pipe (f g) rewrite)", "the body of an @pipe function starts with a value"),
@@ -2763,8 +2851,8 @@ times = extra + 1 # a new variable
             ("(def @pipe (f p g) g | p) (def (h a:group) (f id a)) prepass=(h u)", "prepass reads group variable u before it is bound"),
             ("(def @pipe (f p g) g | p) prepass=(f id u)", "prepass reads group variable u before it is bound"),
             ("(def @pipe (f p g) g | p) prepass=(f id 1)", "f takes a pipeline"),
-            ("(def @pipe (big k g) (size g) > k) prepass=t = (big 3) | (load t)", "t is a number variable, so it cannot name a group variable"),
-            ("(def @pipe (big k g) (size g) > k) prepass=t = (k + 1)", "unknown name k"),
+            ("(def @pipe (big k g) (size (main g)) > k) prepass=t = (big 3) | (load t)", "t is a number variable, so it cannot name a group variable"),
+            ("(def @pipe (big k g) (size (main g)) > k) prepass=t = (k + 1)", "unknown name k"),
         ] {
             let e = Passes::parse(bad).unwrap_err();
             assert!(e.contains(msg), "{bad}: {e}");
@@ -2783,14 +2871,14 @@ times = extra + 1 # a new variable
         }
         assert_eq!(Passes::parse(&s).unwrap(), p);
         assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
-        for ok in ["prepass=(fix (rewrite | size) id)", "prepass=(if ((rewrite | size) < size) id)", "prepass=(if (any (rewrite | size) < 3) id)", "prepass=(if ((size (rewrite)) < (mixed (lowbits | unshift))) id)", "polish=keep = (prepass | size) | id"] {
+        for ok in ["prepass=(fix (rewrite | size) id)", "prepass=(if ((rewrite | size) < size) id)", "prepass=(if (any (rewrite | size) < 3) id)", "prepass=(if ((size (main (rewrite))) < (mixed (main (lowbits | unshift)))) id)", "polish=keep = (prepass | size) | id"] {
             assert!(Passes::parse(ok).is_ok(), "{ok}: {:?}", Passes::parse(ok).err());
         }
         for (bad, msg) in [
             ("prepass=(fix 3 rewrite | size)", "rewrite | size gives a number, not candidates"),
             ("prepass=rewrite | size | rewrite", "size gives a number; rewrite takes candidates"),
             ("prepass=(if ((rewrite | id) < 3) id)", "(rewrite | id) gives candidates, not a number"),
-            ("(def @pipe (f g) (size g) > (rewrite | size))", "(rewrite | size) needs its input here"),
+            ("(def @pipe (f g) (size (main g)) > (rewrite | size))", "(rewrite | size) needs its input here"),
             ("(def @inline (f) rewrite | size)", "cannot be @inline"),
             ("prepass=t = (rewrite | size) | (save t)", "t is a number variable, so it cannot name a group variable"),
 
@@ -2822,7 +2910,7 @@ times = extra + 1 # a new variable
         assert_eq!(sigs, ["(try_without name:name p:pipe g:group) group", "(hold r:group p:pipe g:group) group"]);
         assert_eq!(p.prepass.to_string(), "(try_without relate rewrite) | (save t) | (hold t (lowbits | rewrite))");
         let Pipe::Seq(steps) = &p.prepass else { panic!() };
-        let Pipe::Call(c, _) = &steps[0] else { panic!() };
+        let Some((c, _)) = steps[0].call() else { panic!() };
         assert_eq!(c.body.to_string(), "(best 1 p ((off relate) | p))", "a call has its name arguments in place");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(format!("{p:#}").contains("
@@ -2833,15 +2921,15 @@ times = extra + 1 # a new variable
         let inline = Passes::parse("(def @inline (g r p) p | (load r)) prepass=(save t) | (g t rewrite) | (save u) | (g u (if (size > 1) id))").unwrap();
         assert_eq!(inline.prepass.to_string(), "(save t) | rewrite | (load t) | (save u) | (if (size > 1) id) | (load u)", "an @inline body flat in the sequence");
         let nested = Passes::parse("(def (g n q) (off n) | q) (def (h m p) (g m (p | (save x))) | (load x)) prepass=(h tfunc rewrite)").unwrap();
-        let Pipe::Call(h, _) = &nested.prepass else { panic!() };
+        let Some((h, _)) = nested.prepass.call() else { panic!() };
         let Pipe::Seq(body) = &*h.body else { panic!() };
-        let Pipe::Call(g, _) = &body[0] else { panic!() };
+        let Some((g, _)) = body[0].call() else { panic!() };
         assert_eq!(g.body.to_string(), "(off tfunc) | q", "a name argument passed on is put in place in the inner call too");
         for ok in [
             "(def (f a b) (load a) | (load b)) prepass=(save t) | (f t t)",
             "(def (f p) (save t) | p | (load t)) prepass=(save t) | (f ((load t) | rewrite))",
             "(def (f r) (tag r id) | (cand r id) | (smaller r id) | (egglog r)) pipeline=(f x)",
-            "(def (f r) (if ((size r) > 1 && (same r)) id) | (label r)) prepass=(save t) | (f t)",
+            "(def (f r) (if ((size (main r)) > 1 && (same (main r))) id) | (label r)) prepass=(save t) | (f t)",
         ] {
             assert!(Passes::parse(ok).is_ok(), "{ok}: {:?}", Passes::parse(ok).err());
         }
@@ -2856,7 +2944,7 @@ times = extra + 1 # a new variable
             ("(def (f r n) (load r) | (fix n id)) prepass=(f 3 3)", "expected a group variable after f, found 3"),
             ("(def (f n) (fix n id)) prepass=(f relate = 1)", "an assignment is a step"),
             ("(def (f n) (fix n id)) prepass=(f (load t))", "f takes an expression"),
-            ("(def (f n) (fix n id)) prepass=(f ((size t) + 1))", "prepass reads group variable t before it is bound"),
+            ("(def (f n) (fix n id)) prepass=(f ((size (main t)) + 1))", "prepass reads group variable t before it is bound"),
             ("(def @inline (f n) (load t) | (fix n id)) prepass=(f 1)", "prepass reads group variable t before it is bound"),
             ("(def (k r) (load r)) (def @inline (i n) (k t) | (fix n id)) prepass=(i 1)", "prepass reads group variable t before it is bound"),
             ("(def (f p) p | (load p))", "parameter p is used as a pipeline and as a group variable"),
