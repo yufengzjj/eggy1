@@ -263,7 +263,7 @@ minimal_max_size_8bit = 5
   | (if (mul < 1 && shift < 1 && bitconst < 1) (off lowbits))
   | (if (mul >= 4 && shift < 1) (off small_blocks)))
 
-# The pre-pass, on one run (`scope`). Registers: `t0` the input, `t` with low bits and
+# The pre-pass, on one run (`scope`). Group variables: `t0` the input, `t` with low bits and
 # shifts rewritten, `r` the first rebuild, `n` the rebuild without `wide_blocks`, `f`/`b`
 # the candidates finished, `u` the rebuild without clusters, `m` the ones kept.
 (def (prepass)

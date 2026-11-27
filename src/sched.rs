@@ -757,7 +757,7 @@ pub enum Pipe {
     /// A number; `NONE` is `none`.
     Num(u64),
     /// A name argument: a stats or origin name, an egglog label, a note register, or the group
-    /// variable a built-in binds or reads (`(save t)`, `(size t)`).
+    /// variable a built-in binds or reads (`(save t)`, `(load t)`).
     Name(String),
     /// A string literal (`text`), its escapes read.
     Text(String),
@@ -766,7 +766,7 @@ pub enum Pipe {
     /// A function applied to its arguments in the order of its parameters. For a built-in,
     /// an optional one not written is left out, except the second branch of `if`, which is
     /// `id`; for a function that gives a number, the input written follows the arguments
-    /// (`(mixed g)`, `(size (rewrite))`; `pipe::Builtin::input_at`). Written without the
+    /// (`(minimal g)`, `(size (main g))`; `pipe::Builtin::input_at`). Written without the
     /// arguments it is a function value (`print`).
     App(Fun, std::sync::Arc<[Pipe]>),
     /// Each in turn on the candidates of the one before (`a | b`), as a scope. Where the last

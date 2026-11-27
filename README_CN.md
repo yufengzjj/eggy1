@@ -39,6 +39,7 @@ Usage: eggy1 [OPTIONS] [EXPR]
       --stats                        把各 pass 的次数、耗时和胜出次数打印到 stderr
       --passes <PASSES>              修改 pass 管线（见下文）
       --show-passes                  打印 pass 管线后退出
+      --show-builtins                打印管线内置函数的签名后退出
 ```
 
 运算符：`+ - * / % & | ^ ~ << >>`、一元 `-`，以及 `mulhi(a, b)`（乘积的高半部分）。常数可以是十进制或十六进制（`0xff`）。结果在所选位宽下总与输入等价；只对部分类型成立的规则只在那些类型上使用。
@@ -59,7 +60,7 @@ Usage: eggy1 [OPTIONS] [EXPR]
 eggy1 --passes "extra=0 keep=1" -n u32 "expr"            # 设置
 eggy1 --passes "off=relate,poly_mba" -n u32 "expr"        # 关掉内部 pass
 eggy1 --passes "prepass=lowbits | (if mixed rewrite)" "expr"
-eggy1 --passes "file=my.pipe" "expr"                      # 从文件读入各项
+eggy1 --passes "file=my.pipe" "expr"                      # 读入一个源文件（定义和赋值）
 ```
 
 管线把一组等价候选映射为另一组：`a | b` 依次执行，还有 `(union a b)`、`(best K a b)`、`(first a b)`、`(fix N p)`、`(if COND a b)`、赋值 `NAME = VALUE`（`(split_runs = 4 | p)`）、`(on NAME)`/`(off NAME)`、组变量（`t = (lowbits | rewrite)`、`(save R)`/`(load R)`）、`(mul >= 4 && !mixed)` 这样的条件、`(let NAME p)` 定义（`src/default.pipe` 里定义的名字可以直接用），以及带参数的函数 `(def (with_budget n p) rewrites = n | p)`，调用起来和内置函数一样。读入时会检查管线（未知名字、参数或类型不对、组变量先读后绑定、pass 出现在不能运行它的管线里、递归），不起作用的部分给出警告。完整的参考（所有形式、pass、条件、设置和限值）见 [docs/pipe-language.md](docs/pipe-language.md)。
@@ -89,6 +90,7 @@ cargo test --lib                            # 单元测试
 |---|---|
 | `src/lib.rs` | egglog 规则（`make_egg`）、原语、命令行、驱动 |
 | `src/sched.rs`、`src/pipe.rs`、`src/pipe_lang.rs`、`src/default.pipe` | 管线设置、执行器、语言、默认管线 |
+| `src/builtins.pipe`、`src/builtins.rs` | 管线内置函数的签名 |
 | `src/linear_mba/` | 线性与半线性重建、宽区域、`relate`、`halve`、`split_bits`、polish |
 | `src/poly_mba.rs` | 多项式 MBA 的展开与因式分解 |
 | `src/lowbits.rs`、`src/known_bits.rs` | 已知位推理 |

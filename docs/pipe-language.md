@@ -7,15 +7,16 @@ eggy1 的化简流程由几条管线描述，默认的写在 `src/default.pipe` 
 语言里的名字只有三类：**变量**（第 5、10 节）、**函数**（内置的见第 4.3、7.3、8、9 节，用户定义的见第 6 节）、**宏**（第 5.4 节）。函数的最后一个参数是**输入**（当前的候选组，写在管线里时由 `|` 填入），返回一个数或一组候选；eggy1 的化简流程由几个**定义的函数**（管线）描述。一次运行执行一个**入口程序**：
 
 ```
-<default.pipe 的赋值> | <命令行的赋值> | pipeline
+<default.pipe 的赋值> | <命令行的赋值> | check_limits | pipeline
 ```
 
 - `src/default.pipe` 是一个源文件（第 12.3 节）：定义全局变量和它们的默认值，定义各个函数（管线）和 `let` 名字（也可以写 `def`）。
-- 命令行：先是 `-m N`（`restarts = N`）、`-i N`（`iter_limit = N`），再是 `--passes` 的 `NAME=VALUE` 项、`off` 列表项，按出现顺序，都排在 `default.pipe` 的赋值之后（第 12 节）。所以 `--passes restarts=5` 盖过 `-m`。
+- 命令行：先是 `-m N`（`restarts = N`）、`-i N`（`iter_limit = N`），再是 `--passes` 的赋值项（`NAME=VALUE`、`NAME = VALUE`、`off=`、`pre=` 这些），按出现顺序，都排在 `default.pipe` 的赋值之后（第 12 节）。所以 `--passes restarts=5` 盖过 `-m`。
+- `check_limits` 是 `default.pipe` 里的 `let`，检查有上限的变量（第 5.2 节）。
 - 从 Rust 直接进入别的管线时（测试和 `fuzz --prepass` 调用 `simplify_linear_with` 即 `prepass`、`polish`，不在任何运行里的 `rewrite`），入口换成那条管线，前面接同一段赋值（没有 `-m`、`-i` 那两步）。已经在一次运行里时，嵌套的运行不再执行它们。
 - 每次 `simplify` 都从头执行入口程序，结束时撤销所有绑定，下一个表达式重新开始。
 
-`--show-passes` 先打印一行注释 `# A run: <入口程序的各步> | pipeline`，再打印 `--passes` 写法的全部设置（只含命令行那部分赋值），所以它的输出可以原样传给 `--passes`。`--show-builtins` 按调用方式列出全部内置函数的签名和说明（第 4.3 节），`--passes` 里有 `def` 时最后单列它们的签名。
+`--show-passes` 先打印一行注释 `# A run: <入口程序的各步> | check_limits | pipeline`，再打印 `--passes` 写法的全部设置（只含命令行那部分赋值），所以它的输出可以原样传给 `--passes`。`--show-builtins` 按调用方式列出全部内置函数的签名和说明（第 4.3 节），最后列出 `def` 的签名：`default.pipe` 的（`cand`）一组，`--passes` 里有 `def` 时再一组。
 
 ### 1.1 Rust 代码调用的函数
 
@@ -60,7 +61,7 @@ eggy1 的化简流程由几条管线描述，默认的写在 `src/default.pipe` 
 - 空白只用来分隔；`#` 到行尾是注释。
 - **名字**以字母或 `_` 开头，只含字母、数字和 `_`：`polish_factor`、`semi_bit_split`、`split_runs`。`-`、`/` 这些有含义的符号都不在名字里，所以 `size-mul` 是 `size - mul`，`x/2` 是 `x / 2`。旧的带 `/` 的名字连写时报错并给出新名字：`polish/factor` 报 `names cannot contain '/': write polish_factor`（`/` 换成 `_` 后是已知名字时），`save/t`、`off/relate`、`egglog/x` 报 `write save/t as (save t)` 这样的提示；其余的 `a/b` 是除法。
 - **数**是十进制非负整数，最大 18446744073709551614（2^64 - 2；再大报 `number too large`）。
-- **字符串**写在双引号里：`"max_leaves is at most 6"`。只认两种转义：`\"` 是引号，`\\` 是反斜杠；别的 `\` 报 `unknown escape`。字符串不跨行（行尾还没收尾报 `unclosed string`），里面的 `#`、括号、空白和 `;` 都是字符串的一部分。打印时照读入时的写法写回。现在只用作参数（`assert` 的消息、`print` 的值）。
+- **字符串**写在双引号里：`"max_leaves is at most 6"`。只认两种转义：`\"` 是引号，`\\` 是反斜杠；别的 `\` 报 `unknown escape`。字符串不跨行（行尾还没收尾报 `unclosed string`），里面的 `#`、括号、空白和 `;` 都是字符串的一部分。打印时照读入时的写法写回。只用作参数（`assert` 的消息、`print` 的值）。
 - 内置的值只有 `none`（第 5.2 节）。`on`、`off` 是宏名（第 5.4 节），不是值。
 - 其他记号：`( ) | = || && ! + - * / < <= > >= == != @ :`。`=` 是赋值，`==` 是比较；`@` 写 `def` 的属性，`:` 写参数的类型（第 6.1、6.2 节）。
 
@@ -72,6 +73,7 @@ numpipe := step ('|' step)* '|' expr       # 最后一步给出一个数（第 7
 step    := NAME                            # 不带参数的函数（包括 def 定义的）、let 名，或组值（第 6.3 节）
          | NAME '=' expr                   # 赋值（第 5 节）：右边是数，NAME 是存数的变量
          | NAME '=' step                   # 绑定组变量（第 5.5 节）：右边给出候选
+         | NAME ':' TYPE '=' (expr | step) # 绑定函数变量（第 6.8 节）
          | '(' FUNC arg* input? ')'        # 函数调用（第 8 节、第 6.3 节），或宏 on/off
          | '(' program ')'                 # 分组：一条嵌套的序列
 input   := GROUP | '(' program ')'         # 显式写出的输入（第 6.3 节）
@@ -88,7 +90,7 @@ CMP     := '<' | '<=' | '>' | '>=' | '==' | '!='
 def     := '(' 'def' ATTR* '(' NAME param* ')' body ')'     # 定义函数（第 6 节），是 --passes 的一项
          | '(' 'let' NAME program ')'
 ATTR    := '@inline' | '@pipe'
-param   := NAME | NAME ':' TYPE            # TYPE 是 pipe、group、num、name
+param   := NAME | NAME ':' TYPE            # TYPE 是 pipe、group、num、name，或函数类型 A->B（第 6.8 节）
 body    := program | numpipe | expr
 ```
 
@@ -116,7 +118,7 @@ body    := program | numpipe | expr
 |---|---|
 | 步骤 | 候选组函数（包括 `def` 定义的）、`let` 名、宏，或组值 |
 | `=` 左边 | 变量（存数的，或组变量） |
-| 表达式里 | 存数的变量、数值函数（包括返回数的 `def`）、数值参数 |
+| 表达式里 | 存数的变量（全局变量、局部数变量）、数值函数（包括返回数的 `def`）、数值参数、函数变量和函数参数（用在输入上） |
 
 函数不建作用域，只有调用是一次运行的函数例外（`def` 定义的和第 1.1 节的那几个，第 6.4 节）。内置函数不绑定任何变量，所以这不影响什么；`on`、`off` 必须是宏，就是因为函数里的绑定会在返回时撤销。
 
@@ -148,11 +150,11 @@ x = e | rest    ≡  在 x = e 之下运行 rest          （绑定）
 (extern [@ATTR ...] (NAME PARAM:TYPE ... INPUT:TYPE) RESULT)
 ```
 
-- 类型：`num`（一个数）、`term`（一个候选）、`term?`（一个候选或没有：作返回类型，或返回数的函数声明成 `term?` 的参数和输入，写成 `(main g)`、`(index i g)`；组从不当作候选，要一个组的候选就写 `main`、`index`）、`group`（一组候选）、`name`（统计名、来源名或记录寄存器名）、`text`（一个字符串，写成字符串字面量）、`any`（只用来格式化的值，见 `print`；只能是最后一个参数 `x:any...`，不是多态），以及函数类型 `A->B`（`A->B->C` 是 `A->(B->C)`）。`pipe` 是 `group->group` 的简写：管线，原样传进去，在函数里运行；两种写法相同，打印成 `pipe`。`group` 写在参数里（不是最后一个）时是一个组变量，调用时写它的名字（`(load r:group g:group) group`）。`TYPE...` 是一个或多个，`TYPE?` 可以省略（只用于 `pipe`、`group`、`name`）。
+- 类型：`num`（一个数）、`term`（一个候选）、`term?`（一个候选或没有：作返回类型，或返回数的函数声明成 `term?` 的参数和输入，写成 `(main g)`、`(index i g)`；组从不当作候选，要一个组的候选就写 `main`、`index`）、`group`（一组候选）、`name`（统计名、来源名或记录寄存器名）、`text`（一个字符串，写成字符串字面量）、`any`（只用来格式化的值，见 `print`；只能是最后一个参数 `x:any...`，不是多态），以及函数类型 `A->B`（`A->B->C` 是 `A->(B->C)`）。`pipe` 是 `group->group` 的简写：管线，原样传进去，在函数里运行；两种写法相同，打印成 `pipe`。`group` 写在参数里（不是最后一个）时是一个组变量，调用时写它的名字（`(load r:group g:group) group`）。`TYPE...` 是一个或多个，`TYPE?` 可以省略（`if` 的 `b:pipe?`、`egglog` 的 `label:name?`）。
 - 作参数时，`num` 是调用时对输入求一次值的表达式（`best` 的个数、`fix` 和 `wins` 的次数）；`term->num` 是对每个候选单独求值的条件（`filter`、`any`、`all`）；`group->num` 是对一组候选求值的条件（`if` 对输入，`retry` 对 `a` 的结果）。这两种函数类型的参数也写成表达式，就是以隐式输入为参数的函数（第 6.3 节的隐式输入），所以写法和 `num` 参数一样。内置函数的参数只用 `pipe`、`term->num`、`group->num` 这几种函数类型，其他函数类型的参数还不支持。
 - 最后一个参数是**输入**（`term` 或 `group`），写在管线里时由 `|` 填入，不写；也可以显式写出（第 6.3 节）。返回类型写在最后。
 - 声明前紧挨着的一行注释是它的说明。
-- 属性：`@pipe`：输入可以由 `|` 填入，所以能写成步骤（`a | (f x)` 即 `(f x a)`）；运算符以外的内置函数都带它。`@bookkeeping`：只搬动候选，过了时限照常执行（第 5.3 节）；`@simplify_only`：只能出现在 `pipeline` 里（`egglog`、`reprint`），因为只有 `simplify` 的运行才有 e-graph；`@uncounted`：过了时限照样跳过，但这次跳过不把运行记为截断，也不计入 `time_limit/skipped`（`note`），不能和 `@bookkeeping` 一起写。
+- 属性：`@pipe`：输入可以由 `|` 填入，所以能写成步骤（`a | (f x)` 即 `(f x a)`）；运算符以外的内置函数都带它。`@bookkeeping`：只搬动候选，过了时限照常执行（第 5.3 节）；`@simplify_only`：只能出现在 `pipeline` 里（`egglog`、`reprint`），因为只有 `simplify` 的运行才有 e-graph；`@uncounted`：过了时限照样跳过，但这次跳过不把运行记为截断，也不计入 `time_limit/skipped`（`note`），不能和 `@bookkeeping` 一起写；`@switch`：单项 pass，有一个同名的开关变量（第 10.1 节）。
 - **运算符**：第 7.2 节的 `+ - * / < <= > >= == != && || !` 也是内置函数，名字是这些符号的声明就是运算符：`(extern (+ a:num b:num) num)`、`(extern (! a:num) num)`。运算符没有输入，参数全部写出，不带属性，只在表达式里照第 7.2 节写成中缀（`!` 写在前面），不能按名字调用（`(+ 1 2)` 报错）。`&&`、`||` 声明成 `(extern (&& a:num b:group->num...) num)`：第一个操作数是数，后面的是以输入为参数的函数，由运算符决定调不调用——从左到右求值，结果一旦确定（`&&` 遇到 0、`||` 遇到非 0）就不再求后面的（短路）；其余运算符每个操作数都求值。
 - `extern` 只能写在 `builtins.pipe` 里，写在 `--passes` 或管线里报错。宏 `let`、`on`、`off` 和赋值不是函数，没有声明（宏 `smallest` 有声明，参数照它读）；第 1.1 节的 `pipeline`、`sub_NAME` 不能在步骤里调用，也没有声明。
 
@@ -231,7 +233,7 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 
 给一个不是全局变量（第 10 节）的名字赋值，就在本次运行里新建一个**局部变量**；存什么由右边定（第 5.6 节）：一个数（**数变量**，`n = (size * 2)`，之后 `(fix n p)`、`(if (n > 3) ...)` 读它）、一组候选（**组变量**，下面）、一个函数值（**函数变量**，要写类型，`f:term->num = size`，第 6.8 节）。局部变量都按词法查找，规则同下面的组变量；一个名字只存一种（`n is a number variable, so it cannot be bound to candidates`、`f is a function variable, so it cannot hold a number`）；不能和全局变量、函数、宏、`let`、`def` 名或参数同名，所以遮不住全局变量。数变量的右边在执行到这一步时、对当时的候选组求一次值（`n = size | rewrite | (if (n > size) ...)` 比的是 `rewrite` 前后的大小）。
 
-**组变量**存一组候选。`R = p` 在当前候选组上运行步骤 `p`，把它给出的候选绑定到 `R`，当前候选组原样传下去（同其他赋值）；`R = U`（`U` 是组变量）把 `U` 的候选组绑定到 `R`；`(save R)` 是 `R = id` 的简写，`(load R)` 给出 `R` 的候选组，`(size R)`、`(same R)`、`(label R)` 读它的主候选。
+**组变量**存一组候选。`R = p` 在当前候选组上运行步骤 `p`，把它给出的候选绑定到 `R`，当前候选组原样传下去（同其他赋值）；`R = U`（`U` 是组变量）把 `U` 的候选组绑定到 `R`；`(save R)` 是 `R = id` 的简写，`(load R)` 给出 `R` 的候选组，`(main R)`、`(index I R)` 取它的一个候选（`(size (main R))`、`(same (main R))`），`(label R)` 读它的主候选。
 
 ```
 t = (lowbits | unshift) | rewrite | (filter (size < (size (main t))))   # rewrite 的结果比 t 小才留下
@@ -242,7 +244,7 @@ t = (lowbits | unshift) | rewrite | (filter (size < (size (main t))))   # rewrit
 - `p` 的步骤是本次运行的步骤：读写本次运行的组变量，外面的 `smallest` 在 `p` 的计算步骤后面照样插 `note`（第 5.4 节），过了截止时刻 `p` 的计算步骤照常跳过（绑定本身是赋值，照常执行，所以 `R` 得到当时的输入）。`p` 总是一个作用域，只是一步时也是：`t = (off relate)` 的 `off` 到 `p` 结束为止，不影响后面的步骤（所以这样写什么也不做，给警告）。
 - 组变量**按词法**查找：每次运行（`pipeline`、`prepass`、`polish`、`def` 的调用……）有自己的一套，不受序列、`scope` 的作用域限制；被调用的 `def` 看不到调用处的组变量，管线参数读写写下它的那次运行的，`@inline` 调用和 `let` 共用调用处的（第 6.3、6.4 节）。存数的变量沿调用链动态查找（第 5.1 节），组变量不参与这种查找。
 - 同一个名字不能既是存数的变量又是组变量（`(save keep)`、`keep = rewrite` 报错）；写成 `R = p` 时，`R` 也不能是函数、`let`、`def` 名或参数（`rewrite = id` 报错）。
-- 读一个没绑定的组变量得空组（`size`、`same` 得 0）；静态检查要求读之前有可能先执行的绑定（第 13 节）。
+- 读一个没绑定的组变量得空组（`(main R)` 得 `none`，`(size (main R))`、`(same (main R))` 得 0）；静态检查要求读之前有可能先执行的绑定（第 13 节）。
 
 `clear`、`note`、`take_min` 用的**记录寄存器**是另一套，和 `save`、`load` 的不相通：每个存至多一个候选，`(clear R)` 每次打开一个新的 `R`（同名的已经打开时也是），`note`、`take_min` 用最新打开的那个，`take_min` 把它关上。所以 `@inline` 函数在自己的管线参数里再被调用时，两层的 `smallest` 各用各的。记录寄存器和组变量一样属于一次运行，`@inline` 调用共享调用处的。
 
@@ -283,7 +285,7 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub_NAME=P   # 即 (de
 
 ### 6.2 参数
 
-参数有四种，和内置函数的参数类型一样：
+参数有五种，和内置函数的参数类型一样：
 
 | 种类 | 类型 | 推出它的用法 | 调用时 |
 |---|---|---|---|
@@ -299,7 +301,7 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub_NAME=P   # 即 (de
 - 参数只在函数体里看得见（词法绑定），不参与存数变量的查找，不能赋值（`(save a)`、`a = ...`、`n = 3` 都报 `parameter a cannot be assigned`）；不能和变量、函数、宏、`let` 名、`def` 名、`none`、`def`、`let`、`extern` 或函数自己同名，也不能重复。
 - 读参数的规则和内置函数一样（第 4.3 节）：数值参数是一个 `earg`（`(f size / 2)` 要写成 `(f (size / 2))`），只有一个管线参数、且它是最后一个参数时读到 `)` 为止，其他管线参数各是一个步骤，组参数和名字参数各是一个名字。个数、种类不对时报错附上签名：`f takes a group variable and a pipeline: (f r:group p:pipe g:group) group`；表达式参数处写了管线时还先给出那个表达式的错误。有参数的函数单独写出时报 `NAME needs parentheses`，没有参数的写了参数报 `f takes no arguments: (f g:group) group`。
 
-**数值参数**是值，不是变量：函数体里读到的是调用时算出的值，函数体先改了候选也不变（`(def (f n p) p | (filter (n == 7)))` 调用成 `(f size rewrite)` 时 `n` 是调用时输入的大小）；被调用的函数看不到它（写了就是未知的名字）；对缓存没有影响（缓存只记 Rust 代码读的变量；参数经过赋值影响 pass 时，记下的是被赋值的变量）。赋给有上限的变量时不检查（第 5.2 节）；要检查就在赋值后写 `check_limits`（`(def (f n) max_leaves = n | check_limits | rewrite)` 调用成 `(f 8)` 时这次运行报 `max_leaves is at most 6`）。
+**数值参数**是值，不是变量：函数体里读到的是调用时算出的值，函数体先改了候选也不变（`(def (f n p) p | (filter (n == 7)))` 调用成 `(f size rewrite)` 时 `n` 是调用时输入的大小）；被调用的函数看不到它（写了就是未知的名字）；对缓存没有影响（缓存只记读过的全局变量；参数经过赋值影响 pass 时，记下的是被赋值的变量）。赋给有上限的变量时不检查（第 5.2 节）；要检查就在赋值后写 `check_limits`（`(def (f n) max_leaves = n | check_limits | rewrite)` 调用成 `(f 8)` 时这次运行报 `max_leaves is at most 6`）。
 
 **名字参数**在解析时代入：每处调用得到一份把名字放进去的函数体，`(off name)` 的参数在调用处检查是不是开关（`unknown off name nope (the argument for n)`）。
 
@@ -309,7 +311,7 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub_NAME=P   # 即 (de
 
 值有这几种：数、一组候选、函数值、名字。
 
-- **组值**：组变量（在文字里前面已经绑定过，`(save t)`、`t = ...`）、组参数、`@pipe` 的输入，单独写成一个名字时是一个值，给出它的候选组，不看当前输入。名字不满足这些条件时照旧读成 pass 名（所以写错的名字仍报 `unknown pass`）。`(load t)` 是函数调用，不是值。
+- **组值**：组变量（在文字里前面已经绑定过，`(save t)`、`t = ...`）、组参数、`@pipe` 的输入，单独写成一个名字时是一个值，给出它的候选组，不看当前输入。名字不满足这些条件时读成 pass 名（所以写错的名字报 `unknown pass`）。`(load t)` 是函数调用，不是值。
 - **以值开头的管线** `g | a | b` 是这个值依次经过各步的结果，即 `(b (a g))`；不以值开头的管线 `a | b` 是一个函数值。
 - **函数值**：管线参数是 `group → group` 的函数值；`(p g)` 或 `g | p` 调用它，`(p (p g))` 调用两次。
 
@@ -363,7 +365,7 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub_NAME=P   # 即 (de
 
 - 函数名和变量、函数（内置的和已定义的 `def`）、宏、`let` 名不能重复（报 `the name of a pass, form or macro`、`the name of a variable or function`、`already a function`）。`let` 和 `def @inline` 可以重新定义已有的 `let` 名，之后的项用新的定义；`def` 不能重新定义 `let` 名（`already defined by let or def @inline`）。
 - 第 1.1 节的 `pipeline`、`prepass`、`polish`、`rewrite`、`simba`、`sub_NAME` 只能被 `(def (NAME) P)` 或 `NAME=P` 替换：不带参数，不带 `@inline`；`sub_NAME` 的 `NAME` 要是第 11 节的名字之一。
-- **不允许递归**：函数不能经过别的函数回到自己。函数只能调用在它之前定义的函数，调用处的管线参数也只能写已经定义的名字，所以 `def` 之间成不了环；能成环的只有经过运行时取定义的 `prepass`、`polish`，管线参数里的调用算在调用处（`(def (g p) p) prepass=(g prepass)` 报 `prepass reaches itself`）。`rewrite`、`simba`、`sub_NAME` 这一组内部本来就递归（在子项上），照旧；被这一组调用、又调用回这一组的 `def` 也算在组里。
+- **不允许递归**：函数不能经过别的函数回到自己。函数只能调用在它之前定义的函数，调用处的管线参数也只能写已经定义的名字，所以 `def` 之间成不了环；能成环的只有经过运行时取定义的 `prepass`、`polish`，管线参数里的调用算在调用处（`(def (g p) p) prepass=(g prepass)` 报 `prepass reaches itself`）。`rewrite`、`simba`、`sub_NAME` 这一组内部本来就递归（在子项上），这是允许的；被这一组调用、又调用回这一组的 `def` 也算在组里。
 - `egglog`、`reprint` 写在 `def` 里时，只有 `pipeline` 可以（经过别的函数）调用这个 `def`。
 
 ### 6.7 错误和警告
@@ -378,12 +380,12 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub_NAME=P   # 即 (de
 
 **函数值从哪里来**：
 
-- **部分应用**：带 `@pipe` 的函数少写了输入就是函数值，类型是"输入 -> 返回"：`size` 是 `term->num`，`rewrite` 是 `term->term`，`(best 1 a b)` 是 `pipe`，`(big 20)` 是 `group->num`，`(with_budget 8 rewrite)` 是 `pipe`。在步骤位置、表达式里这就是原来的写法（第 6.3 节的隐式输入）。
+- **部分应用**：带 `@pipe` 的函数少写了输入就是函数值，类型是"输入 -> 返回"：`size` 是 `term->num`，`rewrite` 是 `term->term`，`(best 1 a b)` 是 `pipe`，`(big 20)` 是 `group->num`，`(with_budget 8 rewrite)` 是 `pipe`。在步骤位置、表达式里这就是通常的写法（第 6.3 节的隐式输入）。
 - **写在函数类型位置的表达式或管线**：以隐式输入为参数的函数。`(filter (size <= 20))` 的条件对每个候选求值，`(keep_if (size <= 20))` 传进去的也是这样一个函数。
 - **函数参数**（第 6.2 节）和**函数变量**：函数变量是存函数值的局部变量（第 5.5 节），要写类型：`f:term->num = size`、`small:term->num = (size <= 20)`、`f:term->num = (under 20)`、`g:term->term = relate`（右边是表达式或一步，类型要接得上）。不写类型时右边的意思只由右边定：`f = size` 是数变量，`t = rewrite` 是组变量。同一个名字只能存一种（`f is a function variable, so it cannot name a group variable`、`t is a group variable, so it cannot hold a function value`）。
 - **返回函数的 `def`**：不带 `@pipe` 的函数，函数体是表达式而读了隐含的输入时（`(def (under k) size <= k)`），签名是 `(under k:num t:term) num`：输入只读主候选时是 `t:term`，读整组时是 `g:group`。写在要数的地方时取这一步的输入，得一个数（`(if (under 9) p)`）；写在函数类型的位置时是 `term->num` 的函数值（`(filter (under 20))`、`(keep_if (under 20))`）。函数体不读输入（`(def (f) keep + 1)`、`(def @pipe (big k g) (size (main g)) > k)`）时照旧返回数，意思不变。
 
-**调用**：`(pred t)` 或 `t | pred`（表达式里写在括号里，`((pred t) > 5)`、`(t | pred)`），和 `(p g)` 一样；单独写在要数的地方时用在这一步的输入上（`(filter (f < 5))`）。没写注解的参数被这样调用时推成 `group->num`。函数变量的值是闭包：绑定时抓下它读到的局部变量当时的值和调用的参数，在哪里用都一样，之后再给那些变量赋值也不影响它；`(def (f n) small:term->num = (size <= n) | (keep_if small))` 里的 `small` 在 `keep_if` 里面求值时读的仍是 `f` 的 `n`。函数参数传进去的是参数和写下它的运行（第 6.3 节）。`wins`、`moved`、`scope` 的缓存这些没有名字的状态，照旧按它实际运行的位置算（第 6.3 节）。
+**调用**：`(pred t)` 或 `t | pred`（表达式里写在括号里，`((pred t) > 5)`、`(t | pred)`），和 `(p g)` 一样；单独写在要数的地方时用在这一步的输入上（`(filter (f < 5))`）。没写注解的参数被这样调用时推成 `group->num`。函数变量的值是闭包：绑定时抓下它读到的局部变量当时的值和调用的参数，在哪里用都一样，之后再给那些变量赋值也不影响它；`(def (f n) small:term->num = (size <= n) | (keep_if small))` 里的 `small` 在 `keep_if` 里面求值时读的仍是 `f` 的 `n`。函数参数传进去的是参数和写下它的运行（第 6.3 节）。`wins`、`moved`、`scope` 的缓存这些没有名字的状态，按它实际运行的位置算（第 6.3 节）。
 
 **转换**：传参、存进变量和相邻步骤用同一套规则（第 4.3 节的调用方式），给的类型能接到要的类型时隐式转换：
 
@@ -399,7 +401,7 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub_NAME=P   # 即 (de
 
 接不上时报错写出两边的类型：`each takes f:term->term: (each f:term->term g:group) group; (best 1 rewrite) is pipe`、`keep_if takes pred:term->num: ...; f is term->term`、`f holds term->term; (best 1 rewrite) is pipe`。给数的函数值写在步骤位置报 `f gives a number, not candidates: it holds term->num`。
 
-**不做的**：多态（`(def (f p) p)` 照旧按管线算）；多个输入的函数；在语言里遍历候选。
+**不做的**：多态（`(def (f p) p)` 按管线算）；多个输入的函数；在语言里遍历候选。
 
 例子（各段都能读进来）：
 
@@ -527,7 +529,7 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 - 在当前输入上运行（以值开头的 `(t | rewrite | size)` 从那个值开始），各步是所在运行的步骤：读写所在运行的组变量和参数（`((t = rewrite | size) > 0)` 之后 `t` 可读），外面的 `smallest` 在它的计算步骤后面照样插 `note`，过了截止时刻各步照常跳过，最后的数在当时的候选组上算。管线本身是一个作用域，里面的赋值不漏出来。
 - 在 `filter`、`any`、`all` 里对每个候选单独运行。
 - 函数体顶层没有"这一步的输入"，那里的这种管线必须以值开头（`(size (main g)) > (g | rewrite | size)`）。
-- `--show-passes` 照写下的样子打印；`(mixed (lowbits | unshift))` 这样给数值函数显式写的管线输入打印成 `(lowbits | unshift | mixed)`，意思相同。
+- `--show-passes` 照写下的样子打印；`(minimal (lowbits | unshift))` 这样给数值函数显式写的管线输入打印成 `(lowbits | unshift | minimal)`，意思相同（`(mixed (main (lowbits | unshift)))` 打印成 `(mixed (lowbits | unshift | main))`）。
 
 ## 8. 带参数的候选组函数
 
@@ -576,7 +578,7 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 
 ### 9.1 整组
 
-对整组候选操作。组为空时，除 `none` 外都原样返回。
+调用方式见各自的签名：`prepass`、`reprint` 对主候选调用、结果替换整组，`polish` 对每个候选，其余对整组。组为空时，除 `none` 外都原样返回。
 
 | pass | 含义 |
 |---|---|
@@ -905,7 +907,7 @@ rewrites = none
 - 旧写法报错并提示新写法：`(with KEY=VALUE ... p)`（提示 `(KEY = VALUE | ... | p)`，它的 `bit_splits` 是 `bit_split_budget`）、`(time-limit N)`（提示 `time_limit = N`、`time_limit = none`）、条件名 `true`（提示 `1`，只在有候选时为真的写 `(any 1)`）、单名写法 `save/t`、`off/NAME`、`egglog/LABEL`、`seq(a,b)` 语法，以及带 `/` 的旧名字（`polish/factor`、`sub/cluster`、`semi/bit_split`、`poly/masked`，提示 `names cannot contain '/': write polish_factor`；管线里、`--passes` 的项名和 `off=`、`pre=` 的名字表里、源文件的赋值行里都查）。`with` 外面的 `KEY=VALUE` 就是赋值 `KEY = VALUE`，不报错。
 - 签名带 `@simplify_only` 的函数（`egglog`、`reprint`）只能出现在 `pipeline` 里：只有 `simplify` 的运行才有 e-graph。写在 `def` 里时，只有 `pipeline` 可以（经过别的函数）调用这个 `def`。
 - 函数不能经过别的函数回到自己（第 6.6 节）。调用关系：`prepass` pass 和函数 `opaque`、`rebuilds` 调用 `prepass`；`polish` pass 调用 `polish`；单项 pass、`regions`、`again` 调用 `rewrite`、`simba`、`sub_NAME` 这一组；写出 `def` 名就调用它，调用处的管线参数里的调用算在调用处。
-- 组变量的读（`load`、`label`、`size`、`same`、组值）前面必须有可能先执行的、绑定它的 `(save R)` 或 `R = p`（`R = p` 先算右边，所以 `t = (load t)`、`t = t` 报错；`t = u` 是读 `u`）。每个 `def` 的函数体单独检查（它有自己的组变量，组参数和输入算已绑定），有名字参数的按每种调用代入后的样子检查；`let`、`@inline` 按展开后的样子在调用处检查。管线参数读写调用处的组变量，在调用处检查，当作可能运行多次的体。按执行顺序算：`if` 的两支都算，`retry` 的条件在 `a` 之后，`best` 的个数在各支之后；`fix`、`wins`、`regions` 的体会重复执行，体里任何地方的绑定对整个体都算。这条检查找的是写错名字和顺序，不保证运行时一定有值。
+- 组变量的读（`load`、`label`、`main`、`index`、组值）前面必须有可能先执行的、绑定它的 `(save R)` 或 `R = p`（`R = p` 先算右边，所以 `t = (load t)`、`t = t` 报错；`t = u` 是读 `u`）。每个 `def` 的函数体单独检查（它有自己的组变量，组参数和输入算已绑定），有名字参数的按每种调用代入后的样子检查；`let`、`@inline` 按展开后的样子在调用处检查。管线参数读写调用处的组变量，在调用处检查，当作可能运行多次的体。按执行顺序算：`if` 的两支都算，`retry` 的条件在 `a` 之后，`best` 的个数在各支之后；`fix`、`wins`、`regions` 的体会重复执行，体里任何地方的绑定对整个体都算。这条检查找的是写错名字和顺序，不保证运行时一定有值。
 
 以下只给警告：`eggy1` 和 `bench` 的父进程打印到 stderr，`bench --one` 子进程不打印。
 

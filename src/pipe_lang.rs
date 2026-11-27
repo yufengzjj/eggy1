@@ -1498,7 +1498,7 @@ impl<'a> Parser<'a> {
         Ok(number_seq(p, e))
     }
 
-    /// A number, a name, `(size R)`, `(same R)`, `(any C)`, `(all C)`, `( expr )` or a
+    /// A number, a name, a call such as `(size (main R))` or `(any C)`, `( expr )` or a
     /// pipeline that ends in a number in parentheses.
     fn atom(&mut self) -> Result<Pipe, String> {
         if let Some(e) = self.pending.take() {
@@ -1563,7 +1563,7 @@ impl<'a> Parser<'a> {
                     self.expect(Tok::Close, ")")?;
                     return Ok(number_seq(input, f));
                 }
-                // `(size)` and `(size + 1)` are parenthesized expressions, `(size r)` a call.
+                // `(size)` and `(size + 1)` are parenthesized expressions, `(minimal r)` a call.
                 let call = match self.peek() {
                     Some(Tok::Name(k)) => builtins::get(k).filter(|s| {
                         let named = matches!(self.peek_at(1), Some(Tok::Name(_))) && self.peek_at(2) == Some(&Tok::Close);
@@ -1988,7 +1988,7 @@ fn def_body(d: &Def, s: String) -> String {
 }
 
 /// The body of a call of an `@inline` function with its pipeline arguments in place, as the
-/// checks of registers and assignments see it.
+/// checks of group variables and assignments see it.
 pub fn expand(c: &Call, args: &[Pipe]) -> Pipe {
     let pipes = args.iter().zip(&c.def.params).map(|(a, p)| p.ty.is_step().then_some(a)).collect();
     let s = Subst { names: Vec::new(), owned: Vec::new(), pipes, open: &|_| false };

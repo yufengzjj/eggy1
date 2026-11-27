@@ -13,8 +13,9 @@
 # num is an expression evaluated once at the call; term->num and group->num are written
 # as an expression too, evaluated on each candidate or on the group the function gives
 # it; group is a group variable, written as its name.
-# `TYPE...` is one or more, `TYPE?` may be left out. The last parameter is the implicit
-# input, not written in a call. How a function is called follows from its input and result:
+# `TYPE...` is one or more, `TYPE?` may be left out. The last parameter is the input, which
+# a call may leave out to take the step's. How a function is called follows from its input
+# and result:
 #   group -> group  on the whole list
 #   term -> term    on each candidate; an unchanged result keeps the candidate
 #   term -> term?   on each candidate; no result drops it (an alternative)

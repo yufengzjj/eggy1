@@ -43,6 +43,7 @@ Usage: eggy1 [OPTIONS] [EXPR]
       --stats                        Print per-pass counts, times and wins to stderr
       --passes <PASSES>              Change the pass pipeline (see below)
       --show-passes                  Print the pass pipeline and exit
+      --show-builtins                Print the signatures of the built-in pipeline functions and exit
 ```
 
 Operators: `+ - * / % & | ^ ~ << >>`, unary `-`, and `mulhi(a, b)` (the high half of the
@@ -77,7 +78,7 @@ The order of these steps is a pipeline written in a small language and read from
 eggy1 --passes "extra=0 keep=1" -n u32 "expr"            # settings
 eggy1 --passes "off=relate,poly_mba" -n u32 "expr"        # turn inner passes off
 eggy1 --passes "prepass=lowbits | (if mixed rewrite)" "expr"
-eggy1 --passes "file=my.pipe" "expr"                      # items from a file
+eggy1 --passes "file=my.pipe" "expr"                      # a source file of definitions and assignments
 ```
 
 A pipeline maps a list of equivalent candidates to another: `a | b` runs in sequence,
@@ -119,6 +120,7 @@ cargo test --lib                            # unit tests
 |---|---|
 | `src/lib.rs` | egglog rules (`make_egg`), primitives, CLI, driver |
 | `src/sched.rs`, `src/pipe.rs`, `src/pipe_lang.rs`, `src/default.pipe` | pipeline settings, executor, language, defaults |
+| `src/builtins.pipe`, `src/builtins.rs` | signatures of the built-in pipeline functions |
 | `src/linear_mba/` | linear and semi-linear rebuilds, wide regions, `relate`, `halve`, `split_bits`, polish |
 | `src/poly_mba.rs` | polynomial MBA expansion and factoring |
 | `src/lowbits.rs`, `src/known_bits.rs` | known-bits reasoning |
