@@ -1,8 +1,8 @@
 //! The signatures of the built-in functions of the pipeline language, declared in
-//! `src/builtins.pipe` (`docs/pipe-language.md`). `crate::pipe_lang` parses calls by them
-//! and `sched::Passes::check` reads their attributes; nothing here runs per evaluation.
+//! `src/builtins.pipe` (`docs/pipe-language.md`). `crate::pipe_lang` parses calls by them,
+//! `sched::Passes::check` reads their attributes and `crate::pipe::BUILTINS` pairs each with
+//! its implementation; nothing here runs per evaluation.
 
-use crate::sched::Pass;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::LazyLock;
@@ -187,6 +187,12 @@ impl Sig {
         self.result == Ty::Num
     }
 
+    /// The parameter an argument at position `i` of a call is for: the last one for the
+    /// arguments of a `TYPE...` parameter.
+    pub fn param(&self, i: usize) -> &Param {
+        self.params.get(i).unwrap_or_else(|| self.params.last().unwrap())
+    }
+
     /// Whether a call must write an argument.
     pub fn required(&self) -> bool {
         self.params.iter().any(|p| p.rep != Rep::Opt)
@@ -340,7 +346,7 @@ fn one(text: &str) -> Result<Sig, String> {
     for p in &params {
         match &p.ty {
             Ty::Term | Ty::MaybeTerm => return Err(format!("{name}: {p}: only the input is a candidate")),
-            t @ Ty::Fn(..) if !t.is_pipe() && !t.is_expr() => return Err(format!("{name}: {p}: function types other than pipe, term->num and group->num are not supported yet (step 9)")),
+            t @ Ty::Fn(..) if !t.is_pipe() && !t.is_expr() => return Err(format!("{name}: {p}: function types other than pipe, term->num and group->num are not supported yet (step 9b)")),
             t if p.rep == Rep::Many && !t.is_pipe() || p.rep == Rep::Opt && t.is_expr() => return Err(format!("{name}: {p}: only pipe takes ..., only pipe, group and name take ?")),
             _ => {}
         }
@@ -375,25 +381,13 @@ pub fn get(name: &str) -> Option<&'static Sig> {
     TABLE.1.get(name).map(|i| &TABLE.0[*i])
 }
 
+/// The position of the built-in function `name` in `all`.
+pub fn index(name: &str) -> Option<usize> {
+    TABLE.1.get(name).copied()
+}
+
 /// The names that expand when parsed instead of naming functions or variables.
 pub const MACROS: [&str; 3] = ["let", "on", "off"];
-
-/// The built-in function a pass of a parsed pipeline calls.
-pub fn of_pass(p: &Pass) -> Option<&'static Sig> {
-    let name = match p {
-        Pass::Set(i) => crate::pipe::SET_PASSES[*i],
-        Pass::Egglog(_) => "egglog",
-        Pass::Save(_) => "save",
-        Pass::Load(_) => "load",
-        Pass::Label(_) => "label",
-        Pass::Clear(_) => "clear",
-        Pass::Note(_) => "note",
-        Pass::TakeMin(_) => "take_min",
-        Pass::Term { name, .. } => name,
-        Pass::Off(_) | Pass::On(_) | Pass::Assign(..) => return None,
-    };
-    get(name)
-}
 
 /// The functions a step can call, for error messages: by name, or as a call when it needs
 /// arguments.
@@ -520,7 +514,7 @@ mod tests {
         let sigs = parse("# a\n(extern (x c:term->num p:group->group... g:group) group)").unwrap();
         assert_eq!(sigs[0].to_string(), "(x c:term->num p:pipe... g:group) group");
         for (bad, msg) in [
-            ("# a\n(extern (x p:term->term g:group) group)", "function types other than pipe, term->num and group->num are not supported yet (step 9)"),
+            ("# a\n(extern (x p:term->term g:group) group)", "function types other than pipe, term->num and group->num are not supported yet (step 9b)"),
             ("# a\n(extern (x c:term->num? g:group) group)", "only pipe takes"),
             ("# a\n(extern (x g:group) term->num)", "a function gives num"),
         ] {

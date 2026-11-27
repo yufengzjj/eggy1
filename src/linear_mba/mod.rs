@@ -566,8 +566,8 @@ pub(crate) fn rewrite(t: &T, w: &Ctx) -> T {
 pub(crate) fn sub(i: usize, t: &T, w: &Ctx) -> T {
     let p = crate::sched::current();
     match &p.subs[i] {
-        crate::sched::Pipe::Pass(crate::sched::Pass::Term { name, .. }) if name == "rewrite" => rewrite(t, w),
-        crate::sched::Pipe::Pass(crate::sched::Pass::Term { name, .. }) if name == "rebuild" => rebuild_once(t, w),
+        crate::sched::Pipe::App(b, _) if b.name == "rewrite" => rewrite(t, w),
+        crate::sched::Pipe::App(b, _) if b.name == "rebuild" => rebuild_once(t, w),
         pipe => crate::pipe::run_term(pipe, t, w),
     }
 }
@@ -580,7 +580,7 @@ fn rewrite_uncached(t: &T, w: &Ctx) -> T {
 
 /// `t` with its linear region rebuilt by `rebuild` and the atom leaves of that form
 /// rewritten, or, when `t` is not a region or `rebuild` finds no form, with its operands
-/// rewritten (`crate::sched::Pipe::Regions`).
+/// rewritten (`regions`).
 pub(crate) fn on_region(t: &T, w: &Ctx, rebuild: impl FnOnce() -> Option<T>) -> T {
     let T::Op(op, args) = t else { return t.clone() };
     if kind(t, w) != Kind::Atom
@@ -592,7 +592,7 @@ pub(crate) fn on_region(t: &T, w: &Ctx, rebuild: impl FnOnce() -> Option<T>) -> 
 }
 
 /// `r`, a rebuild of `t`, rewritten again when that is smaller and `t` has an arithmetic
-/// leaf of a bitwise operation (`crate::sched::Pipe::Again`): once `9*(A & B) + ...` becomes
+/// leaf of a bitwise operation (`again`): once `9*(A & B) + ...` becomes
 /// `2*A - B` with `A = -(x ^ y)`, A's own linear form joins the enclosing region.
 pub(crate) fn again(t: &T, r: &T, w: &Ctx) -> Option<T> {
     let mut lv = Vec::new();
@@ -969,29 +969,6 @@ pub(crate) fn leaf_count(t: &T, w: &Ctx) -> usize {
 /// Whether the linear region `t` has a bitwise operation with a constant operand.
 pub(crate) fn const_bitwise(t: &T, w: &Ctx) -> bool {
     has_const_bitwise(t, w)
-}
-
-/// The pass over one term at `at`.
-pub(crate) fn term_pass_at(at: crate::sched::TermAt) -> TermPass {
-    match at {
-        crate::sched::TermAt::Term(i) => TermPass::Term(TERM_PASSES[i].1),
-        crate::sched::TermAt::Polish(i) => TermPass::Polish(POLISH[i].1),
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum TermPass {
-    Term(fn(&T, &Ctx) -> Option<T>),
-    Polish(fn(&T, &Ctx) -> T),
-}
-
-impl TermPass {
-    pub(crate) fn run(self, t: &T, w: &Ctx) -> Option<T> {
-        match self {
-            TermPass::Term(f) => f(t, w),
-            TermPass::Polish(f) => Some(f(t, w)),
-        }
-    }
 }
 
 /// Rewrite the egglog term `egg` (W-bit wrapping semantics) with every linear

@@ -1,123 +1,207 @@
-//! Runs a `sched::Pipe`. Every pass maps a list of equivalent candidate egglog terms (the
-//! first is the main one) to another: a pass over one term (`linear_mba::TERM_PASSES`, the
-//! polish passes as `polish/NAME`) runs on each candidate and replaces it by its result; the
-//! other passes take the list whole.
+//! Runs a `sched::Pipe`. Every step maps a list of equivalent candidate egglog terms (the
+//! first is the main one) to another; an expression gives a number for a list. A built-in
+//! function runs through its entry of `BUILTINS`, which converts the input as its calling
+//! kind says (`builtins::Kind`): a pass over one term (`linear_mba::TERM_PASSES`, the polish
+//! passes as `polish/NAME`) runs on each candidate and replaces it by its result, the other
+//! steps take the list whole.
 
+use crate::builtins::{Sig, Ty};
 use crate::eval::{Op, Term, parse, show, size};
 use crate::linear_mba::{CLUSTERED, Ctx, WIDE};
-use crate::sched::{Expr, Limit, NONE, Pass, Passes, Pipe, TermAt, limit};
+use crate::sched::{Limit, NONE, Passes, Pipe, limit};
 use crate::{Cli, Error, linear_mba, minimal, stats, width_of};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 use std::collections::HashMap;
 
-/// Passes that take the candidate list whole, besides `(save R)`, `(load R)` and `(label R)`.
-pub const SET_PASSES: [&str; 9] = [
-    // The candidates unchanged.
-    "id",
-    // No candidates.
-    "none",
-    // The main candidate's pre-pass rebuilds: the main one, then those to union with it.
-    "prepass",
-    // One egglog round on all candidates unioned: its extraction (`(egglog LABEL)` times it
-    // as `egglog/LABEL`).
-    "egglog",
-    // The first candidate proved minimal (`minimal`).
-    "take_minimal",
-    // `Passes::polish` on each candidate alone, its first result kept when smaller.
-    "polish",
-    // The main candidate printed and read back.
-    "reprint",
-    // No candidates once `rewrite` has used up its calls in the scope under way.
-    "within",
-    // The end of the pre-pass: counts the kept candidates, names their origins `pre/NAME`
-    // and gives the main one as the input was written when it equals it (register `t0`).
-    "pre_done",
-];
+type Steps = Result<Vec<Cand>, Error>;
 
-/// The functions of expressions that give 1 or 0 for the candidates they see (`Expr::Is`).
-pub const CONDS: [&str; 17] = [
-    // The main candidate has a shift, division or mulhi and its rebuild is not tiny.
-    "opaque",
-    // A candidate is proved minimal: no smaller term equals it (with `prove_minimal` on).
-    "minimal",
-    // The main candidate has arithmetic or a constant directly under a bitwise operation.
-    "mixed",
-    // The pre-pass changes the main candidate.
-    "rebuilds",
-    // The last `fix` stopped at its count, the main candidate still changing.
-    "moved",
-    // The main candidate is the input of `simplify`.
-    "input",
-    // The main candidate has at most `tiny_size` nodes.
-    "tiny",
-    // The main candidate has at most `split_size` nodes.
-    "fits_split",
-    // `wide_blocks` gave a kept form in the passes that made a candidate.
-    "used_wide",
-    // `clustered` gave a kept form in the passes that made a candidate.
-    "used_clustered",
-    // The passes that made the main candidate made at most `unclustered_after` uncached
-    // `rewrite` calls.
-    "few_rewrites",
-    // The main candidate as a whole has a smaller T-function form (`tfunc::replacement`).
-    "replaceable",
-    // The main candidate comes from a rebuild with abstracted subterms
-    // (`linear_mba::ABSTRACTED`).
-    "abstracted",
-    // The main candidate is a linear region without leaves.
-    "no_leaves",
-    // The main candidate is a linear region of more than `max_leaves` leaves.
-    "wide",
-    // The main candidate has a bitwise operation with a constant operand.
-    "const_bitwise",
-    // The run rebuilds a linear cofactor of `poly_mba` (`simba_memo`).
-    "cofactor",
+/// How a built-in function runs: the conversion `apply` or `Env::value` makes of the input
+/// for its calling kind, and the Rust code it calls.
+#[derive(Clone, Copy)]
+pub(crate) enum Impl {
+    /// Parsed into a form of the tree: `seq` is a sequence, `smallest` a macro.
+    Form,
+    /// Declared but not implemented, which parsing a call reports.
+    Missing,
+    /// `group -> group`, with the call's arguments.
+    Group(fn(&[Pipe], Vec<Cand>, &Env) -> Steps),
+    /// `term -> group`: on the main candidate, the result replacing the list (none without a
+    /// main candidate); a term given back keeps the origin it came with.
+    Main(fn(&Cand, &Env) -> Steps),
+    /// `term -> term` over the tree: on each candidate, an unchanged result keeping it.
+    Each(fn(&Term, &Ctx) -> Option<Term>),
+    /// `term -> term?`: on each candidate, no result dropping it; the `State::used` bit its
+    /// form sets when kept (`linear_mba::ALTERNATIVES`).
+    Alt(fn(&Term, &Ctx) -> Option<Term>, u8),
+    /// A polish pass (`term -> term`), as `Each`.
+    Polish(fn(&Term, &Ctx) -> Term),
+    /// `term -> term` over candidates: on each, `None` keeping it; a term given back keeps the
+    /// origin it came with.
+    EachCand(fn(&Cand, &Env) -> Option<Cand>),
+    /// A number function with arguments, on the list whole.
+    Num(fn(&[Pipe], &[Cand], &Env) -> u64),
+    /// `term -> num` without arguments: on the main candidate, 0 without one.
+    TermNum(fn(&Cand, &Env) -> u64),
+    /// `group -> num` without arguments: on the list whole, 0 for no candidates.
+    GroupNum(fn(&[Cand], &Env) -> u64),
+}
+
+/// A built-in function: its declaration in `src/builtins.pipe` and how it runs.
+pub struct Builtin {
+    pub name: &'static str,
+    pub sig: &'static Sig,
+    pub(crate) imp: Impl,
+    /// `sig.bookkeeping` and `sig.uncounted`, read for every step run.
+    bookkeeping: bool,
+    uncounted: bool,
+}
+
+impl Builtin {
+    /// Whether it is a pass over one term (`Passes::rewrite` may run inside it).
+    pub fn over_term(&self) -> bool {
+        matches!(self.imp, Impl::Each(_) | Impl::Alt(..) | Impl::Polish(_))
+    }
+}
+
+impl PartialEq for Builtin {
+    fn eq(&self, o: &Builtin) -> bool {
+        std::ptr::eq(self, o)
+    }
+}
+
+impl std::fmt::Debug for Builtin {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(self.name)
+    }
+}
+
+/// Every built-in function, in the order of `src/builtins.pipe`, with its implementation.
+pub static BUILTINS: std::sync::LazyLock<Vec<Builtin>> = std::sync::LazyLock::new(|| {
+    let imp = |sig: &Sig| implementation(&sig.name).unwrap_or(Impl::Missing);
+    crate::builtins::all().iter().map(|sig| Builtin { name: sig.name.as_str(), sig, imp: imp(sig), bookkeeping: sig.bookkeeping, uncounted: sig.uncounted }).collect()
+});
+
+/// The built-in function `name`.
+pub fn builtin(name: &str) -> Option<&'static Builtin> {
+    crate::builtins::index(name).map(|i| &BUILTINS[i])
+}
+
+/// The Rust code of the built-in function `name`: `IMPLS`, the passes over one term, or the
+/// polish passes (`polish/NAME`).
+fn implementation(name: &str) -> Option<Impl> {
+    if let Some((_, imp)) = IMPLS.iter().find(|(n, _)| *n == name) {
+        return Some(*imp);
+    }
+    if let Some((_, f)) = linear_mba::TERM_PASSES.iter().find(|(n, _)| *n == name) {
+        return Some(match linear_mba::ALTERNATIVES.iter().find(|(a, _)| *a == name) {
+            Some((_, bit)) => Impl::Alt(*f, *bit),
+            None => Impl::Each(*f),
+        });
+    }
+    let (_, f) = linear_mba::POLISH.iter().find(|(n, _)| name.strip_prefix("polish/") == Some(n))?;
+    Some(Impl::Polish(*f))
+}
+
+/// The built-in functions other than the passes over one term, by name.
+const IMPLS: &[(&str, Impl)] = &[
+    ("seq", Impl::Form),
+    ("smallest", Impl::Form),
+    ("union", Impl::Group(union)),
+    ("best", Impl::Group(best)),
+    ("first", Impl::Group(first)),
+    ("fix", Impl::Group(fix)),
+    ("if", Impl::Group(|a, set, env| go(if env.holds(&a[0], &set) { &a[1] } else { &a[2] }, set, env))),
+    ("retry", Impl::Group(retry)),
+    ("scope", Impl::Group(scope)),
+    ("regions", Impl::Group(regions)),
+    ("again", Impl::Group(again)),
+    ("tag", Impl::Group(tag)),
+    ("cand", Impl::Group(cand)),
+    ("smaller", Impl::Group(smaller)),
+    ("wins", Impl::Group(wins)),
+    ("filter", Impl::Group(|a, set, env| Ok(set.into_iter().filter(|x| env.holds(&a[0], std::slice::from_ref(x))).collect()))),
+    ("save", Impl::Group(save)),
+    ("load", Impl::Group(|a, _, env| Ok(env.reg(name(&a[0]))))),
+    ("label", Impl::Group(label)),
+    ("clear", Impl::Group(clear)),
+    ("note", Impl::Group(note)),
+    ("take_min", Impl::Group(take_min)),
+    ("id", Impl::Group(|_, set, _| Ok(set))),
+    ("none", Impl::Group(|_, _, _| Ok(Vec::new()))),
+    ("prepass", Impl::Main(prepass)),
+    ("egglog", Impl::Group(egglog)),
+    ("take_minimal", Impl::Group(take_minimal)),
+    ("polish", Impl::EachCand(polish_one)),
+    ("reprint", Impl::Main(reprint)),
+    ("within", Impl::Group(|_, set, _| Ok(if crate::sched::get(crate::sched::REWRITES) > 0 { set } else { Vec::new() }))),
+    ("pre_done", Impl::Group(pre_done)),
+    ("size", Impl::Num(|a, set, env| match a {
+        [r] => env.reg_main(name(r)).map_or(0, |c| c.size() as u64),
+        _ => set.first().map_or(0, |m| m.size() as u64),
+    })),
+    ("vars", Impl::TermNum(|m, _| stats::shape(m.tree()).vars as u64)),
+    ("depth", Impl::TermNum(|m, _| stats::shape(m.tree()).depth as u64)),
+    ("mul", Impl::TermNum(|m, _| stats::shape(m.tree()).mul as u64)),
+    ("bitconst", Impl::TermNum(|m, _| stats::shape(m.tree()).bitconst as u64)),
+    ("arith_in_bit", Impl::TermNum(|m, _| stats::shape(m.tree()).arith_in_bit as u64)),
+    ("shift", Impl::TermNum(|m, _| stats::shape(m.tree()).shift as u64)),
+    ("div", Impl::TermNum(|m, _| stats::shape(m.tree()).div as u64)),
+    ("same", Impl::Num(|a, set, env| set.first().zip(env.reg_main(name(&a[0]))).is_some_and(|(m, c)| c.same(m)) as u64)),
+    ("any", Impl::Num(|a, set, env| set.iter().any(|x| env.holds(&a[0], std::slice::from_ref(x))) as u64)),
+    ("all", Impl::Num(|a, set, env| (!set.is_empty() && set.iter().all(|x| env.holds(&a[0], std::slice::from_ref(x)))) as u64)),
+    ("opaque", Impl::TermNum(|m, env| (opaque(m.tree()) && size_of(&env.prepass_of(m.term()).0) > limit(Limit::TinySize)) as u64)),
+    ("minimal", Impl::GroupNum(|set, env| proved_minimal(set, env).is_some() as u64)),
+    ("mixed", Impl::TermNum(|m, _| crate::mixed(m.tree()) as u64)),
+    ("rebuilds", Impl::TermNum(|m, env| (env.prepass_of(m.term()).0 != m.term()) as u64)),
+    ("moved", Impl::GroupNum(|_, env| env.moved.get() as u64)),
+    ("input", Impl::TermNum(|m, env| (m.term() == env.lex.borrow().input) as u64)),
+    ("tiny", Impl::TermNum(|m, _| (m.size() <= limit(Limit::TinySize)) as u64)),
+    ("fits_split", Impl::TermNum(|m, _| (m.size() <= limit(Limit::SplitSize)) as u64)),
+    ("used_wide", Impl::GroupNum(|set, _| set.iter().any(|c| c.used & WIDE != 0) as u64)),
+    ("used_clustered", Impl::GroupNum(|set, _| set.iter().any(|c| c.used & CLUSTERED != 0) as u64)),
+    ("few_rewrites", Impl::TermNum(|m, _| (m.rewrites <= limit(Limit::UnclusteredAfter)) as u64)),
+    ("replaceable", Impl::TermNum(|m, env| env.ctx(|c| crate::tfunc::replacement(m.tree(), c).is_some()) as u64)),
+    ("abstracted", Impl::TermNum(|m, _| linear_mba::ABSTRACTED.contains(&m.origin.as_str()) as u64)),
+    ("no_leaves", Impl::TermNum(|m, env| env.ctx(|w| linear_mba::leaf_count(m.tree(), w) == 0) as u64)),
+    ("wide", Impl::TermNum(|m, env| env.ctx(|w| linear_mba::leaf_count(m.tree(), w) > limit(Limit::MaxLeaves)) as u64)),
+    ("const_bitwise", Impl::TermNum(|m, env| env.ctx(|w| linear_mba::const_bitwise(m.tree(), w)) as u64)),
+    ("cofactor", Impl::GroupNum(|_, env| env.cofactor as u64)),
 ];
 
 /// The input features of `stats::shape` that conditions compare (`mul >= 4`).
 pub const FEATURES: [&str; 8] = ["size", "vars", "depth", "mul", "bitconst", "arith_in_bit", "shift", "div"];
 
-fn feature(s: &stats::Shape, i: usize) -> usize {
-    match FEATURES[i] {
-        "size" => s.size,
-        "vars" => s.vars,
-        "depth" => s.depth,
-        "mul" => s.mul,
-        "bitconst" => s.bitconst,
-        "arith_in_bit" => s.arith_in_bit,
-        "shift" => s.shift,
-        "div" => s.div,
-        name => unreachable!("feature {name}"),
+/// The name argument `p`.
+fn name(p: &Pipe) -> &str {
+    match p {
+        Pipe::Name(n) => n,
+        p => unreachable!("{p:?} is not a name"),
     }
 }
 
-/// The pass of the internal name `name`: `Pass::name`, `save/R` for `(save R)`.
-pub fn resolve(name: &str) -> Option<Pass> {
-    let prefixes = [("save/", Pass::Save as fn(String) -> Pass), ("load/", Pass::Load), ("label/", Pass::Label), ("clear/", Pass::Clear), ("note/", Pass::Note), ("take_min/", Pass::TakeMin)];
-    for (p, f) in prefixes {
-        if let Some(r) = name.strip_prefix(p).filter(|r| !r.is_empty()) {
-            return Some(f(r.to_string()));
-        }
+/// The name a step is counted as: `egglog/LABEL` for `(egglog LABEL)`, else its function's.
+pub fn step_name(f: &str, args: &[Pipe]) -> String {
+    match args {
+        [Pipe::Name(l)] if f == "egglog" => format!("egglog/{l}"),
+        _ => f.to_string(),
     }
-    if name == "egglog" || name.strip_prefix("egglog/").is_some_and(|r| !r.is_empty()) {
-        return Some(Pass::Egglog(name.to_string()));
+}
+
+/// The step of the internal name `name`: a built-in step called without arguments,
+/// `save/R` for `(save R)`, `egglog/L` for `(egglog L)`, `off/NAME` for `(off NAME)`.
+pub fn resolve(name: &str) -> Option<Pipe> {
+    if let Some((h, r)) = name.split_once('/').filter(|(h, r)| !r.is_empty() && ["save", "load", "label", "clear", "note", "take_min", "egglog"].contains(h)) {
+        return Some(Pipe::app(h, vec![Pipe::Name(r.to_string())]));
     }
     if let Some(n) = name.strip_prefix("off/") {
-        return crate::sched::switch(n).map(|n| Pass::Off(vec![n]));
+        return crate::sched::switch(n).map(|n| Pipe::Switch(false, vec![n]));
     }
     if let Some(n) = name.strip_prefix("on/") {
-        return crate::sched::switch(n).map(|n| Pass::On(vec![n]));
+        return crate::sched::switch(n).map(|n| Pipe::Switch(true, vec![n]));
     }
-    if let Some(i) = SET_PASSES.iter().position(|n| *n == name) {
-        return Some(Pass::Set(i));
-    }
-    let alt = linear_mba::ALTERNATIVES.iter().find(|(a, _)| *a == name).map(|(_, bit)| *bit);
-    if let Some(i) = linear_mba::TERM_PASSES.iter().position(|(n, _)| *n == name) {
-        return Some(Pass::Term { name: name.to_string(), at: TermAt::Term(i), alt });
-    }
-    let i = linear_mba::POLISH.iter().position(|(n, _)| name.strip_prefix("polish/") == Some(n))?;
-    Some(Pass::Term { name: name.to_string(), at: TermAt::Polish(i), alt })
+    let b = builtin(name).filter(|b| !matches!(b.imp, Impl::Form | Impl::Missing) && !b.sig.is_number() && !b.sig.required())?;
+    Some(Pipe::App(b, Vec::new()))
 }
 
 
@@ -284,24 +368,25 @@ impl<'a> Env<'a> {
     }
 
     /// `e` for the candidates `set`: a number or `NONE`.
-    fn value(&self, e: &Expr, set: &[Cand]) -> u64 {
-        let main = || set.first();
+    fn value(&self, e: &Pipe, set: &[Cand]) -> u64 {
         match e {
-            Expr::Num(n) => *n,
-            Expr::Feature(0) => main().map_or(0, |m| m.size() as u64),
-            Expr::Feature(i) => main().map_or(0, |m| feature(&stats::shape(m.tree()), *i) as u64),
-            Expr::Is(i) => cond(*i, set, self) as u64,
-            Expr::Size(r) => self.reg_main(r).map_or(0, |c| c.size() as u64),
-            Expr::Same(r) => main().zip(self.reg_main(r)).is_some_and(|(m, c)| c.same(m)) as u64,
-            Expr::Var(i) if *i == crate::sched::DEADLINE => match crate::sched::read(*i) {
+            Pipe::Num(n) => *n,
+            Pipe::App(b, args) => match b.imp {
+                Impl::TermNum(f) => set.first().map_or(0, |m| f(m, self)),
+                Impl::GroupNum(_) if set.is_empty() => 0,
+                Impl::GroupNum(f) => f(set, self),
+                Impl::Num(f) => f(args, set, self),
+                _ => unreachable!("{} gives no number", b.name),
+            },
+            Pipe::Var(i) if *i == crate::sched::DEADLINE => match crate::sched::read(*i) {
                 NONE => NONE,
                 at => at.saturating_sub(crate::sched::epoch_ns()) / 1_000_000,
             },
-            Expr::Var(i) if *i == crate::sched::KEEP => crate::sched::read(*i).max(1),
-            Expr::Var(i) => crate::sched::read(*i),
-            Expr::Param(i, _) => self.lex.borrow().frame.as_ref().expect("a parameter outside the body of its function").values[*i],
-            Expr::Of(e, p) => self.value(e, &self.group_of(p, set)),
-            Expr::Call(c, input) => {
+            Pipe::Var(i) if *i == crate::sched::KEEP => crate::sched::read(*i).max(1),
+            Pipe::Var(i) => crate::sched::read(*i),
+            Pipe::Param(i, _) => self.lex.borrow().frame.as_ref().expect("a parameter outside the body of its function").values[*i],
+            Pipe::Of(e, p) => self.value(e, &self.group_of(p, set)),
+            Pipe::Call(c, input) => {
                 let input = input.as_ref().map(|p| self.group_of(p, set));
                 let set = input.as_deref().unwrap_or(set);
                 if c.def.steps {
@@ -317,13 +402,12 @@ impl<'a> Env<'a> {
                 self.lex.replace(outer);
                 v
             }
-            Expr::Not(c) => !self.holds(c, set) as u64,
-            Expr::And(cs) => cs.iter().all(|c| self.holds(c, set)) as u64,
-            Expr::Or(cs) => cs.iter().any(|c| self.holds(c, set)) as u64,
-            Expr::Cmp(op, a, b) => op.holds(self.value(a, set), self.value(b, set)) as u64,
-            Expr::Bin(op, a, b) => crate::sched::arith(*op, self.value(a, set), self.value(b, set)),
-            Expr::Any(c) => set.iter().any(|x| self.holds(c, std::slice::from_ref(x))) as u64,
-            Expr::All(c) => (!set.is_empty() && set.iter().all(|x| self.holds(c, std::slice::from_ref(x)))) as u64,
+            Pipe::Not(c) => !self.holds(c, set) as u64,
+            Pipe::And(cs) => cs.iter().all(|c| self.holds(c, set)) as u64,
+            Pipe::Or(cs) => cs.iter().any(|c| self.holds(c, set)) as u64,
+            Pipe::Cmp(op, a, b) => op.holds(self.value(a, set), self.value(b, set)) as u64,
+            Pipe::Bin(op, a, b) => crate::sched::arith(*op, self.value(a, set), self.value(b, set)),
+            e => unreachable!("{e:?} gives no number"),
         }
     }
 
@@ -359,12 +443,12 @@ impl<'a> Env<'a> {
     }
 
     /// Whether `e` is not 0 for the candidates `set`.
-    fn holds(&self, e: &Expr, set: &[Cand]) -> bool {
+    fn holds(&self, e: &Pipe, set: &[Cand]) -> bool {
         self.value(e, set) != 0
     }
 
     /// `e` as a count: `none` is no limit.
-    fn times(&self, e: &Expr, set: &[Cand]) -> usize {
+    fn times(&self, e: &Pipe, set: &[Cand]) -> usize {
         self.value(e, set).try_into().unwrap_or(usize::MAX)
     }
 }
@@ -405,30 +489,6 @@ fn proved_minimal<'s>(set: &'s [Cand], env: &Env) -> Option<&'s Cand> {
         let t = c.tree();
         minimal::is_tidy(t) && (ty.is_some_and(|ty| minimal::is_minimal(t, ty)) || t_only && minimal::is_t_minimal(t))
     })
-}
-
-fn cond(i: usize, set: &[Cand], env: &Env) -> bool {
-    let Some(main) = set.first() else { return false };
-    match CONDS[i] {
-        "opaque" => opaque(main.tree()) && size_of(&env.prepass_of(main.term()).0) > limit(Limit::TinySize),
-        "minimal" => proved_minimal(set, env).is_some(),
-        "mixed" => crate::mixed(main.tree()),
-        "rebuilds" => env.prepass_of(main.term()).0 != main.term(),
-        "moved" => env.moved.get(),
-        "input" => main.term() == env.lex.borrow().input,
-        "tiny" => main.size() <= limit(Limit::TinySize),
-        "fits_split" => main.size() <= limit(Limit::SplitSize),
-        "used_wide" => set.iter().any(|c| c.used & WIDE != 0),
-        "used_clustered" => set.iter().any(|c| c.used & CLUSTERED != 0),
-        "few_rewrites" => main.rewrites <= limit(Limit::UnclusteredAfter),
-        "replaceable" => env.ctx(|c| crate::tfunc::replacement(main.tree(), c).is_some()),
-        "abstracted" => linear_mba::ABSTRACTED.contains(&main.origin.as_str()),
-        "no_leaves" => env.ctx(|w| linear_mba::leaf_count(main.tree(), w) == 0),
-        "wide" => env.ctx(|w| linear_mba::leaf_count(main.tree(), w) > limit(Limit::MaxLeaves)),
-        "const_bitwise" => env.ctx(|w| linear_mba::const_bitwise(main.tree(), w)),
-        "cofactor" => env.cofactor,
-        name => unreachable!("condition {name}"),
-    }
 }
 
 thread_local! {
@@ -477,7 +537,7 @@ fn skipped(env: &Env) {
 /// Whether `p` calls an `@uncounted` function, whose skip past the time limit `skipped`
 /// does not count.
 fn uncounted(p: &Pipe) -> bool {
-    matches!(p, Pipe::Pass(q) if crate::builtins::of_pass(q).is_some_and(|s| s.uncounted))
+    matches!(p, Pipe::App(b, _) if b.uncounted)
 }
 
 /// `f` as a scope (a sequence, `scope` or a pipeline run): an assignment inside it ends
@@ -525,7 +585,7 @@ pub fn in_run<R>(p: &Passes, cli: Option<&Cli>, input: impl FnOnce() -> Cand, f:
         let env = Env::with(cli, p, cli.map_or(64, |c| width_of(&c.num_type)), None, false, String::new(), "");
         let set = vec![input()];
         for step in p.entry_steps(cli.map(|c| (c.max_restarts, c.iter_limit))) {
-            if let Err(e) = pass(&step, set.clone(), &env) {
+            if let Err(e) = bind_step(&step, set.clone(), &env) {
                 fail(&e);
             }
         }
@@ -554,21 +614,24 @@ fn assign_time_limit(ms: u64) {
 /// its right side, whose steps are each skipped past a limit.
 fn bookkeeping(p: &Pipe) -> bool {
     match p {
-        Pipe::Seq(_) | Pipe::Filter(_) | Pipe::Param(..) | Pipe::Bind(..) | Pipe::Value(_) => true,
-        Pipe::Call(c) => c.def.inline,
-        Pipe::Pass(Pass::Save(_) | Pass::Load(_) | Pass::Label(_) | Pass::Clear(_) | Pass::TakeMin(_) | Pass::Off(_) | Pass::On(_) | Pass::Assign(..)) => true,
-        Pipe::Pass(Pass::Set(i)) => matches!(SET_PASSES[*i], "id" | "none" | "within" | "pre_done"),
+        Pipe::App(b, _) => b.bookkeeping,
+        Pipe::Seq(_) | Pipe::Param(..) | Pipe::Bind(..) | Pipe::Value(_) | Pipe::Assign(..) | Pipe::Switch(..) => true,
+        Pipe::Call(c, _) => c.def.inline,
         _ => false,
     }
 }
 
 /// Whether `p` is a step that computes candidates: a call of a function or `def` that is
-/// not bookkeeping and takes no pipeline, other than `note`.
+/// neither bookkeeping nor `@uncounted` and takes no pipeline.
 pub(crate) fn computes(p: &Pipe) -> bool {
-    matches!(p, Pipe::Pass(_) | Pipe::Call(_)) && !matches!(p, Pipe::Pass(Pass::Note(_))) && !bookkeeping(p)
+    match p {
+        Pipe::App(b, _) => !b.sig.bookkeeping && !b.sig.uncounted && !b.sig.params.iter().any(|q| q.ty.is_pipe()),
+        Pipe::Call(c, _) => !c.def.inline,
+        _ => false,
+    }
 }
 
-fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
+fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Steps {
     // Every candidate equals the input, so stopping anywhere keeps the result right.
     if let Some(e) = failed() {
         return Err(e);
@@ -580,161 +643,13 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
         return Ok(set);
     }
     match p {
-        Pipe::Pass(p) => pass(p, set, env),
+        Pipe::App(b, args) => apply(b, args, set, env),
         Pipe::Seq(ps) => scoped(|| ps.iter().try_fold(set, |s, p| go(p, s, env))),
-        Pipe::Union(ps) => {
-            let mut out = Vec::new();
-            for p in ps {
-                out.extend(go(p, set.clone(), env)?);
-            }
-            Ok(dedup(out))
-        }
-        Pipe::Best(k, ps) => {
-            let mut out = Vec::new();
-            for p in ps {
-                out.extend(go(p, set.clone(), env)?);
-            }
-            if stats::on() {
-                count_won(&out, &set, env);
-            }
-            let mut out = dedup(out);
-            out.sort_by_cached_key(|c| c.size());
-            out.truncate(env.times(k, &set).max(1));
-            Ok(out)
-        }
-        Pipe::First(ps) => {
-            for p in ps {
-                let out = go(p, set.clone(), env)?;
-                if !out.is_empty() && out != set {
-                    return Ok(out);
-                }
-            }
-            Ok(set)
-        }
-        Pipe::Fix(n, p) => {
-            let mut set = set;
-            for _ in 0..env.times(n, &set) {
-                let out = go(p, set.clone(), env)?;
-                let same = match (out.first(), set.first()) {
-                    (Some(a), Some(b)) => a.same(b),
-                    (a, b) => a.is_none() && b.is_none(),
-                };
-                env.moved.set(!same);
-                set = out;
-                if same {
-                    break;
-                }
-            }
-            Ok(set)
-        }
-        Pipe::If(c, a, b) => go(if env.holds(c, &set) { a } else { b }, set, env),
-        Pipe::Retry(c, a, b) => {
-            let out = go(a, set.clone(), env)?;
-            if !env.holds(c, &out) {
-                return Ok(out);
-            }
-            let again = go(b, set, env)?;
-            let take = match (again.first(), out.first()) {
-                (Some(b), Some(a)) => b.size() <= a.size(),
-                (b, _) => b.is_some(),
-            };
-            Ok(if take { again } else { out })
-        }
         Pipe::Smallest(m) => {
             let steps = || m.steps.iter().try_fold(set, |s, p| go(p, s, env));
             if m.scoped { scoped(steps) } else { steps() }
         }
-        Pipe::Tag(name, p) => {
-            let clock = std::time::Instant::now();
-            let before = set.first().cloned();
-            let mut out = go(p, set, env)?;
-            stats::add(&format!("{name}/run"), stats::since(clock));
-            if let Some(m) = out.first_mut().filter(|m| !before.as_ref().is_some_and(|b| b.same(m))) {
-                stats::add(&format!("{name}/won/{}", m.origin), 0.0);
-                m.origin = name.clone();
-            }
-            Ok(out)
-        }
-        Pipe::Filter(c) => Ok(set.into_iter().filter(|x| env.holds(c, std::slice::from_ref(x))).collect()),
-        Pipe::Cand(name, p) => {
-            if crate::sched::PRE.contains(&name.as_str()) && !env.passes.pre_on(name) {
-                return Ok(Vec::new());
-            }
-            let clock = std::time::Instant::now();
-            let out = scoped(|| {
-                crate::sched::bind(crate::sched::BIT_SPLIT_BUDGET, limit(Limit::CandBitSplits) as u64);
-                go(p, set, env)
-            })?;
-            stats::add(&format!("pre/{name}/made"), stats::since(clock));
-            Ok(out.into_iter().map(|c| Cand { origin: name.clone(), ..c }).collect())
-        }
-        Pipe::Scope(p) => {
-            env.ctxs.borrow_mut().push(Ctx::typed(env.w, env.signed));
-            let out = scoped(|| go(p, set, env));
-            env.ctxs.borrow_mut().pop();
-            out
-        }
-        Pipe::Smaller(name, p) => {
-            let clock = std::time::Instant::now();
-            let mut out = go(p, set.clone(), env)?;
-            stats::add(&format!("{name}/run"), stats::since(clock));
-            let (Some(m), Some(before)) = (out.first_mut(), set.first()) else { return Ok(set) };
-            if m.size() >= before.size() {
-                return Ok(set);
-            }
-            if env.trace {
-                eprintln!("{name}: {} -> {}", before.size(), m.size());
-            }
-            stats::add(&format!("{name}/won"), 0.0);
-            stats::produced(name, m.tree(), before.size() - m.size());
-            m.origin = name.clone();
-            env.wins.set(env.wins.get() + 1);
-            Ok(out)
-        }
-        Pipe::Regions(p) => {
-            let w = env.ctx(|c| c.narrow(c.w));
-            let mut out = Vec::with_capacity(set.len());
-            for c in set {
-                let outer = w.swap_used(0);
-                let (mut err, mut won) = (None, None);
-                let r = linear_mba::on_region(c.tree(), &w, || {
-                    let before = env.deferred.replace(Some(None));
-                    let rebuilt = go(p, vec![c.clone()], env);
-                    won = env.deferred.replace(before).flatten();
-                    match rebuilt {
-                        Ok(o) => o.into_iter().next().map(|b| {
-                            w.swap_used(w.swap_used(0) | b.used);
-                            b.tree().clone()
-                        }),
-                        Err(e) => {
-                            err = Some(e);
-                            None
-                        }
-                    }
-                });
-                if let Some(e) = err {
-                    return Err(e);
-                }
-                if let Some((name, sizes, input)) = won {
-                    let sizes: Vec<(&str, usize)> = sizes.iter().map(|(n, s)| (n.as_str(), *s)).collect();
-                    stats::won_among(&name, &sizes, input, &r);
-                }
-                let used = w.swap_used(0);
-                w.swap_used(outer | used);
-                out.push(Cand::of(r, &c, used, 0));
-            }
-            Ok(out)
-        }
-        Pipe::Again(p) => {
-            let mut out = go(p, set.clone(), env)?;
-            if let (Some(m), Some(t)) = (out.first_mut(), set.first()) {
-                if let Some(r) = env.ctx(|w| linear_mba::again(t.tree(), m.tree(), w)) {
-                    *m = Cand::of(r, m, 0, 0);
-                }
-            }
-            Ok(out)
-        }
-        Pipe::Call(c) if c.def.inline => {
+        Pipe::Call(c, _) if c.def.inline => {
             let caller = env.lex.borrow().clone();
             let values = arg_values(c, &set, env);
             let lex = Lex { input: caller.input.clone(), regs: caller.regs.clone(), notes: caller.notes.clone(), frame: Some(Frame { call: c.clone(), caller: caller.clone(), values }) };
@@ -746,7 +661,7 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             env.lex.replace(outer);
             out
         }
-        Pipe::Call(c) => {
+        Pipe::Call(c, _) => {
             let run = env.call_env(c, &set);
             scoped(|| go(&c.body, set, &run))
         }
@@ -756,9 +671,8 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
                 let f = lex.frame.as_ref().expect("a parameter outside the body of its function");
                 (f.call.clone(), f.caller.clone())
             };
-            let crate::sched::CallArg::Pipe(arg) = &call.args[*i] else { unreachable!("a pipeline parameter") };
             let callee = env.lex.replace(caller);
-            let out = go(arg, set, env);
+            let out = go(&call.args[*i], set, env);
             env.lex.replace(callee);
             out
         }
@@ -768,34 +682,256 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             env.lex.borrow().regs.borrow_mut().insert(r.clone(), group);
             Ok(set)
         }
-        Pipe::Wins(n, p) => {
-            let n = env.times(n, &set);
-            if n == 0 {
-                return Ok(set);
+        p => bind_step(p, set, env),
+    }
+}
+
+/// An assignment or the macro `on`/`off` on `set`, which passes on unchanged.
+fn bind_step(p: &Pipe, set: Vec<Cand>, env: &Env) -> Steps {
+    match p {
+        Pipe::Switch(false, ns) => ns.iter().for_each(|n| crate::sched::turn_off(n)),
+        Pipe::Switch(true, ns) => ns.iter().for_each(|n| crate::sched::turn_on(n)),
+        Pipe::Assign(i, v) => {
+            let v = env.value(v, &set);
+            match *i {
+                crate::sched::DEADLINE => assign_time_limit(v),
+                i if crate::sched::is_switch(i) => crate::sched::bind(i, (v != 0) as u64),
+                i => match crate::sched::check_cap(i, v) {
+                    Ok(v) => crate::sched::bind(i, v),
+                    Err(e) => {
+                        env.ctx(|c| c.mark_cut());
+                        return Err(Error::BackendError(e));
+                    }
+                },
             }
-            let outer = env.wins.replace(0);
-            let mut set = set;
-            loop {
-                let before = env.wins.get();
-                set = go(p, set, env)?;
-                if env.wins.get() == before || env.wins.get() >= n {
-                    break;
-                }
-            }
-            env.wins.set(outer + env.wins.get());
-            Ok(set)
+        }
+        p => unreachable!("{p:?} is not a step"),
+    }
+    Ok(set)
+}
+
+/// The built-in function `b` on `set` with `args`, the input converted as its calling kind
+/// says.
+fn apply(b: &Builtin, args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    match b.imp {
+        Impl::Group(f) => f(args, set, env),
+        Impl::Each(f) => Ok(dedup(term_pass(b.name, f, None, &set, env))),
+        Impl::Alt(f, bit) => Ok(dedup(term_pass(b.name, f, Some(bit), &set, env))),
+        Impl::Polish(f) => Ok(dedup(term_pass(b.name, |t, w| Some(f(t, w)), None, &set, env))),
+        Impl::Main(f) => match set.first() {
+            Some(main) => Ok(kept(f(main, env)?, &set)),
+            None => Ok(set),
+        },
+        Impl::EachCand(_) if set.is_empty() => Ok(set),
+        Impl::EachCand(f) => Ok(kept(set.iter().map(|c| f(c, env).unwrap_or_else(|| c.clone())).collect(), &set)),
+        _ => unreachable!("{} is not a step", b.name),
+    }
+}
+
+/// `out` without repeats, a term given back from `set` keeping the origin it came with.
+fn kept(out: Vec<Cand>, set: &[Cand]) -> Vec<Cand> {
+    dedup(out)
+        .into_iter()
+        .map(|c| match set.iter().find(|s| s.same(&c)) {
+            Some(s) => s.clone(),
+            None => c,
+        })
+        .collect()
+}
+
+fn union(ps: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    let mut out = Vec::new();
+    for p in ps {
+        out.extend(go(p, set.clone(), env)?);
+    }
+    Ok(dedup(out))
+}
+
+fn best(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    let (k, ps) = args.split_first().unwrap();
+    let mut out = Vec::new();
+    for p in ps {
+        out.extend(go(p, set.clone(), env)?);
+    }
+    if stats::on() {
+        count_won(&out, &set, env);
+    }
+    let mut out = dedup(out);
+    out.sort_by_cached_key(|c| c.size());
+    out.truncate(env.times(k, &set).max(1));
+    Ok(out)
+}
+
+fn first(ps: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    for p in ps {
+        let out = go(p, set.clone(), env)?;
+        if !out.is_empty() && out != set {
+            return Ok(out);
         }
     }
+    Ok(set)
+}
+
+fn fix(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    let [n, p] = args else { unreachable!() };
+    let mut set = set;
+    for _ in 0..env.times(n, &set) {
+        let out = go(p, set.clone(), env)?;
+        let same = match (out.first(), set.first()) {
+            (Some(a), Some(b)) => a.same(b),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        env.moved.set(!same);
+        set = out;
+        if same {
+            break;
+        }
+    }
+    Ok(set)
+}
+
+fn retry(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    let [c, a, b] = args else { unreachable!() };
+    let out = go(a, set.clone(), env)?;
+    if !env.holds(c, &out) {
+        return Ok(out);
+    }
+    let again = go(b, set, env)?;
+    let take = match (again.first(), out.first()) {
+        (Some(b), Some(a)) => b.size() <= a.size(),
+        (b, _) => b.is_some(),
+    };
+    Ok(if take { again } else { out })
+}
+
+fn scope(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    env.ctxs.borrow_mut().push(Ctx::typed(env.w, env.signed));
+    let out = scoped(|| go(&args[0], set, env));
+    env.ctxs.borrow_mut().pop();
+    out
+}
+
+fn tag(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    let [n, p] = args else { unreachable!() };
+    let name = name(n);
+    let clock = std::time::Instant::now();
+    let before = set.first().cloned();
+    let mut out = go(p, set, env)?;
+    stats::add(&format!("{name}/run"), stats::since(clock));
+    if let Some(m) = out.first_mut().filter(|m| !before.as_ref().is_some_and(|b| b.same(m))) {
+        stats::add(&format!("{name}/won/{}", m.origin), 0.0);
+        m.origin = name.to_string();
+    }
+    Ok(out)
+}
+
+fn cand(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    let [n, p] = args else { unreachable!() };
+    let name = name(n);
+    if crate::sched::PRE.contains(&name) && !env.passes.pre_on(name) {
+        return Ok(Vec::new());
+    }
+    let clock = std::time::Instant::now();
+    let out = scoped(|| {
+        crate::sched::bind(crate::sched::BIT_SPLIT_BUDGET, limit(Limit::CandBitSplits) as u64);
+        go(p, set, env)
+    })?;
+    stats::add(&format!("pre/{name}/made"), stats::since(clock));
+    Ok(out.into_iter().map(|c| Cand { origin: name.to_string(), ..c }).collect())
+}
+
+fn smaller(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    let [n, p] = args else { unreachable!() };
+    let name = name(n);
+    let clock = std::time::Instant::now();
+    let mut out = go(p, set.clone(), env)?;
+    stats::add(&format!("{name}/run"), stats::since(clock));
+    let (Some(m), Some(before)) = (out.first_mut(), set.first()) else { return Ok(set) };
+    if m.size() >= before.size() {
+        return Ok(set);
+    }
+    if env.trace {
+        eprintln!("{name}: {} -> {}", before.size(), m.size());
+    }
+    stats::add(&format!("{name}/won"), 0.0);
+    stats::produced(name, m.tree(), before.size() - m.size());
+    m.origin = name.to_string();
+    env.wins.set(env.wins.get() + 1);
+    Ok(out)
+}
+
+fn regions(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    let p = &args[0];
+    let w = env.ctx(|c| c.narrow(c.w));
+    let mut out = Vec::with_capacity(set.len());
+    for c in set {
+        let outer = w.swap_used(0);
+        let (mut err, mut won) = (None, None);
+        let r = linear_mba::on_region(c.tree(), &w, || {
+            let before = env.deferred.replace(Some(None));
+            let rebuilt = go(p, vec![c.clone()], env);
+            won = env.deferred.replace(before).flatten();
+            match rebuilt {
+                Ok(o) => o.into_iter().next().map(|b| {
+                    w.swap_used(w.swap_used(0) | b.used);
+                    b.tree().clone()
+                }),
+                Err(e) => {
+                    err = Some(e);
+                    None
+                }
+            }
+        });
+        if let Some(e) = err {
+            return Err(e);
+        }
+        if let Some((name, sizes, input)) = won {
+            let sizes: Vec<(&str, usize)> = sizes.iter().map(|(n, s)| (n.as_str(), *s)).collect();
+            stats::won_among(&name, &sizes, input, &r);
+        }
+        let used = w.swap_used(0);
+        w.swap_used(outer | used);
+        out.push(Cand::of(r, &c, used, 0));
+    }
+    Ok(out)
+}
+
+fn again(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    let mut out = go(&args[0], set.clone(), env)?;
+    if let (Some(m), Some(t)) = (out.first_mut(), set.first()) {
+        if let Some(r) = env.ctx(|w| linear_mba::again(t.tree(), m.tree(), w)) {
+            *m = Cand::of(r, m, 0, 0);
+        }
+    }
+    Ok(out)
+}
+
+fn wins(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    let [n, p] = args else { unreachable!() };
+    let n = env.times(n, &set);
+    if n == 0 {
+        return Ok(set);
+    }
+    let outer = env.wins.replace(0);
+    let mut set = set;
+    loop {
+        let before = env.wins.get();
+        set = go(p, set, env)?;
+        if env.wins.get() == before || env.wins.get() >= n {
+            break;
+        }
+    }
+    env.wins.set(outer + env.wins.get());
+    Ok(set)
 }
 
 /// The values of the numeric arguments of `c` on the caller's candidates `set`, by parameter
 /// position; empty without any.
 fn arg_values(c: &crate::sched::Call, set: &[Cand], env: &Env) -> Vec<u64> {
-    use crate::sched::CallArg;
-    if !c.args.iter().any(|a| matches!(a, CallArg::Num(_))) {
+    if !c.def.params.iter().any(|p| p.ty == Ty::Num) {
         return Vec::new();
     }
-    c.args.iter().map(|a| if let CallArg::Num(e) = a { env.value(e, set) } else { 0 }).collect()
+    c.args.iter().zip(&c.def.params).map(|(a, p)| if p.ty == Ty::Num { env.value(a, set) } else { 0 }).collect()
 }
 
 /// Binds in the run `lex` of the call `c` its group parameters to the caller's group
@@ -803,7 +939,7 @@ fn arg_values(c: &crate::sched::Call, set: &[Cand], env: &Env) -> Vec<u64> {
 fn bind_args(c: &crate::sched::Call, lex: &Lex, set: &[Cand], caller: &Lex) {
     let mut regs = lex.regs.borrow_mut();
     for (p, a) in c.def.params.iter().zip(&c.args) {
-        if let crate::sched::CallArg::Group(r) = a {
+        if let (Ty::Group, Pipe::Value(r)) = (&p.ty, a) {
             regs.insert(p.name.clone(), caller.regs.borrow().get(r).cloned().unwrap_or_default());
         }
     }
@@ -882,164 +1018,140 @@ fn pre(e: &str) -> String {
     format!("pre/{}", stats::source_of(e).unwrap_or_else(|| "unlabeled".into()))
 }
 
-fn pass(p: &Pass, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
-    let name = match p {
-        Pass::Save(r) => {
-            env.lex.borrow().regs.borrow_mut().insert(r.to_string(), set.clone());
-            return Ok(set);
+fn save(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    env.lex.borrow().regs.borrow_mut().insert(name(&args[0]).to_string(), set.clone());
+    Ok(set)
+}
+
+fn clear(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    env.lex.borrow().notes.borrow_mut().push((name(&args[0]).to_string(), None));
+    Ok(set)
+}
+
+fn note(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    let r = name(&args[0]);
+    let Some(min) = set.iter().reduce(|a, c| if c.size() < a.size() { c } else { a }) else { return Ok(set) };
+    {
+        let lex = env.lex.borrow();
+        let mut notes = lex.notes.borrow_mut();
+        if let Some((_, kept)) = notes.iter_mut().rev().find(|(n, _)| n == r)
+            && kept.as_ref().is_none_or(|k| min.size() < k.size())
+        {
+            *kept = Some(min.clone());
         }
-        Pass::Load(r) => return Ok(env.lex.borrow().regs.borrow().get(r).cloned().unwrap_or_default()),
-        Pass::Off(ns) => {
-            ns.iter().for_each(|n| crate::sched::turn_off(n));
-            return Ok(set);
-        }
-        Pass::On(ns) => {
-            ns.iter().for_each(|n| crate::sched::turn_on(n));
-            return Ok(set);
-        }
-        Pass::Assign(i, v) => {
-            let v = env.value(v, &set);
-            match *i {
-                crate::sched::DEADLINE => assign_time_limit(v),
-                i if crate::sched::is_switch(i) => crate::sched::bind(i, (v != 0) as u64),
-                i => match crate::sched::check_cap(i, v) {
-                    Ok(v) => crate::sched::bind(i, v),
-                    Err(e) => {
-                        env.ctx(|c| c.mark_cut());
-                        return Err(Error::BackendError(e));
-                    }
-                },
-            }
-            return Ok(set);
-        }
-        Pass::Clear(r) => {
-            env.lex.borrow().notes.borrow_mut().push((r.clone(), None));
-            return Ok(set);
-        }
-        Pass::Note(r) => {
-            let Some(min) = set.iter().reduce(|a, c| if c.size() < a.size() { c } else { a }) else { return Ok(set) };
-            let lex = env.lex.borrow();
-            let mut notes = lex.notes.borrow_mut();
-            if let Some((_, kept)) = notes.iter_mut().rev().find(|(n, _)| n == r)
-                && kept.as_ref().is_none_or(|k| min.size() < k.size())
-            {
-                *kept = Some(min.clone());
-            }
-            return Ok(set);
-        }
-        Pass::TakeMin(r) => {
-            let kept = {
-                let lex = env.lex.borrow();
-                let mut notes = lex.notes.borrow_mut();
-                notes.iter().rposition(|(n, _)| n == r).and_then(|i| notes.remove(i).1)
-            };
-            return Ok(match kept {
-                Some(c) if set.first().is_some_and(|m| c.size() < m.size()) => dedup(std::iter::once(c).chain(set).collect()),
-                _ => set,
-            });
-        }
-        Pass::Term { name, at, alt } => return Ok(dedup(term_pass(name, linear_mba::term_pass_at(*at), *alt, &set, env))),
-        Pass::Set(i) => SET_PASSES[*i],
-        Pass::Egglog(name) => name.as_str(),
-        Pass::Label(_) => "label/",
+    }
+    Ok(set)
+}
+
+fn take_min(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    let r = name(&args[0]);
+    let kept = {
+        let lex = env.lex.borrow();
+        let mut notes = lex.notes.borrow_mut();
+        notes.iter().rposition(|(n, _)| n == r).and_then(|i| notes.remove(i).1)
     };
-    let Some(main) = set.first().cloned() else { return Ok(set) };
-    let new = |term: String, origin: String| Cand::new(&term, &origin);
-    let out = match name {
-        "id" => return Ok(set),
-        "none" => return Ok(Vec::new()),
-        "within" => return Ok(if crate::sched::get(crate::sched::REWRITES) > 0 { set } else { Vec::new() }),
-        "label/" => {
-            let Pass::Label(r) = p else { unreachable!() };
-            let first = env.reg_main(r);
-            for c in set.iter().filter(|_| stats::on()) {
-                if let Some(f) = first.as_ref().filter(|f| f.origin != c.origin) {
-                    stats::add(&format!("pre/{}/differs", c.origin), 0.0);
-                    stats::add_n(&format!("pre/{}/gain", c.origin), f.size().saturating_sub(c.size()) as u64, 0.0);
-                }
-                stats::label(&show(c.tree()), &c.origin);
-            }
-            if env.trace {
-                let all: Vec<String> = set.iter().map(|c| format!("{} {}", c.origin, c.size())).collect();
-                eprintln!("prepass: candidates: {}", all.join(", "));
-            }
-            return Ok(set);
+    Ok(match kept {
+        Some(c) if set.first().is_some_and(|m| c.size() < m.size()) => dedup(std::iter::once(c).chain(set).collect()),
+        _ => set,
+    })
+}
+
+fn label(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    if set.is_empty() {
+        return Ok(set);
+    }
+    let first = env.reg_main(name(&args[0]));
+    for c in set.iter().filter(|_| stats::on()) {
+        if let Some(f) = first.as_ref().filter(|f| f.origin != c.origin) {
+            stats::add(&format!("pre/{}/differs", c.origin), 0.0);
+            stats::add_n(&format!("pre/{}/gain", c.origin), f.size().saturating_sub(c.size()) as u64, 0.0);
         }
-        "pre_done" => {
-            if env.trace {
-                let kept: Vec<String> = set.iter().map(|c| format!("{} {}", c.origin, c.size())).collect();
-                eprintln!("prepass: input {} chosen {}", size_of(&env.lex.borrow().input), kept.join(", then "));
-            }
-            let t0 = env.reg_main("t0").unwrap_or_else(|| Cand::new(&env.lex.borrow().input, "input"));
-            return Ok(set
-                .iter()
-                .enumerate()
-                .map(|(i, c)| {
-                    stats::add(&format!("pre/{}/{}", c.origin, if i == 0 { "main" } else { "kept" }), 0.0);
-                    let term = if i == 0 && c.same(&t0) { t0.term().to_string() } else { show(c.tree()) };
-                    new(term, format!("pre/{}", c.origin))
-                })
-                .collect());
-        }
-        "prepass" => {
-            let (alt, other) = env.prepass_of(main.term());
-            std::iter::once(alt).chain(other).map(|e| new(e.clone(), pre(&e))).collect()
-        }
-        "take_minimal" => match proved_minimal(&set, env) {
-            Some(c) => {
-                stats::add("round/minimal", 0.0);
-                vec![c.clone()]
-            }
-            None => set.clone(),
-        },
-        "polish" => set.iter().map(|c| polish_one(c, env).unwrap_or_else(|| c.clone())).collect(),
-        "reprint" => {
-            let cli = env.cli(name);
-            let out = crate::egglog_to_infix(main.term(), &|n| crate::norm_const(n, &cli.num_type));
-            vec![new(crate::infix_to_egglog(&out, true), main.origin.clone())]
-        }
-        _ if name == "egglog" || name.starts_with("egglog/") => {
-            let cli = env.cli(name);
-            if past_deadline(LAST_ROUND.with(|r| r.get()), env) {
-                return Ok(set);
-            }
-            let roots: Vec<&str> = set.iter().map(Cand::term).collect();
-            let clock = std::time::Instant::now();
-            let e = crate::egglog_round(&env.egg, &roots, cli)?;
-            LAST_ROUND.with(|r| r.set(clock.elapsed().as_secs_f64()));
-            stats::add(name, stats::since(clock));
-            if env.trace {
-                eprintln!("{name}: root {} extracted {}", main.size(), size_of(&e));
-            }
-            let origin = match stats::source_of(&e) {
-                Some(src) => format!("pre/{src}"),
-                None => name.to_string(),
-            };
-            vec![new(e, origin)]
-        }
-        _ => panic!("unknown pass {name}"),
-    };
-    // A term a pass over the list gives back keeps the origin it came with.
-    let out: Vec<Cand> = dedup(out)
-        .into_iter()
-        .map(|c| match set.iter().find(|s| s.same(&c)) {
-            Some(s) => s.clone(),
-            None => c,
+        stats::label(&show(c.tree()), &c.origin);
+    }
+    if env.trace {
+        let all: Vec<String> = set.iter().map(|c| format!("{} {}", c.origin, c.size())).collect();
+        eprintln!("prepass: candidates: {}", all.join(", "));
+    }
+    Ok(set)
+}
+
+fn pre_done(_: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    if set.is_empty() {
+        return Ok(set);
+    }
+    if env.trace {
+        let kept: Vec<String> = set.iter().map(|c| format!("{} {}", c.origin, c.size())).collect();
+        eprintln!("prepass: input {} chosen {}", size_of(&env.lex.borrow().input), kept.join(", then "));
+    }
+    let t0 = env.reg_main("t0").unwrap_or_else(|| Cand::new(&env.lex.borrow().input, "input"));
+    Ok(set
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            stats::add(&format!("pre/{}/{}", c.origin, if i == 0 { "main" } else { "kept" }), 0.0);
+            let term = if i == 0 && c.same(&t0) { t0.term().to_string() } else { show(c.tree()) };
+            Cand::new(&term, &format!("pre/{}", c.origin))
         })
-        .collect();
-    Ok(out)
+        .collect())
+}
+
+fn prepass(main: &Cand, env: &Env) -> Steps {
+    let (alt, other) = env.prepass_of(main.term());
+    Ok(std::iter::once(alt).chain(other).map(|e| Cand::new(&e, &pre(&e))).collect())
+}
+
+fn take_minimal(_: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    if set.is_empty() {
+        return Ok(set);
+    }
+    let out = match proved_minimal(&set, env) {
+        Some(c) => {
+            stats::add("round/minimal", 0.0);
+            vec![c.clone()]
+        }
+        None => set.clone(),
+    };
+    Ok(kept(out, &set))
+}
+
+fn reprint(main: &Cand, env: &Env) -> Steps {
+    let cli = env.cli("reprint");
+    let out = crate::egglog_to_infix(main.term(), &|n| crate::norm_const(n, &cli.num_type));
+    Ok(vec![Cand::new(&crate::infix_to_egglog(&out, true), &main.origin)])
+}
+
+fn egglog(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    let Some(main) = set.first() else { return Ok(set) };
+    let name = step_name("egglog", args);
+    let cli = env.cli(&name);
+    if past_deadline(LAST_ROUND.with(|r| r.get()), env) {
+        return Ok(set);
+    }
+    let roots: Vec<&str> = set.iter().map(Cand::term).collect();
+    let clock = std::time::Instant::now();
+    let e = crate::egglog_round(&env.egg, &roots, cli)?;
+    LAST_ROUND.with(|r| r.set(clock.elapsed().as_secs_f64()));
+    stats::add(&name, stats::since(clock));
+    if env.trace {
+        eprintln!("{name}: root {} extracted {}", main.size(), size_of(&e));
+    }
+    let origin = match stats::source_of(&e) {
+        Some(src) => format!("pre/{src}"),
+        None => name.clone(),
+    };
+    Ok(kept(vec![Cand::new(&e, &origin)], &set))
 }
 
 /// The pass over one term `f` on each candidate of `set`, which keeps its own origin.
-fn term_pass(name: &str, f: linear_mba::TermPass, alt: Option<u8>, set: &[Cand], env: &Env) -> Vec<Cand> {
+fn term_pass(name: &str, f: impl Fn(&Term, &Ctx) -> Option<Term>, alt: Option<u8>, set: &[Cand], env: &Env) -> Vec<Cand> {
     env.ctx(|ctx| {
         set.iter()
             .filter_map(|c| {
                 let t = c.tree();
                 let (outer, left) = (ctx.swap_used(0), crate::sched::get(crate::sched::REWRITES) as usize);
                 let r: Option<Term> = match alt {
-                    Some(_) => stats::try_pass(name, t, || f.run(t, ctx)),
-                    None => stats::pass(name, t, || f.run(t, ctx)),
+                    Some(_) => stats::try_pass(name, t, || f(t, ctx)),
+                    None => stats::pass(name, t, || f(t, ctx)),
                 };
                 let used = ctx.swap_used(0);
                 ctx.swap_used(outer | used);
@@ -1064,22 +1176,22 @@ mod tests {
     fn time_limit_ends_with_its_sequence() {
         let passes = Passes::default();
         let env = Env::prepass(&passes, 32, None, false, "(Var \"x\")");
-        let limit = |ms| Pass::Assign(crate::sched::DEADLINE, Expr::Num(if ms > 0 { ms } else { NONE }));
+        let limit = |ms| Pipe::Assign(crate::sched::DEADLINE, Box::new(Pipe::Num(if ms > 0 { ms } else { NONE })));
         let wait = || std::thread::sleep(std::time::Duration::from_millis(5));
         crate::sched::in_default_run(|| {
-            pass(&limit(1), vec![], &env).unwrap();
+            bind_step(&limit(1), vec![], &env).unwrap();
             wait();
             assert!(past_deadline(0.0, &env));
             scoped(|| {
-                pass(&limit(0), vec![], &env).unwrap();
+                bind_step(&limit(0), vec![], &env).unwrap();
                 assert!(past_deadline(0.0, &env), "a clear inside keeps the outer limit");
-                pass(&limit(100_000), vec![], &env).unwrap();
+                bind_step(&limit(100_000), vec![], &env).unwrap();
                 assert!(past_deadline(0.0, &env), "an inner limit is never later than the outer one");
             });
             assert!(past_deadline(0.0, &env));
-            pass(&limit(0), vec![], &env).unwrap();
+            bind_step(&limit(0), vec![], &env).unwrap();
             assert!(!past_deadline(0.0, &env));
-            pass(&limit(1), vec![], &env).unwrap();
+            bind_step(&limit(1), vec![], &env).unwrap();
         });
         wait();
         assert!(!past_deadline(0.0, &env), "a limit ends with its sequence");
@@ -1195,7 +1307,8 @@ mod tests {
         let x = "(Var \"x\")";
         let env = Env::prepass(&passes, 32, None, false, x);
         let input = || Cand::new(x, "input");
-        let Pipe::Fix(count, _) = lang::parse("(fix (restarts - 1) id)").unwrap() else { unreachable!() };
+        let Pipe::App(_, args) = lang::parse("(fix (restarts - 1) id)").unwrap() else { unreachable!() };
+        let count = &args[0];
         let rounds = |m: usize| {
             let cli = Cli { max_restarts: m, ..Default::default() };
             in_run(&cli.passes, Some(&cli), input, || env.times(&count, &[input()]))
@@ -1240,9 +1353,9 @@ mod tests {
         set.iter().map(|c| c.term().to_string()).collect()
     }
 
-    fn expr(s: &str) -> Expr {
-        let Pipe::Filter(e) = lang::parse(&format!("(filter ({s}))")).unwrap() else { unreachable!() };
-        e
+    fn expr(s: &str) -> Pipe {
+        let Pipe::App(_, mut args) = lang::parse(&format!("(filter ({s}))")).unwrap() else { unreachable!() };
+        args.pop().unwrap()
     }
 
     #[test]
@@ -1537,6 +1650,36 @@ mod tests {
             }
             assert_eq!(env.times(&expr("none"), &[]), usize::MAX, "none as a count is no limit");
         });
+    }
+
+    #[test]
+    fn every_builtin_has_an_implementation_and_every_implementation_an_extern() {
+        use crate::builtins::Kind;
+        for b in BUILTINS.iter() {
+            let kind = b.sig.kind();
+            let runs_as_declared = match b.imp {
+                Impl::Form => ["seq", "smallest"].contains(&b.name),
+                Impl::Missing => false,
+                Impl::Group(_) => kind == Kind::Group,
+                Impl::Main(_) => kind == Kind::Main,
+                Impl::Each(_) | Impl::Polish(_) | Impl::EachCand(_) => kind == Kind::Each,
+                Impl::Alt(..) => kind == Kind::Alt,
+                Impl::Num(_) => b.sig.is_number() && !b.sig.params.is_empty(),
+                Impl::TermNum(_) => kind == Kind::TermNum && b.sig.params.is_empty(),
+                Impl::GroupNum(_) => kind == Kind::GroupNum && b.sig.params.is_empty(),
+            };
+            assert!(runs_as_declared, "{}: no implementation for its calling kind", b.sig.decl());
+        }
+        let term = linear_mba::TERM_PASSES.iter().map(|(n, _)| n.to_string());
+        let polish = linear_mba::POLISH.iter().map(|(n, _)| format!("polish/{n}"));
+        let mut rust: Vec<String> = IMPLS.iter().map(|(n, _)| n.to_string()).chain(term).chain(polish).collect();
+        for n in &rust {
+            assert!(builtin(n).is_some(), "{n} has no extern in src/builtins.pipe");
+        }
+        rust.sort();
+        rust.dedup();
+        assert_eq!(rust.len(), BUILTINS.len(), "an implementation is given twice");
+        assert!(linear_mba::ALTERNATIVES.iter().all(|(a, _)| matches!(builtin(a).map(|b| b.imp), Some(Impl::Alt(..)))));
     }
 
     #[test]
