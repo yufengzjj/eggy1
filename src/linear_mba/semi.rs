@@ -135,7 +135,7 @@ fn bit_split(groups: &[(Vec<u64>, u64)], lv: &[T], arith: bool, e0: u64, w: &Ctx
     if !(4..=6).contains(&n) || arith {
         return Vec::new();
     }
-    if crate::sched::get(crate::sched::BIT_SPLIT_BUDGET) == 0 {
+    if crate::lang::vars::get(crate::rust_vars::BIT_SPLIT_BUDGET) == 0 {
         w.read(|d| d.cut = true);
         return Vec::new();
     }
@@ -314,9 +314,9 @@ fn bit_split(groups: &[(Vec<u64>, u64)], lv: &[T], arith: bool, e0: u64, w: &Ctx
     let mut out = Vec::new();
     // Each side has a leaf per leaf it depends on and a mask per table, so most
     // splits are ruled out by size before they are rebuilt.
-    for &(low, op, a, b, ..) in found.iter().take(crate::sched::limit(Limit::BitSplits)) {
+    for &(low, op, a, b, ..) in found.iter().take(crate::rust_vars::limit(Limit::BitSplits)) {
         for (ps, qs) in (0..5).filter_map(|v| pick(op, a, b, v)) {
-            if low as usize + 1 >= limit || !w.take_budget(crate::sched::BIT_SPLIT_BUDGET) {
+            if low as usize + 1 >= limit || !w.take_budget(crate::rust_vars::BIT_SPLIT_BUDGET) {
                 return out;
             }
             let t = T::Op(op, vec![sub(sub_index("bit_split"), &side(&ps, a), w), sub(sub_index("bit_split"), &side(&qs, b), w)]);
@@ -581,7 +581,7 @@ pub(super) fn semi_split(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx,
     };
     let own: Vec<Vec<u64>> = parts.iter().map(|(gs, _)| own_consts(gs, w)).collect();
     let mut memo: crate::eval::FastMap<(usize, u64), Option<T>> = Default::default();
-    let max_combos = crate::sched::limit(Limit::SemiSplitMaxCombos);
+    let max_combos = crate::rust_vars::limit(Limit::SemiSplitMaxCombos);
     for last in 0..parts.len() {
         let others: Vec<usize> = (0..parts.len()).filter(|&k| k != last).collect();
         if others.iter().any(|&k| own[k].is_empty()) || others.iter().map(|&k| own[k].len()).try_fold(1usize, |a, l| a.checked_mul(l)).is_none_or(|c| c > max_combos) {
@@ -770,7 +770,7 @@ fn half_flips(groups: &[(Vec<u64>, u64)], w: &Ctx) -> Vec<Vec<(Vec<u64>, u64)>> 
         let half = (1u64 << (rest - 1)).wrapping_neg() & w.mask;
         (rest > 1 && rest < w.w && g.contains(&half)).then_some((i, half))
     });
-    for (i, half) in flippable.take(crate::sched::limit(Limit::SemiHalfFlips)) {
+    for (i, half) in flippable.take(crate::rust_vars::limit(Limit::SemiHalfFlips)) {
         for v in out.clone() {
             let mut v = v;
             for x in v[i].0.iter_mut().filter(|x| **x == half) {
@@ -785,7 +785,7 @@ fn half_flips(groups: &[(Vec<u64>, u64)], w: &Ctx) -> Vec<Vec<(Vec<u64>, u64)>> 
 /// The first smallest of `grouped_candidates_all`, memoized: callers only keep the first
 /// smallest candidate, and semi-linear searches repeat the same groups.
 fn grouped_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, cands: &mut Vec<T>) {
-    let key = (groups.to_vec(), lv.to_vec(), e0, w.w, crate::sched::limits_key());
+    let key = (groups.to_vec(), lv.to_vec(), e0, w.w, crate::lang::vars::limits_key());
     let known = w.st.grouped.lock().unwrap().get(&key).cloned();
     if let Some(t) = known {
         cands.push(t);
@@ -895,7 +895,7 @@ fn high_merges(groups: &[(Vec<u64>, u64)], w: &Ctx) -> Vec<Vec<(Vec<u64>, u64)>>
     ambiguous.sort_by_key(|&i| low(i));
     // Enumerate at most `semi_max_merges` variants; the other groups join the group holding
     // the bit just below them.
-    let most = crate::sched::limit(Limit::SemiMaxMerges);
+    let most = crate::rust_vars::limit(Limit::SemiMaxMerges);
     let mut count = 1usize;
     let take = ambiguous
         .iter()
@@ -981,7 +981,7 @@ fn masked_groups(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx) -> T {
 fn const_leaf_groups(groups: &[(Vec<u64>, u64)], shifts: &[Vec<u64>], lv: &[T], e0: u64, w: &Ctx) -> Vec<T> {
     let (n, r) = (lv.len(), groups.len());
     let p = (usize::BITS - (r - 1).leading_zeros()) as usize;
-    if r < 2 || r > crate::sched::limit(Limit::SemiMaxCodeGroups) || n + p > max_leaves() {
+    if r < 2 || r > crate::rust_vars::limit(Limit::SemiMaxCodeGroups) || n + p > max_leaves() {
         return Vec::new();
     }
     let m = w.mask;

@@ -6,18 +6,18 @@ fn main() {
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     if let Some(spec) = matches.get_raw("passes").and_then(|mut v| v.next()) {
-        for w in eggy1::sched::Passes::parse_noting(&spec.to_string_lossy()).map(|(_, w)| w).unwrap_or_default() {
+        for w in eggy1::passes::Passes::parse_noting(&spec.to_string_lossy()).map(|(_, w)| w).unwrap_or_default() {
             eprintln!("--passes: warning: {w}");
         }
     }
     if cli.show_builtins {
-        print!("{}", eggy1::builtins::listing());
+        print!("{}", eggy1::cli::listing());
         let (default, spec) = cli.passes.defs.split_at(cli.passes.default_defs);
         for (from, defs) in [("src/default.pipe", default), ("--passes", spec)] {
             if !defs.is_empty() {
                 println!("\n# --- defined by def in {from}");
                 for d in defs {
-                    println!("{}", eggy1::pipe_lang::sig_of(d));
+                    println!("{}", eggy1::lang::defs::sig_of(d));
                 }
             }
         }

@@ -1,12 +1,14 @@
-pub mod builtins;
+pub mod builtin_passes;
+pub mod cand;
+pub mod cli;
 pub mod dag;
 pub mod eval;
 pub mod expr_convert;
 pub mod known_bits;
+pub mod lang;
 pub mod linear_mba;
-pub mod pipe;
-pub mod pipe_lang;
-pub mod sched;
+pub mod passes;
+pub mod rust_vars;
 pub mod stats;
 mod poly_mba;
 mod lowbits;
@@ -947,7 +949,7 @@ fn rules_egraph(egg: &str) -> Result<EGraph, Error> {
 /// One saturate-and-extract round on `s` together with its linear-MBA rebuild, or
 /// on the rebuild alone if `keep_input` is false and the pre-pass changed `s`.
 pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result<String, Error> {
-    pipe::in_run(&cli.passes, Some(cli), || pipe::Cand::new(s, "input"), || {
+    lang::eval::in_run(&cli.passes, Some(cli), || cand::Cand::new(s, "input"), || {
         let (alt, other) = linear_mba::simplify_linear_with(s, width_of(&cli.num_type), crate::eval::NumType::from_name(&cli.num_type).map(|t| t.signed), cli.trace, &cli.passes);
         let mut roots: Vec<&str> = match alt != s {
             true if !keep_input => vec![&alt],
@@ -1016,17 +1018,17 @@ pub(crate) fn egglog_round(egg: &str, roots: &[&str], cli: &Cli) -> Result<Strin
 /// rounds resume rewriting from the smaller term with the full match budget
 /// available again.
 pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
-    pipe::start();
+    builtin_passes::start();
     let egg = make_egg(&cli.num_type);
     stats::set_width(width_of(&cli.num_type));
-    let env = pipe::Env::new(cli, egg, s);
-    let input = pipe::Cand::new(s, "input");
-    let out = pipe::run(&cli.passes.pipeline, vec![input.clone()], &env)?;
+    let env = lang::eval::Env::new(cli, egg, s);
+    let input = cand::Cand::new(s, "input");
+    let out = lang::eval::run(&cli.passes.pipeline, vec![input.clone()], &env)?;
     let r = out.into_iter().next().unwrap_or(input);
     stats::add(&format!("final/{}", r.origin), 0.0);
     let r = r.term().to_string();
     stats::settle(&eval::parse(&r));
-    if pipe::cut() {
+    if builtin_passes::cut() {
         stats::add("time/cut", 0.0);
     }
     Ok(egglog_to_infix(&r, &|n| norm_const(n, &cli.num_type)))
@@ -1035,7 +1037,7 @@ pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
 /// Whether the last `simplify` on this thread was cut short: a step skipped past a
 /// `time_limit` with the switch `cut` on (the default `pipeline` with `--passes time_limit=MS`).
 pub fn last_run_cut() -> bool {
-    pipe::cut()
+    builtin_passes::cut()
 }
 
 /// Whether `t` has an arithmetic operation or a constant directly under a bitwise one.
@@ -1093,10 +1095,10 @@ pub struct Cli {
         long,
         default_value = "",
         hide_default_value = true,
-        value_parser = sched::Passes::parse,
+        value_parser = passes::Passes::parse,
         help = "Change the pass pipeline, e.g. \"extra=0 off=relate\" (see docs/pipe-language.md)"
     )]
-    pub passes: sched::Passes,
+    pub passes: passes::Passes,
     #[arg(long, help = "Print the pass pipeline in --passes form and exit")]
     pub show_passes: bool,
     #[arg(long, help = "Print the signatures of the built-in pipeline functions (src/builtins.pipe) and exit")]
@@ -1114,7 +1116,7 @@ impl Default for Cli {
             iter_limit: 10,
             max_restarts: 2,
             trace: false,
-            passes: sched::Passes::default(),
+            passes: passes::Passes::default(),
             show_passes: false,
             show_builtins: false,
             stats: false,

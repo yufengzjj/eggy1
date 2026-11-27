@@ -6,7 +6,7 @@ use super::*;
 /// ones come back across its factoring choices and across regions.
 pub(crate) fn simba_memo(t: &T, w: &Ctx) -> Option<T> {
     let key = (w.w, t.clone());
-    let f = || crate::pipe::run_alt(&crate::sched::current().simba, t, w, true);
+    let f = || crate::builtin_passes::run_alt(&crate::passes::current().simba, t, w, true);
     if let Some(r) = memo_get(&w.st.simba_memo, &key, w, "simba", f) {
         return r;
     }
@@ -15,7 +15,7 @@ pub(crate) fn simba_memo(t: &T, w: &Ctx) -> Option<T> {
 
 /// Smallest rebuilt form of the linear region `t` (`Passes::simba`).
 pub(super) fn simba(t: &T, w: &Ctx) -> Option<T> {
-    crate::pipe::run_alt(&crate::sched::current().simba, t, w, false)
+    crate::builtin_passes::run_alt(&crate::passes::current().simba, t, w, false)
 }
 
 /// The leaves of the linear region `t` and, when asked for, its values on {0,1}^n, kept
@@ -220,7 +220,7 @@ fn rebuild_table(gp: &[u64], lv: &[T], konst: u64, w: &Ctx) -> (Vec<(u64, T)>, u
     // one-node placeholders (`Op::LeafOperand` for the operand of a `~` leaf) whose sizes
     // `rebuild_table_uncached` takes from `shape`.
     let shape: Vec<(usize, bool)> = lv.iter().map(|l| (size(l), matches!(l, T::Op(op, _) if *op == Op::Not))).collect();
-    let key = (gp.to_vec(), shape, konst, w.w, crate::sched::limits_key());
+    let key = (gp.to_vec(), shape, konst, w.w, crate::lang::vars::limits_key());
     fn fill(t: &T, lv: &[T]) -> T {
         match t {
             T::Op(Op::Leaf(i), _) => lv[*i].clone(),

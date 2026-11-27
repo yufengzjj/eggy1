@@ -122,7 +122,7 @@ pub(super) fn relate_region(t: &T, w: &Ctx) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
     if lv.len() > w.relate_leaves() {
-        let parts = crate::sched::is_on("relate_parts");
+        let parts = crate::rust_vars::is_on("relate_parts");
         return relate_abstracted(t, w).or_else(|| if parts { relate_parts(t, &lv, w) } else { None });
     }
     relate_complemented(t, &lv, w)

@@ -100,8 +100,8 @@ impl Dec {
             max_vars: limit(Limit::DecomposeMaxVars),
             min_free_size: limit(Limit::DecomposeMinFreeSize),
             max_free_classes: limit(Limit::DecomposeMaxFreeClasses),
-            fill_max_vars: crate::sched::limit_u32(Limit::DecomposeFillMaxVars),
-            xor_max_shared: crate::sched::limit_u32(Limit::DecomposeXorMaxShared),
+            fill_max_vars: crate::rust_vars::limit_u32(Limit::DecomposeFillMaxVars),
+            xor_max_shared: crate::rust_vars::limit_u32(Limit::DecomposeXorMaxShared),
         }
     }
 }

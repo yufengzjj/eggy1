@@ -7,7 +7,7 @@
 
 use crate::eval::{Op, Term as T, size};
 use crate::linear_mba::Ctx;
-use crate::sched::{limit, Limit};
+use crate::rust_vars::{limit, Limit};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -554,7 +554,7 @@ mod tests {
         let vars = vec!["x".to_string(), "y".to_string()];
         let ty = crate::eval::NumType { bits: 8, signed: false };
         let mut h = 0x1234_5678_9abc_def1u64;
-        let proof = crate::sched::in_default_run(Proof::read);
+        let proof = crate::rust_vars::in_default_run(Proof::read);
         let (mut proved, mut refuted) = (0, 0);
         for _ in 0..3000 {
             let (f, g) = (random_term(&mut h, 3), random_term(&mut h, 1));
@@ -575,8 +575,8 @@ mod tests {
     fn table_follows_its_variables() {
         let t = crate::eval::parse(&crate::expr_convert::infix_to_egglog("x & -(x & -(x & y))", true));
         let best = |spec: &str| {
-            let p = crate::sched::Passes::parse(spec).unwrap();
-            crate::pipe::in_run(&p, None, || crate::pipe::Cand::new("(Var \"x\")", "input"), || replacement(&t, &Ctx::new(8)).map(|r| crate::eval::show(&r)))
+            let p = crate::passes::Passes::parse(spec).unwrap();
+            crate::lang::eval::in_run(&p, None, || crate::cand::Cand::new("(Var \"x\")", "input"), || replacement(&t, &Ctx::new(8)).map(|r| crate::eval::show(&r)))
         };
         let plain = best("");
         assert_eq!(plain.as_deref(), Some("(And (Var \"x\") (Var \"y\"))"));

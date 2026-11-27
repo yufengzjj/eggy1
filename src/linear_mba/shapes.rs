@@ -215,7 +215,7 @@ pub(super) fn shape_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w:
     scales.dedup();
     let zero_env: Vec<(T, u64)> = lv.iter().map(|l| (l.clone(), 0)).collect();
     let nf = 1usize << pts;
-    let max = crate::sched::limit(Limit::ShapesMaxSize);
+    let max = crate::rust_vars::limit(Limit::ShapesMaxSize);
     for c in scales {
         let overhead = if c == 1 { 0 } else if c == m { 1 } else { 2 };
         // Table `f` fits when `c·(f(q) - f(0)) = g(q)` at every point: with `f(0) = 0`
@@ -294,10 +294,10 @@ fn meets(a: &[u64; 4], b: &[u64; 4]) -> bool {
 pub(super) fn pair_candidates(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx, limit: usize, cands: &mut Vec<T>) {
     let n = lv.len();
     // One group is a linear table, which `overlapping_terms` covers.
-    if !(1..=3).contains(&n) || !(2..=crate::sched::limit(Limit::PairsMaxGroups)).contains(&groups.len()) {
+    if !(1..=3).contains(&n) || !(2..=crate::rust_vars::limit(Limit::PairsMaxGroups)).contains(&groups.len()) {
         return;
     }
-    let key = (w.w, groups.to_vec(), e0, lv.to_vec(), limit, crate::sched::limits_key());
+    let key = (w.w, groups.to_vec(), e0, lv.to_vec(), limit, crate::lang::vars::limits_key());
     if let Some(r) = w.st.pairs.lock().unwrap().get(&key) {
         cands.extend(r.iter().cloned());
         return;
@@ -322,11 +322,11 @@ fn pair_candidates_uncached(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &C
         .collect();
     scales.sort_unstable_by_key(|&v| (w.signed(v).unsigned_abs(), v));
     scales.dedup();
-    scales.truncate(crate::sched::limit(Limit::PairsMaxScales));
+    scales.truncate(crate::rust_vars::limit(Limit::PairsMaxScales));
     let coef = |c: u64| if c == 1 { 0 } else if c == m { 1 } else { 2 };
-    let (max_shape, max_size) = (crate::sched::limit(Limit::ShapesMaxSize), crate::sched::limit(Limit::PairsMaxSize));
-    let mut budget = crate::sched::limit(Limit::PairsBudget);
-    let max_carries = crate::sched::limit(Limit::PairsMaxCarries);
+    let (max_shape, max_size) = (crate::rust_vars::limit(Limit::ShapesMaxSize), crate::rust_vars::limit(Limit::PairsMaxSize));
+    let mut budget = crate::rust_vars::limit(Limit::PairsBudget);
+    let max_carries = crate::rust_vars::limit(Limit::PairsMaxCarries);
     let mut best = limit;
     let leaf_sizes: Vec<usize> = lv.iter().map(size).collect();
     let group_of: Vec<usize> = (0..w.w).map(|j| groups.iter().position(|(_, mask)| mask >> j & 1 == 1).unwrap_or(0)).collect();

@@ -107,9 +107,9 @@ pub fn time<R>(name: &str, f: impl FnOnce() -> R) -> R {
     r
 }
 
-/// `time`, or the default result when the pass is turned off (`sched::is_off`).
+/// `time`, or the default result when the pass is turned off (`rust_vars::is_off`).
 pub fn optional<R: Default>(name: &str, f: impl FnOnce() -> R) -> R {
-    if crate::sched::is_off(name) {
+    if crate::rust_vars::is_off(name) {
         return R::default();
     }
     time(name, f)
@@ -118,7 +118,7 @@ pub fn optional<R: Default>(name: &str, f: impl FnOnce() -> R) -> R {
 /// `time` for a pass in a chain, which returns its input when turned off: also counts
 /// `pass/NAME/smaller` and adds the nodes it saved to `pass/NAME/gain`.
 pub fn pass<R: Out>(name: &str, input: &Term, f: impl FnOnce() -> R) -> R {
-    if crate::sched::is_off(name) {
+    if crate::rust_vars::is_off(name) {
         return R::skipped(input);
     }
     if !on() {
@@ -135,7 +135,7 @@ pub fn pass<R: Out>(name: &str, input: &Term, f: impl FnOnce() -> R) -> R {
 /// `time` for one of several alternatives, which gives no form when turned off: also
 /// counts `pass/NAME/smaller`; its gain is counted by `won` if it is kept.
 pub fn try_pass<R: Out>(name: &str, input: &Term, f: impl FnOnce() -> R) -> R {
-    if crate::sched::is_off(name) {
+    if crate::rust_vars::is_off(name) {
         return R::skipped(input);
     }
     if !on() {

@@ -8,9 +8,9 @@
 use crate::eval::{Op, Term as T, size};
 use crate::known_bits::{self as kb, lowmask};
 use crate::linear_mba::Ctx;
-use crate::sched::{Limit, limit, limit_u32};
+use crate::rust_vars::{Limit, limit, limit_u32};
 
-/// The limits a `Pass` reads (`crate::sched::Limit`), read once when it starts.
+/// The limits a `Pass` reads (`crate::rust_vars::Limit`), read once when it starts.
 #[derive(Clone, Copy)]
 struct Lims {
     max_bits: u32,
@@ -266,7 +266,7 @@ impl<'a> Pass<'a> {
 
     /// Distinct values of a `det` subterm whose bits from `m` up are known, if at most `max_values`.
     fn values(&mut self, t: &T, m: u32) -> Option<(Vec<u64>, Prog)> {
-        let key = (self.w.w, t.clone(), m, crate::sched::limits_key());
+        let key = (self.w.w, t.clone(), m, crate::lang::vars::limits_key());
         // A hit draws the same budget as computing it again, so later calls see the same budget.
         if let Some((cost, vals, prog)) = self.w.low_values().0.lock().unwrap().get(&key) {
             self.budget = self.budget.checked_sub(*cost)?;
@@ -926,7 +926,7 @@ mod tests {
 
     #[test]
     fn known_bits_match_evaluation() {
-        crate::sched::in_default_run(|| {
+        crate::rust_vars::in_default_run(|| {
             let mut h = 0x2545_f491_4f6c_dd1du64;
             for k in 0..600 {
                 let ty = NumType { bits: 8, signed: k % 2 == 1 };
@@ -969,7 +969,7 @@ mod tests {
     /// The `kz` rules and `info` agree with evaluation, and `info` knows every zero `kz` knows.
     #[test]
     fn known_bits_refine_egglog_kz() {
-        crate::sched::in_default_run(|| {
+        crate::rust_vars::in_default_run(|| {
             let mut h = 0x6a09_e667_f3bc_c908u64;
             let mut finer = 0;
             for k in 0..600 {
@@ -991,7 +991,7 @@ mod tests {
 
     #[test]
     fn matches_exhaustive_check_at_8_bits() {
-        crate::sched::in_default_run(|| {
+        crate::rust_vars::in_default_run(|| {
             let w = Ctx::new(8);
             let mut h = 0x9e37_79b9_7f4a_7c15u64;
             let (mut changed, mut in_context) = (0, 0);
@@ -1041,7 +1041,7 @@ mod tests {
 
     #[test]
     fn product_noise_matches_evaluation() {
-        crate::sched::in_default_run(|| {
+        crate::rust_vars::in_default_run(|| {
             let mut h = 0x3c6e_f372_fe94_f82bu64;
             let mut changed = 0;
             for k in 0..400 {
@@ -1095,7 +1095,7 @@ mod tests {
 
     #[test]
     fn nested_candidates_match_exhaustive_check_at_8_bits() {
-        crate::sched::in_default_run(|| {
+        crate::rust_vars::in_default_run(|| {
             let w = Ctx::new(8);
             let mut h = 0x6a09_e667_f3bc_c908u64;
             let mut changed = 0;
@@ -1120,7 +1120,7 @@ mod tests {
     /// constant multipliers and negated xors, at 8 bits on every input.
     #[test]
     fn evaluated_low_bits_match_exhaustive_check() {
-        crate::sched::in_default_run(|| {
+        crate::rust_vars::in_default_run(|| {
             let w = Ctx::new(8);
             let op = |o: Op, a: T, b: T| T::Op(o, vec![a, b]);
             let mut h = 0x5851_f42d_4c95_7f2du64;

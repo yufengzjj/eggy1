@@ -1,7 +1,7 @@
 //! A test that no term with fewer nodes equals a given one, so saturating it cannot help.
 
 use crate::eval::{apply, size, vars, NumType, Op, Term};
-use crate::sched::{limit, Limit};
+use crate::rust_vars::{limit, Limit};
 
 const BINARY: [Op; 11] = [Op::Add, Op::Sub, Op::Mul, Op::Div, Op::Mod, Op::And, Op::Or, Op::Xor, Op::Shl, Op::Shr, Op::Mulhi];
 
@@ -243,7 +243,7 @@ mod tests {
     use crate::expr_convert::infix_to_egglog;
 
     fn minimal(e: &str, ty: &str) -> bool {
-        crate::sched::in_default_run(|| is_minimal(&crate::eval::parse(&infix_to_egglog(e, true)), NumType::from_name(ty).unwrap()))
+        crate::rust_vars::in_default_run(|| is_minimal(&crate::eval::parse(&infix_to_egglog(e, true)), NumType::from_name(ty).unwrap()))
     }
 
     /// `drive` relies on this to use `is_t_minimal`.
@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn t_terms() {
-        let t = |e: &str| crate::sched::in_default_run(|| is_t_minimal(&crate::eval::parse(&infix_to_egglog(e, true))));
+        let t = |e: &str| crate::rust_vars::in_default_run(|| is_t_minimal(&crate::eval::parse(&infix_to_egglog(e, true))));
         for e in ["-2*(x|y) + 1", "(x & -4) ^ 0x1234567", "14 * ~(y|x)", "6 * ~x", "(x ^ y) * (x | 5)", "(x & 0x7f) * 3"] {
             assert!(t(e), "{e}");
         }

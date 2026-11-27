@@ -7,7 +7,8 @@
 //! position then has its own bitwise function, see `semi_linear`.
 
 use crate::eval::{Op, Term as T, show, size};
-use crate::sched::{Limit, Passes, limit};
+use crate::rust_vars::{Limit, limit};
+use crate::passes::Passes;
 use crate::stats;
 use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::Relaxed};
@@ -78,10 +79,10 @@ impl Ctx {
         &self.st.low_values
     }
     pub(super) fn semi_leaves(&self) -> usize {
-        crate::sched::read(crate::sched::SEMI_LEAVES) as usize
+        crate::lang::vars::read(crate::rust_vars::SEMI_LEAVES) as usize
     }
     pub(super) fn relate_leaves(&self) -> usize {
-        crate::sched::read(crate::sched::RELATE_LEAVES) as usize
+        crate::lang::vars::read(crate::rust_vars::RELATE_LEAVES) as usize
     }
     pub(super) fn peel_depth(&self) -> usize {
         self.read(|d| d.peel = true);
@@ -102,10 +103,10 @@ impl Ctx {
     pub(crate) fn mark_cut(&self) {
         self.read(|d| d.cut = true);
     }
-    /// Takes one from the budget variable `i` (`crate::sched::take`), or records a cut when
+    /// Takes one from the budget variable `i` (`crate::lang::vars::take`), or records a cut when
     /// it is used up.
     fn take_budget(&self, i: usize) -> bool {
-        let ok = crate::sched::take(i);
+        let ok = crate::lang::vars::take(i);
         if !ok {
             self.read(|d| d.cut = true);
         }
@@ -162,14 +163,14 @@ impl Deps {
     }
 }
 
-/// A memoized result, valid where the variables in `read` (`crate::sched::var`) have the
+/// A memoized result, valid where the variables in `read` (`crate::lang::vars::var`) have the
 /// values `vals` and the run state it read has the values given.
 #[derive(Clone)]
 struct Entry<V> {
     v: V,
     /// `State::used` of the computation.
     used: u8,
-    read: crate::sched::ReadSet,
+    read: crate::lang::vars::ReadSet,
     vals: Vec<u64>,
     peel: Option<usize>,
     /// The `clustered` nesting depths it holds at, and `Deps::absent` sorted.
@@ -180,7 +181,7 @@ struct Entry<V> {
 /// Bits of `State::used`.
 pub(crate) const CLUSTERED: u8 = 1;
 pub(crate) const WIDE: u8 = 2;
-// The memos below record no reads, so their keys hold `crate::sched::limits_key`.
+// The memos below record no reads, so their keys hold `crate::lang::vars::limits_key`.
 type RebuiltKey = (Vec<u64>, Vec<(usize, bool)>, u64, u32, u64);
 type GroupedKey = (Vec<(Vec<u64>, u64)>, Vec<T>, u64, u32, u64);
 type PairKey = (u32, Vec<(Vec<u64>, u64)>, u64, Vec<T>, usize, u64);
@@ -555,27 +556,27 @@ pub(crate) fn rewrite(t: &T, w: &Ctx) -> T {
     if let Some(r) = memo_get(&w.st.rewritten, &key, w, "rewrite", f) {
         return r;
     }
-    if !w.take_budget(crate::sched::REWRITES) {
+    if !w.take_budget(crate::rust_vars::REWRITES) {
         return t.clone();
     }
     memo_compute(&w.st.rewritten, key, w, f)
 }
 
-/// `t` rebuilt by `Passes::subs` entry `i` (`crate::sched::SUBS`), for a pass that rebuilds
+/// `t` rebuilt by `Passes::subs` entry `i` (`crate::passes::SUBS`), for a pass that rebuilds
 /// a subterm.
 pub(crate) fn sub(i: usize, t: &T, w: &Ctx) -> T {
-    let p = crate::sched::current();
+    let p = crate::passes::current();
     match &p.subs[i] {
-        crate::sched::Pipe::App(crate::sched::Fun::Builtin(b), _) if b.name == "rewrite" => rewrite(t, w),
-        crate::sched::Pipe::App(crate::sched::Fun::Builtin(b), _) if b.name == "rebuild" => rebuild_once(t, w),
-        pipe => crate::pipe::run_term(pipe, t, w),
+        crate::lang::ast::Pipe::App(crate::lang::ast::Fun::Builtin(b), _) if b.name == "rewrite" => rewrite(t, w),
+        crate::lang::ast::Pipe::App(crate::lang::ast::Fun::Builtin(b), _) if b.name == "rebuild" => rebuild_once(t, w),
+        pipe => crate::builtin_passes::run_term(pipe, t, w),
     }
 }
 
-pub(crate) use crate::sched::sub_index;
+pub(crate) use crate::passes::sub_index;
 
 fn rewrite_uncached(t: &T, w: &Ctx) -> T {
-    crate::pipe::run_term(&crate::sched::current().rewrite, t, w)
+    crate::builtin_passes::run_term(&crate::passes::current().rewrite, t, w)
 }
 
 /// `t` with its linear region rebuilt by `rebuild` and the atom leaves of that form
@@ -754,15 +755,15 @@ fn cluster_regions(t: &T, w: &Ctx, in_lin: bool) -> T {
 
 /// `f()`, which of `clustered` and `wide_blocks` gave a kept form during it, the variables
 /// it read and what else it read; all of it also counts for the enclosing call.
-fn tracked<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, u8, crate::sched::ReadSet, Deps) {
+fn tracked<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, u8, crate::lang::vars::ReadSet, Deps) {
     let used0 = w.st.used.swap(0, Relaxed);
-    let read0 = crate::sched::swap_read(crate::sched::ReadSet::EMPTY);
+    let read0 = crate::lang::vars::swap_read(crate::lang::vars::ReadSet::EMPTY);
     let deps0 = std::mem::take(&mut *w.st.deps.lock().unwrap());
     let r = f();
     let used = w.st.used.load(Relaxed);
     w.st.used.store(used0 | used, Relaxed);
-    let read = crate::sched::swap_read(crate::sched::ReadSet::EMPTY);
-    crate::sched::swap_read(read0.union(read));
+    let read = crate::lang::vars::swap_read(crate::lang::vars::ReadSet::EMPTY);
+    crate::lang::vars::swap_read(read0.union(read));
     let deps = {
         let mut d = w.st.deps.lock().unwrap();
         let inner = std::mem::replace(&mut *d, deps0);
@@ -775,23 +776,23 @@ fn tracked<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, u8, crate::sched::ReadSet, 
 /// `f()` with nothing it changes in the run state kept: budgets, `used`, the tracked reads.
 fn isolated<R>(w: &Ctx, f: impl FnOnce() -> R) -> (R, Deps) {
     let st = &w.st;
-    let budgets = [crate::sched::REWRITES, crate::sched::BIT_SPLIT_BUDGET].map(|i| (i, crate::sched::get(i)));
+    let budgets = [crate::rust_vars::REWRITES, crate::rust_vars::BIT_SPLIT_BUDGET].map(|i| (i, crate::lang::vars::get(i)));
     let used = st.used.load(Relaxed);
-    let read = crate::sched::swap_read(crate::sched::ReadSet::EMPTY);
+    let read = crate::lang::vars::swap_read(crate::lang::vars::ReadSet::EMPTY);
     let deps = st.deps.lock().unwrap().clone();
     let (r, _, _, d) = tracked(w, f);
-    budgets.iter().for_each(|&(i, v)| crate::sched::set(i, v));
+    budgets.iter().for_each(|&(i, v)| crate::lang::vars::set(i, v));
     st.used.store(used, Relaxed);
-    crate::sched::swap_read(read);
+    crate::lang::vars::swap_read(read);
     *st.deps.lock().unwrap() = deps;
     (r, d)
 }
 
 /// The bits of `State::used` whose pass is now off.
 pub(super) fn used_off() -> u8 {
-    const C: usize = crate::sched::inner_index("clustered");
-    const W: usize = crate::sched::inner_index("wide_blocks");
-    (crate::sched::is_off_at(C) as u8 * CLUSTERED) | (crate::sched::is_off_at(W) as u8 * WIDE)
+    const C: usize = crate::rust_vars::inner_index("clustered");
+    const W: usize = crate::rust_vars::inner_index("wide_blocks");
+    (crate::rust_vars::is_off_at(C) as u8 * CLUSTERED) | (crate::rust_vars::is_off_at(W) as u8 * WIDE)
 }
 
 /// With `EGGY_CHECK_MEMO` set, each memo hit outside another check is computed again and
@@ -813,7 +814,7 @@ fn memo_get<K: std::hash::Hash + Eq, V: Clone + PartialEq>(memo: &Memo<K, V>, ke
         m.get(key)?.iter().find(|e| holds(e, w)).cloned()?
     };
     w.st.used.fetch_or(e.used, Relaxed);
-    crate::sched::swap_read(crate::sched::swap_read(crate::sched::ReadSet::EMPTY).union(e.read));
+    crate::lang::vars::swap_read(crate::lang::vars::swap_read(crate::lang::vars::ReadSet::EMPTY).union(e.read));
     let at = w.clustering_depth();
     let shift = (e.depths.0 - at, e.depths.1 - at);
     w.read(|d| d.add(&Deps { peel: e.peel.is_some(), shift, absent: e.absent.clone(), cut: false }));
@@ -830,7 +831,7 @@ fn memo_get<K: std::hash::Hash + Eq, V: Clone + PartialEq>(memo: &Memo<K, V>, ke
 
 fn holds<V>(e: &Entry<V>, w: &Ctx) -> bool {
     let st = &w.st;
-    crate::sched::same_values(e.read, &e.vals)
+    crate::lang::vars::same_values(e.read, &e.vals)
         && e.peel.is_none_or(|v| v == st.peel_depth.load(Relaxed))
         && (e.depths.0..=e.depths.1).contains(&w.clustering_depth())
         && (e.absent.is_empty() || !w.in_clustering(&e.absent))
@@ -844,8 +845,8 @@ fn memo_compute<K: std::hash::Hash + Eq, V: Clone>(memo: &Memo<K, V>, key: K, w:
     }
     // `clustered` and `wide_blocks` are alternatives: a result neither gave holds without them.
     for (bit, name) in [(CLUSTERED, "clustered"), (WIDE, "wide_blocks")] {
-        let i = crate::sched::inner_index(name);
-        if used & bit == 0 && crate::sched::get(i) != 0 {
+        let i = crate::rust_vars::inner_index(name);
+        if used & bit == 0 && crate::lang::vars::get(i) != 0 {
             read.remove(i);
         }
     }
@@ -857,7 +858,7 @@ fn memo_compute<K: std::hash::Hash + Eq, V: Clone>(memo: &Memo<K, V>, key: K, w:
         v: v.clone(),
         used,
         read,
-        vals: crate::sched::values(read),
+        vals: crate::lang::vars::values(read),
         peel: d.peel.then(|| st.peel_depth.load(Relaxed)),
         depths: {
             let at = w.clustering_depth();
@@ -868,7 +869,7 @@ fn memo_compute<K: std::hash::Hash + Eq, V: Clone>(memo: &Memo<K, V>, key: K, w:
     let mut m = memo.lock().unwrap();
     let list = m.entry(key).or_default();
     list.retain(|o| !holds(o, w));
-    let most = crate::sched::limit_unread(Limit::MemoContexts);
+    let most = crate::rust_vars::limit_unread(Limit::MemoContexts);
     if most == 0 {
         return v;
     }
@@ -903,7 +904,7 @@ pub(crate) fn rebuild_once(t: &T, w: &Ctx) -> T {
     crate::tfunc::replacement(&t, w).unwrap_or_else(|| crate::tfunc::simplify(&cluster_regions(&rewrite(&t, w), w, false), w))
 }
 
-/// The passes over one term that `crate::pipe` runs by name: each gives an equivalent
+/// The passes over one term that `crate::lang::eval` runs by name: each gives an equivalent
 /// term, or `None` when it does not apply (see `ALTERNATIVES`).
 pub(crate) const TERM_PASSES: &[(&str, fn(&T, &Ctx) -> Option<T>)] = &[
     ("lowbits", |t, w| Some(crate::lowbits::simplify(t, w))),
@@ -961,7 +962,7 @@ pub(crate) const ALTERNATIVES: [(&str, u8); 13] = [
     ("one_wide_term", 0),
 ];
 
-/// Number of leaves of the linear region `t` (`crate::pipe` conditions).
+/// Number of leaves of the linear region `t` (`crate::builtin_passes` conditions).
 pub(crate) fn leaf_count(t: &T, w: &Ctx) -> usize {
     region_leaves(t, w).len()
 }
@@ -994,15 +995,15 @@ pub fn simplify_linear_with(egg: &str, w: u32, signed: Option<bool>, trace: bool
     thread_local! {
         static LAST: std::cell::RefCell<Last> = const { std::cell::RefCell::new(None) };
     }
-    crate::pipe::in_run(p, None, || crate::pipe::Cand::new(egg, "input"), || {
+    crate::lang::eval::in_run(p, None, || crate::cand::Cand::new(egg, "input"), || {
         // A variable bound where it is called (an assignment, `(off NAME)`) changes the result as `p` does.
-        let vars = crate::sched::key();
+        let vars = crate::lang::vars::key();
         let hit = |(e, bits, s, t, q, v, _): &&(String, u32, Option<bool>, bool, Passes, Vec<u64>, Result)| e == egg && *bits == w && *s == signed && *t == trace && q == p && *v == vars;
         match LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.6.clone())) {
             Some(r) => r,
             None => {
                 let r = simplify_linear_uncached(egg, w, signed, trace, p);
-                if crate::pipe::failed().is_some() {
+                if crate::lang::eval::failed().is_some() {
                     return r;
                 }
                 LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, signed, trace, p.clone(), vars, r.clone())));
@@ -1041,9 +1042,9 @@ fn drop_identities(t: &T, w: &Ctx) -> T {
 
 /// The pre-pass result and the forms to union with it: `Passes::prepass` on `egg`.
 fn simplify_linear_uncached(egg: &str, w: u32, signed: Option<bool>, trace: bool, p: &Passes) -> (String, Vec<String>) {
-    let env = crate::pipe::Env::prepass(p, w, signed, trace, egg);
-    let input = crate::pipe::Cand::new(egg, "input");
-    let out = crate::pipe::run(&p.prepass, vec![input], &env).inspect_err(crate::pipe::fail).unwrap_or_default();
+    let env = crate::lang::eval::Env::prepass(p, w, signed, trace, egg);
+    let input = crate::cand::Cand::new(egg, "input");
+    let out = crate::lang::eval::run(&p.prepass, vec![input], &env).inspect_err(crate::lang::eval::fail).unwrap_or_default();
     let mut out = out.into_iter().map(|c| c.term().to_string());
     let main = out.next().unwrap_or_else(|| egg.to_string());
     (main, out.collect())

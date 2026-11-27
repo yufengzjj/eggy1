@@ -82,7 +82,7 @@ fn shifted_term(r: &mut Rng, depth: u32) -> T {
 
 #[test]
 fn unshift_and_halve_preserve_value() {
-    crate::sched::in_default_run(|| {
+    crate::rust_vars::in_default_run(|| {
         let mut r = Rng(0x6a09e667f3bcc909);
         let (mut unshifted, mut halved) = (0, 0);
         for _ in 0..400 {
@@ -125,7 +125,7 @@ fn mba_op(r: &mut Rng, a: &T, a_lin: &T, b: &T) -> T {
 
 #[test]
 fn relate_preserves_value() {
-    crate::sched::in_default_run(|| {
+    crate::rust_vars::in_default_run(|| {
         let mut r = Rng(0x3c6ef372fe94f82b);
         let op = |o: Op, x: Vec<T>| T::Op(o, x);
         let mut changed = 0;
@@ -167,7 +167,7 @@ fn relate_preserves_value() {
 
 #[test]
 fn sum_size_matches_build_sum() {
-    crate::sched::in_default_run(|| {
+    crate::rust_vars::in_default_run(|| {
         let mut r = Rng(0x9e3779b97f4a7c15);
         for w in [8u32, 64] {
             let wd = Ctx::new(w);
@@ -191,7 +191,7 @@ fn sum_size_matches_build_sum() {
 
 #[test]
 fn peel_preserves_value() {
-    crate::sched::in_default_run(|| {
+    crate::rust_vars::in_default_run(|| {
         let op = |o: Op, a: Vec<T>| T::Op(o, a);
         let var = |s: &str| T::Var(s.into());
         let lv = [var("x"), var("y"), var("z"), var("u"), op(Op::Mul, vec![var("a"), var("b")]), op(Op::Add, vec![var("c"), var("x")]), var("v"), var("w")];
@@ -287,7 +287,7 @@ fn split_bits_and_wide_regions_preserve_value() {
 
 #[test]
 fn recombined_products_preserve_value() {
-    crate::sched::in_default_run(|| {
+    crate::rust_vars::in_default_run(|| {
         let mut r = Rng(0x1234_5678_9abc_def1);
         let mut changed = 0;
         for k in 0..300 {
@@ -317,7 +317,7 @@ fn recombined_products_preserve_value() {
 
 #[test]
 fn memoized_rewrites_do_not_depend_on_earlier_settings() {
-    crate::sched::in_default_run(|| {
+    crate::rust_vars::in_default_run(|| {
         let mut r = Rng(0x9e3779b97f4a7c15);
         let mut restricted_differs = 0;
         for w in [8u32, 32] {
@@ -325,14 +325,14 @@ fn memoized_rewrites_do_not_depend_on_earlier_settings() {
                 let depth = 2 + (r.next() % 3) as u32;
                 let t = random_term_in(&mut r, depth, &VARS[..4]);
                 let shared = Ctx::new(w);
-                let narrow = crate::sched::in_scope(|| {
-                    crate::sched::bind(crate::sched::SEMI_LEAVES, 2);
-                    crate::sched::bind(crate::sched::RELATE_LEAVES, 2);
+                let narrow = crate::lang::vars::in_scope(|| {
+                    crate::lang::vars::bind(crate::rust_vars::SEMI_LEAVES, 2);
+                    crate::lang::vars::bind(crate::rust_vars::RELATE_LEAVES, 2);
                     (rewrite(&t, &shared), relate(&t, &shared))
                 });
-                crate::sched::with_off(&["semi_shapes", "rebuild_values", "common_multiple"], || (rewrite(&t, &shared), relate(&t, &shared)));
-                crate::sched::in_scope(|| {
-                    crate::sched::bind(crate::sched::REWRITES, 2);
+                crate::rust_vars::with_off(&["semi_shapes", "rebuild_values", "common_multiple"], || (rewrite(&t, &shared), relate(&t, &shared)));
+                crate::lang::vars::in_scope(|| {
+                    crate::lang::vars::bind(crate::rust_vars::REWRITES, 2);
                     rewrite(&t, &shared)
                 });
                 let again = (rewrite(&t, &shared), relate(&t, &shared));
@@ -348,7 +348,7 @@ fn memoized_rewrites_do_not_depend_on_earlier_settings() {
 
 #[test]
 fn rewrite_preserves_value() {
-    crate::sched::in_default_run(|| {
+    crate::rust_vars::in_default_run(|| {
         let mut r = Rng(0x2545f4914f6cdd1d);
         let mut changed = 0;
         for w in [8u32, 16, 32, 64] {
@@ -405,8 +405,8 @@ fn bool_expr_cache_keeps_decompose_values_apart() {
     // `((w ^ x) | (x & y)) & ~(y ^ z)` over variables 0..4, which `decompose` splits.
     let tt = (0..16usize).filter(|&p| ((p ^ p >> 1) | (p >> 1 & p >> 2)) & !(p >> 2 ^ p >> 3) & 1 == 1).fold(0u64, |t, p| t | 1 << p);
     let cost = |spec: &str| {
-        let p = crate::sched::Passes::parse(spec).unwrap();
-        crate::pipe::in_run(&p, None, || crate::pipe::Cand::new("(Var \"x\")", "input"), || {
+        let p = crate::passes::Passes::parse(spec).unwrap();
+        crate::lang::eval::in_run(&p, None, || crate::cand::Cand::new("(Var \"x\")", "input"), || {
             let BE::E(c, _) = bool_expr_canon(tt, 4) else { panic!("not constant") };
             (c, bool_expr_cached_now(tt, 4))
         })
@@ -436,8 +436,8 @@ fn shape_candidates_follow_shapes_max_size() {
     let t = T::Op(Op::Or, vec![T::Op(Op::Xor, vec![x.clone(), T::Num(0x5a)]), T::Op(Op::And, vec![y.clone(), T::Num(0x33)])]);
     let lv = [x, y];
     let best = |spec: &str| {
-        let p = crate::sched::Passes::parse(spec).unwrap();
-        crate::pipe::in_run(&p, None, || crate::pipe::Cand::new("(Var \"x\")", "input"), || {
+        let p = crate::passes::Passes::parse(spec).unwrap();
+        crate::lang::eval::in_run(&p, None, || crate::cand::Cand::new("(Var \"x\")", "input"), || {
             let w = Ctx::new(8);
             let prog = Prog::new(&t, &lv, &w);
             let base: Vec<u64> = (0..w.w).flat_map(|j| prog.run_many(4, |i, q| ((q >> i & 1) as u64) << j, &w)).collect();
@@ -455,7 +455,7 @@ fn shape_candidates_follow_shapes_max_size() {
 
 #[test]
 fn bool_expr_matches_table() {
-    crate::sched::in_default_run(|| {
+    crate::rust_vars::in_default_run(|| {
         let check = |n: usize, tt: u64| {
             let vars: Vec<usize> = (0..n).collect();
             let BE::E(cost, b) = bool_expr(tt, &vars) else { panic!("n={n} table {tt:#x} not found") };

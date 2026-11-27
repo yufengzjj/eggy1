@@ -200,7 +200,7 @@ fn split_points(t: &T, w: &Ctx) -> Vec<(T, u32)> {
         a.iter().for_each(|x| go(x, w, most, out));
     }
     let mut out = Vec::new();
-    go(t, w, crate::sched::limit_u32(Limit::SplitMaxUnknownBits), &mut out);
+    go(t, w, crate::rust_vars::limit_u32(Limit::SplitMaxUnknownBits), &mut out);
     out
 }
 

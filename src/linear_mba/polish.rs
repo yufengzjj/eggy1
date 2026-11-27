@@ -391,7 +391,7 @@ pub(crate) const POLISH: [Pass; 10] = [
     ("factor", |t, w| factor_regions(t, w, false)),
 ];
 
-/// `crate::sched::polish` with the default passes on the egglog term `egg` of type `ty`.
+/// `crate::cli::passes::polish` with the default passes on the egglog term `egg` of type `ty`.
 pub fn polish(egg: &str, ty: crate::eval::NumType) -> String {
-    crate::pipe::polish(egg, ty.bits, Some(ty.signed), &crate::sched::Passes::default()).0
+    crate::builtin_passes::polish(egg, ty.bits, Some(ty.signed), &crate::passes::Passes::default()).0
 }

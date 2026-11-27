@@ -82,7 +82,7 @@ struct Outcome {
 
 fn main() {
     let args = Args::parse();
-    match eggy1::sched::Passes::parse_noting(&args.passes) {
+    match eggy1::passes::Passes::parse_noting(&args.passes) {
         Err(e) => {
             eprintln!("--passes: {e}");
             std::process::exit(2);
@@ -329,7 +329,7 @@ fn run_one(args: &Args) {
         iter_limit: args.iter_limit,
         max_restarts: args.max_restarts,
         trace: args.trace,
-        passes: eggy1::sched::Passes::parse(&format!("time_limit={} {}", time_limit_ms(args), args.passes)).expect("bad --passes"),
+        passes: eggy1::passes::Passes::parse(&format!("time_limit={} {}", time_limit_ms(args), args.passes)).expect("bad --passes"),
         expr: input.clone(),
         ..Default::default()
     };

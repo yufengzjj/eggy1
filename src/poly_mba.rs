@@ -7,7 +7,7 @@
 
 use crate::eval::{Op, Term as T, size};
 use crate::linear_mba::{Kind, max_leaves, Ctx, build_sum, Prog, const_shift, kind, leaves, simba_memo};
-use crate::sched::{Limit, limit};
+use crate::rust_vars::{Limit, limit};
 use std::collections::BTreeMap;
 
 /// Conjunction of leaves, as a set of leaf indices.
@@ -975,7 +975,7 @@ mod tests {
 
     #[test]
     fn products_of_linear_mbas() {
-        crate::sched::in_default_run(|| {
+        crate::rust_vars::in_default_run(|| {
             let mut r = Rng(0x7f4a7c15_9e3779b9);
             for bits in [8u32, 64] {
                 let w = Ctx::new(bits);
@@ -1001,7 +1001,7 @@ mod tests {
 
     #[test]
     fn cubes_of_linear_mbas() {
-        crate::sched::in_default_run(|| {
+        crate::rust_vars::in_default_run(|| {
             let mut r = Rng(0x2545_f491_4f6c_dd1d);
             let mut factored = 0;
             for bits in [8u32, 64] {
@@ -1034,7 +1034,7 @@ mod tests {
     /// masked expansion, keep their value.
     #[test]
     fn masked_products_keep_value() {
-        crate::sched::in_default_run(|| {
+        crate::rust_vars::in_default_run(|| {
             let mut r = Rng(0x94d0_49bb_1331_11eb);
             let mut built = 0;
             for bits in [8u32, 64] {

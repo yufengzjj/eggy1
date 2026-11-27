@@ -220,7 +220,7 @@ pub(super) fn small_blocks(t: &T, w: &Ctx) -> Option<T> {
     let m = w.mask;
     // Blocks of at most `d` leaves mean degree <= `d`, so the coefficients come from the
     // points with at most `d` ones; the other points must then match the interpolation.
-    let d = crate::sched::limit_u32(Limit::BlockMaxBlock);
+    let d = crate::rust_vars::limit_u32(Limit::BlockMaxBlock);
     let pts: Vec<usize> = (0..1usize << n).filter(|p| p.count_ones() <= d).collect();
     let prog = Prog::new(t, &lv, w);
     let mut coef = vec![0u64; 1 << n];
@@ -420,14 +420,14 @@ pub(super) fn wide_blocks(t: &T, w: &Ctx) -> Option<T> {
     thread_local! {
         static CACHE: std::cell::RefCell<crate::eval::FastMap<(u32, u64, T), Option<T>>> = Default::default();
     }
-    let key = (w.w, crate::sched::limits_key(), t.clone());
+    let key = (w.w, crate::lang::vars::limits_key(), t.clone());
     if let Some(r) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
         return r;
     }
     let r = wide_blocks_uncached(t, lv, w);
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
-        if c.len() >= crate::sched::limit_unread(Limit::WideBlocksCacheSize) {
+        if c.len() >= crate::rust_vars::limit_unread(Limit::WideBlocksCacheSize) {
             c.clear();
         }
         c.insert(key, r.clone());
