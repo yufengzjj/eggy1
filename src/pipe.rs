@@ -94,7 +94,8 @@ fn feature(s: &stats::Shape, i: usize) -> usize {
 
 /// The pass of the internal name `name`: `Pass::name`, `save/R` for `(save R)`.
 pub fn resolve(name: &str) -> Option<Pass> {
-    for (p, f) in [("save/", Pass::Save as fn(String) -> Pass), ("load/", Pass::Load), ("label/", Pass::Label)] {
+    let prefixes = [("save/", Pass::Save as fn(String) -> Pass), ("load/", Pass::Load), ("label/", Pass::Label), ("clear/", Pass::Clear), ("note/", Pass::Note), ("take_min/", Pass::TakeMin)];
+    for (p, f) in prefixes {
         if let Some(r) = name.strip_prefix(p).filter(|r| !r.is_empty()) {
             return Some(f(r.to_string()));
         }
@@ -211,8 +212,6 @@ pub struct Env<'a> {
     deferred: RefCell<Option<Option<Won>>>,
     /// The run rebuilds a linear cofactor of `poly_mba`.
     cofactor: bool,
-    /// The smallest candidate each enclosing `smallest` saw, innermost last.
-    seen: RefCell<Vec<Option<(usize, Cand)>>>,
     /// The runs of the enclosing `scope`s, innermost last.
     ctxs: RefCell<Vec<Ctx>>,
 }
@@ -221,14 +220,16 @@ pub struct Env<'a> {
 /// run's input and registers and the arguments of the call that run is.
 struct Lex {
     input: String,
-    /// Shared with the caller in the call of an `@inline` function.
+    /// Shared with the caller in the call of an `@inline` function, as `notes` is.
     regs: Rc<RefCell<HashMap<String, Vec<Cand>>>>,
+    /// The open note registers, newest last, and the candidate each keeps.
+    notes: Rc<RefCell<Vec<(String, Option<Cand>)>>>,
     frame: Option<Frame>,
 }
 
 impl Lex {
     fn new(input: &str, frame: Option<Frame>) -> Rc<Lex> {
-        Rc::new(Lex { input: input.to_string(), regs: Default::default(), frame })
+        Rc::new(Lex { input: input.to_string(), regs: Default::default(), notes: Default::default(), frame })
     }
 }
 
@@ -254,7 +255,7 @@ impl<'a> Env<'a> {
 
     fn with(cli: Option<&'a Cli>, passes: &'a Passes, w: u32, signed: Option<bool>, trace: bool, egg: String, input: &str) -> Env<'a> {
         let lex = RefCell::new(Lex::new(input, None));
-        Env { cli, passes, w, signed, trace, egg: egg.into(), lex, moved: Cell::new(false), wins: Cell::new(0), deferred: Default::default(), cofactor: false, seen: Default::default(), ctxs: Default::default() }
+        Env { cli, passes, w, signed, trace, egg: egg.into(), lex, moved: Cell::new(false), wins: Cell::new(0), deferred: Default::default(), cofactor: false, ctxs: Default::default() }
     }
 
     fn cli(&self, pass: &str) -> &'a Cli {
@@ -400,16 +401,30 @@ pub fn cut() -> bool {
 /// skipped step (`time_limit/skipped`), and records a cut of the run when the switch `cut` is
 /// on. Results computed then are not memoized (`Ctx::mark_cut`).
 fn past_deadline(secs: f64, env: &Env) -> bool {
-    let at = crate::sched::get(crate::sched::DEADLINE);
-    if at == crate::sched::NONE || crate::sched::epoch_ns().saturating_add((secs * 1e9) as u64) < at {
-        return false;
+    past(secs) && {
+        skipped(env);
+        true
     }
+}
+
+fn past(secs: f64) -> bool {
+    let at = crate::sched::get(crate::sched::DEADLINE);
+    at != crate::sched::NONE && crate::sched::epoch_ns().saturating_add((secs * 1e9) as u64) >= at
+}
+
+/// Counts a step skipped past the time limit, as `past_deadline` does.
+fn skipped(env: &Env) {
     stats::add("time_limit/skipped", 0.0);
     if crate::sched::is_on("cut") {
         CUT.with(|c| c.set(true));
     }
     env.ctx(|c| c.mark_cut());
-    true
+}
+
+/// Whether `p` calls an `@uncounted` function, whose skip past the time limit `skipped`
+/// does not count.
+fn uncounted(p: &Pipe) -> bool {
+    matches!(p, Pipe::Pass(q) if crate::builtins::of_pass(q).is_some_and(|s| s.uncounted))
 }
 
 /// `f` as a scope (a sequence, `scope` or a pipeline run): an assignment inside it ends
@@ -487,10 +502,16 @@ fn bookkeeping(p: &Pipe) -> bool {
     match p {
         Pipe::Seq(_) | Pipe::Filter(_) | Pipe::Param(..) => true,
         Pipe::Call(c) => c.def.inline,
-        Pipe::Pass(Pass::Save(_) | Pass::Load(_) | Pass::Label(_) | Pass::Off(_) | Pass::On(_) | Pass::Assign(..)) => true,
+        Pipe::Pass(Pass::Save(_) | Pass::Load(_) | Pass::Label(_) | Pass::Clear(_) | Pass::TakeMin(_) | Pass::Off(_) | Pass::On(_) | Pass::Assign(..)) => true,
         Pipe::Pass(Pass::Set(i)) => matches!(SET_PASSES[*i], "id" | "none" | "within" | "pre_done"),
         _ => false,
     }
+}
+
+/// Whether `p` is a step that computes candidates: a call of a function or `def` that is
+/// not bookkeeping and takes no pipeline, other than `note`.
+pub(crate) fn computes(p: &Pipe) -> bool {
+    matches!(p, Pipe::Pass(_) | Pipe::Call(_)) && !matches!(p, Pipe::Pass(Pass::Note(_))) && !bookkeeping(p)
 }
 
 fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
@@ -498,7 +519,10 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
     if let Some(e) = failed() {
         return Err(e);
     }
-    if !bookkeeping(p) && past_deadline(0.0, env) {
+    if !bookkeeping(p) && past(0.0) {
+        if !uncounted(p) {
+            skipped(env);
+        }
         return Ok(set);
     }
     match p {
@@ -562,15 +586,9 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             };
             Ok(if take { again } else { out })
         }
-        Pipe::Smallest(p) => {
-            env.seen.borrow_mut().push(None);
-            let out = go(p, set, env);
-            let seen = env.seen.borrow_mut().pop().flatten();
-            let out = out?;
-            match seen {
-                Some((n, c)) if out.first().is_some_and(|m| n < m.size()) => Ok(dedup(std::iter::once(c).chain(out).collect())),
-                _ => Ok(out),
-            }
+        Pipe::Smallest(m) => {
+            let steps = || m.steps.iter().try_fold(set, |s, p| go(p, s, env));
+            if m.scoped { scoped(steps) } else { steps() }
         }
         Pipe::Tag(name, p) => {
             let clock = std::time::Instant::now();
@@ -665,7 +683,7 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
         Pipe::Call(c) if c.def.inline => {
             let caller = env.lex.borrow().clone();
             let values = arg_values(c, &set, env);
-            let lex = Lex { input: caller.input.clone(), regs: caller.regs.clone(), frame: Some(Frame { call: c.clone(), caller: caller.clone(), values }) };
+            let lex = Lex { input: caller.input.clone(), regs: caller.regs.clone(), notes: caller.notes.clone(), frame: Some(Frame { call: c.clone(), caller: caller.clone(), values }) };
             let outer = env.lex.replace(Rc::new(lex));
             let out = match &*c.body {
                 Pipe::Seq(ps) if c.def.flat => ps.iter().try_fold(set, |s, p| go(p, s, env)),
@@ -686,8 +704,7 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             if let Some(c) = env.ctxs.borrow().last() {
                 run.ctxs.borrow_mut().push(c.narrow(c.w));
             }
-            let out = scoped(|| go(&c.body, set, &run))?;
-            Ok(seen(out, env))
+            scoped(|| go(&c.body, set, &run))
         }
         Pipe::Param(i, _) => {
             let (call, caller) = {
@@ -831,7 +848,33 @@ fn pass(p: &Pass, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             }
             return Ok(set);
         }
-        Pass::Term { name, at, alt } => return Ok(seen(dedup(term_pass(name, linear_mba::term_pass_at(*at), *alt, &set, env)), env)),
+        Pass::Clear(r) => {
+            env.lex.borrow().notes.borrow_mut().push((r.clone(), None));
+            return Ok(set);
+        }
+        Pass::Note(r) => {
+            let Some(min) = set.iter().reduce(|a, c| if c.size() < a.size() { c } else { a }) else { return Ok(set) };
+            let lex = env.lex.borrow();
+            let mut notes = lex.notes.borrow_mut();
+            if let Some((_, kept)) = notes.iter_mut().rev().find(|(n, _)| n == r)
+                && kept.as_ref().is_none_or(|k| min.size() < k.size())
+            {
+                *kept = Some(min.clone());
+            }
+            return Ok(set);
+        }
+        Pass::TakeMin(r) => {
+            let kept = {
+                let lex = env.lex.borrow();
+                let mut notes = lex.notes.borrow_mut();
+                notes.iter().rposition(|(n, _)| n == r).and_then(|i| notes.remove(i).1)
+            };
+            return Ok(match kept {
+                Some(c) if set.first().is_some_and(|m| c.size() < m.size()) => dedup(std::iter::once(c).chain(set).collect()),
+                _ => set,
+            });
+        }
+        Pass::Term { name, at, alt } => return Ok(dedup(term_pass(name, linear_mba::term_pass_at(*at), *alt, &set, env))),
         Pass::Set(i) => SET_PASSES[*i],
         Pass::Egglog(name) => name.as_str(),
         Pass::Label(_) => "label/",
@@ -920,7 +963,7 @@ fn pass(p: &Pass, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             None => c,
         })
         .collect();
-    Ok(seen(out, env))
+    Ok(out)
 }
 
 /// The pass over one term `f` on each candidate of `set`, which keeps its own origin.
@@ -946,19 +989,6 @@ fn term_pass(name: &str, f: linear_mba::TermPass, alt: Option<u8>, set: &[Cand],
             })
             .collect()
     })
-}
-
-/// `out`, after the smallest candidate each enclosing `smallest` saw is updated with it.
-fn seen(out: Vec<Cand>, env: &Env) -> Vec<Cand> {
-    for scope in env.seen.borrow_mut().iter_mut() {
-        for c in &out {
-            let n = c.size();
-            if scope.as_ref().is_none_or(|(m, _)| n < *m) {
-                *scope = Some((n, c.clone()));
-            }
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -1129,6 +1159,13 @@ mod tests {
             assert_eq!(cut(), on);
         }
         start();
+        crate::sched::in_default_run(|| {
+            step("(on cut) | (clear r) | time_limit = 0 | (note r) | (take_min r)");
+            assert!(!cut(), "a note skipped past the limit does not cut the run");
+            step("(on cut) | (smallest time_limit = 0 | rewrite)");
+            assert!(cut(), "the pass skipped there does");
+        });
+        start();
         assert!(!cut());
     }
 
@@ -1218,7 +1255,7 @@ mod tests {
         assert_eq!(step("(def @inline (g r p) (save r) | p) prepass=rewrite | (g s none) | (load s)"), [XOR], "an @inline function shares the caller's registers");
         assert_eq!(step("(def @inline (g p) split_runs = 3 | p) prepass=(g id) | (if (split_runs == 3) id none)"), [SUB], "and its sequence");
         assert_eq!(step("(def (g p) split_runs = 3 | p) prepass=(g id) | (if (split_runs == 3) id none)"), Vec::<String>::new(), "a def's assignment ends with its run");
-        assert_eq!(step("(def (w p) (save s) | (smallest p | (load s))) prepass=(w rewrite)"), [XOR, SUB], "an argument's passes are seen by the smallest it runs in");
+        assert_eq!(step("(def (w p) (save s) | (smallest p | (load s))) prepass=(w rewrite)"), [XOR, SUB], "a smallest in a def body notes what a parameter's argument returns");
     }
 
     #[test]
@@ -1248,6 +1285,41 @@ mod tests {
         let env = Env::prepass(&passes, 32, None, false, SUB);
         let e = crate::sched::in_default_run(|| go(&passes.prepass, vec![Cand::new(SUB, "input")], &env)).unwrap_err();
         assert!(e.to_string().contains("max_leaves is at most 6"), "{e}");
+    }
+
+    #[test]
+    fn smallest_keeps_the_first_strictly_smallest_returned() {
+        let passes = Passes::parse("(def (f p) p | none) (def @inline (g n) (if (n == 1) rewrite) | none)").unwrap();
+        let env = Env::prepass(&passes, 32, None, false, SUB);
+        let mut names = lang::Defs::new();
+        for d in &passes.defs {
+            names.insert(d.name.clone(), lang::Named { pipe: crate::sched::Call::bare(d), flat: d.flat, run: !d.inline, params: d.params.clone(), def: Some(d.clone()) });
+        }
+        let on = |p: &str, set: Vec<Cand>| terms(&go(&lang::parse_with(p, &names, &mut Vec::new()).unwrap(), set, &env).unwrap());
+        let step = |p: &str| on(p, vec![Cand::new(SUB, "input")]);
+        let xor2 = "(Xor (Var \"y\") (Var \"x\"))";
+        crate::sched::in_default_run(|| {
+            assert_eq!(step("(save s) | (smallest rewrite | none | (load s))"), [XOR, SUB]);
+            assert_eq!(step("(smallest rewrite | none)"), Vec::<String>::new(), "an empty result stays empty");
+            assert_eq!(step("(smallest none)"), Vec::<String>::new());
+            assert_eq!(step("(smallest id)"), [SUB], "the input is not noted");
+            assert_eq!(step("(save s) | (smallest (smallest rewrite | none | (load s)) | none | (load s))"), [XOR, SUB], "nested: the outer one sees the inner steps");
+            assert_eq!(step("(save s) | (smallest (f rewrite) | (load s))"), [XOR, SUB], "an argument of a def is noted where it is written");
+            assert_eq!(step("(save s) | (smallest (g 1) | (load s))"), [XOR, SUB], "an @inline body is noted");
+            on("(clear r) | (note r)", vec![Cand::new(XOR, "input")]);
+            assert_eq!(on("(take_min r)", vec![Cand::new(xor2, "input")]), [xor2], "take_min needs a strictly smaller candidate");
+            on("(clear r) | (note r)", vec![Cand::new(xor2, "input"), Cand::new(XOR, "input")]);
+            on("(note r)", vec![Cand::new(XOR, "input")]);
+            assert_eq!(on("(take_min r)", vec![Cand::new(SUB, "input")]), [xor2, SUB], "the first smallest is kept");
+            assert_eq!(on("(take_min r)", vec![Cand::new(SUB, "input")]), [SUB], "take_min closes the register");
+            assert_eq!(on("(note r) | (take_min r)", vec![Cand::new(XOR, "input")]), [XOR], "a note without clear keeps nothing");
+            on("(clear r) | (note r) | (clear r)", vec![Cand::new(XOR, "input")]);
+            assert_eq!(on("(take_min r)", vec![Cand::new(SUB, "input")]), [SUB], "a clear of an open name opens another");
+            assert_eq!(on("(take_min r)", vec![Cand::new(SUB, "input")]), [XOR, SUB]);
+            let both = || vec![Cand::new(SUB, "input"), Cand::new(XOR, "input")];
+            assert_eq!(on("(smallest (save b) | rewrite | none | (load b))", both()), [XOR, SUB], "the smallest candidate of a group a step returns is noted");
+            assert_eq!(on("(smallest time_limit = 0 | rewrite)", both()), [SUB, XOR], "past the time limit note is skipped too");
+        });
     }
 
     #[test]

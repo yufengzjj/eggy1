@@ -680,9 +680,8 @@ pub enum Pipe {
     /// `a`, and where the condition holds for its candidates, `b` on the same input taken
     /// instead when it gives candidates and its main one is no larger (`retry`).
     Retry(Expr, Box<Pipe>, Box<Pipe>),
-    /// The candidates of `p`, unless a pass inside gave a strictly smaller candidate than
-    /// their main one: then the first smallest (`smallest`).
-    Smallest(Box<Pipe>),
+    /// The macro `(smallest p)`: `p` as written, run as its expansion.
+    Smallest(Box<Smallest>),
     /// `p` timed as `NAME/run`; a main candidate it changed is counted in `NAME/won/ORIGIN`
     /// and gets origin `NAME` (`tag`).
     Tag(String, Box<Pipe>),
@@ -714,6 +713,25 @@ pub enum Pipe {
     /// A pipeline parameter of the function whose body this is, by its position among the
     /// parameters, and its name: the argument of the call runs where the call is written.
     Param(usize, String),
+}
+
+/// `(smallest p)` expanded to `(clear s) | p' | (take_min s)`, where `p'` is `p` with
+/// `(note s)` after each step that computes candidates (`crate::pipe_lang::smallest`).
+#[derive(Clone, Debug)]
+pub struct Smallest {
+    /// `p` as written, which `--show-passes` prints and the checks walk.
+    pub source: Pipe,
+    /// The expansion's steps, in turn.
+    pub steps: Vec<Pipe>,
+    /// `p` is a sequence, so the steps are a scope; otherwise they run in the enclosing one,
+    /// as `p` would.
+    pub scoped: bool,
+}
+
+impl PartialEq for Smallest {
+    fn eq(&self, o: &Smallest) -> bool {
+        self.source == o.source
+    }
 }
 
 /// A function `(def (NAME PARAM ...) body)` defined in `--passes` or `default.pipe`.
@@ -773,6 +791,14 @@ pub enum Pass {
     Save(String),
     Load(String),
     Label(String),
+    /// Opens the note register `R`, empty (`(clear R)`).
+    Clear(String),
+    /// Keeps the first smallest candidate in the newest open `R` when it is strictly
+    /// smaller than the one there (`(note R)`).
+    Note(String),
+    /// Closes the newest open `R`, its candidate put first when strictly smaller than the
+    /// main one (`(take_min R)`).
+    TakeMin(String),
     /// Turns an `INNER` pass or `FLAGS` switch off until the end of the enclosing sequence,
     /// also in the runs it calls.
     Off(Vec<&'static str>),
@@ -808,6 +834,9 @@ impl Pass {
             Pass::Save(r) => format!("save/{r}"),
             Pass::Load(r) => format!("load/{r}"),
             Pass::Label(r) => format!("label/{r}"),
+            Pass::Clear(r) => format!("clear/{r}"),
+            Pass::Note(r) => format!("note/{r}"),
+            Pass::TakeMin(r) => format!("take_min/{r}"),
             Pass::Off(ns) => format!("off/{}", ns.join(" ")),
             Pass::On(ns) => format!("on/{}", ns.join(" ")),
             Pass::Assign(i, _) => var(*i).name.into(),
@@ -1472,7 +1501,8 @@ impl Pipe {
         match self {
             Pipe::Pass(_) | Pipe::Filter(_) | Pipe::Param(..) => {}
             Pipe::Seq(ps) | Pipe::Union(ps) | Pipe::Best(_, ps) | Pipe::First(ps) => ps.iter().for_each(f),
-            Pipe::Fix(_, p) | Pipe::Wins(_, p) | Pipe::Smallest(p) | Pipe::Tag(_, p) | Pipe::Cand(_, p) | Pipe::Scope(p) | Pipe::Smaller(_, p) | Pipe::Regions(p) | Pipe::Again(p) => f(p),
+            Pipe::Smallest(m) => f(&m.source),
+            Pipe::Fix(_, p) | Pipe::Wins(_, p) | Pipe::Tag(_, p) | Pipe::Cand(_, p) | Pipe::Scope(p) | Pipe::Smaller(_, p) | Pipe::Regions(p) | Pipe::Again(p) => f(p),
             Pipe::If(_, a, b) | Pipe::Retry(_, a, b) => {
                 f(a);
                 f(b);
@@ -1607,7 +1637,8 @@ impl Uses {
             }
             Pipe::Cand(_, p) => self.maybe(p),
             Pipe::Filter(c) => self.expr(c),
-            Pipe::Smallest(p) | Pipe::Scope(p) | Pipe::Tag(_, p) | Pipe::Smaller(_, p) => self.walk(p),
+            Pipe::Smallest(m) => self.walk(&m.source),
+            Pipe::Scope(p) | Pipe::Tag(_, p) | Pipe::Smaller(_, p) => self.walk(p),
             // Both rebuild with `Passes::rewrite`.
             Pipe::Regions(p) => {
                 self.calls.push("rewrite".into());

@@ -16,6 +16,8 @@
 #   group -> num    on the whole list; 0 without candidates
 # @bookkeeping: only moves candidates, so it still runs past the time limit.
 # @simplify_only: only in `pipeline`, since only a simplify run has an e-graph.
+# @uncounted: skipped past the time limit like other steps, but that neither makes the run
+# cut nor counts in time_limit/skipped.
 # The comment line right before a declaration is its description.
 
 # Combinators and forms with arguments.
@@ -58,6 +60,12 @@
 (extern @bookkeeping (load r:reg g:group) group)
 # Counts the candidates for stats against the main one of register r.
 (extern @bookkeeping (label r:reg g:group) group)
+# Opens the note register r, empty; a note register is not one of save and load.
+(extern @bookkeeping (clear r:reg g:group) group)
+# Keeps the first smallest candidate in the newest open r when strictly smaller than the one there.
+(extern @uncounted (note r:reg g:group) group)
+# Closes the newest open r: the input, with its candidate put first when strictly smaller than the main one.
+(extern @bookkeeping (take_min r:reg g:group) group)
 
 # Passes over the whole list.
 

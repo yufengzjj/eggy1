@@ -130,6 +130,9 @@ pub struct Sig {
     pub bookkeeping: bool,
     /// `@simplify_only`: only in `pipeline`.
     pub simplify_only: bool,
+    /// `@uncounted`: skipped past the time limit without making the run cut or counting
+    /// `time_limit/skipped`.
+    pub uncounted: bool,
     /// The comment line before the declaration.
     pub doc: String,
 }
@@ -185,6 +188,9 @@ impl Sig {
         }
         if self.simplify_only {
             attrs += "@simplify_only ";
+        }
+        if self.uncounted {
+            attrs += "@uncounted ";
         }
         format!("(extern {attrs}{self})")
     }
@@ -248,13 +254,17 @@ fn one(text: &str) -> Result<Sig, String> {
         return Err(bad());
     }
     let mut rest = rest.iter().copied().peekable();
-    let (mut bookkeeping, mut simplify_only) = (false, false);
+    let (mut bookkeeping, mut simplify_only, mut uncounted) = (false, false, false);
     while let Some(a) = rest.next_if(|t| t.starts_with('@')) {
         match a {
             "@bookkeeping" => bookkeeping = true,
             "@simplify_only" => simplify_only = true,
-            _ => return Err(format!("unknown attribute {a}; known: @bookkeeping @simplify_only")),
+            "@uncounted" => uncounted = true,
+            _ => return Err(format!("unknown attribute {a}; known: @bookkeeping @simplify_only @uncounted")),
         }
+    }
+    if bookkeeping && uncounted {
+        return Err("@uncounted is for a function skipped past the time limit, which @bookkeeping is not".into());
     }
     if rest.next() != Some("(") {
         return Err(bad());
@@ -289,7 +299,7 @@ fn one(text: &str) -> Result<Sig, String> {
             _ => {}
         }
     }
-    Ok(Sig { name, params, input, result, bookkeeping, simplify_only, doc: String::new() })
+    Ok(Sig { name, params, input, result, bookkeeping, simplify_only, uncounted, doc: String::new() })
 }
 
 fn param(p: &str) -> Result<Param, String> {
@@ -330,6 +340,9 @@ pub fn of_pass(p: &Pass) -> Option<&'static Sig> {
         Pass::Save(_) => "save",
         Pass::Load(_) => "load",
         Pass::Label(_) => "label",
+        Pass::Clear(_) => "clear",
+        Pass::Note(_) => "note",
+        Pass::TakeMin(_) => "take_min",
         Pass::Term { name, .. } => name,
         Pass::Off(_) | Pass::On(_) | Pass::Assign(..) => return None,
     };
@@ -408,6 +421,7 @@ mod tests {
             ("# a\n(extern (x n:num... g:group) group)", "only pipe takes"),
             ("# a\n(extern (x n:int g:group) group)", "unknown type int"),
             ("# a\n(extern @pure (x g:group) group)", "unknown attribute"),
+            ("# a\n(extern @bookkeeping @uncounted (x g:group) group)", "@uncounted is for"),
             ("# a\n(extern (x g:group) group", "unclosed"),
             ("# a\n(def (x g:group) group)", "expected (extern"),
         ] {

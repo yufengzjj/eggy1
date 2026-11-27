@@ -88,9 +88,9 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
 /// The functions of `src/builtins.pipe` whose arguments `construct` reads; the rest without
 /// arguments are passes (`crate::pipe::resolve`).
 #[cfg(test)]
-pub(crate) const FORMS: [&str; 20] = [
+pub(crate) const FORMS: [&str; 23] = [
     "seq", "union", "best", "first", "fix", "if", "retry", "smallest", "scope", "regions", "again", "tag", "cand", "smaller", "wins", "filter", "save", "load", "label",
-    "egglog",
+    "clear", "note", "take_min", "egglog",
 ];
 
 /// The number functions whose arguments `number` reads; the rest are `CONDS` and `FEATURES`.
@@ -165,7 +165,7 @@ fn construct(f: &str, args: Vec<Arg>) -> Option<Pipe> {
         "wins" => Pipe::Wins(a.num(), a.pipe()),
         "if" => Pipe::If(a.num(), a.pipe(), a.maybe_pipe().unwrap_or_else(|| Box::new(Pipe::Pass(Pass::id())))),
         "retry" => Pipe::Retry(a.num(), a.pipe(), a.pipe()),
-        "smallest" => Pipe::Smallest(a.pipe()),
+        "smallest" => smallest(*a.pipe()),
         "scope" => Pipe::Scope(a.pipe()),
         "regions" => Pipe::Regions(a.pipe()),
         "again" => Pipe::Again(a.pipe()),
@@ -173,7 +173,7 @@ fn construct(f: &str, args: Vec<Arg>) -> Option<Pipe> {
         "cand" => Pipe::Cand(a.name(), a.pipe()),
         "smaller" => Pipe::Smaller(a.name(), a.pipe()),
         "filter" => Pipe::Filter(a.num()),
-        "save" | "load" | "label" => Pipe::Pass(resolve(&format!("{f}/{}", a.name()))?),
+        "save" | "load" | "label" | "clear" | "note" | "take_min" => Pipe::Pass(resolve(&format!("{f}/{}", a.name()))?),
         "egglog" => Pipe::Pass(Pass::Egglog(a.maybe_name().map_or_else(|| "egglog".into(), |l| format!("egglog/{l}")))),
         _ if empty => Pipe::Pass(resolve(f)?),
         _ => return None,
@@ -925,6 +925,7 @@ pub fn def_sig(name: &str, params: &[Param]) -> Sig {
         result: Ty::Group,
         bookkeeping: false,
         simplify_only: false,
+        uncounted: false,
         doc: String::new(),
     }
 }
@@ -1036,6 +1037,9 @@ impl<'s> Subst<'s> {
             Pass::Save(r) => Pass::Save(self.name(r)),
             Pass::Load(r) => Pass::Load(self.name(r)),
             Pass::Label(r) => Pass::Label(self.name(r)),
+            Pass::Clear(r) => Pass::Clear(self.name(r)),
+            Pass::Note(r) => Pass::Note(self.name(r)),
+            Pass::TakeMin(r) => Pass::TakeMin(self.name(r)),
             Pass::Egglog(l) => match l.strip_prefix("egglog/") {
                 Some(l) => Pass::Egglog(format!("egglog/{}", self.name(l))),
                 None => p.clone(),
@@ -1060,7 +1064,7 @@ impl<'s> Subst<'s> {
             Pipe::Wins(n, q) => Pipe::Wins(self.expr(n), b(q)?),
             Pipe::If(c, x, y) => Pipe::If(self.expr(c), b(x)?, b(y)?),
             Pipe::Retry(c, x, y) => Pipe::Retry(self.expr(c), b(x)?, b(y)?),
-            Pipe::Smallest(q) => Pipe::Smallest(b(q)?),
+            Pipe::Smallest(m) => smallest(self.pipe(&m.source)?),
             Pipe::Scope(q) => Pipe::Scope(b(q)?),
             Pipe::Regions(q) => Pipe::Regions(b(q)?),
             Pipe::Again(q) => Pipe::Again(b(q)?),
@@ -1086,6 +1090,73 @@ impl<'s> Subst<'s> {
                 Pipe::Call(Arc::new(Call { def: c.def.clone(), args, body }))
             }
         })
+    }
+}
+
+/// The macro `(smallest p)`: `(clear s) | p' | (take_min s)`, `s` a note register no other
+/// `smallest` and no name a user writes has, `p'` being `p` with `(note s)` after each step
+/// in its text that computes candidates (`crate::pipe::computes`, and a pipeline parameter),
+/// also in the pipeline arguments of calls and in the bodies of `@inline` calls, but not in
+/// the bodies of other calls.
+pub fn smallest(p: Pipe) -> Pipe {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let s = format!("smallest#{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let (body, scoped) = match &p {
+        Pipe::Seq(ps) => (noted_stages(ps, &s, false), true),
+        q => (noted_stage(q, &s, false), false),
+    };
+    let mut steps = vec![Pipe::Pass(Pass::Clear(s.clone()))];
+    steps.extend(body);
+    steps.push(Pipe::Pass(Pass::TakeMin(s)));
+    Pipe::Smallest(Box::new(crate::sched::Smallest { source: p, steps, scoped }))
+}
+
+/// `p` with `(note s)` inside and after it (`smallest`); `inline` inside the body of an
+/// `@inline` call, where a parameter's argument has the notes of the text it is written in.
+fn noted_stage(p: &Pipe, s: &str, inline: bool) -> Vec<Pipe> {
+    let q = noted(p, s, inline);
+    if crate::pipe::computes(p) || matches!(p, Pipe::Param(..)) && !inline { vec![q, Pipe::Pass(Pass::Note(s.into()))] } else { vec![q] }
+}
+
+fn noted_stages(ps: &[Pipe], s: &str, inline: bool) -> Vec<Pipe> {
+    ps.iter().flat_map(|p| noted_stage(p, s, inline)).collect()
+}
+
+/// `noted_stage` as one stage.
+fn noted_one(p: &Pipe, s: &str, inline: bool) -> Pipe {
+    let mut ps = noted_stage(p, s, inline);
+    if ps.len() == 1 { ps.pop().unwrap() } else { Pipe::Seq(ps) }
+}
+
+/// `p` with `(note s)` after the steps inside it.
+fn noted(p: &Pipe, s: &str, inline: bool) -> Pipe {
+    let one = |q: &Pipe| Box::new(noted_one(q, s, inline));
+    let all = |ps: &[Pipe]| ps.iter().map(|q| noted_one(q, s, inline)).collect();
+    match p {
+        Pipe::Pass(_) | Pipe::Filter(_) | Pipe::Param(..) => p.clone(),
+        Pipe::Seq(ps) => Pipe::Seq(noted_stages(ps, s, inline)),
+        Pipe::Union(ps) => Pipe::Union(all(ps)),
+        Pipe::First(ps) => Pipe::First(all(ps)),
+        Pipe::Best(k, ps) => Pipe::Best(k.clone(), all(ps)),
+        Pipe::Fix(n, q) => Pipe::Fix(n.clone(), one(q)),
+        Pipe::Wins(n, q) => Pipe::Wins(n.clone(), one(q)),
+        Pipe::If(c, a, b) => Pipe::If(c.clone(), one(a), one(b)),
+        Pipe::Retry(c, a, b) => Pipe::Retry(c.clone(), one(a), one(b)),
+        Pipe::Scope(q) => Pipe::Scope(one(q)),
+        Pipe::Regions(q) => Pipe::Regions(one(q)),
+        Pipe::Again(q) => Pipe::Again(one(q)),
+        Pipe::Tag(n, q) => Pipe::Tag(n.clone(), one(q)),
+        Pipe::Cand(n, q) => Pipe::Cand(n.clone(), one(q)),
+        Pipe::Smaller(n, q) => Pipe::Smaller(n.clone(), one(q)),
+        Pipe::Smallest(m) => {
+            let steps = noted_stages(&m.steps, s, inline);
+            Pipe::Smallest(Box::new(crate::sched::Smallest { source: m.source.clone(), steps, scoped: m.scoped }))
+        }
+        Pipe::Call(c) => {
+            let args = c.args.iter().map(|a| if let CallArg::Pipe(q) = a { CallArg::Pipe(noted_one(q, s, inline)) } else { a.clone() }).collect();
+            let body = if c.def.inline { Arc::new(noted_one(&c.body, s, true)) } else { c.body.clone() };
+            Pipe::Call(Arc::new(Call { def: c.def.clone(), args, body }))
+        }
     }
 }
 
@@ -1161,7 +1232,7 @@ fn show_pass(p: &Pass) -> String {
     }
     let n = p.name();
     match n.split_once('/') {
-        Some((h @ ("save" | "load" | "label" | "off" | "on" | "egglog"), r)) => form(h, &[r.to_string()]),
+        Some((h @ ("save" | "load" | "label" | "clear" | "note" | "take_min" | "off" | "on" | "egglog"), r)) => form(h, &[r.to_string()]),
         _ => n,
     }
 }
@@ -1190,7 +1261,7 @@ pub fn show(p: &Pipe) -> String {
         Pipe::If(c, a, b) if is_id(b) => form("if", &[show_arg(c), stage(a)]),
         Pipe::If(c, a, b) => form("if", &[show_arg(c), stage(a), stage(b)]),
         Pipe::Retry(c, a, b) => form("retry", &[show_arg(c), stage(a), stage(b)]),
-        Pipe::Smallest(p) => form("smallest", &[show(p)]),
+        Pipe::Smallest(m) => form("smallest", &[show(&m.source)]),
         Pipe::Scope(p) => form("scope", &[show(p)]),
         Pipe::Regions(p) => form("regions", &[show(p)]),
         Pipe::Again(p) => form("again", &[show(p)]),
@@ -1244,7 +1315,7 @@ fn pretty_at(p: &Pipe, indent: usize) -> String {
         Pipe::If(c, a, b) if is_id(b) => nested("if", vec![show_arg(c)], vec![(a, true)]),
         Pipe::If(c, a, b) => nested("if", vec![show_arg(c)], vec![(a, true), (b, true)]),
         Pipe::Retry(c, a, b) => nested("retry", vec![show_arg(c)], vec![(a, true), (b, true)]),
-        Pipe::Smallest(q) => nested("smallest", vec![], vec![(q, false)]),
+        Pipe::Smallest(m) => nested("smallest", vec![], vec![(&m.source, false)]),
         Pipe::Scope(q) => nested("scope", vec![], vec![(q, false)]),
         Pipe::Regions(q) => nested("regions", vec![], vec![(q, false)]),
         Pipe::Again(q) => nested("again", vec![], vec![(q, false)]),
@@ -1552,6 +1623,71 @@ mod tests {
             let e = def(bad).unwrap_err();
             assert!(e.contains(msg), "{bad}: {e}");
         }
+    }
+
+    /// The steps `(smallest ...)` in `p` expands to, its note registers named `s`, `t`, ... in
+    /// the order they first appear.
+    fn expansion(p: &Pipe) -> String {
+        let Pipe::Smallest(m) = p else { panic!("{}", show(p)) };
+        let mut out = show(&Pipe::Seq(m.steps.clone()));
+        let mut names: Vec<String> = Vec::new();
+        while let Some(i) = out.find("smallest#") {
+            let end = out[i + 9..].find(|c: char| !c.is_ascii_digit()).map_or(out.len(), |k| i + 9 + k);
+            let n = out[i..end].to_string();
+            names.push(n.clone());
+            out = out.replace(&n, ["s", "t", "u"][names.len() - 1]);
+        }
+        out
+    }
+
+    #[test]
+    fn smallest_notes_each_step_that_computes() {
+        let p = parse("(smallest rewrite | id | (save r) | (fix 2 tfunc) | (best 1 relate id (load r)) | (if mixed polish))").unwrap();
+        assert_eq!(
+            expansion(&p),
+            "(clear s) | rewrite | (note s) | id | (save r) | (fix 2 tfunc | (note s)) | (best 1 (relate | (note s)) id (load r)) | (if mixed (polish | (note s))) | (take_min s)"
+        );
+        assert_eq!(show(&p), "(smallest rewrite | id | (save r) | (fix 2 tfunc) | (best 1 relate id (load r)) | (if mixed polish))", "shown as written");
+        assert_eq!(p, parse(&show(&p)).unwrap(), "compared as written");
+        let one = parse("(smallest (union prepass take_minimal))").unwrap();
+        assert_eq!(expansion(&one), "(clear s) | (union (prepass | (note s)) (take_minimal | (note s))) | (take_min s)");
+        let Pipe::Smallest(m) = &one else { unreachable!() };
+        assert!(!m.scoped, "a single step runs in the enclosing sequence, as it would without smallest");
+        let nested = parse("(smallest rewrite | (smallest tfunc | none) | relate)").unwrap();
+        assert_eq!(
+            expansion(&nested),
+            "(clear s) | rewrite | (note s) | (smallest tfunc | none) | relate | (note s) | (take_min s)",
+            "shown as written inside"
+        );
+        let Pipe::Smallest(m) = &nested else { unreachable!() };
+        let inner = expansion(&m.steps[3]);
+        assert_eq!(inner, "(clear s) | tfunc | (note t) | (note s) | none | (take_min s)", "the outer note (t) in the inner expansion");
+        let names: Vec<String> = [&nested, &m.steps[3]].iter().map(|p| if let Pipe::Smallest(m) = p { show(&m.steps[0]) } else { unreachable!() }).collect();
+        assert_ne!(names[0], names[1], "each smallest has a register of its own");
+    }
+
+    #[test]
+    fn smallest_notes_arguments_but_not_bodies_of_calls() {
+        let passes = |spec: &str| Passes::parse(spec).unwrap_or_else(|e| panic!("{spec}: {e}"));
+        let p = passes("(def (f p) rewrite | p) prepass=(smallest (f tfunc) | relate)");
+        assert_eq!(expansion(&p.prepass), "(clear s) | (f (tfunc | (note s))) | (note s) | relate | (note s) | (take_min s)");
+        let Pipe::Smallest(m) = &p.prepass else { unreachable!() };
+        let Pipe::Call(c) = &m.steps[1] else { unreachable!() };
+        assert_eq!(show(&c.body), "rewrite | p", "the body of a def is a run of its own");
+        let p = passes("(def @inline (g n p) (if (size > n) rewrite) | p) prepass=(smallest (g 1 tfunc))");
+        assert_eq!(expansion(&p.prepass), "(clear s) | (g 1 (tfunc | (note s))) | (take_min s)");
+        let Pipe::Smallest(m) = &p.prepass else { unreachable!() };
+        let Pipe::Call(c) = &m.steps[1] else { unreachable!() };
+        let body = show(&c.body).replace(|c: char| c.is_ascii_digit(), "");
+        assert_eq!(body, "(if (size > n) (rewrite | (note smallest#))) | p", "an @inline body is noted; its argument has its notes");
+        let p = passes("(def (w p) (smallest p | rewrite)) prepass=(w tfunc)");
+        let Pipe::Call(c) = &p.prepass else { unreachable!() };
+        assert_eq!(expansion(&c.body), "(clear s) | p | (note s) | rewrite | (note s) | (take_min s)", "in a def body a parameter gives what its argument returns");
+        let p = passes("(let k rewrite | tfunc) prepass=(smallest id | k)");
+        assert_eq!(expansion(&p.prepass), "(clear s) | id | rewrite | (note s) | tfunc | (note s) | (take_min s)", "a let is in the text");
+        let p = passes("(def @inline (h p) (smallest p | none)) prepass=(h rewrite)");
+        assert_eq!(expansion(&p.prepass), "(clear s) | rewrite | (note s) | none | (take_min s)", "an @inline argument put in place");
+        assert_eq!(p.to_string(), passes(&p.to_string()).to_string());
     }
 
     #[test]
