@@ -32,7 +32,7 @@ impl Ty {
     }
 
     /// What an argument of this type is, for messages.
-    fn what(self) -> &'static str {
+    pub(crate) fn what(self) -> &'static str {
         match self {
             Ty::Num => "an expression",
             Ty::Pipe => "a pipeline",

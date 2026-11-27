@@ -708,16 +708,52 @@ pub enum Pipe {
     /// `p`, then `Passes::rewrite` again on its main candidate, kept when smaller, where it
     /// changed a term with an arithmetic leaf of a bitwise operation (`again`).
     Again(Box<Pipe>),
-    /// A call of a function `(def (NAME) body)` defined: its body as a run of its own on the
-    /// candidates.
-    Call(std::sync::Arc<Def>),
+    /// A call of a function `(def (NAME PARAM ...) body)` defined: its body as a run of its
+    /// own on the candidates.
+    Call(std::sync::Arc<Call>),
+    /// A pipeline parameter of the function whose body this is, by its position among the
+    /// parameters, and its name: the argument of the call runs where the call is written.
+    Param(usize, String),
 }
 
-/// A function `(def (NAME) body)` defined in `--passes` or `default.pipe`.
+/// A function `(def (NAME PARAM ...) body)` defined in `--passes` or `default.pipe`.
 #[derive(Debug, PartialEq)]
 pub struct Def {
     pub name: String,
-    pub body: Pipe,
+    /// The parameters, their types inferred from the body: `pipe`, `reg` or `name`.
+    pub params: Vec<crate::builtins::Param>,
+    /// The body, name parameters written as their names.
+    pub body: std::sync::Arc<Pipe>,
+}
+
+impl Def {
+    /// Whether a parameter is a name, which a call puts in place in its own copy of the body.
+    pub fn has_names(&self) -> bool {
+        self.params.iter().any(|p| p.ty != crate::builtins::Ty::Pipe)
+    }
+}
+
+/// A call of a `Def`.
+#[derive(Debug, PartialEq)]
+pub struct Call {
+    pub def: std::sync::Arc<Def>,
+    /// One per parameter.
+    pub args: Vec<CallArg>,
+    /// The body with the name arguments in place of the name parameters.
+    pub body: std::sync::Arc<Pipe>,
+}
+
+impl Call {
+    /// The call of `def` without arguments.
+    pub fn bare(def: &std::sync::Arc<Def>) -> Pipe {
+        Pipe::Call(std::sync::Arc::new(Call { def: def.clone(), args: Vec::new(), body: def.body.clone() }))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum CallArg {
+    Name(String),
+    Pipe(Pipe),
 }
 
 /// A pass of a `Pipe`.
@@ -1198,15 +1234,15 @@ impl Passes {
                     p.define(&d.name, d.pipe)?;
                     continue;
                 }
-                let pipe = match d.kind {
+                let (pipe, def) = match d.kind {
                     lang::DefKind::Run => {
-                        let def = std::sync::Arc::new(Def { name: d.name.clone(), body: d.pipe });
+                        let def = std::sync::Arc::new(Def { name: d.name.clone(), params: d.params.clone(), body: std::sync::Arc::new(d.pipe) });
                         p.defs.push(def.clone());
-                        Pipe::Call(def)
+                        (Call::bare(&def), Some(def))
                     }
-                    _ => d.pipe,
+                    _ => (d.pipe, None),
                 };
-                defs.insert(d.name.clone(), lang::Named { pipe, flat: d.flat, run: d.kind == lang::DefKind::Run });
+                defs.insert(d.name.clone(), lang::Named { pipe, flat: d.flat, run: d.kind == lang::DefKind::Run, params: d.params, def });
                 lets.defined.push((d.name, d.kind));
                 continue;
             }
@@ -1380,17 +1416,57 @@ impl Passes {
             let node = if ["pipeline", "prepass", "polish"].contains(&name) { name } else { "rewrite" };
             (name.to_string(), node.to_string(), p)
         });
-        builtin
-            .chain(self.defs.iter().map(|d| (d.name.clone(), d.name.clone(), &d.body)))
-            .map(|(name, node, p)| {
-                let mut uses = Uses::default();
-                uses.walk(p);
-                if let Pipe::Pass(a @ (Pass::Assign(..) | Pass::On(_) | Pass::Off(_))) = p {
-                    uses.idle_assign.push(lang::show(&Pipe::Pass(a.clone())));
+        let plain = self.defs.iter().filter(|d| !d.has_names()).map(|d| (d.name.clone(), d.name.clone(), &*d.body));
+        let roots: Vec<(String, String, &Pipe)> = builtin.chain(plain).collect();
+        let mut called = Vec::new();
+        roots.iter().for_each(|(_, _, p)| instances(p, &mut called));
+        let of = |p: &Pipe| {
+            let mut uses = Uses::default();
+            uses.walk(p);
+            if let Pipe::Pass(a @ (Pass::Assign(..) | Pass::On(_) | Pass::Off(_))) = p {
+                uses.idle_assign.push(lang::show(&Pipe::Pass(a.clone())));
+            }
+            uses
+        };
+        let mut out: Vec<(String, String, Uses)> = roots.iter().map(|(name, node, p)| (name.clone(), node.clone(), of(p))).collect();
+        out.extend(called.iter().map(|(name, _, body)| (name.clone(), name.clone(), of(body))));
+        out
+    }
+}
+
+/// The calls in `p` of functions with name parameters, and those in the bodies they run, each
+/// once per function and name arguments: the function's name, the name arguments, the body.
+fn instances(p: &Pipe, out: &mut Vec<(String, Vec<String>, std::sync::Arc<Pipe>)>) {
+    p.each(&mut |q| instances(q, out));
+    if let Pipe::Call(c) = p
+        && c.def.has_names()
+    {
+        let names: Vec<String> = c.args.iter().filter_map(|a| if let CallArg::Name(n) = a { Some(n.clone()) } else { None }).collect();
+        if !out.iter().any(|(n, ns, _)| *n == c.def.name && *ns == names) {
+            out.push((c.def.name.clone(), names, c.body.clone()));
+            instances(&c.body, out);
+        }
+    }
+}
+
+impl Pipe {
+    /// `f` on each pipeline directly inside `self`, the pipeline arguments of a call too (not
+    /// the body it calls).
+    pub fn each<'p>(&'p self, f: &mut dyn FnMut(&'p Pipe)) {
+        match self {
+            Pipe::Pass(_) | Pipe::Filter(_) | Pipe::Param(..) => {}
+            Pipe::Seq(ps) | Pipe::Union(ps) | Pipe::Best(_, ps) | Pipe::First(ps) => ps.iter().for_each(f),
+            Pipe::Fix(_, p) | Pipe::Wins(_, p) | Pipe::Smallest(p) | Pipe::Tag(_, p) | Pipe::Cand(_, p) | Pipe::Scope(p) | Pipe::Smaller(_, p) | Pipe::Regions(p) | Pipe::Again(p) => f(p),
+            Pipe::If(_, a, b) | Pipe::Retry(_, a, b) => {
+                f(a);
+                f(b);
+            }
+            Pipe::Call(c) => c.args.iter().for_each(|a| {
+                if let CallArg::Pipe(p) = a {
+                    f(p)
                 }
-                (name, node, uses)
-            })
-            .collect()
+            }),
+        }
     }
 }
 
@@ -1517,7 +1593,17 @@ impl Uses {
                 self.calls.push("rewrite".into());
                 self.walk(p);
             }
-            Pipe::Call(d) => self.calls.push(d.name.clone()),
+            // A pipeline argument runs with the caller's registers, at any point of the call
+            // and any number of times.
+            Pipe::Call(c) => {
+                self.calls.push(c.def.name.clone());
+                c.args.iter().for_each(|a| {
+                    if let CallArg::Pipe(p) = a {
+                        self.repeated(p)
+                    }
+                });
+            }
+            Pipe::Param(..) => {}
         }
     }
 
@@ -1612,9 +1698,9 @@ impl fmt::Display for Passes {
         let sep = if f.alternate() { "\n" } else { " " };
         for d in &self.defs[self.default_defs..] {
             if f.alternate() {
-                write!(f, "\n# {}\n{}", lang::def_sig(&d.name), lang::pretty_def(&d.name, &d.body))?;
+                write!(f, "\n# {}\n{}", lang::def_sig(&d.name, &d.params), lang::pretty_def(d))?;
             } else {
-                write!(f, " {}", lang::show_def(&d.name, &d.body))?;
+                write!(f, " {}", lang::show_def(d))?;
             }
         }
         for (name, p) in [("pipeline", &self.pipeline), ("prepass", &self.prepass), ("polish", &self.polish), ("rewrite", &self.rewrite), ("simba", &self.simba)] {
@@ -2040,5 +2126,77 @@ prepass=lowbits | r2
         assert!(w.len() == 2 && w[0].contains("(def (f) ...) is never used") && w[1].contains("(def @inline (g) ...) is never used"), "{w:?}");
         let w = warn("(def (f) (save t) | rewrite) prepass=f");
         assert!(w.len() == 1 && w[0].contains("f: register t is saved and never read"), "{w:?}");
+    }
+
+    #[test]
+    fn def_parameters() {
+        let spec = "(def (try_without name p) (best 1 p ((off name) | p))) (def (hold r p) (save r) | p | (union id (load r))) prepass=(try_without relate rewrite) | (hold t (lowbits | rewrite))";
+        let p = Passes::parse(spec).unwrap();
+        let sigs: Vec<String> = p.defs.iter().map(|d| lang::def_sig(&d.name, &d.params).to_string()).collect();
+        assert_eq!(sigs, ["(try_without name:name p:pipe g:group) group", "(hold r:reg p:pipe g:group) group"]);
+        assert_eq!(p.prepass.to_string(), "(try_without relate rewrite) | (hold t (lowbits | rewrite))");
+        let Pipe::Seq(steps) = &p.prepass else { panic!() };
+        let Pipe::Call(c) = &steps[0] else { panic!() };
+        assert_eq!(c.body.to_string(), "(best 1 p ((off relate) | p))", "a call has its name arguments in place");
+        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
+        assert!(format!("{p:#}").contains("
+# (hold r:reg p:pipe g:group) group
+(def (hold r p) (save r) | p | (union id (load r)))
+"), "{p:#}");
+        assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
+        let inline = Passes::parse("(def @inline (g r p) (save r) | p | (load r)) prepass=(g t rewrite) | (g u (if (size > 1) id))").unwrap();
+        assert_eq!(inline.prepass.to_string(), "(save t) | rewrite | (load t) | (save u) | (if (size > 1) id) | (load u)", "an @inline body flat in the sequence");
+        let nested = Passes::parse("(def (g n q) (off n) | q) (def (h m p) (g m (p | (save x))) | (load x)) prepass=(h tfunc rewrite)").unwrap();
+        let Pipe::Call(h) = &nested.prepass else { panic!() };
+        let Pipe::Seq(body) = &*h.body else { panic!() };
+        let Pipe::Call(g) = &body[0] else { panic!() };
+        assert_eq!(g.body.to_string(), "(off tfunc) | q", "a name argument passed on is put in place in the inner call too");
+        for ok in [
+            "(def (f a b) (save a) | (load b)) prepass=(f t t)",
+            "(def (f p) (save t) | p | (load t)) prepass=(save t) | (f ((load t) | rewrite))",
+            "(def (f r) (tag r id) | (cand r id) | (smaller r id) | (egglog r)) pipeline=(f x)",
+            "(def (f r) (save r) | (if ((size r) > 1 && (same r)) id) | (label r)) prepass=(f t)",
+        ] {
+            assert!(Passes::parse(ok).is_ok(), "{ok}: {:?}", Passes::parse(ok).err());
+        }
+        for (bad, msg) in [
+            ("(def (with_budget n p) rewrites = n | p)", "numeric parameters are not supported yet: n is used in an expression"),
+            ("(def (f n) (fix n id))", "numeric parameters are not supported yet"),
+            ("(def (f p) p | (save p))", "parameter p is used as a pipeline and as a register name"),
+            ("(def (f r) (save r) | (tag r id))", "parameter r is used as a register name and as a name"),
+            ("(def (f p q) p)", "def (f p q): parameter q is never used in the body"),
+            ("(def (f r) r = 1)", "parameter r cannot be assigned"),
+            ("(def (f relate) id)", "parameter relate is the name of a variable, function or definition"),
+            ("(def (f rewrite) id)", "the name of a variable, function or definition"),
+            ("(def (f gates) id)", "the name of a variable, function or definition"),
+            ("(def (f p p) p)", "parameter p is written twice"),
+            ("(def (f f) id)", "parameter f is written twice"),
+            ("(def (prepass p) p)", "takes no parameters"),
+            ("(def (f p) (p id))", "parameter p takes no arguments"),
+            ("(def (f p) p) prepass=f", "f needs parentheses: (f ...); (f p:pipe g:group) group"),
+            ("(def (f p) p) prepass=(f)", "f takes a pipeline: (f p:pipe g:group) group"),
+            ("(def (f p) p) prepass=(f id id)", "f takes a pipeline: (f p:pipe g:group) group"),
+            ("(def (f r p) (save r) | p) prepass=(f (id) id)", "expected a name after f, found ("),
+            ("(def (f r p) (save r) | p) prepass=(f t)", "f takes a register name and a pipeline: (f r:reg p:pipe g:group) group"),
+            ("(def (f n p) (off n) | p) prepass=(f nope id)", "unknown off name nope (the argument for n)"),
+            ("(def (f p) p) prepass=(if f id)", "f gives candidates, not a number: (f p:pipe g:group) group"),
+            ("(def (f p) p) prepass=f = 1", "f is a function and cannot be assigned: (f p:pipe g:group) group"),
+            ("(def (f r) (load r)) prepass=(f t)", "f reads register t before any (save t)"),
+            ("(def (f a b) (save a) | (load b)) prepass=(f t u)", "f reads register u before any (save u)"),
+            ("(def (f p) id | p) prepass=(f (load t))", "prepass reads register t before any (save t)"),
+            ("(def (g p) p) prepass=(g prepass)", "prepass reaches itself"),
+            ("(def (g p) p | polish) polish=(g id)", "polish reaches itself"),
+            ("(def (g p) p) (def (h q) (g q)) prepass=(h (if mixed prepass))", "prepass reaches itself"),
+            ("(def (g p) p) prepass=(g egglog)", "egglog needs a simplify run and cannot be in prepass"),
+            ("(def @inline (g p) p) prepass=(g egglog)", "egglog needs a simplify run and cannot be in prepass"),
+        ] {
+            let e = Passes::parse(bad).unwrap_err();
+            assert!(e.contains(msg), "{bad}: {e}");
+        }
+        let warn = |s: &str| Passes::parse_noting(s).unwrap().1;
+        let w = warn("(def (f r p) (save r) | p) prepass=(f t id)");
+        assert!(w.len() == 1 && w[0].contains("f: register t is saved and never read"), "{w:?}");
+        let w = warn("(def (f p) p) (def @inline (g p) p) prepass=id");
+        assert!(w.len() == 2 && w[0].contains("(def (f) ...) is never used") && w[1].contains("(def @inline (g) ...) is never used"), "{w:?}");
     }
 }

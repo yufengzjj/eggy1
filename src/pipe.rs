@@ -200,8 +200,9 @@ pub struct Env<'a> {
     trace: bool,
     /// The egglog program of the numeric type.
     egg: Rc<str>,
-    /// The input of the run.
-    input: String,
+    /// The run's input, registers and arguments; those of the call where a pipeline argument
+    /// is written while it runs.
+    lex: RefCell<Rc<Lex>>,
     moved: Cell<bool>,
     /// Results the `smaller` inside the innermost `wins` took.
     wins: Cell<usize>,
@@ -212,9 +213,29 @@ pub struct Env<'a> {
     cofactor: bool,
     /// The smallest candidate each enclosing `smallest` saw, innermost last.
     seen: RefCell<Vec<Option<(usize, Cand)>>>,
-    regs: RefCell<HashMap<String, Vec<Cand>>>,
     /// The runs of the enclosing `scope`s, innermost last.
     ctxs: RefCell<Vec<Ctx>>,
+}
+
+/// What a pipeline argument takes along from the run where it is written (a closure): the
+/// run's input and registers and the arguments of the call that run is.
+struct Lex {
+    input: String,
+    regs: RefCell<HashMap<String, Vec<Cand>>>,
+    frame: Option<Frame>,
+}
+
+impl Lex {
+    fn new(input: &str, frame: Option<Frame>) -> Rc<Lex> {
+        Rc::new(Lex { input: input.to_string(), regs: Default::default(), frame })
+    }
+}
+
+/// The arguments of a call of a function with parameters.
+struct Frame {
+    call: std::sync::Arc<crate::sched::Call>,
+    /// The run where the call is written, which its pipeline arguments run with.
+    caller: Rc<Lex>,
 }
 
 impl<'a> Env<'a> {
@@ -229,8 +250,8 @@ impl<'a> Env<'a> {
     }
 
     fn with(cli: Option<&'a Cli>, passes: &'a Passes, w: u32, signed: Option<bool>, trace: bool, egg: String, input: &str) -> Env<'a> {
-        let input = input.to_string();
-        Env { cli, passes, w, signed, trace, egg: egg.into(), input, moved: Cell::new(false), wins: Cell::new(0), deferred: Default::default(), cofactor: false, seen: Default::default(), regs: Default::default(), ctxs: Default::default() }
+        let lex = RefCell::new(Lex::new(input, None));
+        Env { cli, passes, w, signed, trace, egg: egg.into(), lex, moved: Cell::new(false), wins: Cell::new(0), deferred: Default::default(), cofactor: false, seen: Default::default(), ctxs: Default::default() }
     }
 
     fn cli(&self, pass: &str) -> &'a Cli {
@@ -250,7 +271,7 @@ impl<'a> Env<'a> {
     }
 
     fn reg_main(&self, r: &str) -> Option<Cand> {
-        self.regs.borrow().get(r).and_then(|s| s.first().cloned())
+        self.lex.borrow().regs.borrow().get(r).and_then(|s| s.first().cloned())
     }
 
     /// `e` for the candidates `set`: a number or `NONE`.
@@ -336,7 +357,7 @@ fn cond(i: usize, set: &[Cand], env: &Env) -> bool {
         "mixed" => crate::mixed(main.tree()),
         "rebuilds" => env.prepass_of(main.term()).0 != main.term(),
         "moved" => env.moved.get(),
-        "input" => main.term() == env.input,
+        "input" => main.term() == env.lex.borrow().input,
         "tiny" => main.size() <= limit(Limit::TinySize),
         "fits_split" => main.size() <= limit(Limit::SplitSize),
         "used_wide" => set.iter().any(|c| c.used & WIDE != 0),
@@ -443,7 +464,7 @@ pub fn in_run<R>(p: &Passes, cli: Option<&Cli>, input: impl FnOnce() -> Cand, f:
 /// The candidates `p` gives for `set`.
 pub fn run(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
     let first = set.first().cloned();
-    let input = || first.unwrap_or_else(|| Cand::new(&env.input, "input"));
+    let input = || first.unwrap_or_else(|| Cand::new(&env.lex.borrow().input, "input"));
     in_run(env.passes, env.cli, input, || scoped(|| go(p, set, env)).and_then(|out| failed().map_or(Ok(out), Err)))
 }
 
@@ -460,7 +481,7 @@ fn assign_time_limit(ms: u64) {
 /// still has its registers and can go on after a `time_limit = none`.
 fn bookkeeping(p: &Pipe) -> bool {
     match p {
-        Pipe::Seq(_) | Pipe::Filter(_) => true,
+        Pipe::Seq(_) | Pipe::Filter(_) | Pipe::Param(..) => true,
         Pipe::Pass(Pass::Save(_) | Pass::Load(_) | Pass::Label(_) | Pass::Off(_) | Pass::On(_) | Pass::Assign(..)) => true,
         Pipe::Pass(Pass::Set(i)) => matches!(SET_PASSES[*i], "id" | "none" | "within" | "pre_done"),
         _ => false,
@@ -636,16 +657,32 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             }
             Ok(out)
         }
-        Pipe::Call(d) => {
+        Pipe::Call(c) => {
             let input = set.first().map_or_else(String::new, |c| c.term().to_string());
             let mut run = Env::with(env.cli, env.passes, env.w, env.signed, env.trace, String::new(), &input);
             run.egg = env.egg.clone();
             run.cofactor = env.cofactor;
+            if !c.args.is_empty() {
+                let frame = Frame { call: c.clone(), caller: env.lex.borrow().clone() };
+                run.lex = RefCell::new(Lex::new(&input, Some(frame)));
+            }
             if let Some(c) = env.ctxs.borrow().last() {
                 run.ctxs.borrow_mut().push(c.narrow(c.w));
             }
-            let out = scoped(|| go(&d.body, set, &run))?;
+            let out = scoped(|| go(&c.body, set, &run))?;
             Ok(seen(out, env))
+        }
+        Pipe::Param(i, _) => {
+            let (call, caller) = {
+                let lex = env.lex.borrow();
+                let f = lex.frame.as_ref().expect("a parameter outside the body of its function");
+                (f.call.clone(), f.caller.clone())
+            };
+            let crate::sched::CallArg::Pipe(arg) = &call.args[*i] else { unreachable!("a pipeline parameter") };
+            let callee = env.lex.replace(caller);
+            let out = go(arg, set, env);
+            env.lex.replace(callee);
+            out
         }
         Pipe::Wins(n, p) => {
             let n = env.times(n, &set);
@@ -740,10 +777,10 @@ fn pre(e: &str) -> String {
 fn pass(p: &Pass, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
     let name = match p {
         Pass::Save(r) => {
-            env.regs.borrow_mut().insert(r.to_string(), set.clone());
+            env.lex.borrow().regs.borrow_mut().insert(r.to_string(), set.clone());
             return Ok(set);
         }
-        Pass::Load(r) => return Ok(env.regs.borrow().get(r).cloned().unwrap_or_default()),
+        Pass::Load(r) => return Ok(env.lex.borrow().regs.borrow().get(r).cloned().unwrap_or_default()),
         Pass::Off(ns) => {
             ns.iter().for_each(|n| crate::sched::turn_off(n));
             return Ok(set);
@@ -797,9 +834,9 @@ fn pass(p: &Pass, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
         "pre_done" => {
             if env.trace {
                 let kept: Vec<String> = set.iter().map(|c| format!("{} {}", c.origin, c.size())).collect();
-                eprintln!("prepass: input {} chosen {}", size_of(&env.input), kept.join(", then "));
+                eprintln!("prepass: input {} chosen {}", size_of(&env.lex.borrow().input), kept.join(", then "));
             }
-            let t0 = env.reg_main("t0").unwrap_or_else(|| Cand::new(&env.input, "input"));
+            let t0 = env.reg_main("t0").unwrap_or_else(|| Cand::new(&env.lex.borrow().input, "input"));
             return Ok(set
                 .iter()
                 .enumerate()
@@ -1111,11 +1148,11 @@ mod tests {
         let env = Env::prepass(&passes, 32, None, false, SUB);
         let mut names = lang::Defs::new();
         for d in &passes.defs {
-            names.insert(d.name.clone(), lang::Named { pipe: Pipe::Call(d.clone()), flat: false, run: true });
+            names.insert(d.name.clone(), lang::Named { pipe: crate::sched::Call::bare(d), flat: false, run: true, params: Vec::new(), def: Some(d.clone()) });
         }
         for item in ["(def @inline (g) rewrite | (save p) | split_runs = 3)", "(def @inline (h2) rewrite | none)"] {
             let d = lang::parse_definition(item, &names, &mut Vec::new()).unwrap();
-            names.insert(d.name, lang::Named { pipe: d.pipe, flat: d.flat, run: false });
+            names.insert(d.name, lang::Named { pipe: d.pipe, flat: d.flat, run: false, params: Vec::new(), def: None });
         }
         let step = |p: &str| terms(&go(&lang::parse_with(p, &names, &mut Vec::new()).unwrap(), vec![Cand::new(SUB, "input")], &env).unwrap());
         crate::sched::in_default_run(|| {
@@ -1129,6 +1166,32 @@ mod tests {
             assert_eq!(step("g | (if (split_runs == 3) (save s)) | (load s)"), [XOR], "and its sequence: the assignment reaches the steps after it");
             assert_eq!(step("(save s) | (smallest h2 | (load s))"), [XOR, SUB], "and its smallest");
         });
+    }
+
+    /// The candidates `prepass` gives for `SUB` where `spec` defines it.
+    fn prepass_of(spec: &str) -> Vec<Cand> {
+        let passes = Passes::parse(spec).unwrap_or_else(|e| panic!("{spec}: {e}"));
+        let env = Env::prepass(&passes, 32, None, false, SUB);
+        crate::sched::in_default_run(|| go(&passes.prepass, vec![Cand::new(SUB, "input")], &env).unwrap())
+    }
+
+    #[test]
+    fn pipeline_arguments_are_closures() {
+        let step = |spec: &str| terms(&prepass_of(spec));
+        let f = "(def (f p) (save t) | p | (union id (load t)))";
+        assert_eq!(step(&format!("{f} prepass=(save t) | rewrite | (f (load t))")), [SUB, XOR], "the argument reads the caller's register, the body its own");
+        assert_eq!(step("(def (f p) p | none) prepass=rewrite | (f (save s)) | (load s)"), [XOR], "and writes the caller's");
+        let nested = "(def (g q) (save u) | none | q) (def (h p) (save u) | none | (g (union (load u) p)))";
+        assert_eq!(step(&format!("{nested} prepass=(save t) | rewrite | (h (load t))")), [XOR, SUB], "a parameter in an argument is the enclosing call's argument");
+        assert_eq!(step("(def (f r p) (save r) | p | (load r)) prepass=rewrite | (f t none)"), [XOR], "a name parameter as a register of the function's run");
+        assert_eq!(step("(def (without n p) (off n) | p) prepass=(without tfunc tfunc)"), [SUB], "a name parameter as a switch");
+        assert_eq!(step("prepass=tfunc"), [XOR]);
+        let out = prepass_of("(def (named n p) (tag n p)) prepass=(named mine rewrite)");
+        assert_eq!(out[0].origin, "mine", "a name parameter as a stats name");
+        assert_eq!(step("(def @inline (g r p) (save r) | p) prepass=rewrite | (g s none) | (load s)"), [XOR], "an @inline function shares the caller's registers");
+        assert_eq!(step("(def @inline (g p) split_runs = 3 | p) prepass=(g id) | (if (split_runs == 3) id none)"), [SUB], "and its sequence");
+        assert_eq!(step("(def (g p) split_runs = 3 | p) prepass=(g id) | (if (split_runs == 3) id none)"), Vec::<String>::new(), "a def's assignment ends with its run");
+        assert_eq!(step("(def (w p) (save s) | (smallest p | (load s))) prepass=(w rewrite)"), [XOR, SUB], "an argument's passes are seen by the smallest it runs in");
     }
 
     #[test]

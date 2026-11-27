@@ -69,7 +69,7 @@ eggy1 的化简流程由几条管线描述，默认的写在 `src/default.pipe` 
 program := step ('|' step)*                # 一条序列（seq）
 step    := NAME                            # 不带参数的函数（包括 def 定义的），或 let 名（第 4.1 节）
          | NAME '=' expr                   # 赋值（第 5 节）
-         | '(' FUNC arg+ ')'               # 带参数的函数（第 7 节），或宏 on/off
+         | '(' FUNC arg+ ')'               # 带参数的函数（第 7 节，包括带参数的 def），或宏 on/off
          | '(' program ')'                 # 分组：一条嵌套的序列
 expr    := expr '||' expr | expr '&&' expr | '!' expr
          | sum CMP sum | sum
@@ -144,7 +144,7 @@ x = e | rest    ≡  在 x = e 之下运行 rest          （绑定）
 - 最后一个参数是**隐含输入**（`term` 或 `group`），调用时不写；返回类型写在最后。
 - 声明前紧挨着的一行注释是它的说明。
 - 属性：`@bookkeeping`：只搬动候选，过了时限照常执行（第 5.3 节）；`@simplify_only`：只能出现在 `pipeline` 里（`egglog`、`reprint`），因为只有 `simplify` 的运行才有 e-graph。
-- `extern` 只能写在 `builtins.pipe` 里，写在 `--passes` 或管线里报错。宏（`let`、`on`、`off`）和赋值不是函数，没有声明；定义的函数 `pipeline`、`sub/NAME` 不能在步骤里调用，也没有声明。`def` 定义的函数的签名由函数体推出，现在总是 `(NAME g:group) group`：`--show-passes` 在它的定义前一行注释里打印，`--show-builtins` 在最后单列一节。
+- `extern` 只能写在 `builtins.pipe` 里，写在 `--passes` 或管线里报错。宏（`let`、`on`、`off`）和赋值不是函数，没有声明；定义的函数 `pipeline`、`sub/NAME` 不能在步骤里调用，也没有声明。`def` 定义的函数的签名由函数体推出（第 5.6 节），如 `(try_without name:name p:pipe g:group) group`，没有参数时是 `(NAME g:group) group`：`--show-passes` 在它的定义前一行注释里打印，`--show-builtins` 在最后单列一节。
 
 调用方式由隐含输入和返回类型决定，第 8 节的四种由此得出：
 
@@ -221,7 +221,7 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 (def @inline (NAME) P)      # 在调用处展开，同 (let NAME P)
 ```
 
-- `def` 和 `let` 一样是 `--passes` 的一项（`default.pipe` 里也可以写），不是管线里的步骤。之后的项里，`NAME` 写在步骤位置就是调用它。还不能带参数（`(def (f x) ...)` 报错）。
+- `def` 和 `let` 一样是 `--passes` 的一项（`default.pipe` 里也可以写），不是管线里的步骤。之后的项里，`NAME` 写在步骤位置就是调用它；带参数的写成 `(NAME ARG ...)`（下面的"参数"）。
 - `(def (NAME) P)`：调用对整组进行（拿到当前候选组，给出 `P` 的结果），是一次**运行**（第 1.1 节）：有自己的寄存器；函数体里的赋值、`on`、`off` 在返回时撤销；外面的 `smallest` 看不到函数里面，只看到调用给出的候选；`wins`、`moved` 只看本次运行。函数体读得到调用处的绑定（动态作用域）。条件 `input` 在函数体里指调用时的主候选。函数体在 `scope` 里调用时，单项 pass 仍共用那个 `scope` 的缓存。
 - `(def @inline (NAME) P)`：不开新的运行，在调用处原地展开，共享调用处的作用域、寄存器和 `smallest`。`P` 直接写成 `a | b` 时平铺进所在的序列，里面的赋值作用到那条序列的末尾；写成 `(a | b)` 时是一条嵌套的序列。
 - `pipeline`、`prepass`、`polish`、`rewrite`、`simba`、`sub/NAME` 只能被 `(def (NAME) P)`（或 `NAME=P`）替换；其他内置函数、变量、宏、`let` 名、已定义的 `def` 名都不能再用 `def` 定义。`@inline` 不能用于这几个名字。
@@ -232,6 +232,32 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 (def (twice) rewrite | rewrite)
 (def @inline (lb) lowbits | relate)
 prepass=lb | twice | finish            # 即 lowbits | relate | twice | finish
+```
+
+**参数**：`(def (NAME PARAM ...) P)`、`(def @inline (NAME PARAM ...) P)`。参数不写类型，按它在 `P` 里的用法推出：
+
+- 写在步骤位置：**管线参数**（`pipe`）；
+- 写在寄存器位置（`(save R)`、`(load R)`、`(label R)`、`(size R)`、`(same R)`）：**寄存器名参数**（`reg`）；
+- 写在名字位置（`(tag NAME p)`、`(cand NAME p)`、`(smaller NAME p)`、`(egglog LABEL)`、`(off NAME)`、`(on NAME)`）：**名字参数**（`name`）；
+- 作为参数传给另一个带参数的函数时，取那个参数的类型。
+- 写在表达式里（数值参数）还不支持，报 `numeric parameters are not supported yet`。
+
+推出的结果就是签名（`(try_without name:name p:pipe g:group) group`），调用处照签名检查参数的个数和种类，报错的样子和内置函数一样（`f takes a register name and a pipeline: (f r:reg p:pipe g:group) group`）。读参数的规则也和内置函数一样：只有一个管线参数、且它是最后一个时读到 `)` 为止，其他管线参数各是一个步骤，寄存器名和名字参数各是一个名字。有参数的函数单独写出时报 `NAME needs parentheses`。
+
+- 参数只在函数体里看得见（词法绑定），不参与变量的查找，不能赋值；不能和变量、函数、宏、`let` 名、`def` 名或函数自己同名，也不能重复。
+- 同一个参数的用法互相矛盾（既是管线又是寄存器名，或既是寄存器名又是名字）、函数体里没用到的参数，都报错。
+- 名字参数（寄存器名和名字）在解析时代入：每处调用得到一份把名字放进去的函数体。`(off name)` 的参数在调用处检查是不是开关。寄存器的读写检查对这份函数体做，在函数自己的运行里（`(def (f r) (load r))` 调用成 `(f t)` 时报 `f reads register t before any (save t)`）。
+- 管线参数是**闭包**：传进去的管线带着调用处的运行，在函数体里每用一次就运行一次，读写的是调用处的寄存器，条件 `input` 指调用处的输入，里面的参数指调用处所在函数的参数（参数作为参数再往下传时，层层回到写下它的地方）。它所在位置的 `smallest`、`wins`、`fix`、`scope` 照常看得到它（它在函数体里运行）。所以寄存器的读写检查对管线参数在调用处做：它可能在调用里的任何时候运行，也可能运行多次或不运行（同 `fix` 的体）。
+- `@inline` 函数的参数在展开时代入（管线参数原样放进去），展开后的样子就是调用处的一部分，共享调用处的作用域和寄存器。函数体直接写成 `a | b` 时，`(NAME ARG ...)` 照样平铺进所在的序列。
+- 不允许递归（第 12 节）：函数只能调用在它之前定义的函数，调用处的管线参数也只能写已经定义的名字，所以 `def` 之间成不了环；能成环的只有经过运行时取定义的 `prepass`、`polish`，管线参数里的调用算在调用处（`(def (g p) p) prepass=(g prepass)` 报 `prepass reaches itself`）。
+
+```
+(def (f p) (save t) | p | (load t))
+(save t) | (f ((load t) | rewrite))          # 参数里的 (load t) 读调用处的 t，f 最后的 (load t) 读 f 自己的 t
+(def (try_without name p) (best 1 p ((off name) | p)))
+prepass=(try_without relate rewrite)         # 即 (best 1 rewrite ((off relate) | rewrite))，在 try_without 的运行里
+(def @inline (keep_in r p) (save r) | p)
+prepass=(keep_in t rewrite) | (load t)       # 即 (save t) | rewrite | (load t)
 ```
 
 ## 6. 表达式
@@ -596,7 +622,7 @@ prepass=lb | twice | finish            # 即 lowbits | relate | twice | finish
 | `pipeline=P`、`prepass=P`、`polish=P`、`rewrite=P`、`simba=P`、`sub/NAME=P` | 替换这条管线的定义：`(def (NAME) P)` 的简写 |
 | `polish=a,b,...` | 全是 polish pass 名时：依次尝试这些 `polish/NAME`，变小才保留，有一个变小就重来，至多保留 `polish_wins` 次 |
 | `(let NAME P)` | 定义名字（第 5.4 节）。`default.pipe` 定义的名字（`first_round`、`later`、`gates`、`rebuild_main`……）也能用 |
-| `(def (NAME) P)`、`(def @inline (NAME) P)` | 定义函数（第 5.6 节） |
+| `(def (NAME PARAM ...) P)`、`(def @inline (NAME PARAM ...) P)` | 定义函数（第 5.6 节） |
 | `file=PATH` | 在此处读入文件里的各项 |
 | `pre=a,b`、`pre+=`、`pre-=` | 造哪些预处理候选：`unified no_wide split_bits halve_first over_products over_const_bitwise over_shared_bitwise halve_input unclustered` |
 | `schedule=...`、`schedule+=`、`schedule-=` | 每轮 egglog 的步骤，逗号分隔的 `run:RS`（back-off 调度）、`once:RS`、`sat:RS`（饱和），`RS` 是 `default-ruleset canonicalization constant-folding analysis identity-zero-element simplify` 之一 |
@@ -610,7 +636,8 @@ prepass=lb | twice | finish            # 即 lowbits | relate | twice | finish
 读完 `--passes` 后检查，出错时拒绝整个设置：
 
 - 名字：未知的变量、函数、`on`/`off` 名、`sub/NAME`、规则集，报错并列出已知的名字。
-- `let`、`def` 名和变量、函数、宏同名（第 4.1 节）；`def` 重新定义已有的 `let`、`def` 名，`let` 重新定义 `def` 名；`@inline` 用于 `prepass` 等内置的定义函数；`def` 带参数、未知的属性、未知的 `sub/NAME`。
+- `let`、`def` 名和变量、函数、宏同名（第 4.1 节）；`def` 重新定义已有的 `let`、`def` 名，`let` 重新定义 `def` 名；`@inline` 用于 `prepass` 等内置的定义函数；未知的属性、未知的 `sub/NAME`。
+- `def` 的参数（第 5.6 节）：和已有的名字同名或重复、用法矛盾、没用到、被赋值、写在表达式里（数值参数还不支持）；`prepass` 等内置的定义函数带参数。调用处参数的个数和种类照推出的签名检查；`(off NAME)` 的名字参数在调用处检查是不是开关。
 - 定义的函数写了参数（`f takes no arguments: (f g:group) group`）、写在表达式里或 `=` 左边。
 - 赋值：给函数赋值；值超过变量的上限。
 - 条件里写了 `=`（`(if (size = 3) ...)`）：报错 "an assignment is a step; compare with =="。
@@ -619,9 +646,9 @@ prepass=lb | twice | finish            # 即 lowbits | relate | twice | finish
 - 旧写法报错并提示新写法：`(with KEY=VALUE ... p)`（提示 `(KEY = VALUE | ... | p)`，它的 `bit_splits` 是 `bit_split_budget`）、`(time-limit N)`（提示 `time_limit = N`、`time_limit = none`）、条件名 `true`（提示 `1`，只在有候选时为真的写 `(any 1)`）、单名写法 `save/t`、`off/NAME`、`egglog/LABEL`、`seq(a,b)` 语法。`with` 外面的 `KEY=VALUE` 就是赋值 `KEY = VALUE`，不报错。名字里的 `-` 读作减号，没法单独报错；解析出错时，如果写了 `a-b` 这样的词，错误后面加上"`a-b` 读作 `a - b`，名字用 `_`"，`a_b` 是已知名字时提示写 `a_b`。
 - 开关赋 `none`：开关只收数，0 是关。
 - 签名带 `@simplify_only` 的函数（`egglog`、`reprint`）只能出现在 `pipeline` 里：只有 `simplify` 的运行才有 e-graph。
-- 函数不能经过别的函数回到自己（`prepass`、`polish` 和 `def` 定义的函数）。调用关系：`prepass` pass 和函数 `opaque`、`rebuilds` 调用 `prepass`；`polish` pass 调用 `polish`；单项 pass、`regions`、`again` 调用 `rewrite`、`simba`、`sub/NAME` 这一组；写出 `def` 名就调用它。`rewrite` 这一组内部本来就是递归的（在子项上），照旧；被这一组调用、又调用回这一组的 `def` 也算在这一组里。
+- 函数不能经过别的函数回到自己（`prepass`、`polish` 和 `def` 定义的函数）。调用关系：`prepass` pass 和函数 `opaque`、`rebuilds` 调用 `prepass`；`polish` pass 调用 `polish`；单项 pass、`regions`、`again` 调用 `rewrite`、`simba`、`sub/NAME` 这一组；写出 `def` 名就调用它，调用处的管线参数里的调用算在调用处。`rewrite` 这一组内部本来就是递归的（在子项上），照旧；被这一组调用、又调用回这一组的 `def` 也算在这一组里。
 - `egglog`、`reprint` 写在 `def` 里时，只有 `pipeline` 可以（经过别的函数）调用这个 `def`。
-- 寄存器的读（`load`、`label`、`size`、`same`）前面必须有可能先执行的同名 `save`。每个 `def` 的函数体单独检查（它有自己的寄存器）；`let`、`@inline` 按展开后的样子检查。按执行顺序算：`if` 的两支都算，`retry` 的条件在 `a` 之后，`best` 的个数在各支之后；`fix`、`wins`、`regions` 的体会重复执行，体里任何地方的 `save` 对整个体都算。这条检查找的是写错名字和顺序，不保证运行时一定有值。
+- 寄存器的读（`load`、`label`、`size`、`same`）前面必须有可能先执行的同名 `save`。每个 `def` 的函数体单独检查（它有自己的寄存器），有名字参数的按每种调用代入后的样子检查；`let`、`@inline` 按展开后的样子检查。管线参数读写调用处的寄存器，在调用处检查，当作可能运行多次的体。按执行顺序算：`if` 的两支都算，`retry` 的条件在 `a` 之后，`best` 的个数在各支之后；`fix`、`wins`、`regions` 的体会重复执行，体里任何地方的 `save` 对整个体都算。这条检查找的是写错名字和顺序，不保证运行时一定有值。
 
 以下只给警告：`eggy1` 和 `bench` 的父进程打印到 stderr，`bench --one` 子进程不打印。
 
