@@ -15,7 +15,7 @@ eggy1 的化简流程由几条管线描述，默认的写在 `src/default.pipe` 
 - 从 Rust 直接进入别的管线时（测试和 `fuzz --prepass` 调用 `simplify_linear_with` 即 `prepass`、`polish`，不在任何运行里的 `rewrite`），入口换成那条管线，前面接同一段赋值（没有 `-m`、`-i` 那两步）。已经在一次运行里时，嵌套的运行不再执行它们。
 - 每次 `simplify` 都从头执行入口程序，结束时撤销所有绑定，下一个表达式重新开始。
 
-`--show-passes` 先打印一行注释 `# A run: <入口程序的各步> | pipeline`，再打印 `--passes` 写法的全部设置（只含命令行那部分赋值），所以它的输出可以原样传给 `--passes`。
+`--show-passes` 先打印一行注释 `# A run: <入口程序的各步> | pipeline`，再打印 `--passes` 写法的全部设置（只含命令行那部分赋值），所以它的输出可以原样传给 `--passes`。`--show-builtins` 按调用方式列出全部内置函数的签名和说明（第 4.3 节）。
 
 ### 1.1 定义的函数（管线）
 
@@ -87,8 +87,8 @@ CMP     := '<' | '<=' | '>' | '>=' | '==' | '!='
 - 序列的每一步可以是任何 `step`：函数调用、赋值、宏、分组都能接在一起。
 - 赋值右边的表达式读到 `|`、`)` 或项尾为止：`split_runs = vars * 2 | split_bits`。
 - 表达式只有一种：条件和数是同一种东西（第 6 节）。
-- `(` 后面紧跟带参数的内置函数名或宏名时是调用，否则是分组。这些名字是保留字，不能用作 `let` 名或变量名；单独写出时报 `NAME needs parentheses`（`egglog` 除外，它也可以不带参数）。
-- 作为参数的管线如果含 `|`，要加括号：`(best 1 (a | b) c)`。
+- `(` 后面紧跟有参数的内置函数名（签名里写了参数，第 4.3 节）或宏名时是调用，否则是分组。表达式里只有可选参数的数值函数没写参数时也是分组：`(size)`、`(size + 1)` 是表达式，`(size r)` 是调用。内置函数名、宏名和 `extern` 是保留字，不能用作 `let` 名；必须写参数的函数单独写出时报 `NAME needs parentheses`（只有可选参数的，如 `egglog`，也可以不带参数）；没有参数的函数后面跟了参数（`(lowbits x)`）报 `NAME takes no arguments`。
+- 作为参数的管线如果含 `|`，要加括号：`(best 1 (a | b) c)`。只有一个管线参数、且它是最后一个参数的函数（`fix`、`wins`、`tag`、`smallest`……）例外：这个参数读到 `)` 为止，`(fix 3 a | b)` 就是 `(fix 3 (a | b))`。
 
 ### 4.1 名字
 
@@ -99,6 +99,7 @@ CMP     := '<' | '<=' | '>' | '>=' | '==' | '!='
   - **数值函数**返回一个数：`mixed`、`size`、`(size R)`、`(any C)`（第 6.3 节）。
   - **候选组函数**返回一组候选：不带参数的 `lowbits`、`rewrite`、`egglog`（第 8 节，习惯上叫 pass）；带参数的 `(save R)`、`(egglog LABEL)`，以及参数里有管线的**高阶函数** `(best K a b)`、`(fix N p)`、`(if C a b)`（第 7 节）。
   - 内置函数之外，还有**定义的函数**：`prepass=P` 等项定义的管线（第 1.1 节）。
+  - 内置函数分哪一类、怎么调用、带什么参数，都由 `src/builtins.pipe` 里的签名决定（第 4.3 节）。
 - **宏**在解析时展开：`let`、`on`、`off`（第 5.4 节）。
 
 名字按位置解释，放错位置是类型错误，解析时报出：
@@ -131,6 +132,35 @@ x = e | rest    ≡  在 x = e 之下运行 rest          （绑定）
 
 作为参数传给函数的管线（`best` 的分支等）在调用处所在的运行里执行，读写的是这次运行的寄存器。
 
+### 4.3 内置函数的签名
+
+内置函数的签名声明在 `src/builtins.pipe` 里（在 `default.pipe` 之前读入），函数体在 Rust 里实现；第 6.3、7、8 节的表是它们的说明，完整的签名以 `builtins.pipe` 为准：
+
+```
+(extern [@ATTR ...] (NAME PARAM:TYPE ... INPUT:TYPE) RESULT)
+```
+
+- 类型：`num`（表达式）、`term`（一个候选）、`term?`（一个候选或没有，只作返回类型）、`group`（一组候选）、`pipe`（管线，原样传进去，在函数里运行）、`reg`（寄存器名）、`name`（统计名或来源名）。`TYPE...` 是一个或多个，`TYPE?` 可以省略（只用于 `pipe`、`reg`、`name`）。
+- 最后一个参数是**隐含输入**（`term` 或 `group`），调用时不写；返回类型写在最后。
+- 声明前紧挨着的一行注释是它的说明。
+- 属性：`@bookkeeping`：只搬动候选，过了时限照常执行（第 5.3 节）；`@simplify_only`：只能出现在 `pipeline` 里（`egglog`、`reprint`），因为只有 `simplify` 的运行才有 e-graph。
+- `extern` 只能写在 `builtins.pipe` 里，写在 `--passes` 或管线里报错。宏（`let`、`on`、`off`）和赋值不是函数，没有声明；定义的函数 `pipeline`、`sub/NAME` 不能在步骤里调用，也没有声明。
+
+调用方式由隐含输入和返回类型决定，第 8 节的四种由此得出：
+
+| 隐含输入 → 返回 | 调用方式 |
+|---|---|
+| `group → group` | 整组 |
+| `term → term` | 对每个候选调用；结果不变时保留原候选（单项、polish、`polish`） |
+| `term → term?` | 对每个候选调用；没有结果时去掉这个候选（alternative） |
+| `term → group` | 对主候选调用，结果替换整组（`prepass`、`reprint`） |
+| `term → num` | 对主候选求值；组为空时得 0 |
+| `group → num` | 对整组求值；组为空时得 0（`any`、`all`、`minimal`、`used_wide`、`used_clustered`，以及不看候选的 `moved`、`cofactor`） |
+
+例外：`(size R)` 读寄存器 `R` 的主候选，不看输入，所以输入为空时也不得 0。
+
+解析照签名读参数：`num` 参数是一个 `earg`（数值函数 `any`、`all` 的参数是整个表达式），`reg`、`name` 参数是一个名字，`pipe...` 是一个或多个步骤，第 4 节末尾说的那种 `pipe` 参数读到 `)` 为止，其他 `pipe` 参数各是一个步骤。位置、参数个数和种类的检查都照签名做（第 12 节），报错时附上签名。
+
 ## 5. 变量与作用域
 
 ### 5.1 一条规则
@@ -157,7 +187,7 @@ x = e | rest    ≡  在 x = e 之下运行 rest          （绑定）
 
 ### 5.3 时限
 
-- 过了截止时刻，干活的步骤原样返回输入，所以任何时候停下来结果都正确。只搬动候选的步骤照常执行：序列本身、赋值、`save`、`load`、`label`、`filter`、`id`、`none`、`within`、`pre_done`。所以寄存器照常可用，时限所在的作用域结束后，外面的步骤接着运行。
+- 过了截止时刻，干活的步骤原样返回输入，所以任何时候停下来结果都正确。只搬动候选的步骤照常执行：签名带 `@bookkeeping` 的函数（序列本身、`save`、`load`、`label`、`filter`、`id`、`none`、`within`、`pre_done`），以及赋值和 `on`、`off`。所以寄存器照常可用，时限所在的作用域结束后，外面的步骤接着运行。
 - 时限只在步骤之间检查，打断不了正在运行的单个步骤（一轮 egglog、一次大的 `poly_mba` 展开）。一轮 egglog 开始前，按上一轮用的时间估计：估计会超过截止时刻就跳过。
 - 开关 `cut` 开着时，因时限跳过的步骤会把整次运行记为截断：`eggy1` 打印提示，bench 把没解出的用例记作 `cut`。默认 `pipeline` 开头写 `cut = 1`。不想算的地方写 `cut = 0`。
 - 截断时得到的结果不进缓存。
@@ -270,7 +300,7 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 
 ## 8. 不带参数的候选组函数（pass）
 
-这些函数习惯上叫 pass。按调用方式分四种：整组、单项、alternative、polish。
+这些函数习惯上叫 pass。按调用方式分四种：整组、单项、alternative、polish（第 4.3 节，由签名决定）。
 
 ### 8.1 整组
 
@@ -560,10 +590,11 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 - `let` 名和变量、函数、宏同名（第 4.1 节）。
 - 赋值：给函数赋值；值超过变量的上限。
 - 条件里写了 `=`（`(if (size = 3) ...)`）：报错 "an assignment is a step; compare with =="。
-- 类型：步骤位置写了数值函数或变量，表达式里写了候选组函数；函数参数的个数、种类（表达式、管线、寄存器名）不对。
+- 类型，照签名（第 4.3 节）检查，报错时附上签名：步骤位置写了数值函数或变量（`mixed gives a number, not candidates: (mixed t:term) num`），表达式里写了候选组函数（`egglog gives candidates, not a number`）；参数的个数、种类（表达式、管线、寄存器名、名字）不对（`retry takes an expression and two pipelines: (retry c:num a:pipe b:pipe g:group) group`）；没有参数的函数写了参数；给函数赋值。
+- `extern` 写在 `src/builtins.pipe` 以外。
 - 旧写法报错并提示新写法：`(with KEY=VALUE ... p)`（提示 `(KEY = VALUE | ... | p)`，它的 `bit_splits` 是 `bit_split_budget`）、`(time-limit N)`（提示 `time_limit = N`、`time_limit = none`）、条件名 `true`（提示 `1`，只在有候选时为真的写 `(any 1)`）、单名写法 `save/t`、`off/NAME`、`egglog/LABEL`、`seq(a,b)` 语法。`with` 外面的 `KEY=VALUE` 就是赋值 `KEY = VALUE`，不报错。名字里的 `-` 读作减号，没法单独报错；解析出错时，如果写了 `a-b` 这样的词，错误后面加上"`a-b` 读作 `a - b`，名字用 `_`"，`a_b` 是已知名字时提示写 `a_b`。
 - 开关赋 `none`：开关只收数，0 是关。
-- `egglog`、`reprint` 只能出现在 `pipeline` 里：只有 `simplify` 的运行才有 e-graph。
+- 签名带 `@simplify_only` 的函数（`egglog`、`reprint`）只能出现在 `pipeline` 里：只有 `simplify` 的运行才有 e-graph。
 - `prepass` 和 `polish` 不能经过别的管线回到自己。调用关系：`prepass` pass 和函数 `opaque`、`rebuilds` 调用 `prepass`；`polish` pass 调用 `polish`；单项 pass、`regions`、`again` 调用 `rewrite`、`simba`、`sub/NAME` 这一组（这一组内部本来就是递归的）。
 - 寄存器的读（`load`、`label`、`size`、`same`）前面必须有可能先执行的同名 `save`。按执行顺序算：`if` 的两支都算，`retry` 的条件在 `a` 之后，`best` 的个数在各支之后；`fix`、`wins`、`regions` 的体会重复执行，体里任何地方的 `save` 对整个体都算。这条检查找的是写错名字和顺序，不保证运行时一定有值。
 

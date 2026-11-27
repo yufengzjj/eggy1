@@ -3,6 +3,7 @@
 //! variable, conditions are expressions (`(if (mul >= 4 && shift < 1) (off small_blocks))`).
 //! Parsed into `sched::Pipe`.
 
+use crate::builtins::{self, Rep, Sig, Ty};
 use crate::pipe::{CONDS, FEATURES, resolve};
 use crate::sched::{Cmp, Expr, INNER, NONE, NVARS, Pass, Pipe, is_switch, var, var_index};
 
@@ -72,6 +73,7 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
                 let len = cs[i..].iter().take_while(|c| name_char(**c)).count();
                 (Tok::Name(cs[i..i + len].iter().collect()), len)
             }
+            _ if s.contains("(extern") => return Err(NO_EXTERN.into()),
             _ => return Err(format!("unexpected character {c:?} in pipeline")),
         };
         out.push(tok);
@@ -80,31 +82,139 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
     Ok(out)
 }
 
-const FORMS: [&str; 22] = [
+/// The functions of `src/builtins.pipe` whose arguments `construct` reads; the rest without
+/// arguments are passes (`crate::pipe::resolve`).
+#[cfg(test)]
+pub(crate) const FORMS: [&str; 20] = [
     "seq", "union", "best", "first", "fix", "if", "retry", "smallest", "scope", "regions", "again", "tag", "cand", "smaller", "wins", "filter", "save", "load", "label",
-    "off", "on", "egglog",
+    "egglog",
 ];
+
+/// The number functions whose arguments `number` reads; the rest are `CONDS` and `FEATURES`.
+#[cfg(test)]
+pub(crate) const NUMBER_FORMS: [&str; 4] = ["size", "same", "any", "all"];
 
 const NO_WITH: &str = "(with KEY=VALUE ... p) is no longer read: write (KEY = VALUE | ... | p), as in (rewrites = 8 | semi_leaves = 2 | rewrite); with's bit_splits=N is bit_split_budget = N";
 const NO_TIME_LIMIT: &str = "(time-limit N) is no longer read: write time_limit = N, or time_limit = none for no limit";
 const NO_TRUE: &str = "true is no longer a condition: write 1, or (any 1) for true only where there are candidates";
+pub(crate) const NO_EXTERN: &str = "extern declarations are only read from src/builtins.pipe";
+
+/// An argument of a call, as its parameter's type reads it.
+#[derive(Clone)]
+enum Arg {
+    Num(Expr),
+    Name(String),
+    Pipe(Pipe),
+    Pipes(Vec<Pipe>),
+    Absent,
+}
+
+/// The arguments of a call in order; each read as its signature says, so a mismatch is a
+/// bug that the tests of every declaration find.
+struct Args(std::vec::IntoIter<Arg>);
+
+impl Args {
+    fn num(&mut self) -> Expr {
+        let Some(Arg::Num(e)) = self.0.next() else { unreachable!() };
+        e
+    }
+
+    fn name(&mut self) -> String {
+        let Some(Arg::Name(n)) = self.0.next() else { unreachable!() };
+        n
+    }
+
+    fn maybe_name(&mut self) -> Option<String> {
+        match self.0.next() {
+            Some(Arg::Name(n)) => Some(n),
+            _ => None,
+        }
+    }
+
+    fn pipe(&mut self) -> Box<Pipe> {
+        self.maybe_pipe().unwrap()
+    }
+
+    fn maybe_pipe(&mut self) -> Option<Box<Pipe>> {
+        match self.0.next() {
+            Some(Arg::Pipe(p)) => Some(Box::new(p)),
+            _ => None,
+        }
+    }
+
+    fn pipes(&mut self) -> Vec<Pipe> {
+        let Some(Arg::Pipes(ps)) = self.0.next() else { unreachable!() };
+        ps
+    }
+}
+
+/// The pipeline a call of the group function `f` with `args` stands for; `None` when no
+/// Rust code implements `f`.
+fn construct(f: &str, args: Vec<Arg>) -> Option<Pipe> {
+    let empty = args.is_empty();
+    let mut a = Args(args.into_iter());
+    Some(match f {
+        "seq" => Pipe::Seq(a.pipes()),
+        "union" => Pipe::Union(a.pipes()),
+        "first" => Pipe::First(a.pipes()),
+        "best" => Pipe::Best(a.num(), a.pipes()),
+        "fix" => Pipe::Fix(a.num(), a.pipe()),
+        "wins" => Pipe::Wins(a.num(), a.pipe()),
+        "if" => Pipe::If(a.num(), a.pipe(), a.maybe_pipe().unwrap_or_else(|| Box::new(Pipe::Pass(Pass::id())))),
+        "retry" => Pipe::Retry(a.num(), a.pipe(), a.pipe()),
+        "smallest" => Pipe::Smallest(a.pipe()),
+        "scope" => Pipe::Scope(a.pipe()),
+        "regions" => Pipe::Regions(a.pipe()),
+        "again" => Pipe::Again(a.pipe()),
+        "tag" => Pipe::Tag(a.name(), a.pipe()),
+        "cand" => Pipe::Cand(a.name(), a.pipe()),
+        "smaller" => Pipe::Smaller(a.name(), a.pipe()),
+        "filter" => Pipe::Filter(a.num()),
+        "save" | "load" | "label" => Pipe::Pass(resolve(&format!("{f}/{}", a.name()))?),
+        "egglog" => Pipe::Pass(Pass::Egglog(a.maybe_name().map_or_else(|| "egglog".into(), |l| format!("egglog/{l}")))),
+        _ if empty => Pipe::Pass(resolve(f)?),
+        _ => return None,
+    })
+}
+
+/// The expression a call of the number function `f` with `args` stands for; `None` when no
+/// Rust code implements `f`.
+fn number(f: &str, args: Vec<Arg>) -> Option<Expr> {
+    let mut a = Args(args.into_iter());
+    Some(match f {
+        "size" => a.maybe_name().map_or(Expr::Feature(0), Expr::Size),
+        "same" => Expr::Same(a.name()),
+        "any" => Expr::Any(Box::new(a.num())),
+        "all" => Expr::All(Box::new(a.num())),
+        _ => match CONDS.iter().position(|c| *c == f) {
+            Some(i) => Expr::Is(i),
+            None => Expr::Feature(FEATURES.iter().position(|c| *c == f)?),
+        },
+    })
+}
+
+fn unimplemented(s: &Sig) -> String {
+    format!("{s} is declared in src/builtins.pipe but nothing implements it")
+}
 
 /// The expression a name stands for: a variable, a function of the candidates or `none`.
 fn name_expr(n: &str) -> Result<Expr, String> {
-    if let Some(i) = CONDS.iter().position(|c| *c == n) {
-        Ok(Expr::Is(i))
-    } else if let Some(i) = FEATURES.iter().position(|f| *f == n) {
-        Ok(Expr::Feature(i))
-    } else if let Some(i) = var_index(n) {
+    if let Some(s) = builtins::get(n).filter(|s| s.is_number()) {
+        if s.required() {
+            return Err(format!("{n} needs parentheses: ({n} ...); {s}"));
+        }
+        return number(n, vec![Arg::Absent; s.params.len()]).ok_or_else(|| unimplemented(s));
+    }
+    if let Some(i) = var_index(n) {
         Ok(Expr::Var(i))
     } else if n == "none" {
         Ok(Expr::Num(NONE))
     } else if n == "true" {
         Err(NO_TRUE.into())
-    } else if ["same", "any", "all"].contains(&n) {
-        Err(format!("{n} needs parentheses: ({n} ...)"))
+    } else if let Some(s) = builtins::get(n) {
+        Err(format!("{n} gives candidates, not a number: {s}; an expression reads variables and number functions"))
     } else {
-        Err(format!("unknown name {n} in an expression; known: {} {} and the variables", CONDS.join(" "), FEATURES.join(" ")))
+        Err(format!("unknown name {n} in an expression; known: {} and the variables", builtins::number_names().join(" ")))
     }
 }
 
@@ -182,24 +292,29 @@ impl Parser<'_> {
             return Err(e.into());
         }
         match self.next() {
-            Some(Tok::Name(n)) if FORMS.contains(&n.as_str()) && n != "egglog" => Err(format!("{n} needs parentheses: ({n} ...)")),
             Some(Tok::Name(n)) if self.defs.contains_key(&n) => {
                 let p = self.defs[&n].0.clone();
                 self.used.push(n);
                 Ok(p)
             }
-            Some(Tok::Name(n)) if n.split_once('/').is_some_and(|(h, _)| crate::pipe::FORM_PASSES.contains(&h)) => {
-                let (h, r) = n.split_once('/').unwrap();
-                Err(format!("write {n} as ({h} {r})"))
-            }
-            Some(Tok::Name(n)) => resolve(&n).map(Pipe::Pass).ok_or_else(|| format!("unknown pass {n}; known: {}", crate::pipe::names().join(" "))),
+            Some(Tok::Name(n)) => bare(&n),
             Some(Tok::Open) => {
-                let p = match self.peek() {
-                    Some(Tok::Name(n)) if FORMS.contains(&n.as_str()) && !(n == "egglog" && self.peek_at(1) == Some(&Tok::Close)) => {
-                        let n = n.clone();
+                let p = match self.peek().cloned() {
+                    Some(Tok::Name(n)) if n == "on" || n == "off" => {
                         self.at += 1;
-                        self.form(&n)?
+                        self.switches(&n)?
                     }
+                    Some(Tok::Name(n)) => match builtins::get(&n) {
+                        Some(s) if s.is_number() => return Err(not_a_step(s)),
+                        Some(s) if !s.params.is_empty() => {
+                            self.at += 1;
+                            self.call(s)?
+                        }
+                        Some(s) if matches!(self.peek_at(1), Some(Tok::Name(_) | Tok::Num(_) | Tok::Open | Tok::Not)) => {
+                            return Err(format!("{n} takes no arguments: {s}"));
+                        }
+                        _ => self.pipe()?,
+                    },
                     _ => self.pipe()?,
                 };
                 self.expect(Tok::Close, ")")?;
@@ -254,19 +369,24 @@ impl Parser<'_> {
         matches!(self.peek(), Some(Tok::Close) | None)
     }
 
-    /// Stages up to the closing parenthesis.
-    fn stages(&mut self, form: &str) -> Result<Vec<Pipe>, String> {
+    /// Stages up to the closing parenthesis, at least one (`missing` the error otherwise).
+    fn stages(&mut self, form: &str, missing: &dyn Fn() -> String) -> Result<Vec<Pipe>, String> {
         let mut out = Vec::new();
         while !self.at_close() {
-            if self.peek() == Some(&Tok::Bar) {
-                return Err(format!("group a pipeline argument of {form} in parentheses: ({form} ... (a | b))"));
-            }
+            self.no_bar(form)?;
             out.push(self.stage()?);
         }
         if out.is_empty() {
-            return Err(format!("{form} needs a pipeline"));
+            return Err(missing());
         }
         Ok(out)
+    }
+
+    fn no_bar(&self, form: &str) -> Result<(), String> {
+        match self.peek() {
+            Some(Tok::Bar) => Err(format!("group a pipeline argument of {form} in parentheses: ({form} ... (a | b))")),
+            _ => Ok(()),
+        }
     }
 
     /// An expression argument of a form: a number, a name, `!` and an argument, or a
@@ -285,61 +405,73 @@ impl Parser<'_> {
         self.atom()
     }
 
-    fn form(&mut self, f: &str) -> Result<Pipe, String> {
-        let b = Box::new;
-        Ok(match f {
-            "seq" => Pipe::Seq(self.stages(f)?),
-            "union" => Pipe::Union(self.stages(f)?),
-            "first" => Pipe::First(self.stages(f)?),
-            "best" => {
-                let k = self.arg()?;
-                Pipe::Best(k, self.stages(f)?)
-            }
-            "fix" => Pipe::Fix(self.arg()?, b(self.pipe()?)),
-            "wins" => Pipe::Wins(self.arg()?, b(self.pipe()?)),
-            "if" | "retry" => {
-                let c = self.arg()?;
-                let mut ps = self.stages(f)?;
-                match (f, ps.len()) {
-                    ("if", 1) => Pipe::If(c, b(ps.remove(0)), b(Pipe::Pass(Pass::id()))),
-                    ("if", 2) => Pipe::If(c, b(ps.remove(0)), b(ps.remove(0))),
-                    ("retry", 2) => Pipe::Retry(c, b(ps.remove(0)), b(ps.remove(0))),
-                    _ => return Err(format!("{f} takes a condition and {} pipelines", if f == "if" { "one or two" } else { "two" })),
+    /// The arguments of a call of the group function `s` after its name, as its parameters
+    /// read them: an expression argument (`arg`), a name, one stage per pipeline, or the
+    /// whole pipeline up to `)` when one pipeline is the last and only one (`(fix 3 a | b)`).
+    fn call(&mut self, s: &'static Sig) -> Result<Pipe, String> {
+        let f = s.name.as_str();
+        let arity = || format!("{f} takes {}: {s}", s.takes());
+        let pipes = s.params.iter().filter(|p| p.ty == Ty::Pipe).count();
+        let mut args = Vec::new();
+        for (i, p) in s.params.iter().enumerate() {
+            let whole = pipes == 1 && i + 1 == s.params.len() && p.rep == Rep::One;
+            let named = matches!(self.peek(), Some(Tok::Name(_)));
+            args.push(match (p.ty, p.rep) {
+                (_, Rep::Opt) if self.at_close() => Arg::Absent,
+                (Ty::Name | Ty::Reg, Rep::Opt) if !named => Arg::Absent,
+                (_, Rep::One) if self.at_close() => return Err(arity()),
+                (Ty::Num, _) => Arg::Num(self.arg()?),
+                (Ty::Name | Ty::Reg, _) => Arg::Name(self.name(&format!("a name after {f}"))?),
+                (Ty::Pipe, Rep::Many) => Arg::Pipes(self.stages(f, &arity)?),
+                (Ty::Pipe, _) if whole => Arg::Pipe(self.pipe()?),
+                (Ty::Pipe, _) => {
+                    self.no_bar(f)?;
+                    Arg::Pipe(self.stage()?)
                 }
+                _ => unreachable!("{s}"),
+            });
+        }
+        if !self.at_close() {
+            if pipes > 0 {
+                self.no_bar(f)?;
             }
-            "smallest" => Pipe::Smallest(b(self.pipe()?)),
-            "scope" => Pipe::Scope(b(self.pipe()?)),
-            "regions" => Pipe::Regions(b(self.pipe()?)),
-            "again" => Pipe::Again(b(self.pipe()?)),
-            "tag" | "cand" | "smaller" => {
-                let n = self.name(&format!("a name after {f}"))?;
-                let p = b(self.pipe()?);
-                match f {
-                    "tag" => Pipe::Tag(n, p),
-                    "cand" => Pipe::Cand(n, p),
-                    _ => Pipe::Smaller(n, p),
-                }
-            }
-            "filter" => Pipe::Filter(self.arg()?),
-            "save" | "load" | "label" | "egglog" => {
-                let n = format!("{f}/{}", self.name(&format!("a name after {f}"))?);
-                Pipe::Pass(resolve(&n).unwrap())
-            }
-            "off" | "on" => {
-                // One pass for all the names: a sequence of them would end their effect.
-                let mut ns = Vec::new();
-                while !self.at_close() {
-                    let n = self.name(&format!("a pass name after {f}"))?;
-                    let known = || INNER.iter().chain(&crate::sched::FLAGS).copied().collect::<Vec<_>>().join(",");
-                    ns.push(crate::sched::switch(&n).ok_or_else(|| format!("unknown {f} name {n}; known: {}", known()))?);
-                }
-                if ns.is_empty() {
-                    return Err(format!("{f} needs a pass name"));
-                }
-                Pipe::Pass(if f == "off" { Pass::Off(ns) } else { Pass::On(ns) })
-            }
-            _ => unreachable!(),
-        })
+            return Err(arity());
+        }
+        construct(f, args).ok_or_else(|| unimplemented(s))
+    }
+
+    /// The macro `(off NAME ...)` or `(on NAME ...)` after its name: one pass for all the
+    /// names, since a sequence of them would end their effect.
+    fn switches(&mut self, f: &str) -> Result<Pipe, String> {
+        let mut ns = Vec::new();
+        while !self.at_close() {
+            let n = self.name(&format!("a pass name after {f}"))?;
+            let known = || INNER.iter().chain(&crate::sched::FLAGS).copied().collect::<Vec<_>>().join(",");
+            ns.push(crate::sched::switch(&n).ok_or_else(|| format!("unknown {f} name {n}; known: {}", known()))?);
+        }
+        if ns.is_empty() {
+            return Err(format!("{f} needs a pass name"));
+        }
+        Ok(Pipe::Pass(if f == "off" { Pass::Off(ns) } else { Pass::On(ns) }))
+    }
+
+    /// The arguments of a call of the number function `s` after its name: names, and
+    /// expressions up to `)`.
+    fn number_call(&mut self, s: &'static Sig) -> Result<Expr, String> {
+        let f = s.name.as_str();
+        let mut args = Vec::new();
+        for p in &s.params {
+            args.push(match p.ty {
+                _ if self.at_close() && p.rep == Rep::Opt => Arg::Absent,
+                _ if self.at_close() => return Err(format!("{f} takes {}: {s}", s.takes())),
+                Ty::Num => Arg::Num(self.or()?),
+                _ => Arg::Name(self.name("a register")?),
+            });
+        }
+        if !self.at_close() {
+            return Err(format!("{f} takes {}: {s}", s.takes()));
+        }
+        number(f, args).ok_or_else(|| unimplemented(s))
     }
 
     fn or(&mut self) -> Result<Expr, String> {
@@ -400,21 +532,20 @@ impl Parser<'_> {
                 name_expr(&n)
             }
             Some(Tok::Open) => {
-                let reg = matches!(self.peek_at(1), Some(Tok::Name(_))) && self.peek_at(2) == Some(&Tok::Close);
-                let e = match self.peek() {
-                    Some(Tok::Name(k)) if reg && (k == "size" || k == "same") => {
-                        let k = k.clone();
+                // `(size)` and `(size + 1)` are parenthesized expressions, `(size r)` a call.
+                let call = match self.peek() {
+                    Some(Tok::Name(k)) => builtins::get(k).filter(|s| {
+                        let named = matches!(self.peek_at(1), Some(Tok::Name(_))) && self.peek_at(2) == Some(&Tok::Close);
+                        s.is_number() && !s.params.is_empty() && (s.required() || named)
+                    }),
+                    _ => None,
+                };
+                let e = match call {
+                    Some(s) => {
                         self.at += 1;
-                        let r = self.name("a register")?;
-                        if k == "size" { Expr::Size(r) } else { Expr::Same(r) }
+                        self.number_call(s)?
                     }
-                    Some(Tok::Name(k)) if k == "any" || k == "all" => {
-                        let any = k == "any";
-                        self.at += 1;
-                        let c = Box::new(self.or()?);
-                        if any { Expr::Any(c) } else { Expr::All(c) }
-                    }
-                    _ => self.or()?,
+                    None => self.or()?,
                 };
                 self.expect(Tok::Close, ")")?;
                 Ok(e)
@@ -453,15 +584,42 @@ fn assignable(n: &str) -> Result<usize, String> {
         format!("unknown variable {n}: names use _, not -; write {joined}")
     } else if n == "minimal" {
         "minimal is a condition and cannot be assigned; the setting is prove_minimal".into()
-    } else if FEATURES.contains(&n) || CONDS.contains(&n) {
-        format!("{n} is computed from the candidates and cannot be assigned")
+    } else if let Some(s) = builtins::get(n).filter(|s| s.is_number()) {
+        format!("{n} is computed from the candidates and cannot be assigned: {s}")
+    } else if let Some(s) = builtins::get(n) {
+        format!("{n} is a function and cannot be assigned: {s}")
     } else {
         format!("unknown variable {n}; known: {}", (0..NVARS).map(|i| var(i).name).collect::<Vec<_>>().join(" "))
     })
 }
 
 fn known_name(n: &str) -> bool {
-    var_index(n).is_some() || resolve(n).is_some() || CONDS.contains(&n) || FEATURES.contains(&n) || FORMS.contains(&n)
+    var_index(n).is_some() || builtins::get(n).is_some() || builtins::MACROS.contains(&n)
+}
+
+/// The error for a number function written as a step.
+fn not_a_step(s: &Sig) -> String {
+    format!("{} gives a number, not candidates: {s}; a step calls a function that gives candidates", s.name)
+}
+
+/// The step a name written alone is: a function called without arguments.
+fn bare(n: &str) -> Result<Pipe, String> {
+    if let Some(s) = builtins::get(n) {
+        return match s {
+            _ if s.is_number() => Err(not_a_step(s)),
+            _ if s.required() => Err(format!("{n} needs parentheses: ({n} ...); {s}")),
+            _ => construct(n, vec![Arg::Absent; s.params.len()]).ok_or_else(|| unimplemented(s)),
+        };
+    }
+    // `save/t` for `(save t)`: a function of one name, or a macro.
+    let one_name = |h: &str| builtins::get(h).is_some_and(|s| matches!(s.params.as_slice(), [p] if matches!(p.ty, Ty::Reg | Ty::Name)));
+    Err(match n.split_once('/') {
+        _ if n == "extern" => NO_EXTERN.into(),
+        _ if builtins::MACROS.contains(&n) => format!("{n} needs parentheses: ({n} ...)"),
+        Some((h, r)) if one_name(h) || h == "on" || h == "off" => format!("write {n} as ({h} {r})"),
+        _ if var_index(n).is_some() => format!("{n} is a variable, not a step: assign it with {n} = VALUE, or read it in an expression"),
+        _ => format!("unknown pass {n}; known: {}", builtins::step_names().join(" ")),
+    })
 }
 
 /// `e` with a note on a word of `s` such as `time-limit` (outside comments), which reads as a
@@ -528,11 +686,12 @@ fn let_def(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<(String, (Pip
         return Err(format!("expected (let NAME pipeline): {s}"));
     }
     let name = p.name("a name after let")?;
-    if FORMS.contains(&name.as_str()) || resolve(&name).is_some() || name == "let" {
-        return Err(format!("let {name}: the name of a pass or form"));
+    let function = builtins::get(&name);
+    if function.is_some_and(|s| !s.is_number()) || resolve(&name).is_some() || builtins::MACROS.contains(&name.as_str()) || name == "extern" {
+        return Err(format!("let {name}: the name of a pass, form or macro"));
     }
     let pipeline = ["pipeline", "prepass", "polish", "rewrite", "simba"].contains(&name.as_str()) || name.strip_prefix("sub/").is_some_and(|n| crate::sched::SUBS.iter().any(|(s, _)| *s == n));
-    if var_index(&name).is_some() || CONDS.contains(&name.as_str()) || FEATURES.contains(&name.as_str()) || ["none", "same", "any", "all"].contains(&name.as_str()) || pipeline {
+    if var_index(&name).is_some() || function.is_some() || name == "none" || pipeline {
         return Err(format!("let {name}: the name of a variable or function"));
     }
     let mut stages = p.stages_of_pipe()?;
@@ -847,6 +1006,107 @@ mod tests {
             ("tfunc-whole", "write tfunc_whole"),
             ("split_runs = size-mul | tfunc-whole", "tfunc-whole reads as tfunc - whole"),
             ("(if (prove-minimal) id)", "write prove_minimal"),
+        ] {
+            let e = parse(bad).unwrap_err();
+            assert!(e.contains(msg), "{bad}: {e}");
+        }
+    }
+
+    /// How the Rust code calls a parsed function.
+    fn rust_kind(p: &Pipe) -> builtins::Kind {
+        use builtins::Kind;
+        match p {
+            Pipe::Pass(Pass::Term { alt: Some(_), .. }) => Kind::Alt,
+            Pipe::Pass(Pass::Term { .. }) => Kind::Each,
+            Pipe::Pass(Pass::Set(i)) => match crate::pipe::SET_PASSES[*i] {
+                "prepass" | "reprint" => Kind::Main,
+                "polish" => Kind::Each,
+                _ => Kind::Group,
+            },
+            _ => Kind::Group,
+        }
+    }
+
+    /// How `pipe::cond` and `Env::value` evaluate a parsed number function.
+    fn rust_number_kind(e: &Expr) -> builtins::Kind {
+        match e {
+            Expr::Is(i) if ["minimal", "used_wide", "used_clustered", "moved", "cofactor"].contains(&CONDS[*i]) => builtins::Kind::GroupNum,
+            Expr::Any(_) | Expr::All(_) => builtins::Kind::GroupNum,
+            _ => builtins::Kind::TermNum,
+        }
+    }
+
+    #[test]
+    fn every_builtin_is_declared_and_implemented() {
+        for s in builtins::all() {
+            let call = builtins::sample(s);
+            if s.is_number() {
+                let Pipe::Filter(e) = parse(&format!("(filter {call})")).unwrap_or_else(|e| panic!("{call}: {e}")) else { panic!("{call}") };
+                assert_eq!(rust_number_kind(&e), s.kind(), "{}", s.decl());
+            } else {
+                let p = parse(&call).unwrap_or_else(|e| panic!("{call}: {e}"));
+                assert_eq!(rust_kind(&p), s.kind(), "{}", s.decl());
+            }
+        }
+        let polish = crate::linear_mba::POLISH.iter().map(|(n, _)| format!("polish/{n}"));
+        let term = crate::linear_mba::TERM_PASSES.iter().map(|(n, _)| n.to_string());
+        let named = [&crate::pipe::SET_PASSES[..], &FORMS, &NUMBER_FORMS, &CONDS, &FEATURES].concat();
+        let mut rust: Vec<String> = named.iter().map(|n| n.to_string()).chain(term).chain(polish).collect();
+        rust.sort();
+        rust.dedup();
+        for n in &rust {
+            assert!(builtins::get(n).is_some(), "{n} has no extern in src/builtins.pipe");
+        }
+        assert_eq!(rust.len(), builtins::all().len(), "an extern names no Rust built-in");
+    }
+
+    #[test]
+    fn calls_follow_signatures() {
+        let same = |a: &str, b: &str| assert_eq!(parse(a).unwrap(), parse(b).unwrap(), "{a}");
+        let id = || Box::new(Pipe::Pass(Pass::id()));
+        same("(egglog)", "egglog");
+        assert_eq!(parse("(egglog later)").unwrap(), Pipe::Pass(Pass::Egglog("egglog/later".into())));
+        same("(fix 3 lowbits | rewrite)", "(fix 3 (lowbits | rewrite))");
+        same("(tag t lowbits | rewrite)", "(tag t (lowbits | rewrite))");
+        same("(if (size) id)", "(if size id)");
+        same("(relate = 0 | rewrite)", "relate = 0 | rewrite");
+        same("(rewrite | relate)", "rewrite | relate");
+        assert_eq!(parse("(if (size + 1) id)").unwrap(), Pipe::If(Expr::Bin('+', Box::new(Expr::Feature(0)), Box::new(Expr::Num(1))), id(), id()));
+        assert_eq!(parse("(filter (size vars))").unwrap(), Pipe::Filter(Expr::Size("vars".into())));
+        same("(filter (any mul > 1 && tiny))", "(filter (any (mul > 1 && tiny)))");
+        assert_eq!(parse("(if lowbits id)").unwrap(), Pipe::If(Expr::Var(var_index("lowbits").unwrap()), id(), id()), "a switch in an expression");
+        for (bad, msg) in [
+            ("mixed", "mixed gives a number, not candidates: (mixed t:term) num"),
+            ("(any 1)", "any gives a number"),
+            ("(size t)", "size gives a number"),
+            ("(if egglog id)", "egglog gives candidates, not a number: (egglog label:name? g:group) group"),
+            ("(if (best 1 id) id)", "best gives candidates"),
+            ("(if mixed)", "if takes an expression, a pipeline and an optional pipeline: (if c:num a:pipe b:pipe? g:group) group"),
+            ("(if mixed id id id)", "if takes"),
+            ("(retry mixed id)", "retry takes an expression and two pipelines"),
+            ("(fix 3)", "fix takes an expression and a pipeline"),
+            ("(fix)", "fix takes"),
+            ("(seq)", "seq takes one or more pipelines"),
+            ("(best 1)", "best takes"),
+            ("(save t x)", "save takes a register name: (save r:reg g:group) group"),
+            ("(save)", "save takes a register name"),
+            ("(tag)", "tag takes a name and a pipeline"),
+            ("(lowbits x)", "lowbits takes no arguments: (lowbits t:term) term"),
+            ("(id 1)", "id takes no arguments"),
+            ("fix", "fix needs parentheses: (fix ...); (fix n:num p:pipe g:group) group"),
+            ("(if any id)", "any needs parentheses"),
+            ("(if (same) id)", "same takes a register name: (same r:reg t:term) num"),
+            ("(if (same t u) id)", "same takes a register name"),
+            ("split_runs", "split_runs is a variable, not a step"),
+            ("off", "off needs parentheses"),
+            ("egglog/x", "write egglog/x as (egglog x)"),
+            ("label/b", "write label/b as (label b)"),
+            ("extern", NO_EXTERN),
+            ("(extern (x g:group) group)", NO_EXTERN),
+            ("rewrite = 1", "rewrite is a function and cannot be assigned: (rewrite t:term) term"),
+            ("same = 1", "computed from the candidates"),
+            ("nope", "unknown pass nope; known: id none prepass"),
+            ("(if nope id)", "unknown name nope in an expression; known: size vars"),
         ] {
             let e = parse(bad).unwrap_err();
             assert!(e.contains(msg), "{bad}: {e}");

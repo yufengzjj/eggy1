@@ -10,6 +10,10 @@ fn main() {
             eprintln!("--passes: warning: {w}");
         }
     }
+    if cli.show_builtins {
+        print!("{}", eggy1::builtins::listing());
+        return;
+    }
     if cli.show_passes {
         println!("{}", cli.passes.show_run(cli.max_restarts, cli.iter_limit));
         return;

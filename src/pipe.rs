@@ -92,16 +92,6 @@ fn feature(s: &stats::Shape, i: usize) -> usize {
     }
 }
 
-/// The passes as a pipeline writes them, for error messages.
-pub fn names() -> Vec<String> {
-    let polish = linear_mba::POLISH.iter().map(|(n, _)| format!("polish/{n}"));
-    let forms = ["(egglog LABEL)", "(save R)", "(load R)", "(label R)", "(off NAME)", "(on NAME)"].map(String::from);
-    SET_PASSES.iter().map(|n| n.to_string()).chain(forms).chain(linear_mba::TERM_PASSES.iter().map(|(n, _)| n.to_string())).chain(polish).collect()
-}
-
-/// The internal names of the passes a pipeline writes as forms: `(save R)` is `save/R`.
-pub const FORM_PASSES: [&str; 6] = ["save", "load", "label", "egglog", "off", "on"];
-
 /// The pass of the internal name `name`: `Pass::name`, `save/R` for `(save R)`.
 pub fn resolve(name: &str) -> Option<Pass> {
     for (p, f) in [("save/", Pass::Save as fn(String) -> Pass), ("load/", Pass::Load), ("label/", Pass::Label)] {
@@ -1187,6 +1177,14 @@ mod tests {
             }
             assert_eq!(env.times(&expr("none"), &[]), usize::MAX, "none as a count is no limit");
         });
+    }
+
+    #[test]
+    fn bookkeeping_matches_the_attribute() {
+        for s in crate::builtins::all().iter().filter(|s| !s.is_number()) {
+            let call = crate::builtins::sample(s);
+            assert_eq!(bookkeeping(&lang::parse(&call).unwrap()), s.bookkeeping, "{}", s.decl());
+        }
     }
 
     #[test]

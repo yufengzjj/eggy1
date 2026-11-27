@@ -1009,6 +1009,7 @@ pub struct Passes {
 
 /// The default passes, and the names `default.pipe` defines for `--passes` to use.
 static DEFAULT: std::sync::LazyLock<(Passes, lang::Defs)> = std::sync::LazyLock::new(|| {
+    crate::builtins::all();
     let mut p = Passes::base();
     let mut defs = lang::Defs::new();
     p.apply(include_str!("default.pipe"), &mut defs, &mut Lets::default()).and_then(|()| p.finish()).unwrap_or_else(|e| panic!("src/default.pipe: {e}"));
@@ -1149,7 +1150,7 @@ impl Passes {
         for (chunk, ends) in chunks {
             if !chunk.is_empty() {
                 let key: String = chunk.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '/').collect();
-                let def = chunk.starts_with("(let");
+                let def = chunk.starts_with("(let") || chunk.starts_with("(extern");
                 let starts = def || !key.is_empty() && ["=", "+=", "-="].iter().any(|op| chunk[key.len()..].starts_with(op));
                 let bar = chunk.ends_with('|');
                 match items.last_mut() {
@@ -1163,6 +1164,9 @@ impl Passes {
             after_bar &= !ends;
         }
         for item in items.iter().map(String::as_str) {
+            if item.starts_with("(extern") {
+                return Err(lang::NO_EXTERN.into());
+            }
             if item.starts_with("(let") {
                 let (name, pipe) = lang::parse_let(item, defs, &mut lets.used)?;
                 lets.defined.push(name.clone());
@@ -1273,8 +1277,8 @@ impl Passes {
                 return Err(format!("{name} reads register {r} before any (save {r})"));
             }
             if name != "pipeline" {
-                if let Some(what) = uses.needs_run.first() {
-                    return Err(format!("{what} needs a simplify run and cannot be in {name}"));
+                if let Some((what, sig)) = uses.needs_run.first() {
+                    return Err(format!("{what} needs a simplify run and cannot be in {name}: {}", sig.decl()));
                 }
             }
             let node = if ["pipeline", "prepass", "polish"].contains(&name) { name } else { "inner" };
@@ -1342,8 +1346,9 @@ struct Lets {
 /// What a pipeline uses, for `Passes::check` and `Passes::warnings`.
 #[derive(Default)]
 struct Uses {
-    /// The passes in it that need a `simplify` run.
-    needs_run: Vec<String>,
+    /// The passes in it that need a `simplify` run (`@simplify_only`), by the name they are
+    /// counted as.
+    needs_run: Vec<(String, &'static crate::builtins::Sig)>,
     /// The pipelines it runs: `prepass`, `polish`, `inner`.
     calls: Vec<&'static str>,
     /// The registers a `(save R)` may have set by now, in run order; each pipeline has its own.
@@ -1365,10 +1370,13 @@ struct Uses {
 
 impl Uses {
     fn walk(&mut self, p: &Pipe) {
+        if let Pipe::Pass(q) = p
+            && let Some(sig) = crate::builtins::of_pass(q).filter(|s| s.simplify_only)
+        {
+            self.needs_run.push((q.name(), sig));
+        }
         match p {
-            Pipe::Pass(Pass::Egglog(n)) => self.needs_run.push(n.clone()),
             Pipe::Pass(Pass::Set(i)) => match crate::pipe::SET_PASSES[*i] {
-                "reprint" => self.needs_run.push("reprint".into()),
                 "prepass" => self.calls.push("prepass"),
                 "polish" => self.calls.push("polish"),
                 "pre_done" => self.seen("t0"),
@@ -1829,6 +1837,11 @@ prepass=lowbits | r2
             assert!(e.contains("simplify run") || e.contains("reaches itself"), "{bad}: {e}");
         }
         assert!(Passes::parse("pipeline=(fix restarts prepass | egglog | polish)").is_ok());
+        assert!(Passes::parse("prepass=(egglog x)").unwrap_err().contains("(extern @simplify_only (egglog label:name? g:group) group)"));
+        assert!(Passes::parse("polish=(if mixed reprint)").unwrap_err().contains("reprint needs a simplify run and cannot be in polish"));
+        for bad in ["(extern (x g:group) group)", "keep=1 (extern (x g:group) group)", "pipeline=extern"] {
+            assert!(Passes::parse(bad).unwrap_err().contains(lang::NO_EXTERN), "{bad}");
+        }
         for bad in ["prepass=(load x)", "prepass=(save t) | (load u)", "prepass=(load t) | (save t)", "polish=(filter (size < (size t)))", "rewrite=(if (same t) id)", "prepass=(if mixed (save t)) | (label u)", "pipeline=(retry (size < (size t)) id (save t))"] {
             let e = Passes::parse(bad).unwrap_err();
             assert!(e.contains("before any (save"), "{bad}: {e}");

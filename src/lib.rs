@@ -1,3 +1,4 @@
+pub mod builtins;
 pub mod dag;
 pub mod eval;
 pub mod expr_convert;
@@ -1098,6 +1099,8 @@ pub struct Cli {
     pub passes: sched::Passes,
     #[arg(long, help = "Print the pass pipeline in --passes form and exit")]
     pub show_passes: bool,
+    #[arg(long, help = "Print the signatures of the built-in pipeline functions (src/builtins.pipe) and exit")]
+    pub show_builtins: bool,
     #[arg(long, help = "Print per-pass counts, times and wins to stderr")]
     pub stats: bool,
     #[arg(default_value = "", hide_default_value = true, help = "The infix expression to simplify")]
@@ -1113,6 +1116,7 @@ impl Default for Cli {
             trace: false,
             passes: sched::Passes::default(),
             show_passes: false,
+            show_builtins: false,
             stats: false,
             expr: String::new(),
         }
