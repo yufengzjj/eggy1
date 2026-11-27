@@ -7,34 +7,62 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::LazyLock;
 
-/// A parameter or result type.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A parameter or result type; `pipe` is `group->group`.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ty {
     Num,
     Term,
-    /// `term?`: one candidate or none.
+    /// `term?`: one candidate or none, only as a result.
     MaybeTerm,
     Group,
-    Pipe,
     Name,
+    /// `A->B`, `A->B->C` being `A->(B->C)`.
+    Fn(Box<Ty>, Box<Ty>),
 }
 
 impl Ty {
-    const WORDS: [(Ty, &'static str); 6] = [(Ty::Num, "num"), (Ty::Term, "term"), (Ty::MaybeTerm, "term?"), (Ty::Group, "group"), (Ty::Pipe, "pipe"), (Ty::Name, "name")];
+    const WORDS: [(&'static str, Ty); 5] = [("num", Ty::Num), ("term", Ty::Term), ("term?", Ty::MaybeTerm), ("group", Ty::Group), ("name", Ty::Name)];
 
-    pub fn word(self) -> &'static str {
-        Ty::WORDS.iter().find(|(t, _)| *t == self).unwrap().1
+    pub fn pipe() -> Ty {
+        Ty::Fn(Box::new(Ty::Group), Box::new(Ty::Group))
     }
 
-    fn of(w: &str) -> Option<Ty> {
-        Ty::WORDS.iter().find(|(_, s)| *s == w).map(|(t, _)| *t)
+    pub fn is_pipe(&self) -> bool {
+        matches!(self, Ty::Fn(a, b) if **a == Ty::Group && **b == Ty::Group)
+    }
+
+    /// Whether an argument of this type is written as an expression: `num`, evaluated once at
+    /// the call, or `term->num` and `group->num`, evaluated on the input they are given.
+    pub fn is_expr(&self) -> bool {
+        match self {
+            Ty::Num => true,
+            Ty::Fn(a, b) => matches!(**a, Ty::Term | Ty::Group) && **b == Ty::Num,
+            _ => false,
+        }
+    }
+
+    /// Reads `num`, `pipe`, `term->num`, `term->group->num`, ...
+    pub fn parse(s: &str) -> Result<Ty, String> {
+        let unknown = |w: &str| format!("unknown type {w}; known: num term term? group name pipe, and A->B");
+        let mut parts: Vec<&str> = s.split("->").collect();
+        let atom = |w: &str| if w == "pipe" { Some(Ty::pipe()) } else { Ty::WORDS.iter().find(|(n, _)| *n == w).map(|(_, t)| t.clone()) };
+        let mut ty = atom(parts.pop().unwrap()).ok_or_else(|| unknown(s))?;
+        while let Some(w) = parts.pop() {
+            let a = atom(w).ok_or_else(|| unknown(if w.is_empty() { s } else { w }))?;
+            if a == Ty::MaybeTerm {
+                return Err(format!("term? is only a result, in {s}"));
+            }
+            ty = Ty::Fn(Box::new(a), Box::new(ty));
+        }
+        Ok(ty)
     }
 
     /// What an argument of this type is, for messages.
-    pub(crate) fn what(self) -> &'static str {
+    pub(crate) fn what(&self) -> &'static str {
         match self {
-            Ty::Num => "an expression",
-            Ty::Pipe => "a pipeline",
+            _ if self.is_expr() => "an expression",
+            _ if self.is_pipe() => "a pipeline",
+            Ty::Fn(..) => "a function",
             Ty::Group => "a group variable",
             Ty::Name => "a name",
             _ => "a candidate",
@@ -42,7 +70,18 @@ impl Ty {
     }
 }
 
-fn noun(t: Ty) -> &'static str {
+impl fmt::Display for Ty {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            _ if self.is_pipe() => write!(f, "pipe"),
+            Ty::Fn(a, b) if matches!(**a, Ty::Fn(..)) && !a.is_pipe() => write!(f, "({a})->{b}"),
+            Ty::Fn(a, b) => write!(f, "{a}->{b}"),
+            t => write!(f, "{}", Ty::WORDS.iter().find(|(_, w)| w == t).unwrap().0),
+        }
+    }
+}
+
+fn noun(t: &Ty) -> &'static str {
     noun_of(t.what())
 }
 
@@ -72,7 +111,7 @@ impl fmt::Display for Param {
             Rep::Many => "...",
             Rep::Opt => "?",
         };
-        write!(f, "{}:{}{suffix}", self.name, self.ty.word())
+        write!(f, "{}:{}{suffix}", self.name, self.ty)
     }
 }
 
@@ -103,7 +142,7 @@ impl Kind {
         (Kind::GroupNum, "numbers of the whole list (group -> num)"),
     ];
 
-    fn of(input: Ty, result: Ty) -> Option<Kind> {
+    fn of(input: &Ty, result: &Ty) -> Option<Kind> {
         Some(match (input, result) {
             (Ty::Group, Ty::Group) => Kind::Group,
             (Ty::Term, Ty::Term) => Kind::Each,
@@ -140,7 +179,7 @@ pub struct Sig {
 
 impl Sig {
     pub fn kind(&self) -> Kind {
-        Kind::of(self.input.ty, self.result).unwrap()
+        Kind::of(&self.input.ty, &self.result).unwrap()
     }
 
     /// Whether it gives a number, so belongs in expressions, not steps.
@@ -159,8 +198,8 @@ impl Sig {
         for p in &self.params {
             let w = match p.rep {
                 Rep::One => p.ty.what().to_string(),
-                Rep::Many => format!("one or more {}s", noun(p.ty)),
-                Rep::Opt => format!("an optional {}", noun(p.ty)),
+                Rep::Many => format!("one or more {}s", noun(&p.ty)),
+                Rep::Opt => format!("an optional {}", noun(&p.ty)),
             };
             match words.last_mut() {
                 Some((last, n)) if *last == w && p.rep == Rep::One => *n += 1,
@@ -207,7 +246,7 @@ impl fmt::Display for Sig {
         for p in self.params.iter().chain([&self.input]) {
             write!(f, " {p}")?;
         }
-        write!(f, ") {}", self.result.word())
+        write!(f, ") {}", self.result)
     }
 }
 
@@ -283,7 +322,8 @@ fn one(text: &str) -> Result<Sig, String> {
             None => return Err(bad()),
         }
     }
-    let result = rest.next().and_then(Ty::of).ok_or_else(|| format!("{name}: expected a result type"))?;
+    let result = rest.next().ok_or_else(|| format!("{name}: expected a result type"))?;
+    let result = Ty::parse(result).map_err(|e| format!("{name}: {e}"))?;
     if rest.next() != Some(")") || rest.next().is_some() {
         return Err(bad());
     }
@@ -294,13 +334,14 @@ fn one(text: &str) -> Result<Sig, String> {
     if !matches!(result, Ty::Num | Ty::Term | Ty::MaybeTerm | Ty::Group) {
         return Err(format!("{name}: a function gives num, term, term? or group"));
     }
-    if Kind::of(input.ty, result).is_none() {
-        return Err(format!("{name}: no calling kind takes {} to {}", input.ty.word(), result.word()));
+    if Kind::of(&input.ty, &result).is_none() {
+        return Err(format!("{name}: no calling kind takes {} to {}", input.ty, result));
     }
     for p in &params {
-        match (p.ty, p.rep) {
-            (Ty::Term | Ty::MaybeTerm, _) => return Err(format!("{name}: {p}: only the input is a candidate")),
-            (Ty::Num | Ty::Group | Ty::Name, Rep::Many) | (Ty::Num, Rep::Opt) => return Err(format!("{name}: {p}: only pipe takes ..., only pipe, group and name take ?")),
+        match &p.ty {
+            Ty::Term | Ty::MaybeTerm => return Err(format!("{name}: {p}: only the input is a candidate")),
+            t @ Ty::Fn(..) if !t.is_pipe() && !t.is_expr() => return Err(format!("{name}: {p}: function types other than pipe, term->num and group->num are not supported yet (step 9)")),
+            t if p.rep == Rep::Many && !t.is_pipe() || p.rep == Rep::Opt && t.is_expr() => return Err(format!("{name}: {p}: only pipe takes ..., only pipe, group and name take ?")),
             _ => {}
         }
     }
@@ -311,10 +352,10 @@ fn param(p: &str) -> Result<Param, String> {
     let (name, ty) = p.split_once(':').ok_or_else(|| format!("expected NAME:TYPE, found {p}"))?;
     let (ty, rep) = match (ty.strip_suffix("..."), ty.strip_suffix('?')) {
         (Some(t), _) => (t, Rep::Many),
-        (_, Some(t)) if t != "term" => (t, Rep::Opt),
+        (_, Some(t)) if !t.ends_with("term") => (t, Rep::Opt),
         _ => (ty, Rep::One),
     };
-    let ty = Ty::of(ty).ok_or_else(|| format!("unknown type {ty} in {p}; known: num term term? group pipe name"))?;
+    let ty = Ty::parse(ty).map_err(|e| format!("{e}, in {p}"))?;
     Ok(Param { name: name.to_string(), ty, rep })
 }
 
@@ -387,9 +428,9 @@ pub(crate) fn sample(s: &Sig) -> String {
         .params
         .iter()
         .filter(|p| p.rep != Rep::Opt)
-        .map(|p| match p.ty {
-            Ty::Num => "1",
-            Ty::Pipe => "id",
+        .map(|p| match &p.ty {
+            t if t.is_expr() => "1",
+            t if t.is_pipe() => "id",
             _ => "x",
         })
         .collect();
@@ -403,7 +444,7 @@ mod tests {
     #[test]
     fn declarations() {
         let s = get("if").unwrap();
-        assert_eq!(s.to_string(), "(if c:num a:pipe b:pipe? g:group) group");
+        assert_eq!(s.to_string(), "(if c:group->num a:pipe b:pipe? g:group) group");
         assert_eq!(s.takes(), "an expression, a pipeline and an optional pipeline");
         assert_eq!(get("best").unwrap().takes(), "an expression and one or more pipelines");
         assert_eq!(get("retry").unwrap().takes(), "an expression and two pipelines");
@@ -430,6 +471,58 @@ mod tests {
             ("# a\n(extern @bookkeeping @uncounted (x g:group) group)", "@uncounted is for"),
             ("# a\n(extern (x g:group) group", "unclosed"),
             ("# a\n(def (x g:group) group)", "expected (extern"),
+        ] {
+            let e = parse(bad).unwrap_err();
+            assert!(e.contains(msg), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn types() {
+        for (s, shown) in [
+            ("num", "num"),
+            ("term?", "term?"),
+            ("pipe", "pipe"),
+            ("group->group", "pipe"),
+            ("term->num", "term->num"),
+            ("term->group->num", "term->group->num"),
+            ("pipe->num", "pipe->num"),
+            ("term->term?", "term->term?"),
+            ("group->group->group", "group->pipe"),
+        ] {
+            let t = Ty::parse(s).unwrap();
+            assert_eq!(t.to_string(), shown, "{s}");
+            assert_eq!(Ty::parse(shown).unwrap(), t, "{s}");
+        }
+        let curried = Ty::parse("term->group->num").unwrap();
+        assert_eq!(curried, Ty::Fn(Box::new(Ty::Term), Box::new(Ty::Fn(Box::new(Ty::Group), Box::new(Ty::Num)))));
+        assert_eq!(Ty::Fn(Box::new(Ty::parse("term->num").unwrap()), Box::new(Ty::Num)).to_string(), "(term->num)->num");
+        assert!(Ty::parse("pipe").unwrap().is_pipe() && Ty::parse("term->num").unwrap().is_expr() && !Ty::parse("term->term").unwrap().is_expr());
+        for (bad, msg) in [("int", "unknown type int"), ("term->", "unknown type term->"), ("->num", "unknown type ->num"), ("term?->num", "term? is only a result")] {
+            let e = Ty::parse(bad).unwrap_err();
+            assert!(e.contains(msg), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn condition_signatures() {
+        let ty = |f: &str| get(f).unwrap().params[0].ty.clone();
+        for f in ["filter", "any", "all"] {
+            assert_eq!(ty(f), Ty::parse("term->num").unwrap(), "{f}");
+        }
+        for f in ["if", "retry"] {
+            assert_eq!(ty(f), Ty::parse("group->num").unwrap(), "{f}");
+        }
+        for f in ["best", "fix", "wins"] {
+            assert_eq!(ty(f), Ty::Num, "{f}");
+        }
+        assert_eq!(get("filter").unwrap().takes(), "an expression");
+        let sigs = parse("# a\n(extern (x c:term->num p:group->group... g:group) group)").unwrap();
+        assert_eq!(sigs[0].to_string(), "(x c:term->num p:pipe... g:group) group");
+        for (bad, msg) in [
+            ("# a\n(extern (x p:term->term g:group) group)", "function types other than pipe, term->num and group->num are not supported yet (step 9)"),
+            ("# a\n(extern (x c:term->num? g:group) group)", "only pipe takes"),
+            ("# a\n(extern (x g:group) term->num)", "a function gives num"),
         ] {
             let e = parse(bad).unwrap_err();
             assert!(e.contains(msg), "{bad}: {e}");

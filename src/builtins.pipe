@@ -3,12 +3,14 @@
 #
 #   (extern [@ATTR ...] (NAME PARAM:TYPE ... INPUT:TYPE) RESULT)
 #
-# Types: num (an expression, evaluated where the function says), term (one candidate),
-# term? (one candidate or none), group (a list of candidates), pipe (a pipeline, run inside
-# the function), name (a stats or origin name, or a note register); as a parameter, group
-# is a group variable, written as its name. `TYPE...` is one or more, `TYPE?` may be left
-# out. The last parameter is the implicit input, not written in a call. How a function is
-# called follows from its input and result:
+# Types: num (a number), term (one candidate), term? (one candidate or none, only a
+# result), group (a list of candidates), name (a stats or origin name, or a note register),
+# and functions A->B (A->B->C is A->(B->C)); pipe is group->group, a pipeline run inside
+# the function. As a parameter, num is an expression evaluated once at the call;
+# term->num and group->num are written as an expression too, evaluated on each candidate
+# or on the group the function gives it; group is a group variable, written as its name.
+# `TYPE...` is one or more, `TYPE?` may be left out. The last parameter is the implicit
+# input, not written in a call. How a function is called follows from its input and result:
 #   group -> group  on the whole list
 #   term -> term    on each candidate; an unchanged result keeps the candidate
 #   term -> term?   on each candidate; no result drops it (an alternative)
@@ -36,9 +38,9 @@
 # p repeated at most n times while the main candidate changes.
 (extern @pipe (fix n:num p:pipe g:group) group)
 # a where c holds for the input, else b (id when left out).
-(extern @pipe (if c:num a:pipe b:pipe? g:group) group)
+(extern @pipe (if c:group->num a:pipe b:pipe? g:group) group)
 # a, and where c holds for its result, b on the same input, taken when no larger.
-(extern @pipe (retry c:num a:pipe b:pipe g:group) group)
+(extern @pipe (retry c:group->num a:pipe b:pipe g:group) group)
 # p, with the first strictly smaller candidate a step inside gave put first.
 (extern @pipe (smallest p:pipe g:group) group)
 # p on one shared context of memos; a scope.
@@ -56,7 +58,7 @@
 # p repeated while a smaller inside takes a result, until n are taken.
 (extern @pipe (wins n:num p:pipe g:group) group)
 # The candidates c holds for, each taken alone.
-(extern @pipe @bookkeeping (filter c:num g:group) group)
+(extern @pipe @bookkeeping (filter c:term->num g:group) group)
 # Binds the group variable r to the candidates (r = id).
 (extern @pipe @bookkeeping (save r:group g:group) group)
 # The candidates of the group variable r; none when it is unbound.
@@ -214,9 +216,9 @@
 # 1 when the main candidate is the main one of the group variable r.
 (extern @pipe (same r:group t:term) num)
 # 1 when c holds for some candidate alone.
-(extern @pipe (any c:num g:group) num)
+(extern @pipe (any c:term->num g:group) num)
 # 1 when there are candidates and c holds for each alone.
-(extern @pipe (all c:num g:group) num)
+(extern @pipe (all c:term->num g:group) num)
 # A shift, division or mulhi, and a rebuild larger than tiny_size (runs prepass).
 (extern @pipe (opaque t:term) num)
 # Some candidate is proved minimal (with prove_minimal on).
