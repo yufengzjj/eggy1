@@ -5,10 +5,13 @@
 #
 # Types: num (a number), term (one candidate), term? (one candidate or none, only a
 # result), group (a list of candidates), name (a stats or origin name, or a note register),
-# and functions A->B (A->B->C is A->(B->C)); pipe is group->group, a pipeline run inside
-# the function. As a parameter, num is an expression evaluated once at the call;
-# term->num and group->num are written as an expression too, evaluated on each candidate
-# or on the group the function gives it; group is a group variable, written as its name.
+# text (a string literal "...", with \" and \\ the only escapes), any (a value only
+# formatted, as print does: a number, a text, a name, candidates as infix, a function as
+# its signature; only as a last parameter any...), and functions A->B (A->B->C is
+# A->(B->C)); pipe is group->group, a pipeline run inside the function. As a parameter,
+# num is an expression evaluated once at the call; term->num and group->num are written
+# as an expression too, evaluated on each candidate or on the group the function gives
+# it; group is a group variable, written as its name.
 # `TYPE...` is one or more, `TYPE?` may be left out. The last parameter is the implicit
 # input, not written in a call. How a function is called follows from its input and result:
 #   group -> group  on the whole list
@@ -74,6 +77,10 @@
 (extern @pipe @uncounted (note r:name g:group) group)
 # Closes the newest open r: the input, with its candidate put first when strictly smaller than the main one.
 (extern @pipe @bookkeeping (take_min r:name g:group) group)
+# The candidates unchanged when c is not 0; else the run ends with the error msg.
+(extern @pipe @bookkeeping (assert c:num msg:text g:group) group)
+# The candidates unchanged, after the values x written to stderr, separated by spaces.
+(extern @pipe @bookkeeping (print x:any... g:group) group)
 
 # Passes over the whole list.
 

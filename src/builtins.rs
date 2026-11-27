@@ -16,12 +16,16 @@ pub enum Ty {
     MaybeTerm,
     Group,
     Name,
+    /// A string literal `"..."`.
+    Text,
+    /// A value only formatted (`print`): a number, a text, a name, candidates or a function.
+    Any,
     /// `A->B`, `A->B->C` being `A->(B->C)`.
     Fn(Box<Ty>, Box<Ty>),
 }
 
 impl Ty {
-    const WORDS: [(&'static str, Ty); 5] = [("num", Ty::Num), ("term", Ty::Term), ("term?", Ty::MaybeTerm), ("group", Ty::Group), ("name", Ty::Name)];
+    const WORDS: [(&'static str, Ty); 7] = [("num", Ty::Num), ("term", Ty::Term), ("term?", Ty::MaybeTerm), ("group", Ty::Group), ("name", Ty::Name), ("text", Ty::Text), ("any", Ty::Any)];
 
     pub fn pipe() -> Ty {
         Ty::Fn(Box::new(Ty::Group), Box::new(Ty::Group))
@@ -73,7 +77,7 @@ impl Ty {
 
     /// Reads `num`, `pipe`, `term->num`, `term->group->num`, ...
     pub fn parse(s: &str) -> Result<Ty, String> {
-        let unknown = |w: &str| format!("unknown type {w}; known: num term term? group name pipe, and A->B");
+        let unknown = |w: &str| format!("unknown type {w}; known: num term term? group name text any pipe, and A->B");
         let mut parts: Vec<&str> = s.split("->").collect();
         let atom = |w: &str| if w == "pipe" { Some(Ty::pipe()) } else { Ty::WORDS.iter().find(|(n, _)| *n == w).map(|(_, t)| t.clone()) };
         let mut ty = atom(parts.pop().unwrap()).ok_or_else(|| unknown(s))?;
@@ -95,6 +99,8 @@ impl Ty {
             Ty::Fn(..) => "a function",
             Ty::Group => "a group variable",
             Ty::Name => "a name",
+            Ty::Text => "a text",
+            Ty::Any => "a value",
             _ => "a candidate",
         }
     }
@@ -379,11 +385,12 @@ fn one(text: &str) -> Result<Sig, String> {
     if Kind::of(&input.ty, &result).is_none() {
         return Err(format!("{name}: no calling kind takes {} to {}", input.ty, result));
     }
-    for p in &params {
+    for (i, p) in params.iter().enumerate() {
         match &p.ty {
             Ty::Term | Ty::MaybeTerm => return Err(format!("{name}: {p}: only the input is a candidate")),
             t @ Ty::Fn(..) if !t.is_function() => return Err(format!("{name}: {p}: a function takes one input, term or group, and gives num, term, term? or group")),
-            t if p.rep == Rep::Many && !t.is_pipe() || p.rep == Rep::Opt && t.is_expr() => return Err(format!("{name}: {p}: only pipe takes ..., only pipe, group and name take ?")),
+            Ty::Any if p.rep != Rep::Many || i + 1 != params.len() => return Err(format!("{name}: {p}: any is only for a last parameter any...")),
+            t if p.rep == Rep::Many && !t.is_pipe() && *t != Ty::Any || p.rep == Rep::Opt && (t.is_expr() || *t == Ty::Text) => return Err(format!("{name}: {p}: only pipe and any take ..., only pipe, group and name take ?")),
             _ => {}
         }
     }
@@ -464,6 +471,8 @@ pub(crate) fn sample(s: &Sig) -> String {
         .map(|p| match &p.ty {
             t if t.is_expr() => "1",
             t if t.is_pipe() => "id",
+            Ty::Text => "\"m\"",
+            Ty::Any => "1",
             _ => "x",
         })
         .collect();
@@ -500,7 +509,7 @@ mod tests {
             ("# a\n(extern (x g:group) term)", "no calling kind"),
             ("# a\n(extern (x n:num) num)", "must be term or group"),
             ("# a\n(extern (x t:term g:group) group)", "only the input"),
-            ("# a\n(extern (x n:num... g:group) group)", "only pipe takes"),
+            ("# a\n(extern (x n:num... g:group) group)", "only pipe and any take"),
             ("# a\n(extern (x n:int g:group) group)", "unknown type int"),
             ("# a\n(extern @pure (x g:group) group)", "unknown attribute"),
             ("# a\n(extern @bookkeeping @uncounted (x g:group) group)", "@uncounted is for"),
@@ -559,7 +568,7 @@ mod tests {
         assert!(Ty::parse("term->term").unwrap().fits(&Ty::pipe()) && Ty::parse("term->num").unwrap().fits(&Ty::parse("group->num").unwrap()) && !Ty::pipe().fits(&Ty::parse("term->term").unwrap()));
         for (bad, msg) in [
             ("# a\n(extern (x p:num->term g:group) group)", "a function takes one input, term or group"),
-            ("# a\n(extern (x c:term->num? g:group) group)", "only pipe takes"),
+            ("# a\n(extern (x c:term->num? g:group) group)", "only pipe and any take"),
             ("# a\n(extern (x g:group) term->num)", "a function gives num"),
         ] {
             let e = parse(bad).unwrap_err();

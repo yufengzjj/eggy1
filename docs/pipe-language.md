@@ -60,6 +60,7 @@ eggy1 的化简流程由几条管线描述，默认的写在 `src/default.pipe` 
 - 空白只用来分隔；`#` 到行尾是注释。
 - **名字**以字母或 `_` 开头，可以含字母、数字、`_`、`/`：`polish/factor`、`semi/bit_split`、`split_runs`。`-` 不能出现在名字里，所以 `size-mul` 是 `size - mul`。`/` 两边是名字时要留空格：`x / 2`，因为 `x/2` 读成名字 `x/2`。
 - **数**是十进制非负整数，最大 18446744073709551614（2^64 - 2；再大报 `number too large`）。
+- **字符串**写在双引号里：`"max_leaves is at most 6"`。只认两种转义：`\"` 是引号，`\\` 是反斜杠；别的 `\` 报 `unknown escape`。字符串不跨行（行尾还没收尾报 `unclosed string`），里面的 `#`、括号、空白和 `;` 都是字符串的一部分。打印时照读入时的写法写回。现在只用作参数（`assert` 的消息、`print` 的值）。
 - 内置的值只有 `none`（第 5.2 节）。`on`、`off` 是宏名（第 5.4 节），不是值。
 - 其他记号：`( ) | = || && ! + - * / < <= > >= == != @ :`。`=` 是赋值，`==` 是比较；`@` 写 `def` 的属性，`:` 写参数的类型（第 6.1、6.2 节）。
 
@@ -147,7 +148,7 @@ x = e | rest    ≡  在 x = e 之下运行 rest          （绑定）
 (extern [@ATTR ...] (NAME PARAM:TYPE ... INPUT:TYPE) RESULT)
 ```
 
-- 类型：`num`（一个数）、`term`（一个候选）、`term?`（一个候选或没有，只作返回类型）、`group`（一组候选）、`name`（统计名、来源名或记录寄存器名），以及函数类型 `A->B`（`A->B->C` 是 `A->(B->C)`）。`pipe` 是 `group->group` 的简写：管线，原样传进去，在函数里运行；两种写法相同，打印成 `pipe`。`group` 写在参数里（不是最后一个）时是一个组变量，调用时写它的名字（`(load r:group g:group) group`）。`TYPE...` 是一个或多个，`TYPE?` 可以省略（只用于 `pipe`、`group`、`name`）。
+- 类型：`num`（一个数）、`term`（一个候选）、`term?`（一个候选或没有，只作返回类型）、`group`（一组候选）、`name`（统计名、来源名或记录寄存器名）、`text`（一个字符串，写成字符串字面量）、`any`（只用来格式化的值，见 `print`；只能是最后一个参数 `x:any...`，不是多态），以及函数类型 `A->B`（`A->B->C` 是 `A->(B->C)`）。`pipe` 是 `group->group` 的简写：管线，原样传进去，在函数里运行；两种写法相同，打印成 `pipe`。`group` 写在参数里（不是最后一个）时是一个组变量，调用时写它的名字（`(load r:group g:group) group`）。`TYPE...` 是一个或多个，`TYPE?` 可以省略（只用于 `pipe`、`group`、`name`）。
 - 作参数时，`num` 是调用时对输入求一次值的表达式（`best` 的个数、`fix` 和 `wins` 的次数）；`term->num` 是对每个候选单独求值的条件（`filter`、`any`、`all`）；`group->num` 是对一组候选求值的条件（`if` 对输入，`retry` 对 `a` 的结果）。这两种函数类型的参数也写成表达式，就是以隐式输入为参数的函数（第 6.3 节的隐式输入），所以写法和 `num` 参数一样。内置函数的参数只用 `pipe`、`term->num`、`group->num` 这几种函数类型，其他函数类型的参数还不支持。
 - 最后一个参数是**输入**（`term` 或 `group`），写在管线里时由 `|` 填入，不写；也可以显式写出（第 6.3 节）。返回类型写在最后。
 - 声明前紧挨着的一行注释是它的说明。
@@ -193,12 +194,12 @@ x = e | rest    ≡  在 x = e 之下运行 rest          （绑定）
 - 变量的值是非负整数，或 `none`。每个变量开始时都是 `none`。
 - `none` 比所有整数都大（+∞）。上限类变量（`split_runs`、预算、`time_limit`……）读到 `none` 就是不限。
 - 布尔值就是数：开关写 1（开）或 0（关），非 0 都算开，比如 `relate = 0`、`cut = 1`。`none` 不是 0，所以作开关时算开：内部 pass 不赋值就是开着的。
-- 有上限的变量（`max_leaves` 最多 6），赋超过上限的值时报错，`none` 也一样。右边是数字或 `none` 时解析时就报；是表达式时执行到这一步时报，这次运行停下，返回这个错误（`max_leaves = 8: max_leaves is at most 6`）。
+- 有上限的变量（`max_leaves` 最多 6）的上限不在 Rust 里，而是 `default.pipe` 的检查 `(let check_limits ...)`：一串 `(assert (NAME <= CAP) "NAME is at most CAP")`。每次最外层的运行在入口赋值之后、进入管线之前执行它一次（`<default.pipe 的赋值> | -m、-i | <--passes 的赋值> | check_limits | pipeline`，进入 `prepass`、`polish` 等的运行也一样；Rust 按名字找它，`--passes` 可以重新定义）。赋值本身不检查；入口赋值超过上限（`none` 也算超过）时这次运行停下，返回这个错误（`max_leaves is at most 6`），所以 `--passes max_leaves=7` 在运行开始时报。管线里的赋值（`(max_leaves = 7 | rewrite)`）不检查，超限的值交给 Rust，后果自负；需要时在赋值后面自己写 `check_limits` 或 `assert`。
 - 开关不收字面的 `none`（解析时报错）；右边是表达式、算出 `none` 时，开关为开。
 
 ### 5.3 时限
 
-- 过了截止时刻，干活的步骤原样返回输入，所以任何时候停下来结果都正确。只搬动候选的步骤照常执行：签名带 `@bookkeeping` 的函数（序列本身、`save`、`load`、`label`、`clear`、`take_min`、`filter`、`id`、`none`、`within`、`pre_done`），以及赋值和 `on`、`off`。所以组变量照常可用，时限所在的作用域结束后，外面的步骤接着运行。`note` 不是 `@bookkeeping`：过了截止时刻它和其他计算的步骤一样跳过，原样返回、什么也不记；它是 `@uncounted`，这次跳过不算截断，也不计入 `time_limit/skipped`；之后的计算步骤也都原样返回，所以最后一个真正的结果原样到达 `take_min`。`smallest` 本身不是 `@bookkeeping`，过了截止时刻整个跳过。
+- 过了截止时刻，干活的步骤原样返回输入，所以任何时候停下来结果都正确。只搬动候选的步骤照常执行：签名带 `@bookkeeping` 的函数（序列本身、`save`、`load`、`label`、`clear`、`take_min`、`filter`、`id`、`none`、`within`、`pre_done`、`assert`、`print`），以及赋值和 `on`、`off`。所以组变量照常可用，时限所在的作用域结束后，外面的步骤接着运行。`note` 不是 `@bookkeeping`：过了截止时刻它和其他计算的步骤一样跳过，原样返回、什么也不记；它是 `@uncounted`，这次跳过不算截断，也不计入 `time_limit/skipped`；之后的计算步骤也都原样返回，所以最后一个真正的结果原样到达 `take_min`。`smallest` 本身不是 `@bookkeeping`，过了截止时刻整个跳过。
 - 时限只在步骤之间检查，打断不了正在运行的单个步骤（一轮 egglog、一次大的 `poly_mba` 展开）。一轮 egglog 开始前，按上一轮用的时间估计：估计会超过截止时刻就跳过。
 - 开关 `cut` 开着时，因时限跳过的步骤会把整次运行记为截断：`eggy1` 打印提示，bench 把没解出的用例记作 `cut`。默认 `pipeline` 开头写 `cut = 1`。不想算的地方写 `cut = 0`。
 - 截断时得到的结果不进缓存。
@@ -290,7 +291,7 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub/NAME=P   # 即 (de
 - 参数只在函数体里看得见（词法绑定），不参与存数变量的查找，不能赋值（`(save a)`、`a = ...`、`n = 3` 都报 `parameter a cannot be assigned`）；不能和变量、函数、宏、`let` 名、`def` 名、`none`、`def`、`let`、`extern` 或函数自己同名，也不能重复。
 - 读参数的规则和内置函数一样（第 4.3 节）：数值参数是一个 `earg`（`(f size / 2)` 要写成 `(f (size / 2))`），只有一个管线参数、且它是最后一个参数时读到 `)` 为止，其他管线参数各是一个步骤，组参数和名字参数各是一个名字。个数、种类不对时报错附上签名：`f takes a group variable and a pipeline: (f r:group p:pipe g:group) group`；表达式参数处写了管线时还先给出那个表达式的错误。有参数的函数单独写出时报 `NAME needs parentheses`，没有参数的写了参数报 `f takes no arguments: (f g:group) group`。
 
-**数值参数**是值，不是变量：函数体里读到的是调用时算出的值，函数体先改了候选也不变（`(def (f n p) p | (filter (n == 7)))` 调用成 `(f size rewrite)` 时 `n` 是调用时输入的大小）；被调用的函数看不到它（写了就是未知的名字）；对缓存没有影响（缓存只记 Rust 代码读的变量；参数经过赋值影响 pass 时，记下的是被赋值的变量）。赋给有上限的变量时，和其他表达式一样在执行时检查（`(def (f n) max_leaves = n | rewrite)` 调用成 `(f 8)` 时这次运行报 `max_leaves is at most 6`）。
+**数值参数**是值，不是变量：函数体里读到的是调用时算出的值，函数体先改了候选也不变（`(def (f n p) p | (filter (n == 7)))` 调用成 `(f size rewrite)` 时 `n` 是调用时输入的大小）；被调用的函数看不到它（写了就是未知的名字）；对缓存没有影响（缓存只记 Rust 代码读的变量；参数经过赋值影响 pass 时，记下的是被赋值的变量）。赋给有上限的变量时不检查（第 5.2 节）；要检查就在赋值后写 `check_limits`（`(def (f n) max_leaves = n | check_limits | rewrite)` 调用成 `(f 8)` 时这次运行报 `max_leaves is at most 6`）。
 
 **名字参数**在解析时代入：每处调用得到一份把名字放进去的函数体，`(off name)` 的参数在调用处检查是不是开关（`unknown off name nope (the argument for n)`）。
 
@@ -543,6 +544,8 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 | `(note R)` | 当前组里第一个最小的候选比最新打开的 `R` 里的严格更小（或 `R` 是空的）时记进去，原样返回；过了截止时刻和其他计算的步骤一样跳过，但不算截断（`@uncounted`） | 空组、没有打开的 `R` 时什么也不记 |
 | `(take_min R)` | 关上最新打开的 `R`：它的候选比当前组的主候选严格更小时放到最前面（去重），否则原样返回 | 当前组为空时原样返回 |
 | `(label R)` | 只做统计：每个候选记 `stats::label`，与组变量 `R` 的主候选来源不同时记 `pre/来源/differs`、`pre/来源/gain`；`--trace` 时打印候选 | — |
+| `(assert C "MSG")` | 调用时对输入求一次 `C`：不是 0 时原样返回；是 0 时这次运行以错误 `MSG` 结束（运行时错误，和其他错误一样返回，不 panic）。`@bookkeeping`，过了截止时刻照样检查 | — |
+| `(print X ...)` | 把各个值用空格隔开、换行结尾写到 stderr，原样返回。每个值：表达式照 `num` 参数在输入上求值，写成数（`none` 写 `none`）；字符串原样；组变量写成各候选的中缀，用 `, ` 隔开（常数照最后输出的写法，按这次运行的数值类型）；单独写的给出候选的函数名（内置函数、`def`、`let`，函数变量）写它的签名（`(rewrite t:term) term`，函数变量写 `f:term->num`）；其他名字照写。`@bookkeeping` | — |
 | `(egglog LABEL)`、`egglog` | 一轮 egglog：所有候选并入一个 e-graph，饱和，提取出一个候选。统计计在 `egglog/LABEL` 下 | — |
 
 `tag`、`label`、`smaller`、`cand` 记的统计不影响结果；它们改的来源会影响结果（第 2.2 节）。
@@ -618,7 +621,7 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 
 ## 10. 变量
 
-全局变量都在 `src/default.pipe` 里定义（第 12.3 节），默认值也写在那里；下面各表的"默认"就是那里的值。Rust 代码读其中大部分，它读哪些名字、怎样用（开关、预算、时限、只决定缓存大小）列在 Rust 的一张表里（`sched::INNER`、`FLAGS`、`LIMITS`、`UNREAD`、`SETTINGS`、`RUN`、`time_limit`），启动时按名字对上：表里的名字都要在源文件里有定义，否则启动就报错。`extra`、`printed`、`unclustered_relate_leaves`、`unclustered_rewrites`、`unified_rewrites`、`polish_rewrites`、`polish_wins` 只有默认管线读。上限（`max_leaves` 最多 6 等，第 5.2 节）暂时仍是 Rust 里的一张小表。
+全局变量都在 `src/default.pipe` 里定义（第 12.3 节），默认值也写在那里；下面各表的"默认"就是那里的值。Rust 代码读其中大部分，它读哪些名字、怎样用（开关、预算、时限、只决定缓存大小）列在 Rust 的一张表里（`sched::INNER`、`FLAGS`、`LIMITS`、`UNREAD`、`SETTINGS`、`RUN`、`time_limit`），启动时按名字对上：表里的名字都要在源文件里有定义，否则启动就报错。`extra`、`printed`、`unclustered_relate_leaves`、`unclustered_rewrites`、`unified_rewrites`、`polish_rewrites`、`polish_wins` 只有默认管线读。上限（`max_leaves` 最多 6 等）由 `default.pipe` 的 `check_limits` 检查（第 5.2 节），下表的"上限"就是那里写的值。
 
 ### 10.1 开关
 
@@ -872,7 +875,7 @@ rewrites = none
 
 - 名字：未知的变量、函数、`on`/`off` 名、`sub/NAME`、规则集，报错并列出已知的名字。名字里的 `-` 读作减号，没法单独报错；解析出错时，如果写了 `a-b` 这样的词，错误后面加上"`a-b` 读作 `a - b`，名字用 `_`"，`a_b` 是已知名字时提示写 `a_b`。
 - 类型，照签名（第 4.3 节；`def` 的签名见第 6.5 节）检查，报错时附上签名：步骤位置写了数值函数或变量（`mixed gives a number, not candidates: (mixed t:term) num`），表达式里写了候选组函数（`egglog gives candidates, not a number`）；参数的个数、种类（表达式、管线、组变量、名字）不对（`retry takes an expression and two pipelines: (retry c:group->num a:pipe b:pipe g:group) group`）；没有参数的函数写了参数；给出数的步骤接在 `|` 前面；以数结束的管线写在要候选的地方，或括号里的管线写在要数的地方却不以数结束；不带 `@pipe` 的函数写在 `|` 后面；函数体顶层的函数没写输入。
-- 赋值（第 5.6 节）：给函数、参数赋值；值超过变量的上限；开关赋 `none`（开关只收数，0 是关）；右边的类型和左边不合（存数的变量给了候选，组变量给了数，报错写出两边）；组变量和存数的变量同名（`(save keep)`、`keep = rewrite`）。条件里写了 `=`（`(if (size = 3) ...)`）报 "an assignment is a step; compare with =="。
+- 赋值（第 5.6 节）：给函数、参数赋值；开关赋 `none`（开关只收数，0 是关）；右边的类型和左边不合（存数的变量给了候选，组变量给了数，报错写出两边）；组变量和存数的变量同名（`(save keep)`、`keep = rewrite`）。条件里写了 `=`（`(if (size = 3) ...)`）报 "an assignment is a step; compare with =="。
 - 定义（第 6 节）：`let`、`def` 名和变量、函数、宏同名，`def` 重新定义已有的 `let`、`def` 名，`let` 重新定义 `def` 名；第 1.1 节的函数带参数或 `@inline`，未知的 `sub/NAME`；未知的属性、类型；`def` 的参数和已有的名字同名或重复、用法矛盾、没用到；`@pipe` 函数的最后一个参数不是组、函数体不以值开头也不是表达式；返回数的管线带 `@inline` 或写成 `let`。`(off NAME)` 的名字参数在调用处检查是不是开关。
 - `extern` 写在 `src/builtins.pipe` 以外。
 - 旧写法报错并提示新写法：`(with KEY=VALUE ... p)`（提示 `(KEY = VALUE | ... | p)`，它的 `bit_splits` 是 `bit_split_budget`）、`(time-limit N)`（提示 `time_limit = N`、`time_limit = none`）、条件名 `true`（提示 `1`，只在有候选时为真的写 `(any 1)`）、单名写法 `save/t`、`off/NAME`、`egglog/LABEL`、`seq(a,b)` 语法。`with` 外面的 `KEY=VALUE` 就是赋值 `KEY = VALUE`，不报错。

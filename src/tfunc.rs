@@ -585,6 +585,5 @@ mod tests {
         assert_eq!(best("tfunc_points=1"), None, "one point finds a smaller term the proof rejects");
         assert_eq!(best("tfunc_points=12 tfunc_max_vars=4"), plain);
         assert_eq!(best("tfunc_max_size=2"), None);
-        assert!(crate::sched::Passes::parse("tfunc_points=25").is_err());
     }
 }

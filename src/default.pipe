@@ -162,6 +162,29 @@ minimal_max_vars = 3
 minimal_max_size_4bit = 7
 minimal_max_size_8bit = 5
 
+# The largest values of the limits the Rust code sizes tables, shifts or bit masks by; none
+# is more. Every run checks them once, after its entry assignments (`pipe::in_run`), so a
+# larger value from default.pipe or --passes ends it with the error before a pass reads it;
+# a pipeline that assigns one of them is not checked.
+(let check_limits
+  (assert (block_max_block <= 5) "block_max_block is at most 5")
+  | (assert (max_leaves <= 6) "max_leaves is at most 6")
+  | (assert (max_wide_leaves <= 64) "max_wide_leaves is at most 64")
+  | (assert (lowbits_max_bits <= 63) "lowbits_max_bits is at most 63")
+  | (assert (lowbits_max_context_bits <= 63) "lowbits_max_context_bits is at most 63")
+  | (assert (lowbits_max_refine_bits <= 63) "lowbits_max_refine_bits is at most 63")
+  | (assert (overlap_max_terms <= 63) "overlap_max_terms is at most 63")
+  | (assert (unify_operands_max_leaves <= 63) "unify_operands_max_leaves is at most 63")
+  | (assert (decompose_max_free_classes <= 63) "decompose_max_free_classes is at most 63")
+  | (assert (wide_blocks_max_term_leaves <= 63) "wide_blocks_max_term_leaves is at most 63")
+  | (assert (wide_blocks_max_block <= 63) "wide_blocks_max_block is at most 63")
+  | (assert (shapes_max_size <= 15) "shapes_max_size is at most 15")
+  | (assert (tfunc_max_vars <= 4) "tfunc_max_vars is at most 4")
+  | (assert (tfunc_points <= 24) "tfunc_points is at most 24")
+  | (assert (tfunc_max_carries <= 128) "tfunc_max_carries is at most 128")
+  | (assert (minimal_lanes <= 16) "minimal_lanes is at most 16")
+  | (assert (minimal_max_vars <= 31) "minimal_max_vars is at most 31"))
+
 # A later round: the pre-pass rebuilds, then their extraction, or the one proved minimal.
 (let later prepass | (if minimal take_minimal (egglog later)))
 

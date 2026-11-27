@@ -451,7 +451,6 @@ fn shape_candidates_follow_shapes_max_size() {
     assert_eq!(best("shapes_max_size=6"), None);
     assert_eq!(best(""), Some(7), "a smaller max leaves the table usable");
     assert_eq!(best("shapes_max_size=6"), None);
-    assert!(crate::sched::Passes::parse("shapes_max_size=16").is_err());
 }
 
 #[test]

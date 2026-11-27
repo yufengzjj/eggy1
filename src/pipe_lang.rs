@@ -20,6 +20,8 @@ enum Tok {
     Arith(char),
     Num(u64),
     Name(String),
+    /// A string literal, its escapes read.
+    Str(String),
     Assign,
     At,
     Colon,
@@ -52,6 +54,10 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
             c if c.is_whitespace() => {
                 i += 1;
                 continue;
+            }
+            '"' => {
+                let (text, len) = string_at(&cs[i..])?;
+                (Tok::Str(text), len)
             }
             '(' => (Tok::Open, 1),
             ')' => (Tok::Close, 1),
@@ -87,6 +93,66 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
         i += len;
     }
     Ok(out)
+}
+
+/// The string literal at the start of `cs`, a `"`, and the characters it takes: `\"` and
+/// `\\` are the only escapes, and it ends on its line.
+fn string_at(cs: &[char]) -> Result<(String, usize), String> {
+    let mut text = String::new();
+    let mut k = 1;
+    loop {
+        match cs.get(k) {
+            None | Some('\n') => return Err(format!("unclosed string: {}", cs[..k].iter().collect::<String>())),
+            Some('"') => return Ok((text, k + 1)),
+            Some('\\') => match cs.get(k + 1) {
+                Some(c @ ('"' | '\\')) => {
+                    text.push(*c);
+                    k += 2;
+                }
+                c => return Err(format!("unknown escape \\{} in a string: only \\\" and \\\\ are read", c.map_or(String::new(), |c| c.to_string()))),
+            },
+            Some(c) => {
+                text.push(*c);
+                k += 1;
+            }
+        }
+    }
+}
+
+/// `s` written as a string literal that `string_at` reads back.
+pub(crate) fn quoted(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// `s` up to a `#` that starts a comment, outside string literals.
+pub(crate) fn code_part(s: &str) -> &str {
+    let (mut in_str, mut esc) = (false, false);
+    for (i, c) in s.char_indices() {
+        match c {
+            _ if esc => esc = false,
+            '\\' if in_str => esc = true,
+            '"' => in_str = !in_str,
+            '#' if !in_str => return &s[..i],
+            _ => {}
+        }
+    }
+    s
+}
+
+/// The parentheses opened less those closed in `s`, outside string literals.
+pub(crate) fn depth_of(s: &str) -> i32 {
+    let (mut d, mut in_str, mut esc) = (0, false, false);
+    for c in s.chars() {
+        match c {
+            _ if esc => esc = false,
+            '\\' if in_str => esc = true,
+            '"' => in_str = !in_str,
+            '(' if !in_str => d += 1,
+            ')' if !in_str => d -= 1,
+            _ => {}
+        }
+    }
+    d
 }
 
 const NO_WITH: &str = "(with KEY=VALUE ... p) is no longer read: write (KEY = VALUE | ... | p), as in (rewrites = 8 | semi_leaves = 2 | rewrite); with's bit_splits=N is bit_split_budget = N";
@@ -841,7 +907,6 @@ impl<'a> Parser<'a> {
             if is_switch(i) && k == NONE {
                 return Err(format!("{n} is a switch: assign it 0 (off) or 1 (on)"));
             }
-            crate::sched::check_cap(i, k)?;
         }
         Ok(Pipe::Assign(i, Box::new(e)))
     }
@@ -1009,6 +1074,20 @@ impl<'a> Parser<'a> {
                 continue;
             }
             args.push(match (&p.ty, p.rep) {
+                (Ty::Text, _) => match self.next() {
+                    Some(Tok::Str(t)) => Arg::Num(Pipe::Text(t)),
+                    x => return Err(format!("{}; found {}", whose(), show_tok(x.as_ref()))),
+                },
+                (Ty::Any, _) => {
+                    let mut xs = Vec::new();
+                    while !self.at_close() {
+                        xs.push(self.any_arg()?);
+                    }
+                    if xs.is_empty() {
+                        return Err(arity());
+                    }
+                    Arg::Pipes(xs)
+                }
                 (_, Rep::Opt) if self.at_close() => Arg::Absent,
                 (Ty::Name | Ty::Group, Rep::Opt) if !named => Arg::Absent,
                 (_, Rep::One) if self.at_close() => return Err(arity()),
@@ -1046,6 +1125,39 @@ impl<'a> Parser<'a> {
             return Err(arity());
         }
         Ok(args)
+    }
+
+    /// An argument of type `any`: a string literal, a group value, a function that gives
+    /// candidates written alone (its signature), an expression, or else a name.
+    fn any_arg(&mut self) -> Result<Pipe, String> {
+        let Some(Tok::Str(_) | Tok::Name(_)) = self.peek() else { return self.arg() };
+        let n = match self.next() {
+            Some(Tok::Str(t)) => return Ok(Pipe::Text(t)),
+            Some(Tok::Name(n)) => n,
+            _ => unreachable!(),
+        };
+        if self.group_value(&n) {
+            self.use_param(&n, Ty::Group)?;
+            return Ok(Pipe::Value(n));
+        }
+        if self.param(&n).is_none() && !self.locals.contains(&n) && n != "none" {
+            if let Some(t) = self.fn_var(&n) {
+                return Ok(Pipe::Sig(n.clone(), format!("{n}:{t}")));
+            }
+            if let Some(s) = builtins::get(&n).filter(|s| !s.is_number()) {
+                return Ok(Pipe::Sig(n, s.to_string()));
+            }
+            if self.defs.get(&n).is_some_and(|d| d.def.as_ref().is_none_or(|d| d.value.is_none())) {
+                self.used.push(n.clone());
+                let sig = self.sig_named(&n).to_string();
+                return Ok(Pipe::Sig(n, sig));
+            }
+            if self.unknown(&n) {
+                return Ok(Pipe::Name(n));
+            }
+        }
+        self.at -= 1;
+        self.arg()
     }
 
     /// A call of the function `n` defined with parameters, after its name: a call of a
@@ -1378,6 +1490,7 @@ fn show_tok(t: Option<&Tok>) -> String {
             Tok::Arith(c) => c.to_string(),
             Tok::Num(n) => n.to_string(),
             Tok::Name(n) => n.clone(),
+            Tok::Str(t) => quoted(t),
             Tok::Assign => "=".into(),
             Tok::At => "@".into(),
             Tok::Colon => ":".into(),
@@ -1580,7 +1693,7 @@ fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition
                     }
                     match Ty::parse(&t) {
                         Ok(ty) if matches!(ty, Ty::Fn(..)) && !ty.is_function() => return Err(format!("type {t} of parameter {n}: a function takes one input, term or group, and gives num, term, term? or group")),
-                        Ok(ty) if !matches!(ty, Ty::Term | Ty::MaybeTerm) => Some(ty),
+                        Ok(ty) if !matches!(ty, Ty::Term | Ty::MaybeTerm | Ty::Text | Ty::Any) => Some(ty),
                         _ => return Err(format!("unknown type {t} of parameter {n}; known: pipe group num name, and A->B as in term->num")),
                     }
                 } else {
@@ -1869,7 +1982,7 @@ impl<'s> Subst<'s> {
             Pipe::Not(c) => Pipe::Not(b(c)?),
             Pipe::Cmp(op, x, y) => Pipe::Cmp(*op, b(x)?, b(y)?),
             Pipe::Bin(op, x, y) => Pipe::Bin(*op, b(x)?, b(y)?),
-            Pipe::Num(_) | Pipe::Var(_) | Pipe::Fun(_) | Pipe::Local(_) => p.clone(),
+            Pipe::Num(_) | Pipe::Text(_) | Pipe::Sig(..) | Pipe::Var(_) | Pipe::Fun(_) | Pipe::Local(_) => p.clone(),
         })
     }
 
@@ -1947,7 +2060,7 @@ fn noted(p: &Pipe, s: &str, inline: bool) -> Pipe {
         Pipe::Or(xs) => Pipe::Or(xs.iter().map(|x| noted(x, s, inline)).collect()),
         Pipe::Cmp(op, x, y) => Pipe::Cmp(*op, b(x), b(y)),
         Pipe::Bin(op, x, y) => Pipe::Bin(*op, b(x), b(y)),
-        Pipe::Num(_) | Pipe::Name(_) | Pipe::Var(_) | Pipe::Value(_) | Pipe::Fun(_) | Pipe::Local(_) | Pipe::Param(..) | Pipe::Switch(..) => p.clone(),
+        Pipe::Num(_) | Pipe::Name(_) | Pipe::Text(_) | Pipe::Sig(..) | Pipe::Var(_) | Pipe::Value(_) | Pipe::Fun(_) | Pipe::Local(_) | Pipe::Param(..) | Pipe::Switch(..) => p.clone(),
     }
 }
 
@@ -2097,7 +2210,8 @@ pub fn show(p: &Pipe) -> String {
             let all: Vec<String> = c.args.iter().zip(&c.def.params).map(|(a, p)| show_call_arg(a, p)).chain(input.as_deref().map(stage)).collect();
             if all.is_empty() { c.def.name.clone() } else { form(&c.def.name, &all) }
         }
-        Pipe::Param(_, n) | Pipe::Value(n) | Pipe::Fun(n) | Pipe::Local(n) | Pipe::Name(n) => n.clone(),
+        Pipe::Param(_, n) | Pipe::Value(n) | Pipe::Fun(n) | Pipe::Local(n) | Pipe::Name(n) | Pipe::Sig(n, _) => n.clone(),
+        Pipe::Text(t) => quoted(t),
         Pipe::BindNum(n, e) => format!("{n} = {}", show_assigned(e)),
         Pipe::Bind(n, q) => format!("{n} = {}", bound(q, show(q))),
         Pipe::BindFn(n, q, t) if t.is_step() => format!("{n}:{t} = {}", stage(q)),

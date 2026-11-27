@@ -136,6 +136,8 @@ const IMPLS: &[(&str, Impl)] = &[
     ("reprint", Impl::Main(reprint)),
     ("within", Impl::Group(|_, set, _| Ok(if crate::sched::get(crate::sched::REWRITES) > 0 { set } else { Vec::new() }))),
     ("pre_done", Impl::Group(pre_done)),
+    ("assert", Impl::Group(assert)),
+    ("print", Impl::Group(print)),
     ("size", Impl::Num(|a, set, env| match a {
         [r] => env.reg_main(name(r)).map_or(0, |c| c.size() as u64),
         _ => set.first().map_or(0, |m| m.size() as u64),
@@ -416,6 +418,17 @@ impl<'a> Env<'a> {
         }
     }
 
+    /// `c` in infix, its constants as the final output prints them for the run's type.
+    fn infix(&self, c: &Cand) -> String {
+        let (w, signed) = (self.w, self.signed == Some(true));
+        match self.cli {
+            Some(cli) => crate::egglog_to_infix(c.term(), &|n| crate::norm_const(n, &cli.num_type)),
+            None if w >= 64 => crate::egglog_to_infix(c.term(), &|n| n),
+            None if signed => crate::egglog_to_infix(c.term(), &|n| (n << (64 - w)) >> (64 - w)),
+            None => crate::egglog_to_infix(c.term(), &|n| n & ((1i64 << w) - 1)),
+        }
+    }
+
     fn reg(&self, r: &str) -> Vec<Cand> {
         match self.lex.borrow().regs.borrow().get(r) {
             Some(Value::Group(g)) => g.clone(),
@@ -689,6 +702,9 @@ pub fn in_run<R>(p: &Passes, cli: Option<&Cli>, input: impl FnOnce() -> Cand, f:
                 fail(&e);
             }
         }
+        if let Err(e) = go(&p.check, set, &env) {
+            fail(&e);
+        }
         f()
     })
 }
@@ -829,7 +845,7 @@ fn reads(p: &Pipe, names: &mut Vec<String>, params: &mut Vec<usize>) {
         }
         Pipe::Not(q) | Pipe::Assign(_, q) | Pipe::Bind(_, q) | Pipe::BindNum(_, q) => reads(q, names, params),
         Pipe::BindFn(_, q, _) => reads(q, names, params),
-        Pipe::Num(_) | Pipe::Var(_) | Pipe::Switch(..) => {}
+        Pipe::Num(_) | Pipe::Text(_) | Pipe::Sig(..) | Pipe::Var(_) | Pipe::Switch(..) => {}
     }
 }
 
@@ -843,13 +859,7 @@ fn bind_step(p: &Pipe, set: Vec<Cand>, env: &Env) -> Steps {
             match *i {
                 crate::sched::DEADLINE => assign_time_limit(v),
                 i if crate::sched::is_switch(i) => crate::sched::bind(i, (v != 0) as u64),
-                i => match crate::sched::check_cap(i, v) {
-                    Ok(v) => crate::sched::bind(i, v),
-                    Err(e) => {
-                        env.ctx(|c| c.mark_cut());
-                        return Err(Error::BackendError(e));
-                    }
-                },
+                i => crate::sched::bind(i, v),
             }
         }
         p => unreachable!("{p:?} is not a step"),
@@ -1171,6 +1181,42 @@ fn polish_one(c: &Cand, env: &Env) -> Option<Cand> {
     out.inspect_err(fail).ok()?.into_iter().next().filter(|r| r.size() < c.size())
 }
 
+fn assert(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    if env.value(&args[0], &set) != 0 {
+        return Ok(set);
+    }
+    let Pipe::Text(msg) = &args[1] else { unreachable!("assert takes a text") };
+    env.ctx(|c| c.mark_cut());
+    Err(Error::BackendError(msg.clone()))
+}
+
+fn print(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    let shown: Vec<String> = args
+        .iter()
+        .map(|a| match a {
+            Pipe::Text(t) => t.clone(),
+            Pipe::Name(n) => n.clone(),
+            Pipe::Sig(_, s) => s.clone(),
+            Pipe::Value(g) => env.reg(g).iter().map(|c| env.infix(c)).collect::<Vec<_>>().join(", "),
+            e => match env.value(e, &set) {
+                NONE => "none".into(),
+                v => v.to_string(),
+            },
+        })
+        .collect();
+    let line = shown.join(" ");
+    #[cfg(test)]
+    PRINTED.with(|p| p.borrow_mut().push(line.clone()));
+    eprintln!("{line}");
+    Ok(set)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The lines `print` wrote on this thread.
+    static PRINTED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
 fn pre(e: &str) -> String {
     format!("pre/{}", stats::source_of(e).unwrap_or_else(|| "unlabeled".into()))
 }
@@ -1328,6 +1374,38 @@ fn term_pass(name: &str, f: impl Fn(&Term, &Ctx) -> Option<Term>, alt: Option<u8
 mod tests {
     use super::*;
     use crate::pipe_lang as lang;
+
+    #[test]
+    fn assert_and_print() {
+        let run_on = |spec: &str, input: &str, w: u32, signed: Option<bool>| {
+            let p = Passes::parse(spec).unwrap();
+            let input = Cand::new(input, "input");
+            PRINTED.with(|l| l.borrow_mut().clear());
+            let r = run(&p.prepass, vec![input.clone()], &Env::prepass(&p, w, signed, false, input.term()));
+            (r.map(|c| c.iter().map(|c| c.term().to_string()).collect::<Vec<_>>()).map_err(|e| e.to_string()), PRINTED.with(|l| l.take()))
+        };
+        let x3 = "(Add (Var \"x\") (Num 253))";
+        let run = |spec: &str| run_on(spec, x3, 64, None);
+        assert_eq!(run("prepass=(assert (size == 3) \"three\")"), (Ok(vec![x3.to_string()]), vec![]));
+        assert_eq!(run("prepass=(assert (size > 3) \"not \\\"big\\\" \\\\ (#)\") | rewrite").0, Err("not \"big\" \\ (#)".into()));
+        assert_eq!(run("prepass=time_limit = 0 | (assert 0 \"past the limit too\")").0, Err("past the limit too".into()));
+        let (r, lines) = run_on("prepass=(save t) | (print \"size\" size none max_leaves (size * 2) t rewrite some_name) | (print t)", x3, 8, Some(false));
+        assert_eq!(r, Ok(vec![x3.to_string()]), "print passes the candidates on");
+        assert_eq!(lines, ["size 3 none 6 6 (x + 0xfd) (rewrite t:term) term some_name", "(x + 0xfd)"]);
+        assert_eq!(run_on("prepass=(save t) | (print t)", x3, 8, Some(true)).1, ["(x - 3)"], "constants as the type prints them");
+        let two = "(Add (And (Var \"x\") (Var \"y\")) (Or (Var \"x\") (Var \"y\")))";
+        assert_eq!(run_on("prepass=(union id rewrite) | (save u) | (print u)", two, 64, None).1, ["((x & y) + (x | y)), (x + y)"]);
+        let (_, lines) = run("(def (g) id) prepass=f:term->num = size | (print f g) | g");
+        assert_eq!(lines, ["f:term->num (g g:group) group"]);
+        for (bad, msg) in [("prepass=(assert 1)", "assert takes"), ("prepass=(assert 1 x)", "msg:text"), ("prepass=(print)", "print takes"), ("prepass=(print \"a)", "unclosed string"), ("prepass=(print \"a\\n\")", "unknown escape")] {
+            let e = Passes::parse(bad).unwrap_err();
+            assert!(e.contains(msg), "{bad}: {e}");
+        }
+        assert_eq!(Passes::parse_noting("prepass=(save t) | (print t) | (assert (size t) \"m\")").unwrap().1, Vec::<String>::new(), "print and assert read their group variables");
+        let p = Passes::parse("prepass=(print \"a \\\"b\\\" c\" 1) | (assert 1 \"x;y z\")").unwrap();
+        assert_eq!(lang::show(&p.prepass), "(print \"a \\\"b\\\" c\" 1) | (assert 1 \"x;y z\")");
+        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p, "strings are written back as read");
+    }
 
     #[test]
     fn time_limit_ends_with_its_sequence() {
@@ -1615,9 +1693,9 @@ mod tests {
         assert_eq!(step("(def @inline (hold n) (save s) | (filter (size == n))) prepass=rewrite | (hold 3) | (union id (load s))"), [XOR], "and its registers");
         assert_eq!(step("(def @inline (hold n) (save s) | (filter (size == n))) prepass=(hold 4) | (load s)"), [SUB]);
         assert_eq!(step("(def @inline (i m p) p | (filter (m == 1))) (def (f n) (i 1 (filter (n == 7)))) prepass=(f size)"), [SUB], "an argument of an @inline call reads the frame it is written in");
-        let passes = Passes::parse("(def (f n) max_leaves = n | rewrite) prepass=(f 8)").unwrap();
+        let passes = Passes::parse("(def (f n) max_leaves = n | check_limits | rewrite) prepass=(f 8)").unwrap();
         let env = Env::prepass(&passes, 32, None, false, SUB);
-        let e = crate::sched::in_default_run(|| go(&passes.prepass, vec![Cand::new(SUB, "input")], &env)).unwrap_err();
+        let e = crate::sched::in_default_run(|| run(&passes.prepass, vec![Cand::new(SUB, "input")], &env)).unwrap_err();
         assert!(e.to_string().contains("max_leaves is at most 6"), "{e}");
     }
 

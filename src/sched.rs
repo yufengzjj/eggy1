@@ -338,28 +338,6 @@ limits! {
 /// read (`limit_unread`), also where a pipeline reads them.
 pub const UNREAD: [Limit; 2] = [Limit::MemoContexts, Limit::WideBlocksCacheSize];
 
-/// The largest value an assignment may give each of these limits; a capped one cannot be
-/// `none`.
-const CAPS: [(Limit, u64); 17] = [
-    (Limit::BlockMaxBlock, 5),
-    (Limit::MaxLeaves, crate::linear_mba::TABLE_LEAVES as u64),
-    (Limit::MaxWideLeaves, 64),
-    (Limit::LowbitsMaxBits, 63),
-    (Limit::LowbitsMaxContextBits, 63),
-    (Limit::LowbitsMaxRefineBits, 63),
-    (Limit::OverlapMaxTerms, 63),
-    (Limit::UnifyOperandsMaxLeaves, 63),
-    (Limit::DecomposeMaxFreeClasses, 63),
-    (Limit::WideBlocksMaxTermLeaves, 63),
-    (Limit::WideBlocksMaxBlock, 63),
-    (Limit::ShapesMaxSize, 15),
-    (Limit::TfuncMaxVars, crate::tfunc::VARS_CAP as u64),
-    (Limit::TfuncPoints, crate::tfunc::POINTS_CAP as u64),
-    (Limit::TfuncMaxCarries, 128),
-    (Limit::MinimalLanes, crate::minimal::LANES_CAP as u64),
-    (Limit::MinimalMaxVars, 31),
-];
-
 /// Variables besides the limits: `rewrites` (uncached `rewrite` calls left), `semi_leaves`
 /// (most leaves of a semi-linear region rebuilt), `relate_leaves` (most leaves of a region
 /// `relate` tries), `bit_split_budget` (`bit_split` pairs left).
@@ -558,18 +536,6 @@ pub fn var_names() -> Vec<&'static str> {
 /// Whether the variable at `i` is a switch: an `INNER` pass or a `FLAGS` switch.
 pub fn is_switch(i: usize) -> bool {
     matches!(kind(i), VarKind::Pass | VarKind::Flag)
-}
-
-/// `v` checked against the cap of variable `i` (`CAPS`): an error naming the cap when it is
-/// more.
-pub fn check_cap(i: usize, v: u64) -> Result<u64, String> {
-    let Some(&(_, cap)) = CAPS.iter().find(|(l, _)| LIMIT0 + *l as usize == i) else { return Ok(v) };
-    let name = var(i).name;
-    match v {
-        _ if v <= cap => Ok(v),
-        NONE => Err(format!("{name} is at most {cap}; none is more")),
-        _ => Err(format!("{name} = {v}: {name} is at most {cap}")),
-    }
 }
 
 thread_local! {
@@ -809,6 +775,11 @@ pub enum Pipe {
     /// A name argument: a stats or origin name, an egglog label, a note register, or the group
     /// variable a built-in binds or reads (`(save t)`, `(size t)`).
     Name(String),
+    /// A string literal (`text`), its escapes read.
+    Text(String),
+    /// A function written as a value where it is only formatted (`print`): its name and
+    /// signature.
+    Sig(String, String),
     /// A variable of `VARS`; `time_limit` reads as the milliseconds left, `keep` as at least 1.
     Var(usize),
     /// The group variable or group parameter `NAME` written as a value: its candidates,
@@ -1165,6 +1136,9 @@ pub struct Passes {
     /// first `defaults` from `default.pipe`, the rest from `--passes` (`entry_steps`).
     pub entry: Vec<Pipe>,
     pub defaults: usize,
+    /// `check_limits` of `default.pipe` (or of `--passes`, which may redefine it), run once
+    /// after the entry assignments (`pipe::in_run`).
+    pub check: Pipe,
     /// The passes `simplify` runs on its input.
     pub pipeline: Pipe,
     /// The pre-pass on one term: its first candidate is the main rebuild, the others are
@@ -1200,6 +1174,7 @@ static DEFAULT: std::sync::LazyLock<(Passes, lang::Defs)> = std::sync::LazyLock:
     let mut globals = Vec::new();
     parsing(&mut globals, || p.apply_source(include_str!("default.pipe"), &mut defs, &mut Lets::default(), true)).and_then(|()| p.finish()).unwrap_or_else(|e| panic!("src/default.pipe: {e}"));
     p.globals = globals;
+    p.check = check_of(&defs);
     if let Some(e) = p.undefined().first() {
         panic!("{e}");
     }
@@ -1208,6 +1183,11 @@ static DEFAULT: std::sync::LazyLock<(Passes, lang::Defs)> = std::sync::LazyLock:
     p.default_globals = p.globals.len();
     (p, defs)
 });
+
+/// The checks `(let check_limits ...)` defines in `defs`.
+fn check_of(defs: &lang::Defs) -> Pipe {
+    defs.get("check_limits").map_or_else(Pipe::id, |n| n.pipe.clone())
+}
 
 impl Default for Passes {
     fn default() -> Passes {
@@ -1232,6 +1212,7 @@ impl Passes {
             pre: PRE.to_vec(),
             entry: Vec::new(),
             defaults: 0,
+            check: id.clone(),
             pipeline: id.clone(),
             prepass: id.clone(),
             polish: id.clone(),
@@ -1262,10 +1243,10 @@ impl Passes {
     }
 
     /// `{:#}` after a comment line with the run it describes: `entry_steps` for `-m m -i i`,
-    /// then `pipeline` (`--show-passes`).
+    /// `check_limits`, then `pipeline` (`--show-passes`).
     pub fn show_run(&self, m: usize, i: usize) -> String {
         let steps: Vec<String> = self.entry_steps(Some((m, i))).iter().map(lang::show).collect();
-        format!("# A run: {} | pipeline
+        format!("# A run: {} | check_limits | pipeline
 {self:#}", steps.join(" | "))
     }
 
@@ -1316,8 +1297,10 @@ impl Passes {
         let r = parsing(&mut globals, || p.apply(spec, &mut defs, &mut lets));
         p.globals = globals;
         r?;
+        p.check = check_of(&defs);
         p.finish()?;
-        let unused = lets.defined.iter().filter(|(head, _)| !lets.used.iter().any(|n| head.split(' ').next() == Some(n)));
+        // The Rust code runs `check_limits` (`Passes::check`).
+        let unused = lets.defined.iter().filter(|(head, _)| head != "check_limits" && !lets.used.iter().any(|n| head.split(' ').next() == Some(n)));
         let mut notes: Vec<String> = unused
             .map(|(n, k)| match k {
                 lang::DefKind::Let => format!("(let {n} ...) is never used: a name is expanded only where a later item writes it"),
@@ -1340,17 +1323,21 @@ impl Passes {
                 false => e,
             })
         };
-        let spec: String = spec.lines().map(|l| l.split_once('#').map_or(l, |(a, _)| a)).collect::<Vec<_>>().join("\n");
+        let spec: String = spec.lines().map(lang::code_part).collect::<Vec<_>>().join("\n");
         let mut items: Vec<String> = Vec::new();
         let (mut depth, mut cur, mut fresh, mut after_bar) = (0i32, String::new(), true, false);
+        let (mut in_str, mut esc) = (false, false);
         let mut chunks = Vec::new();
         for c in spec.chars() {
             match c {
-                '(' => depth += 1,
-                ')' => depth -= 1,
+                _ if esc => esc = false,
+                '\\' if in_str => esc = true,
+                '"' => in_str = !in_str,
+                '(' if !in_str => depth += 1,
+                ')' if !in_str => depth -= 1,
                 _ => {}
             }
-            if depth == 0 && (c.is_whitespace() || c == ';') {
+            if depth == 0 && !in_str && (c.is_whitespace() || c == ';') {
                 chunks.push((std::mem::take(&mut cur), c == ';'));
             } else {
                 cur.push(c);
@@ -1392,7 +1379,7 @@ impl Passes {
             if let Some(val) = item.strip_prefix("polish=") {
                 let names: Vec<&str> = val.split(',').filter(|s| !s.is_empty()).collect();
                 let all_polish = names.iter().all(|n| crate::linear_mba::POLISH.iter().any(|(m, _)| m == n));
-                p.polish = if all_polish { lang::parse(&polish(&names))? } else { read(val, defs, &mut lets.used)? };
+                p.polish = if all_polish { read(&polish(&names), defs, &mut lets.used)? } else { read(val, defs, &mut lets.used)? };
                 continue;
             }
             if let Some((name, val)) = item.split_once('=').filter(|(k, _)| lang::defined_builtin(k) || k.starts_with("sub/")) {
@@ -1488,7 +1475,7 @@ impl Passes {
     fn apply_source(&mut self, text: &str, defs: &mut lang::Defs, lets: &mut Lets, default: bool) -> Result<(), String> {
         let (mut form, mut depth, mut start) = (String::new(), 0i32, 0);
         for (n, line) in text.lines().enumerate() {
-            let code = line.split_once('#').map_or(line, |(a, _)| a).trim_end();
+            let code = lang::code_part(line).trim_end();
             if depth == 0 && code.trim().is_empty() {
                 continue;
             }
@@ -1496,7 +1483,7 @@ impl Passes {
                 start = n + 1;
             }
             let at = |e: String| format!("line {start}: {e}");
-            depth += code.chars().map(|c| i32::from(c == '(') - i32::from(c == ')')).sum::<i32>();
+            depth += lang::depth_of(code);
             form = if form.is_empty() { code.trim().to_string() } else { format!("{form}\n{code}") };
             if depth > 0 && form.starts_with('(') {
                 continue;
@@ -1818,7 +1805,7 @@ impl Pipe {
                 a.each(f);
                 b.each(f);
             }
-            Pipe::Num(_) | Pipe::Name(_) | Pipe::Var(_) | Pipe::Value(_) | Pipe::Fun(_) | Pipe::Local(_) | Pipe::Param(..) | Pipe::Switch(..) => {}
+            Pipe::Num(_) | Pipe::Name(_) | Pipe::Text(_) | Pipe::Sig(..) | Pipe::Var(_) | Pipe::Value(_) | Pipe::Fun(_) | Pipe::Local(_) | Pipe::Param(..) | Pipe::Switch(..) => {}
         }
     }
 }
@@ -1988,7 +1975,12 @@ impl Uses {
                 self.maybe(&args[2]);
             }
             "cand" => self.maybe(&args[1]),
-            "filter" => self.expr(&args[0]),
+            "filter" | "assert" => self.expr(&args[0]),
+            "print" => args.iter().for_each(|a| match a {
+                Pipe::Value(r) => self.read(r),
+                Pipe::Name(_) | Pipe::Text(_) | Pipe::Sig(..) => {}
+                e => self.expr(e),
+            }),
             "scope" => self.walk(&args[0]),
             "tag" | "smaller" => self.walk(&args[1]),
             // Both rebuild with `Passes::rewrite`.
@@ -2200,6 +2192,11 @@ mod tests {
         crate::pipe::Cand::new("(Sub (Var \"x\") (Var \"y\"))", "input")
     }
 
+    /// `s` parsed with the names `default.pipe` defines.
+    fn parse_default(s: &str) -> Pipe {
+        lang::parse_with(s, &DEFAULT.1, &mut Vec::new()).unwrap()
+    }
+
     /// The value of variable `name` after the entry assignments of `p`.
     fn after_entry(p: &Passes, name: &str) -> u64 {
         let i = parsing(&mut p.globals.clone(), || var_index(name)).unwrap();
@@ -2245,7 +2242,7 @@ mod tests {
         let (m, i) = crate::pipe::in_run(&cli.passes, Some(&cli), x, || (get(RESTARTS), get(ITER_LIMIT)));
         assert_eq!((m, i), (5, 6), "-m and -i come before the --passes items");
         let shown = cli.passes.show_run(5, 3);
-        assert!(shown.starts_with("# A run: keep = 2 | ") && shown.contains("| restarts = 5 | iter_limit = 3 | iter_limit = iter_limit * 2 | pipeline\n"), "{shown}");
+        assert!(shown.starts_with("# A run: keep = 2 | ") && shown.contains("| restarts = 5 | iter_limit = 3 | iter_limit = iter_limit * 2 | check_limits | pipeline\n"), "{shown}");
         assert_eq!(Passes::parse(&shown).unwrap(), cli.passes);
         for bad in ["minimal=0", "relate=none", "nope=1", "split_runs=4 | rewrite", "keep+=1", "size=3"] {
             assert!(Passes::parse(bad).is_err(), "{bad}");
@@ -2295,17 +2292,47 @@ mod tests {
     #[test]
     fn caps_reject_larger_values() {
         assert_eq!(after_entry(&Passes::parse("max_leaves=5 max_wide_leaves=64").unwrap(), "max_leaves"), 5);
-        for (bad, msg) in [("max_leaves=7", "max_leaves is at most 6"), ("max_leaves=none", "none is more"), ("max_wide_leaves=65", "at most 64"), ("prepass=lowbits_max_bits = 64 | lowbits", "lowbits_max_bits is at most 63")] {
-            let e = Passes::parse(bad).unwrap_err();
-            assert!(e.contains(msg), "{bad}: {e}");
+        let caps = [
+            ("block_max_block", 5),
+            ("max_leaves", crate::linear_mba::TABLE_LEAVES as u64),
+            ("max_wide_leaves", 64),
+            ("lowbits_max_bits", 63),
+            ("lowbits_max_context_bits", 63),
+            ("lowbits_max_refine_bits", 63),
+            ("overlap_max_terms", 63),
+            ("unify_operands_max_leaves", 63),
+            ("decompose_max_free_classes", 63),
+            ("wide_blocks_max_term_leaves", 63),
+            ("wide_blocks_max_block", 63),
+            ("shapes_max_size", 15),
+            ("tfunc_max_vars", crate::tfunc::VARS_CAP as u64),
+            ("tfunc_points", crate::tfunc::POINTS_CAP as u64),
+            ("tfunc_max_carries", 128),
+            ("minimal_lanes", crate::minimal::LANES_CAP as u64),
+            ("minimal_max_vars", 31),
+        ];
+        let prepass = |spec: &str| {
+            let p = Passes::parse(spec).unwrap();
+            crate::pipe::run(&p.prepass, vec![x()], &crate::pipe::Env::prepass(&p, 64, None, false, x().term())).err().map(|e| e.to_string())
+        };
+        for (name, cap) in caps {
+            let msg = format!("{name} is at most {cap}");
+            assert!(include_str!("default.pipe").contains(&format!("(assert ({name} <= {cap}) \"{msg}\")")), "{name}");
+            assert_eq!(prepass(&format!("{name}={cap}")), None, "{name}");
+            for bad in [(cap + 1).to_string(), "none".into()] {
+                assert_eq!(prepass(&format!("{name}={bad}")).as_deref(), Some(msg.as_str()), "{name}={bad}");
+            }
         }
-        let p = Passes::parse("prepass=max_leaves = vars * 4 | lowbits").unwrap();
         let input = crate::pipe::Cand::new("(Sub (Var \"x\") (Var \"y\"))", "input");
+        let cli = crate::Cli { passes: Passes::parse("max_leaves=7").unwrap(), ..crate::Cli::default() };
+        assert_eq!(crate::simplify(input.term(), &cli).err().map(|e| e.to_string()).as_deref(), Some("max_leaves is at most 6"), "checked when the run starts");
+        let p = Passes::parse("prepass=(max_leaves = 7 | id)").unwrap();
         let r = crate::pipe::run(&p.prepass, vec![input.clone()], &crate::pipe::Env::prepass(&p, 64, None, false, input.term()));
-        assert_eq!(r.err().map(|e| e.to_string()).as_deref(), Some("max_leaves = 8: max_leaves is at most 6"));
+        assert!(r.is_ok(), "only the entry assignments are checked, not those inside a pipeline");
+        let p = Passes::parse("prepass=(max_leaves = vars * 4 | check_limits | rewrite)").unwrap();
         let cli = crate::Cli { passes: p, ..crate::Cli::default() };
         let r = crate::simplify(input.term(), &cli);
-        assert_eq!(r.err().map(|e| e.to_string()).as_deref(), Some("max_leaves = 8: max_leaves is at most 6"), "a pre-pass run inside the pipeline gives its error");
+        assert_eq!(r.err().map(|e| e.to_string()).as_deref(), Some("max_leaves is at most 6"), "a pipeline can check its own assignments; a pre-pass run inside the pipeline gives its error");
     }
 
     #[test]
@@ -2438,7 +2465,7 @@ mod tests {
         assert_eq!(Passes::parse("").unwrap(), Passes::default());
         let p = Passes::parse("pre-=halve_input,unified;polish=factor,push_not,factor extra=0 keep=3 prove_minimal=0").unwrap();
         assert!(!p.pre_on("unified") && p.pre_on("no_wide"));
-        assert_eq!(p.polish, lang::parse(&polish(&["factor", "push_not", "factor"])).unwrap());
+        assert_eq!(p.polish, parse_default(&polish(&["factor", "push_not", "factor"])));
         assert_eq!(lang::parse(&Passes::default().polish.to_string()).unwrap(), Passes::default().polish);
         let p = Passes::parse("rewrite=(regions (best 1 simba poly_mba))").unwrap();
         assert_eq!(p.rewrite.to_string(), "(regions (best 1 simba poly_mba))");
@@ -2504,7 +2531,7 @@ mod tests {
             assert!(Passes::parse(bad).is_err(), "{bad}");
         }
         assert_eq!(Passes::default().check(), Ok(()));
-        assert_eq!(Passes::default().polish, lang::parse(&polish(&crate::linear_mba::POLISH.map(|(n, _)| n))).unwrap());
+        assert_eq!(Passes::default().polish, parse_default(&polish(&crate::linear_mba::POLISH.map(|(n, _)| n))));
         let p = Passes::parse("(let twice (fix 2 rewrite)) rewrite=twice | (best 1 twice simba) pipeline=(fix 1 first_round) | polish").unwrap();
         assert_eq!(p.rewrite, lang::parse("(fix 2 rewrite) | (best 1 (fix 2 rewrite) simba)").unwrap());
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
@@ -2569,7 +2596,7 @@ times = extra + 1 # a new variable
         assert_eq!(Passes::default().warnings(), Vec::<String>::new());
         let mut lets = Lets::default();
         Passes::base().apply(include_str!("default.pipe"), &mut lang::Defs::new(), &mut lets).unwrap();
-        assert!(lets.defined.iter().all(|(n, _)| lets.used.contains(n)), "{:?} {:?}", lets.defined, lets.used);
+        assert!(lets.defined.iter().all(|(n, _)| n == "check_limits" || lets.used.contains(n)), "{:?} {:?}", lets.defined, lets.used);
         let (_, w) = Passes::parse_noting("(let foo rewrite) (let bar lowbits) prepass=bar | (save t) | (save q) | (load t) | ((off relate) | (save x) | id) | (rewrite | (off relate))").unwrap();
         assert_eq!(w.len(), 4, "{w:?}");
         assert!(w[0].contains("let foo") && w[1].contains("group variable q") && w[2].contains("group variable x") && w[3].contains("(off relate) ends"), "{w:?}");
@@ -2665,7 +2692,7 @@ times = extra + 1 # a new variable
             assert_eq!(Passes::parse(&format!("(def ({name}) lowbits | rewrite)")).unwrap(), short, "{name}");
             assert_ne!(short, d);
         }
-        assert_eq!(Passes::parse("polish=factor,push_not").unwrap().polish, lang::parse(&polish(&["factor", "push_not"])).unwrap());
+        assert_eq!(Passes::parse("polish=factor,push_not").unwrap().polish, parse_default(&polish(&["factor", "push_not"])));
         let p = Passes::parse("(def (twice) rewrite | rewrite) (def (more) twice | relate) prepass=lowbits | more | twice").unwrap();
         assert_eq!(p.defs.len(), 2);
         assert_eq!(p.prepass.to_string(), "lowbits | more | twice");
