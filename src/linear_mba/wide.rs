@@ -119,7 +119,7 @@ pub(super) fn peel(t: &T, w: &Ctx) -> Option<T> {
     let prog = Prog::new(t, &lv, w);
     let e0 = prog.at(0, w);
     let mut h = 0x9e37_79b9_7f4a_7c15u64;
-    let spread = (0..16).map(|_| {
+    let spread = (0..limit(Limit::PeelSpreadPoints)).map(|_| {
         h ^= h << 13;
         h ^= h >> 7;
         h ^= h << 17;
@@ -204,7 +204,7 @@ fn bit_degree(t: &T, w: &Ctx) -> usize {
 
 
 /// Rebuild a linear region from its conjunction-basis expansion when every maximal
-/// set of leaves with a non-zero coefficient (a block) has at most 3 leaves: one
+/// set of leaves with a non-zero coefficient (a block) has at most `block_max_block` leaves: one
 /// term `c·f` per block, with `f` any bitwise function of the block's leaves and `c`
 /// set by the block's top coefficient, plus the lower-degree monomials still left
 /// over. The choice per block that gives the smallest sum wins, so `c·(x & y)` may
@@ -218,9 +218,10 @@ pub(super) fn small_blocks(t: &T, w: &Ctx) -> Option<T> {
         return None;
     }
     let m = w.mask;
-    // Blocks of at most 3 leaves mean degree <= 3, so the coefficients come from the
-    // points with at most 3 ones; the other points must then match the interpolation.
-    let pts: Vec<usize> = (0..1usize << n).filter(|p| p.count_ones() <= 3).collect();
+    // Blocks of at most `d` leaves mean degree <= `d`, so the coefficients come from the
+    // points with at most `d` ones; the other points must then match the interpolation.
+    let d = crate::sched::limit_u32(Limit::BlockMaxBlock);
+    let pts: Vec<usize> = (0..1usize << n).filter(|p| p.count_ones() <= d).collect();
     let prog = Prog::new(t, &lv, w);
     let mut coef = vec![0u64; 1 << n];
     for &p in &pts {
@@ -234,23 +235,23 @@ pub(super) fn small_blocks(t: &T, w: &Ctx) -> Option<T> {
         }
     }
     let low: Vec<usize> = pts.iter().copied().filter(|&p| coef[p] != 0).collect();
-    if bit_degree(t, w) > 3 {
+    if bit_degree(t, w) > d as usize {
         let fits = |p: usize| prog.at(p, w) == low.iter().filter(|&&q| q & p == q).fold(0u64, |a, &q| a.wrapping_add(coef[q])) & m;
         // Most regions fail; a few spread-out points reject them before the full check.
         let mut h = 0x9e37_79b9_7f4a_7c15u64;
-        let spread = (0..8).map(|_| {
+        let spread = (0..limit(Limit::BlockSpreadPoints)).map(|_| {
             h ^= h << 13;
             h ^= h >> 7;
             h ^= h << 17;
             h as usize & ((1 << n) - 1)
         });
-        if !spread.chain(0..1 << n).filter(|p| p.count_ones() > 3).all(fits) {
+        if !spread.chain(0..1 << n).filter(|p| p.count_ones() > d).all(fits) {
             return None;
         }
     }
     let support: Vec<usize> = low.into_iter().filter(|&p| p != 0).collect();
     let blocks: Vec<usize> = support.iter().copied().filter(|&p| p.count_ones() >= 2 && !support.iter().any(|&q| q != p && q & p == p)).collect();
-    if blocks.is_empty() || blocks.iter().any(|b| b.count_ones() > 3) {
+    if blocks.is_empty() || blocks.iter().any(|b| b.count_ones() > d) {
         return None;
     }
     // Leaves can be large subterms, so sums are built over placeholder variables
@@ -361,7 +362,7 @@ pub(super) fn small_blocks(t: &T, w: &Ctx) -> Option<T> {
             break;
         }
     }
-    for _ in 0..if combos <= limit(Limit::BlockCombos) { 0 } else { 4 } {
+    for _ in 0..if combos <= limit(Limit::BlockCombos) { 0 } else { limit(Limit::BlockDescentRounds) } {
         let mut improved = false;
         for e in 0..blocks.len() {
             for ci in 0..opts[e].len() {
@@ -479,7 +480,7 @@ fn wide_blocks_uncached(t: &T, lv: Vec<T>, w: &Ctx) -> Option<T> {
     // A term over a block uses each of its leaves; a region not much larger than that
     // is mostly in block form already.
     let least: usize = blocks.iter().map(|&b| (0..n).filter(|i| b >> i & 1 == 1).map(|i| leaf_size[i] + 1).sum::<usize>()).sum();
-    if 2 * size(t) < 4 * least {
+    if size(t) < limit(Limit::WideBlocksMinRatio).saturating_mul(least) {
         return None;
     }
     let private = |g: u64| g.count_ones() >= 2 && blocks.iter().filter(|&&b| b & g == g).count() == 1;
@@ -568,7 +569,7 @@ fn wide_blocks_uncached(t: &T, lv: Vec<T>, w: &Ctx) -> Option<T> {
     let pick = |choice: &[usize]| -> Vec<&BlockTerm> { opts.iter().zip(choice).map(|(o, &ci)| &o[ci]).collect() };
     let mut best_choice = vec![0usize; nb];
     let mut best_size = score(&pick(&best_choice), &left(&pick(&best_choice)));
-    for _ in 0..4 {
+    for _ in 0..limit(Limit::WideBlocksDescentRounds) {
         let mut improved = false;
         for e in 0..nb {
             for ci in 0..opts[e].len() {

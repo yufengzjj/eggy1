@@ -30,6 +30,7 @@ struct Lims {
     max_solutions: usize,
     max_shifted: usize,
     max_shifted_monos: usize,
+    shifted_rest_ratio: usize,
     builds: usize,
 }
 
@@ -46,6 +47,7 @@ impl Lims {
             max_solutions: limit(Limit::PolyMaxSolutions),
             max_shifted: limit(Limit::PolyMaxShifted),
             max_shifted_monos: limit(Limit::PolyMaxShiftedMonos),
+            shifted_rest_ratio: limit(Limit::PolyShiftedRestRatio),
             builds: limit(Limit::PolyBuilds),
         }
     }
@@ -744,7 +746,7 @@ impl<'a> Expansion<'a> {
                 let with_rest = |prod: T, rest: Poly| if rest.is_empty() { prod } else { T::Op(Op::Add, vec![prod, self.build_linear(&rest)]) };
                 let mut shifted = Vec::new();
                 let small = |l: &Poly| l.len() <= self.lim.max_shifted_monos;
-                let tries = if low.len() > self.lim.max_shifted_monos.saturating_mul(2) { 0 } else { self.lim.max_shifted };
+                let tries = if low.len() > self.lim.max_shifted_monos.saturating_mul(self.lim.shifted_rest_ratio) { 0 } else { self.lim.max_shifted };
                 for (l1, l2) in self.factor2(&high).into_iter().filter(|(a, b)| small(a) && small(b)).take(tries) {
                     // Only shifts that leave the rest fewer monomials are built.
                     let mut cache: Vec<Option<[T; 2]>> = vec![None; 2 * SHIFTS.len()];
@@ -887,7 +889,7 @@ fn masked_poly(t: &T, monos: usize, w: &Ctx) -> Option<T> {
     }
     let mut ctx = Expansion::new(w, atoms);
     let p = ctx.poly(t)?;
-    if p.len() > limit(Limit::PolyMaxMaskedMonos).max(2 * monos) {
+    if p.len() > limit(Limit::PolyMaxMaskedMonos).max(limit(Limit::PolyMaskedMonosRatio).saturating_mul(monos)) {
         return None;
     }
     let q = ctx.reduce_null(&p);

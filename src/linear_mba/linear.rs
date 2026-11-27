@@ -303,7 +303,7 @@ fn rebuild_table_uncached(gp: &[u64], lv: &[T], shape: &[(usize, bool)], konst: 
         .unwrap()
 }
 
-/// Up to 3 bitwise terms whose supports may overlap (`11*(x^y) - x`), possibly
+/// Up to `overlap_max_terms` bitwise terms whose supports may overlap (`11*(x^y) - x`), possibly
 /// non-zero at 0 (`-23*~(x|y)`). Shifting the table by `d` gives
 /// `h = gp + d = Σ c_j·b_j` per bit, and then `e = Σ c_j·b_j(x) + konst + d`,
 /// since a per-bit constant `d` is the word `-d`. `d` is tried as 0 or `-v`
@@ -317,6 +317,7 @@ pub(super) fn overlapping_terms(gp: &[u64], lv: &[T], konst: u64, w: &Ctx) -> Ve
         v
     };
     let (most, choices, dec) = (limit(Limit::OverlapMaxValues), limit(Limit::OverlapMaxChoices), Dec::read());
+    let max_terms = limit(Limit::OverlapMaxTerms);
     let vals = distinct(gp);
     if vals.len() > most {
         return Vec::new();
@@ -338,8 +339,8 @@ pub(super) fn overlapping_terms(gp: &[u64], lv: &[T], konst: u64, w: &Ctx) -> Ve
         pool.retain(|&c| c != 0);
         pool.sort_unstable();
         pool.dedup();
-        for k in (1..=3usize).filter(|k| hv.len() < 1 << k) {
-            // At k = 3 a repeated coefficient leaves ambiguous points (rejected) or two equal terms.
+        for k in (1..=max_terms).filter(|k| hv.len() < 1 << k) {
+            // Past k = 2 a repeated coefficient leaves ambiguous points (rejected) or two equal terms.
             combinations(&pool, k, k == 2, &mut Vec::new(), &mut |coefs| {
                 if let Some(c) = split_by_sums(&h, &hv, coefs, lv, konst.wrapping_add(d) & m, (choices, dec), w) {
                     out.push(c);

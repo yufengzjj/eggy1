@@ -322,10 +322,11 @@ fn pair_candidates_uncached(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &C
         .collect();
     scales.sort_unstable_by_key(|&v| (w.signed(v).unsigned_abs(), v));
     scales.dedup();
-    scales.truncate(12);
+    scales.truncate(crate::sched::limit(Limit::PairsMaxScales));
     let coef = |c: u64| if c == 1 { 0 } else if c == m { 1 } else { 2 };
     let (max_shape, max_size) = (crate::sched::limit(Limit::ShapesMaxSize), crate::sched::limit(Limit::PairsMaxSize));
     let mut budget = crate::sched::limit(Limit::PairsBudget);
+    let max_carries = crate::sched::limit(Limit::PairsMaxCarries);
     let mut best = limit;
     let leaf_sizes: Vec<usize> = lv.iter().map(size).collect();
     let group_of: Vec<usize> = (0..w.w).map(|j| groups.iter().position(|(_, mask)| mask >> j & 1 == 1).unwrap_or(0)).collect();
@@ -472,7 +473,7 @@ fn pair_candidates_uncached(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &C
                             let classes: Vec<u8> = (0..groups.len()).map(|gi| zero_classes(&sh, (i, k), &p1[gi], &comp[gi])).collect();
                             let folds = *zero_r.entry(classes).or_insert_with_key(|classes| {
                                 let options: Vec<Vec<(u8, u8)>> = classes.iter().map(|&c| (0..4u8).filter(|t| c >> t & 1 == 1).map(|t| (t >> 1, t & 1)).collect()).collect();
-                                match carry_layers(&group_of, &options, (c1, c2), e0, w) {
+                                match carry_layers(&group_of, &options, (c1, c2), e0, max_carries, w) {
                                     Ok(_) => Some(true),
                                     Err(gave_up) => (!gave_up).then_some(false),
                                 }
@@ -485,7 +486,7 @@ fn pair_candidates_uncached(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &C
                             if low >= best {
                                 continue;
                             }
-                            let cand = build_pair(&sh, (i, k), (c1, c2), groups, &comp, lv, e0, w);
+                            let cand = build_pair(&sh, (i, k), (c1, c2), groups, &comp, lv, e0, max_carries, w);
                             if size(&cand) < best {
                                 best = size(&cand);
                                 cands.push(cand);
@@ -505,9 +506,9 @@ fn pair_candidates_uncached(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &C
 /// Per bit, an index into its group's options so that `Σ_j (c1·a_j + c2·b_j)·2^j = e0`,
 /// with `(a_j, b_j)` the option's tables at 0; found from the low bit up with the
 /// carry as state. All zeros when there is no such choice.
-fn pick_bits(group_of: &[usize], options: &[Vec<(u8, u8)>], c: (u64, u64), e0: u64, w: &Ctx) -> Vec<usize> {
+fn pick_bits(group_of: &[usize], options: &[Vec<(u8, u8)>], c: (u64, u64), e0: u64, max_carries: usize, w: &Ctx) -> Vec<usize> {
     let bits = w.w as usize;
-    let Ok(layers) = carry_layers(group_of, options, c, e0, w) else {
+    let Ok(layers) = carry_layers(group_of, options, c, e0, max_carries, w) else {
         return vec![0; bits];
     };
     let mut out = vec![0; bits];
@@ -520,10 +521,10 @@ fn pick_bits(group_of: &[usize], options: &[Vec<(u8, u8)>], c: (u64, u64), e0: u
     out
 }
 
-/// The carry DP of `pick_bits`; `Err(true)` when it gives up past 4096 carries,
+/// The carry DP of `pick_bits`; `Err(true)` when it gives up past `max_carries` carries,
 /// `Err(false)` when no choice exists.
 #[allow(clippy::type_complexity)]
-fn carry_layers(group_of: &[usize], options: &[Vec<(u8, u8)>], (c1, c2): (u64, u64), e0: u64, w: &Ctx) -> Result<Vec<std::collections::BTreeMap<i128, (i128, usize)>>, bool> {
+fn carry_layers(group_of: &[usize], options: &[Vec<(u8, u8)>], (c1, c2): (u64, u64), e0: u64, max_carries: usize, w: &Ctx) -> Result<Vec<std::collections::BTreeMap<i128, (i128, usize)>>, bool> {
     let bits = w.w as usize;
     let val = |o: (u8, u8)| (w.signed(c1) as i128) * (o.0 & 1) as i128 + (w.signed(c2) as i128) * (o.1 & 1) as i128;
     // layers[j]: carry into bit j -> (carry into bit j-1, option at bit j-1).
@@ -538,7 +539,7 @@ fn carry_layers(group_of: &[usize], options: &[Vec<(u8, u8)>], (c1, c2): (u64, u
                 }
             }
         }
-        if next.is_empty() || next.len() > 4096 {
+        if next.is_empty() || next.len() > max_carries {
             return Err(!next.is_empty());
         }
         layers.push(next);
@@ -566,7 +567,7 @@ fn zero_classes(sh: &Shapes, (i, k): (usize, usize), p1: &[u64; 4], comp: &[[u64
 /// `c1·B1 + c2·B2 + r` for the shapes `(i, k)`, with per bit a table pair whose
 /// values at 0 make `r = 0` if there is one.
 #[allow(clippy::too_many_arguments)]
-fn build_pair(sh: &Shapes, (i, k): (usize, usize), (c1, c2): (u64, u64), groups: &[(Vec<u64>, u64)], comp: &[Vec<[u64; 4]>], lv: &[T], e0: u64, w: &Ctx) -> T {
+fn build_pair(sh: &Shapes, (i, k): (usize, usize), (c1, c2): (u64, u64), groups: &[(Vec<u64>, u64)], comp: &[Vec<[u64; 4]>], lv: &[T], e0: u64, max_carries: usize, w: &Ctx) -> T {
     let m = w.mask;
     let has = |s: &[u64; 4], f: u8| s[(f >> 6) as usize] >> (f & 63) & 1 == 1;
     // For each group, one table pair per choice of (f1(0), f2(0)).
@@ -584,7 +585,7 @@ fn build_pair(sh: &Shapes, (i, k): (usize, usize), (c1, c2): (u64, u64), groups:
         })
         .collect();
     let group_of: Vec<usize> = (0..w.w).map(|j| groups.iter().position(|(_, mask)| mask >> j & 1 == 1).unwrap_or(0)).collect();
-    let picked = pick_bits(&group_of, &options, (c1, c2), e0, w);
+    let picked = pick_bits(&group_of, &options, (c1, c2), e0, max_carries, w);
     let (mut k1, mut k2) = (Vec::new(), Vec::new());
     for j in 0..w.w {
         let (f1, f2) = options[group_of[j as usize]][picked[j as usize]];

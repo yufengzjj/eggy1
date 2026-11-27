@@ -90,6 +90,8 @@ pub(super) struct Dec {
     pub(super) max_vars: usize,
     min_free_size: usize,
     max_free_classes: usize,
+    fill_max_vars: u32,
+    xor_max_shared: u32,
 }
 
 impl Dec {
@@ -98,6 +100,8 @@ impl Dec {
             max_vars: limit(Limit::DecomposeMaxVars),
             min_free_size: limit(Limit::DecomposeMinFreeSize),
             max_free_classes: limit(Limit::DecomposeMaxFreeClasses),
+            fill_max_vars: crate::sched::limit_u32(Limit::DecomposeFillMaxVars),
+            xor_max_shared: crate::sched::limit_u32(Limit::DecomposeXorMaxShared),
         }
     }
 }
@@ -241,10 +245,10 @@ fn bool_expr_uncached(tt: u64, n: usize, top: bool, dec: Option<Dec>) -> BE {
 /// `((w ^ x) | (x & y)) & ~(y ^ z)`. For `&`, `g` and `h` are `tt` ORed over the
 /// variables outside their set; for `|`, ANDed; for `^`, `g = tt(B \ A = 0)` and
 /// `h = tt(A \ B = 0) ^ tt(A \ B = 0, B \ A = 0)`. Each is checked against `tt`. Only
-/// splits smaller than `bound` are returned. With `free_points`, a side of at most 3
-/// variables is also tried with the points the other side decides alone set either way
-/// (`(e | (f & c)) & (c ^ e ^ m)`), and for `^` both sides with a function of `A ∩ B`
-/// XORed in.
+/// splits smaller than `bound` are returned. With `free_points`, a side of at most
+/// `decompose_fill_max_vars` variables is also tried with the points the other side decides
+/// alone set either way (`(e | (f & c)) & (c ^ e ^ m)`), and for `^` both sides with a
+/// function of `A ∩ B` (at most `decompose_xor_max_shared` variables) XORed in.
 pub(super) fn decompose(tt: u64, n: usize, bound: usize, free_points: bool, dec: Dec) -> Option<(usize, B)> {
     let full_vars = (1usize << n) - 1;
     let full = table_full(n);
@@ -346,10 +350,10 @@ pub(super) fn decompose(tt: u64, n: usize, bound: usize, free_points: bool, dec:
                         offer(op, (g, a), (h, b), &mut best);
                         continue;
                     }
-                    let small = |k: usize| k.count_ones() <= 3;
+                    let small = |k: usize| k.count_ones() <= dec.fill_max_vars;
                     if op == Op::Xor {
                         // `g ^ φ` and `h ^ φ` for any `φ` over the shared variables.
-                        if small(a) && small(b) && a & b != 0 && (a & b).count_ones() <= 2 {
+                        if small(a) && small(b) && a & b != 0 && (a & b).count_ones() <= dec.xor_max_shared {
                             let shared: Vec<usize> = classes(a & b).collect();
                             for phi in tables_over(a & b, 0, &shared).into_iter().skip(1) {
                                 offer(op, (g ^ phi, a), (h ^ phi, b), &mut best);

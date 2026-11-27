@@ -18,7 +18,7 @@ pub fn is_minimal(t: &Term, ty: NumType) -> bool {
     }
     let names = vars(t);
     let k = names.len();
-    if k == 0 || n > 2 * k + 1 || (n > 2 * k - 1 && k > 3) {
+    if k == 0 || n > 2 * k + 1 || (n > 2 * k - 1 && k > limit(Limit::MinimalMaxVars)) {
         return false;
     }
     let points = points(k, limit(Limit::MinimalPoints));
@@ -50,12 +50,13 @@ pub(crate) const LANES_CAP: usize = 16;
 /// variables of `t` and any constants equals `t`; `false` when that is not proved.
 ///
 /// Such terms commute with truncation, so one equal to `t` would also be equal in the
-/// low bits with its constants cut to them. In 4 bits (up to 7 nodes) and in 8 (up to 5),
-/// all terms are built bottom up by size, each distinct vector of values at the points
-/// kept once, and none smaller than `t` may give `t`'s vector.
+/// low bits with its constants cut to them. In 4 bits (up to `minimal_max_size_4bit` nodes)
+/// and in 8 (up to `minimal_max_size_8bit`), all terms are built bottom up by size, each
+/// distinct vector of values at the points kept once, and none smaller than `t` may give
+/// `t`'s vector.
 pub fn is_t_minimal(t: &Term) -> bool {
     let n = size(t);
-    n == 1 || t_term(t) && (n <= 7 && none_smaller_low(t, 4) || n <= 5 && none_smaller_low(t, 8))
+    n == 1 || t_term(t) && (n <= limit(Limit::MinimalMaxSize4bit) && none_smaller_low(t, 4) || n <= limit(Limit::MinimalMaxSize8bit) && none_smaller_low(t, 8))
 }
 
 fn none_smaller_low(t: &Term, bits: u32) -> bool {

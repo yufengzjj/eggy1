@@ -242,7 +242,7 @@ fn shift_cases_in(t: &T, w: &Ctx, depth: usize) -> T {
     let mut found = Vec::new();
     amounts(t, &mut found);
     let mut best = t.clone();
-    for s in found.iter().take(2) {
+    for s in found.iter().take(limit(Limit::ShiftCasesAmounts)) {
         let var = match s {
             T::Op(Op::And, a) if a.contains(&T::Num(m)) => match a.iter().find(|x| **x != T::Num(m)) {
                 Some(T::Op(Op::Not, b)) => Some((b[0].clone(), true)),

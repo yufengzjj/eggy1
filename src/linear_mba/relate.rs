@@ -16,7 +16,7 @@ pub(super) fn related_leaves(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
     let arith: Vec<&T> = lv
         .iter()
         .filter(|l| kind(l, w) == Kind::Lin && !has_const_bitwise(l, w) && own(l).iter().any(|s| lv.contains(s)))
-        .take(4)
+        .take(limit(Limit::RelatedLeavesMaxArith))
         .collect();
     if arith.is_empty() {
         return None;
@@ -438,6 +438,7 @@ fn relate_in(t: &T, w: &Ctx) -> Option<T> {
         Some(lv.into_iter().zip(used).filter(|p| p.1).map(|p| p.0).collect())
     };
     let (semi, wide) = (has_const_bitwise(t, w), lv.len() > max_leaves());
+    let wide_percent = limit(Limit::RelateWideMaxPercent);
     let base_used = semi_used(t);
     let base_count = base_used.as_ref().map_or(lv.len(), |u| u.len());
     let base_monos = if semi { None } else { crate::poly_mba::monomials(t, w) };
@@ -508,7 +509,7 @@ fn relate_in(t: &T, w: &Ctx) -> Option<T> {
         };
         // In a wide region only results where leaves or terms cancelled, or much smaller:
         // others shift extraction for little gain.
-        let much = 10 * size(&r) <= 9 * size(t);
+        let much = 100 * size(&r) <= wide_percent.saturating_mul(size(t));
         if (!wide || fewer || much || (by_terms.is_some() && size(&r) < size(t))) && best.as_ref().is_none_or(|b| size(&r) < size(b)) {
             best = Some(r);
         }

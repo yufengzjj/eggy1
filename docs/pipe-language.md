@@ -298,12 +298,17 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `split_depth` | 2 | `split_bits` 最多嵌套几层 |
 | `split_runs` | 16 | 一次 `split_bits` 最多几次重建 |
 | `split_size` | 64 | `split_bits` 只处理不大于此的第一次重建 |
+| `split_max_unknown_bits` | 2 | `split_bits`：乘积因子最多几个未知位才按位分情况 |
 | `block_leaves` | 12 | `small_blocks` 最多处理几个叶子 |
 | `block_combos` | 32768 | `small_blocks` 穷举的组合数上限，也是 `wide_blocks` 搜索的步数上限 |
+| `block_max_block` | 3，上限 5 | `small_blocks`：一个块最多几个叶子；系数从至多这么多个 1 的点插值，每块试全部 `2^(2^k)` 个真值表 |
+| `block_descent_rounds` | 4 | `small_blocks`：组合太多、不能穷举时，坐标下降最多几轮 |
+| `block_spread_points` | 8 | `small_blocks`：完整检查前先查几个分散的点，多数区域早早被排除；不改变结果 |
 | `cluster_depth` | 2 | `clustered` 最多嵌套几层 |
 | `poly_builds` | 512 | `poly_mba` 穷举选择时最多构造几个乘积，之后每层只取第一种 |
 | `poly_branch_monos` | 128 | 展开的单项式多于此时，从一开始就每层只取第一种 |
 | `polish_rewrites` | 2000 | 一次 `polish` 最多几次未缓存的 `rewrite` |
+| `polish_wins` | 8 | 默认 `polish`（和 `polish=a,b,...`）最多采用几次 `smaller` 的结果 |
 | `tiny_size` | 3 | 不大于此的重建不再细找：条件 `tiny`，`opaque` 要求重建大于它 |
 | `max_leaves` | 6，上限 6 | 线性区域最多几个叶子才按 {0,1}^n 上的值重建（真值表是 `u64`） |
 | `max_wide_leaves` | 16，上限 64 | 宽区域最多几个叶子才整体求值（`drop_unused`、`relate`、`peel`；用到的叶子是 `u64` 掩码） |
@@ -330,20 +335,27 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `poly_max_factor_steps` | 4096 | `poly_mba`：分解因式时最多试几种根的组合 |
 | `poly_max_solutions` | 8 | `poly_mba`：一个主元最多给出几种分解 |
 | `poly_max_shifted` | 4 | `poly_mba`：最多几种分解把因子加减常数、和线性余项并列 |
-| `poly_max_shifted_monos` | 4 | `poly_mba`：加减常数的因子最多几个单项式，余项最多两倍 |
+| `poly_max_shifted_monos` | 4 | `poly_mba`：加减常数的因子最多几个单项式 |
+| `poly_shifted_rest_ratio` | 2 | `poly_mba`：加减常数的分解旁边，线性余项最多是 `poly_max_shifted_monos` 的几倍个单项式 |
 | `poly_max_atoms` | 4 | `poly_mba`：按掩码展开时最多把位分成几组 |
-| `poly_max_masked_monos` | 16 | `poly_mba`：按掩码展开最多几个单项式（或普通展开的两倍） |
+| `poly_max_masked_monos` | 16 | `poly_mba`：按掩码展开最多几个单项式（或普通展开的 `poly_masked_monos_ratio` 倍） |
+| `poly_masked_monos_ratio` | 2 | `poly_mba`：按掩码展开也可以有普通展开的这么多倍个单项式 |
 | `poly_max_masked_size` | 20 | `poly_mba`：只有一个两边都带常数的乘积时，按掩码展开的项最大多大 |
 | `common_multiple_min` | 4 | `common_multiple`：提出的 `c` 的绝对值至少多大 |
 | `common_multiple_tries` | 2 | `common_multiple`：最多试几个 `c` |
 | `overlap_max_values` | 4 | `overlapping_terms`：表里不同的非零值多于此时不搜索 |
 | `overlap_max_choices` | 16 | `overlapping_terms`：一个点的值是几组系数之和时，最多试几种取法 |
+| `overlap_max_terms` | 3，上限 63 | `overlapping_terms`：最多搜几个位运算项的和 |
 | `decompose_max_vars` | 5 | 找最短位运算式时，最多几个变量的真值表才试 `g(A) op h(B)` 分解（`decompose`） |
 | `decompose_min_free_size` | 10 | `decompose`：要胜过的大小至少这么大时，才把自由点两种取值都试 |
 | `decompose_max_free_classes` | 4，上限 63 | `decompose`：一边最多枚举几类自由点 |
+| `decompose_fill_max_vars` | 3 | `decompose`：一边最多几个变量才填自由点 |
+| `decompose_xor_max_shared` | 2 | `decompose`：`^` 两边最多共用几个变量，才把它们的函数异或进两边 |
+| `related_leaves_max_arith` | 4 | `related_leaves`：最多几个和区域其他叶子相关的算术叶子 |
 | `relate_max_written_out` | 2 | `relate`：试过 `related` 个算术叶子后，再试几个区域里也展开写出的叶子 |
 | `relate_max_free_product` | 20 | `relate`：不是位运算操作数的乘积叶子最大多大才试 |
 | `relate_max_parts` | 8 | `relate`：按部分处理宽区域时最多试几个算术叶子 |
+| `relate_wide_max_percent` | 90 | `relate`：宽区域里没有叶子或项消掉时，结果至多是区域大小的百分之几才保留 |
 | `unify_operands_max_leaves` | 8，上限 63 | `unify_operands`：算术操作数最多几个叶子才按 {0,1}^n 上的值比较 |
 | `memo_contexts` | 4 | `rewrite`、`simba_memo`、`relate` 的缓存每个键最多存几个结果，多了丢最早的（0 不缓存） |
 | `join_constants_max_leaves` | 3 | `join_constants`：两个叶子组合起来和常数一起重建时，最多几个叶子 |
@@ -354,8 +366,10 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `join_linear_max_near_groups` | 8 | `join_linear`：区域最多几个叶子组才接着再移一次 |
 | `shift_cases_depth` | 2 | `shift_cases`：最多嵌套按几个变量移位量分情况 |
 | `shift_cases_max_size` | 64 | `shift_cases`：只处理不大于此的项（每个移位量最多重建 `2w` 种情况） |
+| `shift_cases_amounts` | 2 | `shift_cases`：每层最多按几个移位量分情况 |
 | `used_leaves_budget` | 33554432 | 宽区域在 {0,1}^n 上求值（`used_leaves`、`peel`）最多多少条指令乘点数 |
 | `peel_min_size` | 16 | `peel`：区域的大小至少是叶子数的这么多倍才试 |
+| `peel_spread_points` | 16 | `peel`：建位真值表之前，区域先要在几个分散的点上像位运算 |
 | `wide_blocks_max_term_leaves` | 10，上限 63 | `wide_blocks`：一项最多几个叶子才展开 |
 | `wide_blocks_max_block` | 10，上限 63 | `wide_blocks`：一个块最多几个叶子才重建成一项 |
 | `wide_blocks_steps` | 4096 | `wide_blocks`：每个块、每个乘数找真值表的搜索步数 |
@@ -363,10 +377,18 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `wide_blocks_max_wide_tables` | 16 | `wide_blocks`：多于 6 个叶子的块最多收集几个真值表（按不相交分解写出，慢） |
 | `wide_blocks_max_functions` | 64 | `wide_blocks`：每个块留几个最小的真值表给块间的搜索 |
 | `wide_blocks_cache_size` | 4096 | `wide_blocks` 的线程级缓存最多存几个区域，满了清空 |
+| `wide_blocks_descent_rounds` | 4 | `wide_blocks`：分支定界之前坐标下降最多几轮 |
+| `wide_blocks_min_ratio` | 2 | `wide_blocks`：区域小于各块最小项大小之和的这么多倍时跳过（差不多已是块的形式） |
 | `shapes_max_size` | 15，上限 15 | `semi/shapes`、`semi/pairs`：带自由常数的位运算式最大多大（第 15 层的表约 100 MB） |
 | `pairs_max_groups` | 8 | `semi/pairs`：区域最多几个位组 |
 | `pairs_budget` | 500000 | `semi/pairs`：一次调用最多检查几个式子 |
 | `pairs_max_size` | 12 | `semi/pairs`：两个式子的大小之和最大多大 |
+| `pairs_max_scales` | 12 | `semi/pairs`：最多试几个系数（从小的开始） |
+| `pairs_max_carries` | 4096 | `semi/pairs`：进位 DP 每一位最多几个进位，超过就放弃 |
+| `semi_split_max_combos` | 64 | `semi/semi_split`：每个集合最多试几种其他集合常数的组合 |
+| `semi_half_flips` | 2 | `semi_linear`：最多几个位组把 `-2^(r-1)` 也读成 `+2^(r-1)` |
+| `semi_max_merges` | 16 | `semi_linear`：按高位合并位组时最多枚举几种 |
+| `semi_max_code_groups` | 4 | `semi_linear`：最多几个位组用常数叶子编码（每种编码都试） |
 | `tfunc_max_vars` | 3，上限 4 | `tfunc`：子项最多几个变量（或位运算原子）才查表（求值点是定长数组） |
 | `tfunc_max_size` | 7 | `tfunc`：查找表里的式子最大多大 |
 | `tfunc_points` | 24，上限 24 | `tfunc`：查表时在几个点上求值（值是定长数组） |
@@ -377,8 +399,11 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | `minimal_points` | 64 | 最小性证明：在几个点上比较项和更小的项 |
 | `minimal_lanes` | 16，上限 16 | 只含 `+ - * & \| ^ ~ neg` 的最小性证明：低位值向量有几个点（定长数组） |
 | `minimal_budget` | 2097152 | 只含 `+ - * & \| ^ ~ neg` 的最小性证明：最多组合几对项 |
+| `minimal_max_vars` | 3，上限 31 | 枚举的最小性证明：多于 `2k - 1` 个节点的项最多几个变量（变量集是 `u32`） |
+| `minimal_max_size_4bit` | 7 | 只含 `+ - * & \| ^ ~ neg` 的最小性证明：在 4 位里证明的项最大多大 |
+| `minimal_max_size_8bit` | 5 | 只含 `+ - * & \| ^ ~ neg` 的最小性证明：在 8 位里证明的项最大多大 |
 
-`decompose_max_vars`、`decompose_min_free_size`、`decompose_max_free_classes` 决定最短位运算式的搜索；线程级的真值表缓存按这三个值分开存，所以不同作用域里的不同值各建一份表。`memo_contexts` 只决定缓存留多少结果，不改变结果，所以不记入缓存读过的变量。
+`decompose_max_vars`、`decompose_min_free_size`、`decompose_max_free_classes`、`decompose_fill_max_vars`、`decompose_xor_max_shared` 决定最短位运算式的搜索；线程级的真值表缓存按这五个值分开存，所以不同作用域里的不同值各建一份表。`memo_contexts` 只决定缓存留多少结果，不改变结果，所以不记入缓存读过的变量。
 `wide_blocks_cache_size` 和 `memo_contexts` 一样只决定缓存留多少，不记入读过的变量；`wide_blocks` 的缓存键里有全部限值的哈希。带自由常数的位运算式按大小逐层建表，进程内共用；表里的式子与 `shapes_max_size` 无关，只是最大那一层的式子不当操作数，不存它们的真值表列表，所以值小时少建几层，值大时补上那一层的列表再接着建。
 `tfunc` 的查找表进程内共用，按位宽、变量数和 `tfunc_max_vars`、`tfunc_max_size`、`tfunc_points` 分开建，所以不同作用域里的不同值各建一份，正常运行只建默认那一份；没用到的求值点上变量都是 0，值和第 0 个点相同，不改变查表的结果。`tfunc_max_carries`、`tfunc_max_states`、`tfunc_max_factor` 也决定 `lowbits` 在上下文里的证明，每次 `lowbits` 调用读一次。
 
@@ -417,7 +442,7 @@ a | (if big time_limit = 200) | b | c               # 输入大时 b、c 共用 
 | 项 | 含义 |
 |---|---|
 | `pipeline=P`、`prepass=P`、`polish=P`、`rewrite=P`、`simba=P`、`sub/NAME=P` | 替换这条管线 |
-| `polish=a,b,...` | 全是 polish pass 名时：依次尝试这些 `polish/NAME`，变小才保留，有一个变小就重来，至多保留 8 次 |
+| `polish=a,b,...` | 全是 polish pass 名时：依次尝试这些 `polish/NAME`，变小才保留，有一个变小就重来，至多保留 `polish_wins` 次 |
 | `(let NAME P)` | 定义名字，之后的项里写到 `NAME` 的地方展开为 `P`（`a | b` 平铺，`(a | b)` 嵌套，见第 4 节）。`default.pipe` 定义的名字（`first_round`、`later`、`gates`、`rebuild_main`……）也能用 |
 | `file=PATH` | 在此处读入文件里的各项 |
 | `pre=a,b`、`pre+=`、`pre-=` | 造哪些预处理候选：`unified no_wide split_bits halve_first over_products over_const_bitwise over_shared_bitwise halve_input unclustered` |

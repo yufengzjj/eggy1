@@ -11,8 +11,9 @@ semi/peel_shapes=0
 # Limits of the passes.
 unclustered_relate_leaves=10 unclustered_rewrites=256 unclustered_after=1024
 unified_rewrites=128 related_rebuilds=8 related=4 bit_splits=4 cand_bit_splits=8
-splits=4 split_depth=2 split_runs=16 split_size=64 block_leaves=12 block_combos=32768
-cluster_depth=2 poly_builds=512 poly_branch_monos=128 polish_rewrites=2000
+splits=4 split_depth=2 split_runs=16 split_size=64 split_max_unknown_bits=2
+block_leaves=12 block_combos=32768 block_max_block=3 block_descent_rounds=4 block_spread_points=8
+cluster_depth=2 poly_builds=512 poly_branch_monos=128 polish_rewrites=2000 polish_wins=8
 
 # Sizes of the linear regions rebuilt.
 tiny_size=3 max_leaves=6 max_wide_leaves=16
@@ -26,30 +27,38 @@ lowbits_refine_bits=2 lowbits_max_refine_bits=12 lowbits_refine_budget=4194304 l
 # `poly_mba`.
 poly_max_monos=4096 poly_monos_per_node=4 poly_factor_tries=3 poly_max_factor_monos=64
 poly_max_factor_vars=12 poly_max_pivots=4 poly_max_roots=16 poly_max_factor_steps=4096
-poly_max_solutions=8 poly_max_shifted=4 poly_max_shifted_monos=4 poly_max_atoms=4
-poly_max_masked_monos=16 poly_max_masked_size=20
+poly_max_solutions=8 poly_max_shifted=4 poly_max_shifted_monos=4 poly_shifted_rest_ratio=2 poly_max_atoms=4
+poly_max_masked_monos=16 poly_masked_monos_ratio=2 poly_max_masked_size=20
 
 # The rebuilds of linear regions and the shortest bitwise expressions.
-common_multiple_min=4 common_multiple_tries=2 overlap_max_values=4 overlap_max_choices=16
+common_multiple_min=4 common_multiple_tries=2 overlap_max_values=4 overlap_max_choices=16 overlap_max_terms=3
 decompose_max_vars=5 decompose_min_free_size=10 decompose_max_free_classes=4
-relate_max_written_out=2 relate_max_free_product=20 relate_max_parts=8 unify_operands_max_leaves=8
+decompose_fill_max_vars=3 decompose_xor_max_shared=2
+related_leaves_max_arith=4 relate_max_written_out=2 relate_max_free_product=20 relate_max_parts=8
+relate_wide_max_percent=90 unify_operands_max_leaves=8
 memo_contexts=4
 
 # Wide regions, `wide_blocks` and the bitwise expressions with free constants.
-used_leaves_budget=33554432 peel_min_size=16 wide_blocks_max_term_leaves=10 wide_blocks_max_block=10
+used_leaves_budget=33554432 peel_min_size=16 peel_spread_points=16
+wide_blocks_max_term_leaves=10 wide_blocks_max_block=10
 wide_blocks_steps=4096 wide_blocks_max_tables=4096 wide_blocks_max_wide_tables=16
-wide_blocks_max_functions=64 wide_blocks_cache_size=4096
+wide_blocks_max_functions=64 wide_blocks_cache_size=4096 wide_blocks_descent_rounds=4 wide_blocks_min_ratio=2
 shapes_max_size=15 pairs_max_groups=8 pairs_budget=500000 pairs_max_size=12
+pairs_max_scales=12 pairs_max_carries=4096
+
+# Semi-linear rebuilds.
+semi_split_max_combos=64 semi_half_flips=2 semi_max_merges=16 semi_max_code_groups=4
 
 # `polish`.
 join_constants_max_leaves=3 join_constants_max_sets=10 join_linear_max_groups=12
 join_linear_near_slack=4 join_linear_near_moves=3 join_linear_max_near_groups=8
-shift_cases_depth=2 shift_cases_max_size=64
+shift_cases_depth=2 shift_cases_max_size=64 shift_cases_amounts=2
 
 # T-function replacement and proofs (`tfunc`, also `lowbits`), and the minimality proofs.
 tfunc_max_vars=3 tfunc_max_size=7 tfunc_points=24 tfunc_max_try=256
 tfunc_max_carries=64 tfunc_max_states=512 tfunc_max_factor=255
 minimal_points=64 minimal_lanes=16 minimal_budget=2097152
+minimal_max_vars=3 minimal_max_size_4bit=7 minimal_max_size_8bit=5
 
 # A later round: the pre-pass rebuilds, then their extraction, or the one proved minimal.
 (let later prepass | (if minimal take_minimal (egglog later)))
@@ -163,13 +172,13 @@ prepass=
     | pre_done)
 
 # The final polish, on one candidate: the polish passes in turn, each kept when smaller,
-# repeated while one is, until 8 are; on one run whose `rewrite` calls are limited.
+# repeated while one is, until `polish_wins` are; on one run whose `rewrite` calls are limited.
 # `join_linear` rewrites every pair of leaf groups many times, and semi-linear groups of
 # many leaves take seconds there. `polish=a,b,...` writes the same for other passes.
 polish=
   (scope
     rewrites = polish_rewrites
-    | (wins 8
+    | (wins polish_wins
         (smaller polish/push_not polish/push_not | drop_identities)
         | (smaller polish/join_constants polish/join_constants | drop_identities)
         | (smaller polish/join_linear (semi_leaves = 2 | polish/join_linear | drop_identities))

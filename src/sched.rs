@@ -115,6 +115,14 @@ limits! {
     /// Most combinations of block choices `small_blocks` tries exhaustively, and steps of
     /// the `wide_blocks` search.
     BlockCombos "block_combos";
+    /// `small_blocks`: most leaves of one block; it interpolates from the points with at most
+    /// this many ones and tries every table of a block, `2^(2^k)` of them.
+    BlockMaxBlock "block_max_block" <= 5;
+    /// `small_blocks`: rounds of coordinate descent when the combinations are too many to try.
+    BlockDescentRounds "block_descent_rounds";
+    /// `small_blocks`: spread-out points checked first in the full check, which rejects most
+    /// regions sooner; changes no result.
+    BlockSpreadPoints "block_spread_points";
     /// Most `clustered` calls nested inside each other.
     ClusterDepth "cluster_depth";
     /// Most products `poly_mba` builds with every choice before it keeps to the first.
@@ -124,6 +132,8 @@ limits! {
     PolyBranchMonos "poly_branch_monos";
     /// Uncached `rewrite` calls one `polish` call may make.
     PolishRewrites "polish_rewrites";
+    /// Most `smaller` steps of the default `polish` (and `polish=a,b,...`) taken.
+    PolishWins "polish_wins";
     /// Rebuilds of at most this size are not searched further: the input is not halved, and
     /// the driver does not saturate the input beside them (the conditions `tiny`, `opaque`).
     TinySize "tiny_size";
@@ -181,12 +191,18 @@ limits! {
     PolyMaxSolutions "poly_max_solutions";
     /// `poly_mba`: most factorings shifted by constants beside the linear rest.
     PolyMaxShifted "poly_max_shifted";
-    /// `poly_mba`: most monomials of a shifted factor; the rest may have twice as many.
+    /// `poly_mba`: most monomials of a shifted factor.
     PolyMaxShiftedMonos "poly_max_shifted_monos";
+    /// `poly_mba`: the linear rest beside a shifted factoring has at most this many times
+    /// `poly_max_shifted_monos` monomials.
+    PolyShiftedRestRatio "poly_shifted_rest_ratio";
     /// `poly_mba`: most bit sets the masked expansion splits the width into.
     PolyMaxAtoms "poly_max_atoms";
-    /// `poly_mba`: most monomials of the masked expansion (or twice the plain one's).
+    /// `poly_mba`: most monomials of the masked expansion (or `poly_masked_monos_ratio` times
+    /// the plain one's).
     PolyMaxMaskedMonos "poly_max_masked_monos";
+    /// `poly_mba`: the masked expansion may also have this many times the plain one's monomials.
+    PolyMaskedMonosRatio "poly_masked_monos_ratio";
     /// `poly_mba`: largest term the masked expansion rebuilds for a single product with
     /// constants in both factors.
     PolyMaxMaskedSize "poly_max_masked_size";
@@ -199,12 +215,19 @@ limits! {
     /// `overlapping_terms`: most ways tried to resolve points whose value is the sum of
     /// several subsets of the coefficients.
     OverlapMaxChoices "overlap_max_choices";
+    /// `overlapping_terms`: most bitwise terms of a sum it searches.
+    OverlapMaxTerms "overlap_max_terms" <= 63;
+    /// `related_leaves`: most arithmetic leaves related to the region's other leaves.
+    RelatedLeavesMaxArith "related_leaves_max_arith";
     /// `relate`: most further arithmetic leaves tried that the region also has written out.
     RelateMaxWrittenOut "relate_max_written_out";
     /// `relate`: largest product leaf tried when it is not an operand of a bitwise operation.
     RelateMaxFreeProduct "relate_max_free_product";
     /// `relate`: most arithmetic leaves `relate_parts` tries.
     RelateMaxParts "relate_max_parts";
+    /// `relate`: in a wide region where no leaf or term cancelled, a result is kept only at
+    /// most this percent of the region's size.
+    RelateWideMaxPercent "relate_wide_max_percent";
     /// `unify_operands`: most leaves of an arithmetic operand compared by its values.
     UnifyOperandsMaxLeaves "unify_operands_max_leaves" <= 63;
     /// `join_constants`: most leaves of two leaf groups rebuilt together with the constant.
@@ -223,6 +246,8 @@ limits! {
     ShiftCasesDepth "shift_cases_depth";
     /// `shift_cases`: largest term it runs on (it rebuilds up to `2w` cases per amount).
     ShiftCasesMaxSize "shift_cases_max_size";
+    /// `shift_cases`: most variable shift amounts split on at each level.
+    ShiftCasesAmounts "shift_cases_amounts";
     /// Most variables of a truth table split as `g(A) op h(B)` (`decompose`) when its
     /// shortest bitwise expression is looked for.
     DecomposeMaxVars "decompose_max_vars";
@@ -230,6 +255,11 @@ limits! {
     DecomposeMinFreeSize "decompose_min_free_size";
     /// `decompose`: most classes of free points enumerated for one side.
     DecomposeMaxFreeClasses "decompose_max_free_classes" <= 63;
+    /// `decompose`: most variables of a side whose free points are filled.
+    DecomposeFillMaxVars "decompose_fill_max_vars";
+    /// `decompose`: most variables shared by the sides of a `^` that a function of them is
+    /// XORed into.
+    DecomposeXorMaxShared "decompose_xor_max_shared";
     /// Most results one key of the `rewrite`, `simba_memo` and `relate` memos keeps, the
     /// oldest dropped first.
     MemoContexts "memo_contexts";
@@ -238,6 +268,9 @@ limits! {
     UsedLeavesBudget "used_leaves_budget";
     /// `peel`: least size per leaf of a region it tries.
     PeelMinSize "peel_min_size";
+    /// `peel`: spread-out points at which a region must look bitwise before its bit tables
+    /// are built.
+    PeelSpreadPoints "peel_spread_points";
     /// `wide_blocks`: most leaves of one term it expands; points are counted in a `usize`.
     WideBlocksMaxTermLeaves "wide_blocks_max_term_leaves" <= 63;
     /// `wide_blocks`: most leaves of one block rebuilt as one term.
@@ -253,6 +286,11 @@ limits! {
     WideBlocksMaxFunctions "wide_blocks_max_functions";
     /// `wide_blocks`: most regions its thread cache keeps before it is cleared.
     WideBlocksCacheSize "wide_blocks_cache_size";
+    /// `wide_blocks`: rounds of coordinate descent before the branch and bound.
+    WideBlocksDescentRounds "wide_blocks_descent_rounds";
+    /// `wide_blocks`: a region less than this many times its blocks' least term sizes is
+    /// skipped, as mostly in block form already.
+    WideBlocksMinRatio "wide_blocks_min_ratio";
     /// Largest bitwise expression with free constants `semi/shapes` and `semi/pairs` search;
     /// the table of level 15 takes about 100 MB.
     ShapesMaxSize "shapes_max_size" <= 15;
@@ -262,6 +300,20 @@ limits! {
     PairsBudget "pairs_budget";
     /// `semi/pairs`: largest total size of the two shapes.
     PairsMaxSize "pairs_max_size";
+    /// `semi/pairs`: most coefficients tried, the smallest first.
+    PairsMaxScales "pairs_max_scales";
+    /// `semi/pairs`: most carries per bit of the carry DP before it gives up.
+    PairsMaxCarries "pairs_max_carries";
+    /// `semi/semi_split`: most combinations of the other sets' constants per set.
+    SemiSplitMaxCombos "semi_split_max_combos";
+    /// `semi_linear`: most groups whose `-2^(r-1)` entries are also read as `+2^(r-1)`.
+    SemiHalfFlips "semi_half_flips";
+    /// `semi_linear`: most variants of the groups joined by their high bits enumerated.
+    SemiMaxMerges "semi_max_merges";
+    /// `semi_linear`: most bit groups encoded by constant leaves (every code assignment tried).
+    SemiMaxCodeGroups "semi_max_code_groups";
+    /// `split_bits`: most unknown bits of a factor that selects a product.
+    SplitMaxUnknownBits "split_max_unknown_bits";
     /// `tfunc`: most variables (or bitwise atoms) of a subterm looked up; the points are a
     /// fixed array.
     TfuncMaxVars "tfunc_max_vars" <= crate::tfunc::VARS_CAP as u64;
@@ -284,6 +336,13 @@ limits! {
     MinimalLanes "minimal_lanes" <= crate::minimal::LANES_CAP as u64;
     /// Minimality proofs over `+ - * & | ^ ~ neg`: most pairs of terms combined.
     MinimalBudget "minimal_budget";
+    /// Minimality proofs by enumeration: most variables of a term of more than `2k - 1` nodes;
+    /// variable sets are a `u32`.
+    MinimalMaxVars "minimal_max_vars" <= 31;
+    /// Minimality proofs over `+ - * & | ^ ~ neg`: largest term proved in 4 bits.
+    MinimalMaxSize4bit "minimal_max_size_4bit";
+    /// Minimality proofs over `+ - * & | ^ ~ neg`: largest term proved in 8 bits.
+    MinimalMaxSize8bit "minimal_max_size_8bit";
 }
 
 /// Variables besides the limits: `rewrites` (uncached `rewrite` calls left), `semi_leaves`
@@ -826,7 +885,7 @@ pub const fn sub_index(name: &str) -> usize {
 }
 
 /// The polish `polish=a,b,...` writes: the polish passes `names` in turn, each kept when
-/// smaller, repeated while one is, until 8 are, as the default in `default.pipe`.
+/// smaller, repeated while one is, until `polish_wins` are, as the default in `default.pipe`.
 pub fn polish(names: &[&str]) -> String {
     let step = |n: &&str| {
         let run = format!("polish/{n} | drop_identities");
@@ -835,7 +894,7 @@ pub fn polish(names: &[&str]) -> String {
     };
     let steps: Vec<String> = names.iter().map(step).collect();
     let steps = if steps.len() == 1 { format!("(seq {})", steps[0]) } else { steps.join("\n  | ") };
-    format!("(scope rewrites = polish_rewrites\n  | (wins 8\n  {steps}))")
+    format!("(scope rewrites = polish_rewrites\n  | (wins polish_wins\n  {steps}))")
 }
 
 fn switch_index(name: &str) -> Option<usize> {

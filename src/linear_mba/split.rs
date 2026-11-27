@@ -158,7 +158,8 @@ pub(super) fn halve(t: &T, w: &Ctx) -> T {
 }
 
 
-/// `(s, k)` for a product factor with one or two bits not known, `k` the lowest of them:
+/// `(s, k)` for a product factor with up to `split_max_unknown_bits` bits not known, `k` the
+/// lowest of them:
 /// first the subterm `s` it is built from with constants alone, as `z + x` in
 /// `3 & ((z + x) + 5)`, then each variable `s` of it.
 fn split_points(t: &T, w: &Ctx) -> Vec<(T, u32)> {
@@ -175,7 +176,7 @@ fn split_points(t: &T, w: &Ctx) -> Vec<(T, u32)> {
             _ => t,
         }
     }
-    fn go(t: &T, w: &Ctx, out: &mut Vec<(T, u32)>) {
+    fn go(t: &T, w: &Ctx, most: u32, out: &mut Vec<(T, u32)>) {
         let T::Op(op, a) = t else { return };
         if *op == Op::Mul && !a.iter().any(|x| matches!(x, T::Num(_))) {
             for f in a {
@@ -184,7 +185,7 @@ fn split_points(t: &T, w: &Ctx) -> Vec<(T, u32)> {
                     _ => f,
                 };
                 let bits = crate::lowbits::unknown_bits(g, w);
-                if bits != 0 && bits.count_ones() <= 2 {
+                if bits != 0 && bits.count_ones() <= most {
                     let k = bits.trailing_zeros();
                     let s = core(f);
                     let vars = crate::eval::vars(f).into_iter().map(T::Var);
@@ -196,10 +197,10 @@ fn split_points(t: &T, w: &Ctx) -> Vec<(T, u32)> {
                 }
             }
         }
-        a.iter().for_each(|x| go(x, w, out));
+        a.iter().for_each(|x| go(x, w, most, out));
     }
     let mut out = Vec::new();
-    go(t, w, &mut out);
+    go(t, w, crate::sched::limit_u32(Limit::SplitMaxUnknownBits), &mut out);
     out
 }
 

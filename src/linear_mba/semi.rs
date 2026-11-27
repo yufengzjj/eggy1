@@ -581,9 +581,10 @@ pub(super) fn semi_split(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx,
     };
     let own: Vec<Vec<u64>> = parts.iter().map(|(gs, _)| own_consts(gs, w)).collect();
     let mut memo: crate::eval::FastMap<(usize, u64), Option<T>> = Default::default();
+    let max_combos = crate::sched::limit(Limit::SemiSplitMaxCombos);
     for last in 0..parts.len() {
         let others: Vec<usize> = (0..parts.len()).filter(|&k| k != last).collect();
-        if others.iter().any(|&k| own[k].is_empty()) || others.iter().map(|&k| own[k].len()).product::<usize>() > 64 {
+        if others.iter().any(|&k| own[k].is_empty()) || others.iter().map(|&k| own[k].len()).try_fold(1usize, |a, l| a.checked_mul(l)).is_none_or(|c| c > max_combos) {
             continue;
         }
         let mut choice = vec![0usize; others.len()];
@@ -760,7 +761,7 @@ fn const_bits(t: &T) -> u32 {
 }
 
 /// The groups, plus variants with `-2^(r-1)` entries read as `+2^(r-1)`, for the
-/// first two groups that have such entries (`r = w - j` for the group's lowest bit
+/// first `semi_half_flips` groups that have such entries (`r = w - j` for the group's lowest bit
 /// `j`; both are the same value modulo `2^r`).
 fn half_flips(groups: &[(Vec<u64>, u64)], w: &Ctx) -> Vec<Vec<(Vec<u64>, u64)>> {
     let mut out = vec![groups.to_vec()];
@@ -769,7 +770,7 @@ fn half_flips(groups: &[(Vec<u64>, u64)], w: &Ctx) -> Vec<Vec<(Vec<u64>, u64)>> 
         let half = (1u64 << (rest - 1)).wrapping_neg() & w.mask;
         (rest > 1 && rest < w.w && g.contains(&half)).then_some((i, half))
     });
-    for (i, half) in flippable.take(2) {
+    for (i, half) in flippable.take(crate::sched::limit(Limit::SemiHalfFlips)) {
         for v in out.clone() {
             let mut v = v;
             for x in v[i].0.iter_mut().filter(|x| **x == half) {
@@ -892,14 +893,15 @@ fn high_merges(groups: &[(Vec<u64>, u64)], w: &Ctx) -> Vec<Vec<(Vec<u64>, u64)>>
         .collect();
     let mut ambiguous: Vec<usize> = (0..r).filter(|&i| !options[i].is_empty()).collect();
     ambiguous.sort_by_key(|&i| low(i));
-    // Enumerate at most 16 variants; the other groups join the group holding the
-    // bit just below them.
-    let mut count = 1;
+    // Enumerate at most `semi_max_merges` variants; the other groups join the group holding
+    // the bit just below them.
+    let most = crate::sched::limit(Limit::SemiMaxMerges);
+    let mut count = 1usize;
     let take = ambiguous
         .iter()
         .take_while(|&&i| {
-            count *= options[i].len();
-            count <= 16
+            count = count.saturating_mul(options[i].len());
+            count <= most
         })
         .count();
     let fixed = ambiguous.split_off(take);
@@ -972,14 +974,14 @@ fn masked_groups(groups: &[(Vec<u64>, u64)], lv: &[T], e0: u64, w: &Ctx) -> T {
 /// holding the bits of the groups whose code has bit `b`. Then bit `j` of the
 /// region is `table(bits_j(x), code of j's group)`, a linear MBA of `x` and the
 /// constant leaves, so `(y & ~K) - (y & K) + K` can come back as `y ^ K`.
-/// Tried for every code assignment of at most 4 groups. Part of the constant
+/// Tried for every code assignment of at most `semi_max_code_groups` groups. Part of the constant
 /// `e0` can also move into the table: adding `shifts[i]` to group `i`'s table
 /// adds `shifts[i]·M_i` to the region, so `-2*(x & ~K) - 2*K` can come back as
 /// `-2*(x | K)`.
 fn const_leaf_groups(groups: &[(Vec<u64>, u64)], shifts: &[Vec<u64>], lv: &[T], e0: u64, w: &Ctx) -> Vec<T> {
     let (n, r) = (lv.len(), groups.len());
     let p = (usize::BITS - (r - 1).leading_zeros()) as usize;
-    if r < 2 || r > 4 || n + p > max_leaves() {
+    if r < 2 || r > crate::sched::limit(Limit::SemiMaxCodeGroups) || n + p > max_leaves() {
         return Vec::new();
     }
     let m = w.mask;
