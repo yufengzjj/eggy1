@@ -14,15 +14,15 @@ features (size, vars, depth, mul, bitconst, arith_in_bit, shift, div), then
   egglog/first|later|rerun_input  saturation rounds and their time
   round/minimal     rounds skipped because the rebuild was proved minimal
   round/extra       extra rounds while the pre-pass still changed the result
-  polish/NAME/run|won  final-polish pass runs and runs that made the result smaller
+  polish_NAME/run|won  final-polish pass runs and runs that made the result smaller
   rerun_printed/run, rerun_printed/won/ORIGIN  the second run from the printed result
   final/ORIGIN      where the returned result came from (one per case)
   pass/NAME         a pass inside a rebuild (time includes the passes it calls)
   pass/NAME/self    its time without the passes it calls
   pass/NAME/smaller its result was smaller than its input
-  pass/NAME/won     it gave the form kept among alternatives (semi/NAME: semi_linear's
+  pass/NAME/won     it gave the form kept among alternatives (semi_NAME: semi_linear's
                     candidate sources)
-  pass/NAME/gain, pre/NAME/gain, polish/NAME/gain  nodes saved (in the count): a pass in
+  pass/NAME/gain, pre/NAME/gain, polish_NAME/gain  nodes saved (in the count): a pass in
                     a chain its input's size less its result's, one of several
                     alternatives the next best one's size (or the input's) less the kept
                     one's, a pre-pass candidate the first rebuild's size less its own, a
@@ -108,11 +108,11 @@ def summarize(cases, title):
     print("\nrounds: count, seconds")
     for key in sorted(k for k in total if k.startswith(("egglog/", "round/", "rerun_printed/"))):
         print(f"  {key:40s} {total[key][0]:7d} {total[key][1]:9.1f}s")
-    passes = sorted({k.split("/")[1] for k in total if k.startswith("polish/")})
+    passes = sorted({k.split("/")[0][len("polish_"):] for k in total if k.startswith("polish_") and k.endswith("/run")})
     print("\npolish passes: runs, seconds, won, final, gain, survived, ROI")
-    for name in sorted(passes, key=lambda p: -total[f"polish/{p}/run"][1]):
-        run, won, gain, surv = total[f"polish/{name}/run"], total[f"polish/{name}/won"], total[f"polish/{name}/gain"], total[f"polish/{name}/survived"]
-        print(f"  {name:20s} {run[0]:7d} {run[1]:9.1f}s {won[0]:7d} {final.get('polish/' + name, 0):7d} {gain[0]:8d} {surv[0]:8d} {roi(gain[0], run[1])}")
+    for name in sorted(passes, key=lambda p: -total[f"polish_{p}/run"][1]):
+        run, won, gain, surv = total[f"polish_{name}/run"], total[f"polish_{name}/won"], total[f"polish_{name}/gain"], total[f"polish_{name}/survived"]
+        print(f"  {name:20s} {run[0]:7d} {run[1]:9.1f}s {won[0]:7d} {final.get('polish_' + name, 0):7d} {gain[0]:8d} {surv[0]:8d} {roi(gain[0], run[1])}")
     inner(total)
     print()
 

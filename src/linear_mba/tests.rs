@@ -330,7 +330,7 @@ fn memoized_rewrites_do_not_depend_on_earlier_settings() {
                     crate::sched::bind(crate::sched::RELATE_LEAVES, 2);
                     (rewrite(&t, &shared), relate(&t, &shared))
                 });
-                crate::sched::with_off(&["semi/shapes", "rebuild_values", "common_multiple"], || (rewrite(&t, &shared), relate(&t, &shared)));
+                crate::sched::with_off(&["semi_shapes", "rebuild_values", "common_multiple"], || (rewrite(&t, &shared), relate(&t, &shared)));
                 crate::sched::in_scope(|| {
                     crate::sched::bind(crate::sched::REWRITES, 2);
                     rewrite(&t, &shared)

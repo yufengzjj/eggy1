@@ -45,7 +45,7 @@ def read(path):
 
 
 def stage(key):
-    return key.startswith("egglog/") or (key.startswith("pre/") and key.endswith("/made")) or (key.startswith("polish/") and key.endswith("/run"))
+    return key.startswith("egglog/") or (key.startswith("pre/") and key.endswith("/made")) or (key.startswith("polish_") and key.endswith("/run"))
 
 
 def own(key):

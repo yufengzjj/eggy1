@@ -5,22 +5,9 @@
 use crate::pipe_lang as lang;
 use std::fmt;
 
-/// Pre-pass candidates built beside the first rebuild, in the order they are computed.
-pub const PRE: [&str; 9] = [
-    "unified",
-    "no_wide",
-    "split_bits",
-    "halve_first",
-    "over_products",
-    "over_const_bitwise",
-    "over_shared_bitwise",
-    "halve_input",
-    "unclustered",
-];
-
 /// Passes inside a rebuild that `off` can turn off: one in a chain then returns its input,
 /// one of several alternatives gives no form. Each is an `extern @switch` of `builtins.pipe`
-/// or, with a `/`, a part of one (`DEFAULT` checks this).
+/// or a step inside one, a switch `default.pipe` defines (`DEFAULT` checks both).
 pub const INNER: [&str; 34] = [
     "lowbits",
     "unshift",
@@ -37,7 +24,7 @@ pub const INNER: [&str; 34] = [
     "small_blocks",
     "wide_blocks",
     "poly_mba",
-    "poly/masked",
+    "poly_masked",
     "rebuild_values",
     "common_multiple",
     "related_leaves",
@@ -47,15 +34,15 @@ pub const INNER: [&str; 34] = [
     "clustered",
     "peel",
     "peel_clustered",
-    "semi/grouped",
-    "semi/peel_grouped",
-    "semi/shapes",
-    "semi/pairs",
-    "semi/peel_shapes",
-    "semi/semi_split",
-    "semi/scaled",
-    "semi/bit_split",
-    "semi/short_consts",
+    "semi_grouped",
+    "semi_peel_grouped",
+    "semi_shapes",
+    "semi_pairs",
+    "semi_peel_shapes",
+    "semi_split",
+    "semi_scaled",
+    "semi_bit_split",
+    "semi_short_consts",
 ];
 
 /// Switches besides the `INNER` passes: `cut` (off unless turned on: a step skipped past a
@@ -92,9 +79,6 @@ limits! {
     Related "related";
     /// Most leaf splits `bit_split` rebuilds per region.
     BitSplits "bit_splits";
-    /// Most `P op Q` pairs `bit_split` rebuilds per pre-pass candidate: `cand` sets
-    /// the budget `bit_split_budget` to it.
-    CandBitSplits "cand_bit_splits";
     /// Most variable bits `split_bits` tries on one term.
     Splits "splits";
     /// How deep `split_bits` nests.
@@ -280,20 +264,20 @@ limits! {
     /// `wide_blocks`: a region less than this many times its blocks' least term sizes is
     /// skipped, as mostly in block form already.
     WideBlocksMinRatio "wide_blocks_min_ratio";
-    /// Largest bitwise expression with free constants `semi/shapes` and `semi/pairs` search;
+    /// Largest bitwise expression with free constants `semi_shapes` and `semi_pairs` search;
     /// the table of level 15 takes about 100 MB.
     ShapesMaxSize "shapes_max_size";
-    /// `semi/pairs`: most bit groups of a region.
+    /// `semi_pairs`: most bit groups of a region.
     PairsMaxGroups "pairs_max_groups";
-    /// `semi/pairs`: most shape entries checked per call.
+    /// `semi_pairs`: most shape entries checked per call.
     PairsBudget "pairs_budget";
-    /// `semi/pairs`: largest total size of the two shapes.
+    /// `semi_pairs`: largest total size of the two shapes.
     PairsMaxSize "pairs_max_size";
-    /// `semi/pairs`: most coefficients tried, the smallest first.
+    /// `semi_pairs`: most coefficients tried, the smallest first.
     PairsMaxScales "pairs_max_scales";
-    /// `semi/pairs`: most carries per bit of the carry DP before it gives up.
+    /// `semi_pairs`: most carries per bit of the carry DP before it gives up.
     PairsMaxCarries "pairs_max_carries";
-    /// `semi/semi_split`: most combinations of the other sets' constants per set.
+    /// `semi_semi_split`: most combinations of the other sets' constants per set.
     SemiSplitMaxCombos "semi_split_max_combos";
     /// `semi_linear`: most groups whose `-2^(r-1)` entries are also read as `+2^(r-1)`.
     SemiHalfFlips "semi_half_flips";
@@ -1119,13 +1103,19 @@ pub const fn sub_index(name: &str) -> usize {
 /// smaller, repeated while one is, until `polish_wins` are, as the default in `default.pipe`.
 pub fn polish(names: &[&str]) -> String {
     let step = |n: &&str| {
-        let run = format!("polish/{n} | drop_identities");
+        let run = format!("polish_{n} | drop_identities");
         let run = if *n == "join_linear" { format!("(semi_leaves = 2 | {run})") } else { run };
-        format!("(smaller polish/{n} {run})")
+        format!("(smaller polish_{n} {run})")
     };
     let steps: Vec<String> = names.iter().map(step).collect();
     let steps = if steps.len() == 1 { format!("(seq {})", steps[0]) } else { steps.join("\n  | ") };
     format!("(scope rewrites = polish_rewrites\n  | (wins polish_wins\n  {steps}))")
+}
+
+/// Whether the `INNER` switch `name` is defined by an `extern @switch` of `builtins.pipe`, not
+/// by `default.pipe`.
+fn is_extern_switch(name: &str) -> bool {
+    crate::builtins::get(name).is_some_and(|s| s.switch)
 }
 
 fn switch_index(name: &str) -> Option<usize> {
@@ -1158,19 +1148,24 @@ pub fn is_off(name: &str) -> bool {
     INNER.iter().position(|k| *k == name).is_some_and(is_off_at)
 }
 
+const fn same_name(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut j = 0;
+    while j < a.len() && a[j] == b[j] {
+        j += 1;
+    }
+    j == a.len()
+}
+
 /// The position of `name` in `INNER`, for `is_off_at`.
 pub const fn inner_index(name: &str) -> usize {
     let mut i = 0;
     while i < INNER.len() {
-        let (a, b) = (INNER[i].as_bytes(), name.as_bytes());
-        if a.len() == b.len() {
-            let mut j = 0;
-            while j < a.len() && a[j] == b[j] {
-                j += 1;
-            }
-            if j == a.len() {
-                return i;
-            }
+        if same_name(name, INNER[i]) {
+            return i;
         }
         i += 1;
     }
@@ -1202,8 +1197,6 @@ const STEPS: [(Step, &str); 3] = [(Step::Run, "run"), (Step::Once, "once"), (Ste
 pub struct Passes {
     /// The steps each of a round's `iter_limit` repetitions runs, in order.
     pub schedule: Vec<(Step, &'static str)>,
-    /// Enabled entries of `PRE`.
-    pub pre: Vec<&'static str>,
     /// The assignments (`Pipe::Bind` of globals, `on` and `off`) a run starts with, in order: the
     /// first `defaults` from `default.pipe`, the rest from `--passes` (`entry_steps`).
     pub entry: Vec<Pipe>,
@@ -1244,7 +1237,7 @@ static DEFAULT: std::sync::LazyLock<(Passes, lang::Defs)> = std::sync::LazyLock:
     let mut p = Passes::base();
     let mut defs = lang::Defs::new();
     let mut globals = Vec::new();
-    parsing(&mut globals, || p.apply_source(include_str!("default.pipe"), &mut defs, &mut Lets::default(), true)).and_then(|()| p.finish()).unwrap_or_else(|e| panic!("src/default.pipe: {e}"));
+    parsing(&mut globals, || p.apply_source(include_str!("default.pipe"), &mut defs, &mut Lets::default(), true)).and_then(|()| p.check()).unwrap_or_else(|e| panic!("src/default.pipe: {e}"));
     p.globals = globals;
     p.check = check_of(&defs);
     if let Some(e) = p.undefined().first() {
@@ -1281,7 +1274,6 @@ impl Passes {
                 (Saturate, "identity-zero-element"),
                 (Run, "simplify"),
             ],
-            pre: PRE.to_vec(),
             entry: Vec::new(),
             defaults: 0,
             check: id.clone(),
@@ -1297,12 +1289,6 @@ impl Passes {
             default_globals: 0,
             defines: Vec::new(),
         }
-    }
-
-    /// Whether the pre-pass candidate `name` (an entry of `PRE`) is built.
-    pub fn pre_on(&self, name: &str) -> bool {
-        debug_assert!(PRE.contains(&name), "unknown pre-pass candidate {name}");
-        self.pre.contains(&name)
     }
 
     /// The assignments a run starts with: those of `default.pipe`, then `restarts = m` and
@@ -1345,10 +1331,11 @@ impl Passes {
     /// The default pipeline changed by `spec`: items `key=value`, and for the lists `pre`,
     /// `off` and `schedule` also `key+=names` and `key-=names` (names separated by `,`;
     /// schedule steps written `run:`, `once:` or `sat:` and a ruleset). `pipeline`,
-    /// `prepass`, `polish`, `rewrite`, `simba` and `sub/NAME` (`SUBS`) take a pipeline
+    /// `prepass`, `polish`, `rewrite`, `simba` and `sub_NAME` (`SUBS`) take a pipeline
     /// (`crate::pipe_lang`), and `polish` also a list of polish pass names, run as
     /// `polish(names)`. Any other key is a variable that exists: the item is an entry
-    /// assignment (`entry`), as are the `off` items.
+    /// assignment (`entry`), as are the `off` and `pre` items (`pre` lists the switches
+    /// `pre_NAME` by `NAME`).
     /// `(let NAME p)` and `(def ...)` define a name for the items after it (those of
     /// `default.pipe` come first); `pipeline=p` and the like are `(def (pipeline) p)`.
     /// `NAME = VALUE` with spaces around `=` is the item of a source file (`assign_top`), and
@@ -1370,7 +1357,7 @@ impl Passes {
         p.globals = globals;
         r?;
         p.check = check_of(&defs);
-        p.finish()?;
+        p.check()?;
         // The Rust code runs `check_limits` (`Passes::check`).
         let unused = lets.defined.iter().filter(|(head, _)| head != "check_limits" && !lets.used.iter().any(|n| head.split(' ').next() == Some(n)));
         let mut notes: Vec<String> = unused
@@ -1448,13 +1435,16 @@ impl Passes {
                 p.apply_source(&text, defs, lets, false).map_err(|e| format!("{path}: {e}"))?;
                 continue;
             }
+            if let Some(e) = item.split(['=', '+']).next().and_then(lang::slash_name) {
+                return Err(format!("{item}: {e}"));
+            }
             if let Some(val) = item.strip_prefix("polish=") {
                 let names: Vec<&str> = val.split(',').filter(|s| !s.is_empty()).collect();
                 let all_polish = names.iter().all(|n| crate::linear_mba::POLISH.iter().any(|(m, _)| m == n));
                 p.polish = if all_polish { read(&polish(&names), defs, &mut lets.used)? } else { read(val, defs, &mut lets.used)? };
                 continue;
             }
-            if let Some((name, val)) = item.split_once('=').filter(|(k, _)| lang::defined_builtin(k) || k.starts_with("sub/")) {
+            if let Some((name, val)) = item.split_once('=').filter(|(k, _)| lang::defined_builtin(k) || k.starts_with("sub_")) {
                 p.define(name, read(val, defs, &mut lets.used)?)?;
                 continue;
             }
@@ -1463,14 +1453,19 @@ impl Passes {
                 .find_map(|op| item.split_once(op).map(|(k, v)| (k, *op, v)))
                 .ok_or_else(|| format!("expected key=value: {item}"))?;
             let names = |known: &[&'static str]| -> Result<Vec<&'static str>, String> {
-                val.split(',').filter(|s| !s.is_empty()).map(|n| known.iter().find(|k| **k == n).copied().ok_or_else(|| format!("unknown {key} name {n}; known: {}", known.join(",")))).collect()
+                let unknown = |n: &str| lang::slash_name(n).unwrap_or_else(|| format!("unknown {key} name {n}; known: {}", known.join(",")));
+                val.split(',').filter(|s| !s.is_empty()).map(|n| known.iter().find(|k| **k == n).copied().ok_or_else(|| unknown(n))).collect()
             };
+            // `pre=a,b` sets the switches `pre_a`, `pre_b` to 1 and the other `pre_*` to 0.
             if key == "pre" {
-                let ns = names(&PRE)?;
-                match op {
-                    "=" => p.pre = ns,
-                    "+=" => p.pre.extend(ns),
-                    _ => p.pre.retain(|n| !ns.contains(n)),
+                let all: Vec<&'static str> = var_names().into_iter().filter_map(|n| n.strip_prefix("pre_")).collect();
+                let ns = names(&all)?;
+                let set: Vec<(&str, bool)> = match op {
+                    "=" => all.iter().map(|n| (*n, ns.contains(n))).collect(),
+                    _ => ns.iter().map(|n| (*n, op == "+=")).collect(),
+                };
+                for (n, on) in set {
+                    p.entry.push(lang::parse_assign(&format!("pre_{n}"), if on { "1" } else { "0" })?);
                 }
                 continue;
             }
@@ -1580,17 +1575,20 @@ impl Passes {
     /// Every variable is `none` until assigned, so a definition of `default.pipe` as `none`
     /// adds no entry assignment.
     fn assign_top(&mut self, name: &str, val: &str, default: bool, defs: &lang::Defs) -> Result<(), String> {
+        if let Some(e) = lang::slash_name(name) {
+            return Err(e);
+        }
         let defined = PARSED.with(|p| p.borrow().as_ref().is_some_and(|g| g.iter().any(|i| var(*i).name == name)));
         let new = match var_index(name) {
             _ if defined => false,
-            Some(i) if i < FLAG0 => false,
+            Some(i) if i < FLAG0 && is_extern_switch(INNER[i]) => false,
             Some(i) if i < RUST_VARS => {
                 PARSED.with(|p| p.borrow_mut().get_or_insert_with(Vec::new).push(i));
                 true
             }
             Some(_) => false,
             None => {
-                if lang::defined_builtin(name) || name.starts_with("sub/") {
+                if lang::defined_builtin(name) || name.starts_with("sub_") {
                     return Err(format!("{name} is a function: a source file defines it as (def ({name}) ...)"));
                 }
                 if !lang::free_name(name) || defs.contains_key(name) {
@@ -1611,18 +1609,19 @@ impl Passes {
     }
 
     /// The variables the Rust code reads that the source files do not define, as errors: a
-    /// pass switch (`INNER`) is the name of an `extern @switch`, or has a `/` (a part of a pass).
+    /// pass switch (`INNER`) is defined by an `extern @switch` or, for a step inside a pass,
+    /// in `default.pipe`.
     fn undefined(&self) -> Vec<String> {
         let sigs = crate::builtins::all();
-        let switched = |n: &str| sigs.iter().any(|s| s.switch && s.name == n);
-        let mut out: Vec<String> = (FLAG0..RUST_VARS).filter(|i| !self.globals.contains(i)).map(|i| format!("src/default.pipe: {} is read by the Rust code and not defined", var(i).name)).collect();
-        out.extend(INNER.iter().filter(|n| !n.contains('/') && !switched(n)).map(|n| format!("src/builtins.pipe: {n} is a pass switch of the Rust code (sched::INNER) and no extern @switch")));
+        let defined = |i: usize| self.globals.contains(&i) || i < FLAG0 && is_extern_switch(INNER[i]);
+        let mut out: Vec<String> = (0..RUST_VARS).filter(|i| !defined(*i)).map(|i| format!("src/default.pipe: {} is read by the Rust code and not defined", var(i).name)).collect();
+        out.extend(INNER.iter().enumerate().filter(|(i, n)| is_extern_switch(n) && self.globals.contains(i)).map(|(_, n)| format!("src/default.pipe: {n} is defined by its extern @switch")));
         out.extend(sigs.iter().filter(|s| s.switch && !INNER.contains(&s.name.as_str())).map(|s| format!("src/builtins.pipe: {} has @switch and is not in sched::INNER", s.name)));
         out
     }
 
     /// `(def (name) body)` for a defined function of the Rust code: `pipeline`, `prepass`,
-    /// `polish`, `rewrite`, `simba` or `sub/NAME`.
+    /// `polish`, `rewrite`, `simba` or `sub_NAME`.
     fn define(&mut self, name: &str, body: Pipe) -> Result<(), String> {
         let slot = match name {
             "pipeline" => &mut self.pipeline,
@@ -1631,9 +1630,9 @@ impl Passes {
             "rewrite" => &mut self.rewrite,
             "simba" => &mut self.simba,
             _ => {
-                let sub = name.strip_prefix("sub/").unwrap_or(name);
+                let sub = name.strip_prefix("sub_").unwrap_or(name);
                 let names: Vec<&str> = SUBS.iter().map(|(n, _)| *n).collect();
-                let i = names.iter().position(|n| *n == sub).ok_or_else(|| format!("unknown sub/{sub}; known: {}", names.join(" ")))?;
+                let i = names.iter().position(|n| *n == sub).ok_or_else(|| format!("unknown sub_{sub}; known: {}", names.join(" ")))?;
                 &mut self.subs[i]
             }
         };
@@ -1641,17 +1640,10 @@ impl Passes {
         Ok(())
     }
 
-    /// The lists in their canonical order, then `check`.
-    fn finish(&mut self) -> Result<(), String> {
-        self.pre.sort_by_key(|n| PRE.iter().position(|k| k == n));
-        self.pre.dedup();
-        self.check()
-    }
-
     /// Rejects pipelines that cannot run: an egglog round or `reprint` outside `pipeline`
     /// (only a `simplify` run has them), also in a function they call, and a function that
     /// reaches itself through other functions. The rebuilds of one term (`rewrite`, `simba`,
-    /// `sub/NAME`: one node `rewrite`, which any pass over one term may run) recurse on
+    /// `sub_NAME`: one node `rewrite`, which any pass over one term may run) recurse on
     /// subterms, and so may the functions they call that call them again.
     fn check(&self) -> Result<(), String> {
         let mut reach: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
@@ -1739,12 +1731,12 @@ impl Passes {
         let main = [&self.pipeline, &self.prepass, &self.polish, &self.rewrite, &self.simba];
         text.extend(main.into_iter().chain(&self.subs).map(lang::show));
         text.extend(self.defs.iter().map(|d| lang::show_def(d)));
-        let words: std::collections::HashSet<&str> = text.iter().flat_map(|t| t.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '/'))).collect();
+        let words: std::collections::HashSet<&str> = text.iter().flat_map(|t| t.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))).collect();
         self.globals[self.default_globals..].iter().filter(|i| **i >= RUST_VARS).map(|i| var(*i).name).filter(|n| !words.contains(n)).collect()
     }
 
     /// Each pipeline by name, with its node in `check` (`rewrite` for `simba` and
-    /// `sub/NAME`) and what it uses.
+    /// `sub_NAME`) and what it uses.
     fn uses(&self) -> Vec<(String, String, Uses)> {
         let main = [("pipeline", &self.pipeline), ("prepass", &self.prepass), ("polish", &self.polish), ("rewrite", &self.rewrite), ("simba", &self.simba)];
         let builtin = main.into_iter().chain(SUBS.iter().map(|(n, _)| *n).zip(&self.subs)).map(|(name, p)| {
@@ -1892,7 +1884,7 @@ struct Uses {
     /// counted as.
     needs_run: Vec<(String, &'static crate::builtins::Sig)>,
     /// The functions it runs: `prepass`, `polish`, `rewrite` (also for `simba` and
-    /// `sub/NAME`, which any pass over one term may run) and those `def` defines.
+    /// `sub_NAME`, which any pass over one term may run) and those `def` defines.
     calls: Vec<String>,
     /// The group variables a `(save R)` or `R = p` may have bound by now, in run order; each
     /// pipeline has its own.
@@ -2046,7 +2038,6 @@ impl Uses {
                 self.expr(&args[0]);
                 self.maybe(&args[2]);
             }
-            "cand" => self.maybe(&args[1]),
             "filter" | "assert" => self.expr(&args[0]),
             "print" => args.iter().for_each(|a| match a {
                 Pipe::Var(Slot::Local(r, Holds::Group)) => self.read(r),
@@ -2055,7 +2046,7 @@ impl Uses {
                 e => self.expr(e),
             }),
             "scope" => self.walk(&args[0]),
-            "tag" | "smaller" => self.walk(&args[1]),
+            "tag" | "smaller" | "origin" => self.walk(&args[1]),
             // Both rebuild with `Passes::rewrite`.
             "regions" => {
                 self.calls.push("rewrite".into());
@@ -2224,7 +2215,7 @@ fn reads_var(e: &Pipe, i: usize) -> bool {
 impl fmt::Display for Passes {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let steps: Vec<String> = self.schedule.iter().map(|(s, rs)| format!("{}:{rs}", STEPS.iter().find(|(k, _)| k == s).unwrap().1)).collect();
-        write!(f, "schedule={} pre={}", steps.join(","), self.pre.join(","))?;
+        write!(f, "schedule={}", steps.join(","))?;
         let spec = &self.entry[self.defaults..];
         let mut i = 0;
         while i < spec.len() {
@@ -2265,7 +2256,7 @@ impl fmt::Display for Passes {
         }
         for ((name, default), p) in SUBS.iter().zip(&self.subs) {
             if Some(p) != crate::pipe::resolve(default).as_ref() {
-                write!(f, "{sep}sub/{name}={}", show(p))?;
+                write!(f, "{sep}sub_{name}={}", show(p))?;
             }
         }
         Ok(())
@@ -2295,7 +2286,7 @@ mod tests {
     fn off_ends_with_its_scope() {
         let p = Passes::parse("off+=relate").unwrap();
         crate::pipe::in_run(&p, None, x, || {
-            assert!(is_off("relate") && is_off("semi/peel_shapes"), "the entry assignments run first");
+            assert!(is_off("relate") && is_off("semi_peel_shapes"), "the entry assignments run first");
             in_scope(|| {
                 turn_on("relate");
                 crate::pipe::in_run(&p, None, x, || assert!(!is_off("relate"), "a run inside a run keeps the bindings of its caller"));
@@ -2303,7 +2294,7 @@ mod tests {
             });
             assert!(!is_off("tfunc") && is_off("relate"), "a pass turned off in a scope is on again after it");
         });
-        assert!(!is_off("relate") && !is_off("semi/peel_shapes"), "the entry bindings end with the run");
+        assert!(!is_off("relate") && !is_off("semi_peel_shapes"), "the entry bindings end with the run");
     }
 
     #[test]
@@ -2314,13 +2305,13 @@ mod tests {
         assert_eq!(after_entry(&p, "keep"), 2, "default.pipe comes first");
         crate::pipe::in_run(&p, None, x, || {
             assert!(is_off("relate") && is_off("simba") && !is_off("tfunc"));
-            assert!(!is_off("semi/peel_shapes"), "off= turns every other pass on");
+            assert!(!is_off("semi_peel_shapes"), "off= turns every other pass on");
         });
         assert!(!is_off("relate") && get(var_index("extra").unwrap()) == NONE, "nothing leaks out of a run");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(p.to_string().contains(" extra=5 split_runs=vars * 3 extra=extra + 1 off=relate,tfunc off+=simba off-=tfunc "), "{p}");
-        let p = Passes::parse("off-=semi/peel_shapes keep=0 prove_minimal=0 restarts=7 match_limit=9").unwrap();
-        assert!(crate::pipe::in_run(&p, None, x, || !is_off("semi/peel_shapes")));
+        let p = Passes::parse("off-=semi_peel_shapes keep=0 prove_minimal=0 restarts=7 match_limit=9").unwrap();
+        assert!(crate::pipe::in_run(&p, None, x, || !is_off("semi_peel_shapes")));
         assert_eq!([after_entry(&p, "keep"), after_entry(&p, "prove_minimal"), after_entry(&p, "restarts")], [0, 0, 7]);
         assert!(crate::pipe::in_run(&p, None, x, || p.egglog_schedule().contains(":match-limit 9 :ban-length 3")));
         let p = Passes::parse("off=").unwrap();
@@ -2354,16 +2345,19 @@ mod tests {
         let p = Passes::default();
         assert_eq!(p.undefined(), Vec::<String>::new(), "every name the Rust code reads is defined, every extern @switch is in INNER");
         let defined: Vec<&str> = p.globals.iter().map(|i| var(*i).name).collect();
-        for i in FLAG0..RUST_VARS {
-            assert!(defined.contains(&var(i).name), "{}", var(i).name);
+        for i in 0..RUST_VARS {
+            assert_eq!(defined.contains(&var(i).name), i >= FLAG0 || !is_extern_switch(var(i).name), "{}", var(i).name);
         }
+        let steps: Vec<&str> = INNER.iter().copied().filter(|n| !is_extern_switch(n)).collect();
+        assert_eq!(steps, ["poly_masked", "semi_grouped", "semi_peel_grouped", "semi_shapes", "semi_pairs", "semi_peel_shapes", "semi_split", "semi_scaled", "semi_bit_split", "semi_short_consts"], "the switches of steps inside passes are defined in default.pipe");
         let only_pipelines: Vec<&str> = p.globals.iter().filter(|i| **i >= RUST_VARS).map(|i| var(*i).name).collect();
-        assert_eq!(only_pipelines, ["extra", "printed", "unclustered_relate_leaves", "unclustered_rewrites", "unified_rewrites", "polish_rewrites", "polish_wins"]);
+        let pre = ["pre_unified", "pre_no_wide", "pre_split_bits", "pre_halve_first", "pre_over_products", "pre_over_const_bitwise", "pre_over_shared_bitwise", "pre_halve_input", "pre_unclustered"];
+        assert_eq!(only_pipelines, [&["extra", "printed"][..], &pre, &["unclustered_relate_leaves", "unclustered_rewrites", "unified_rewrites", "cand_bit_splits", "polish_rewrites", "polish_wins"]].concat());
         let mut all = p.clone();
         all.default_globals = 0;
         assert_eq!(all.unread_globals(), Vec::<&str>::new(), "a pipeline reads each variable the Rust code does not");
         assert_eq!(Passes::parse_noting("").unwrap().1, Vec::<String>::new(), "default.pipe gives no warnings");
-        let kinds = [("relate", VarKind::Pass), ("semi/shapes", VarKind::Pass), ("cut", VarKind::Flag), ("max_leaves", VarKind::Limit), ("memo_contexts", VarKind::Unread), ("wide_blocks_cache_size", VarKind::Unread), ("semi_leaves", VarKind::Setting), ("keep", VarKind::Setting), ("rewrites", VarKind::Budget), ("bit_split_budget", VarKind::Budget), ("time_limit", VarKind::Deadline), ("extra", VarKind::Global)];
+        let kinds = [("relate", VarKind::Pass), ("semi_shapes", VarKind::Pass), ("cut", VarKind::Flag), ("max_leaves", VarKind::Limit), ("memo_contexts", VarKind::Unread), ("wide_blocks_cache_size", VarKind::Unread), ("semi_leaves", VarKind::Setting), ("keep", VarKind::Setting), ("rewrites", VarKind::Budget), ("bit_split_budget", VarKind::Budget), ("time_limit", VarKind::Deadline), ("extra", VarKind::Global)];
         for (n, k) in kinds {
             assert_eq!(kind(var_index(n).unwrap()), k, "{n}");
         }
@@ -2500,11 +2494,11 @@ mod tests {
             crate::eval::size(&crate::eval::parse(r[0].term()))
         };
         let before = crate::eval::size(&crate::eval::parse(&input));
-        let plain = run("prepass=(scope polish/join_linear)");
+        let plain = run("prepass=(scope polish_join_linear)");
         assert!(plain < before, "a move makes it smaller");
-        assert_eq!(run("prepass=(scope join_linear_max_groups = 0 | polish/join_linear)"), before, "no region is moved in");
-        assert_eq!(run("prepass=(scope (join_linear_max_groups = 0 | id) | polish/join_linear)"), plain, "the assignment ends with its sequence");
-        assert_eq!(run("prepass=(scope (join_linear_max_groups = 0 | polish/join_linear) | polish/join_linear)"), plain, "the memo keeps the scopes apart");
+        assert_eq!(run("prepass=(scope join_linear_max_groups = 0 | polish_join_linear)"), before, "no region is moved in");
+        assert_eq!(run("prepass=(scope (join_linear_max_groups = 0 | id) | polish_join_linear)"), plain, "the assignment ends with its sequence");
+        assert_eq!(run("prepass=(scope (join_linear_max_groups = 0 | polish_join_linear) | polish_join_linear)"), plain, "the memo keeps the scopes apart");
     }
 
     #[test]
@@ -2552,23 +2546,34 @@ mod tests {
     fn spec_round_trip() {
         assert_eq!(Passes::parse("").unwrap(), Passes::default());
         let p = Passes::parse("pre-=halve_input,unified;polish=factor,push_not,factor extra=0 keep=3 prove_minimal=0").unwrap();
-        assert!(!p.pre_on("unified") && p.pre_on("no_wide"));
+        assert!(after_entry(&p, "pre_unified") == 0 && after_entry(&p, "pre_halve_input") == 0 && after_entry(&p, "pre_no_wide") == 1);
+        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert_eq!(p.polish, parse_default(&polish(&["factor", "push_not", "factor"])));
+        let p = Passes::parse("pre=no_wide,unified pre+=halve_input pre-=unified").unwrap();
+        let on: Vec<&str> = var_names().into_iter().filter_map(|n| n.strip_prefix("pre_")).filter(|n| after_entry(&p, &format!("pre_{n}")) == 1).collect();
+        assert_eq!(on, ["no_wide", "halve_input"], "pre= turns the others off, pre+= and pre-= one each");
+        assert!(p.to_string().contains(" pre_unified=1 pre_no_wide=1 pre_split_bits=0"), "{p}");
+        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
+        assert!(Passes::parse("pre=done").is_err(), "pre_done is a function, not a switch");
+        for (old, new) in [("sub/cluster=rebuild", "sub_cluster"), ("off=semi/bit_split", "semi_bit_split"), ("semi/peel_shapes=1", "semi_peel_shapes"), ("semi/peel_shapes = 1", "semi_peel_shapes"), ("polish=polish/factor", "polish_factor")] {
+            let e = Passes::parse(old).unwrap_err();
+            assert!(e.contains(&format!("names cannot contain '/': write {new}")), "{old}: {e}");
+        }
         assert_eq!(lang::parse(&Passes::default().polish.to_string()).unwrap(), Passes::default().polish);
         let p = Passes::parse("rewrite=(regions (best 1 simba poly_mba))").unwrap();
         assert_eq!(p.rewrite.to_string(), "(regions (best 1 simba poly_mba))");
         assert_eq!(lang::parse(&Passes::default().simba.to_string()).unwrap(), Passes::default().simba);
-        let p = Passes::parse("sub/cluster=(regions simba) sub/split_bits=rewrite").unwrap();
+        let p = Passes::parse("sub_cluster=(regions simba) sub_split_bits=rewrite").unwrap();
         assert_eq!(p.subs[sub_index("cluster")].to_string(), "(regions simba)");
-        assert!(p.to_string().contains(" sub/cluster=(regions simba) sub/split_bits=rewrite"));
+        assert!(p.to_string().contains(" sub_cluster=(regions simba) sub_split_bits=rewrite"));
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
-        assert!(Passes::parse("sub/nope=rewrite").is_err());
+        assert!(Passes::parse("sub_nope=rewrite").is_err());
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("polish+=factor").is_err() && Passes::parse("polish=nope").is_err());
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("pre+=nope").is_err() && Passes::parse("keep+=1").is_err());
-        let p = Passes::parse("off=semi/bit_split,relate").unwrap();
-        assert_eq!(p.entry[p.defaults..], [Expanded::switches(true, &INNER), Expanded::switches(false, &["semi/bit_split", "relate"])]);
+        let p = Passes::parse("off=semi_bit_split,relate").unwrap();
+        assert_eq!(p.entry[p.defaults..], [Expanded::switches(true, &INNER), Expanded::switches(false, &["semi_bit_split", "relate"])]);
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(crate::pipe::in_run(&p, None, x, || is_off("relate") && !is_off("simba")));
         assert!(!is_off("relate"));
@@ -2595,15 +2600,15 @@ mod tests {
         let got = crate::pipe::in_run(&p, None, x, || (limit(Limit::SplitRuns), limit(Limit::PolyBuilds), limit(Limit::SplitDepth)));
         assert_eq!(got, (4, 64, 2));
         assert_eq!(limit(Limit::SplitRuns), usize::MAX);
-        let p = Passes::parse("keep=1 pipeline=lowbits | (best 2 rewrite ((off relate tfunc) | rebuild)) | (fix 3 egglog) | polish/factor extra=0").unwrap();
-        assert_eq!(p.pipeline.to_string(), "lowbits | (best 2 rewrite ((off relate tfunc) | rebuild)) | (fix 3 egglog) | polish/factor");
+        let p = Passes::parse("keep=1 pipeline=lowbits | (best 2 rewrite ((off relate tfunc) | rebuild)) | (fix 3 egglog) | polish_factor extra=0").unwrap();
+        assert_eq!(p.pipeline.to_string(), "lowbits | (best 2 rewrite ((off relate tfunc) | rebuild)) | (fix 3 egglog) | polish_factor");
         assert_eq!((after_entry(&p, "keep"), after_entry(&p, "extra")), (1, 0));
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         let p = Passes::parse("pipeline=(smallest (fix restarts (retry (mixed && !minimal) prepass (egglog later))) | (if !input (tag t polish) id))").unwrap();
         assert_eq!(p.pipeline.to_string(), "(smallest (fix restarts (retry (mixed && !minimal) prepass (egglog later))) | (if !input (tag t polish)))");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert_eq!(lang::parse(&Passes::default().pipeline.to_string()).unwrap(), Passes::default().pipeline);
-        assert_eq!(lang::parse(&Passes::default().prepass.to_string()).unwrap(), Passes::default().prepass);
+        assert_eq!(Passes::parse(&format!("prepass={}", Passes::default().prepass)).unwrap().prepass, Passes::default().prepass);
         let d = Passes::default();
         assert_eq!(Passes::parse(&d.to_string()).unwrap(), d);
         assert_eq!(Passes::parse(&format!("{d:#}")).unwrap(), d);
@@ -2612,8 +2617,8 @@ mod tests {
         assert_eq!(p.prepass, lang::parse("(seq lowbits (if mixed rewrite id) polish)").unwrap());
         assert_eq!(p.pipeline, lang::parse("(fix 2 (seq prepass egglog))").unwrap());
         assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
-        let p = Passes::parse("prepass=(scope (save t) | (rewrites = unified_rewrites | semi_leaves = 2 | rewrite) | (filter (size < (size (main t)) || size <= (size (main t)) * 3 / 4 && !tiny)) | (cand halve_input (load t)))").unwrap();
-        assert_eq!(p.prepass.to_string(), "(scope (save t) | (rewrites = unified_rewrites | semi_leaves = 2 | rewrite) | (filter (size < (size (main t)) || size <= (size (main t)) * 3 / 4 && !tiny)) | (cand halve_input (load t)))");
+        let p = Passes::parse("prepass=(scope (save t) | (rewrites = unified_rewrites | semi_leaves = 2 | rewrite) | (filter (size < (size (main t)) || size <= (size (main t)) * 3 / 4 && !tiny)) | (cand pre_halve_input halve_input (load t)))").unwrap();
+        assert_eq!(p.prepass.to_string(), "(scope (save t) | (rewrites = unified_rewrites | semi_leaves = 2 | rewrite) | (filter (size < (size (main t)) || size <= (size (main t)) * 3 / 4 && !tiny)) | (cand pre_halve_input halve_input (load t)))");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         for bad in ["prepass=(filter lt)", "prepass=(filter (size <=))", "prepass=(rewrites = x | id)", "prepass=(save)", "prepass=(scope id id)"] {
             assert!(Passes::parse(bad).is_err(), "{bad}");
@@ -2660,7 +2665,7 @@ times = extra + 1 # a new variable
         assert_eq!(notes, ["unused_one is defined and never read", "kep is defined and never read"]);
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(Passes::parse("rewrite=(fix (restarts - 1) rewrite)").is_ok(), "restarts is a variable");
-        for bad in ["prepass=egglog", "simba=reprint", "sub/cluster=(egglog first)", "prepass=lowbits | prepass", "polish=polish", "rewrite=(again polish)", "prepass=(if rebuilds id)"] {
+        for bad in ["prepass=egglog", "simba=reprint", "sub_cluster=(egglog first)", "prepass=lowbits | prepass", "polish=polish", "rewrite=(again polish)", "prepass=(if rebuilds id)"] {
             let e = Passes::parse(bad).unwrap_err();
             assert!(e.contains("simplify run") || e.contains("reaches itself"), "{bad}: {e}");
         }
@@ -2684,7 +2689,7 @@ times = extra + 1 # a new variable
         assert_eq!(Passes::default().warnings(), Vec::<String>::new());
         let mut lets = Lets::default();
         Passes::base().apply(include_str!("default.pipe"), &mut lang::Defs::new(), &mut lets).unwrap();
-        assert!(lets.defined.iter().all(|(n, _)| n == "check_limits" || lets.used.contains(n)), "{:?} {:?}", lets.defined, lets.used);
+        assert!(lets.defined.iter().all(|(n, _)| n == "check_limits" || n.split(' ').next().is_some_and(|n| lets.used.iter().any(|u| u == n))), "{:?} {:?}", lets.defined, lets.used);
         let (_, w) = Passes::parse_noting("(let foo rewrite) (let bar lowbits) prepass=bar | (save t) | (save q) | (load t) | ((off relate) | (save x) | id) | (rewrite | (off relate))").unwrap();
         assert_eq!(w.len(), 4, "{w:?}");
         assert!(w[0].contains("let foo") && w[1].contains("group variable q") && w[2].contains("group variable x") && w[3].contains("(off relate) ends"), "{w:?}");
@@ -2694,7 +2699,7 @@ times = extra + 1 # a new variable
         assert!(w.len() == 1 && w[0].contains("(off relate) ends"), "the right side of a group assignment is a scope: {w:?}");
         let (_, w) = Passes::parse_noting("prepass=t = id | t = rewrite | (load t) | u = rewrite | id").unwrap();
         assert!(w.len() == 2 && w[0].contains("group variable u is bound and never read") && w[1].contains("group variable t is bound again"), "{w:?}");
-        for ok in ["prepass=(save t) | (if mixed (save t)) | (load t)", "prepass=(save t) | (cand unified (save t)) | (load t)", "prepass=(fix 3 (save t) | rewrite) | (load t)", "prepass=(save t) | (filter (size < (size (main t)))) | (save t) | (load t)", "prepass=(save t) | (first rewrite (save t)) | (load t)", "prepass=(if mixed (save t) (save t)) | (load t)"] {
+        for ok in ["prepass=(save t) | (if mixed (save t)) | (load t)", "prepass=(save t) | (cand pre_unified unified (save t)) | (load t)", "prepass=(fix 3 (save t) | rewrite) | (load t)", "prepass=(save t) | (filter (size < (size (main t)))) | (save t) | (load t)", "prepass=(save t) | (first rewrite (save t)) | (load t)", "prepass=(if mixed (save t) (save t)) | (load t)"] {
             assert_eq!(Passes::parse_noting(ok).unwrap().1, Vec::<String>::new(), "{ok}");
         }
         let p = Passes::parse("prepass=rewrite | time_limit = 500 | relate | time_limit = size-1 * 2 | tfunc | time_limit = none | lowbits").unwrap();
@@ -2775,16 +2780,16 @@ times = extra + 1 # a new variable
     #[test]
     fn def_items() {
         let d = Passes::default();
-        for name in ["pipeline", "prepass", "polish", "rewrite", "simba", "sub/cluster"] {
+        for name in ["pipeline", "prepass", "polish", "rewrite", "simba", "sub_cluster"] {
             let short = Passes::parse(&format!("{name}=lowbits | rewrite")).unwrap();
             assert_eq!(Passes::parse(&format!("(def ({name}) lowbits | rewrite)")).unwrap(), short, "{name}");
             assert_ne!(short, d);
         }
         assert_eq!(Passes::parse("polish=factor,push_not").unwrap().polish, parse_default(&polish(&["factor", "push_not"])));
         let p = Passes::parse("(def (twice) rewrite | rewrite) (def (more) twice | relate) prepass=lowbits | more | twice").unwrap();
-        assert_eq!(p.defs.len(), 2);
+        assert_eq!(p.defs.len(), p.default_defs + 2);
         assert_eq!(p.prepass.to_string(), "lowbits | more | twice");
-        assert_eq!(p.defs[1].body.to_string(), "twice | relate");
+        assert_eq!(p.defs[p.default_defs + 1].body.to_string(), "twice | relate");
         assert!(p.to_string().contains(" (def (twice) rewrite | rewrite) (def (more) twice | relate) pipeline="), "{p}");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(format!("{p:#}").contains("\n# (twice g:group) group\n(def (twice) rewrite | rewrite)\n"));
@@ -2800,7 +2805,7 @@ times = extra + 1 # a new variable
             ("(def (split_runs) id)", "the name of a variable"),
             ("(def @inline (prepass) id)", "replaced only by (def (prepass) p)"),
             ("(let polish id)", "replaced only by"),
-            ("(def (sub/nope) id)", "unknown sub/NAME"),
+            ("(def (sub_nope) id)", "unknown sub_NAME"),
             ("(def (f) prepass) (def (g) f) prepass=lowbits | g", "prepass reaches itself"),
             ("(def (f) polish) (def (g) (if mixed f)) polish=g", "polish reaches itself"),
             ("(def (f) egglog) (def (g) f) prepass=g", "egglog needs a simplify run and cannot be in f, which prepass calls"),
@@ -2813,7 +2818,7 @@ times = extra + 1 # a new variable
             let e = Passes::parse(bad).unwrap_err();
             assert!(e.contains(msg), "{bad}: {e}");
         }
-        for ok in ["(def (f) egglog) pipeline=f | polish", "(def (f) rewrite | relate) sub/cluster=f", "(def @inline (g) id) (def @inline (g) rewrite) prepass=g", "(def (f) (save t) | (load t)) prepass=(save t) | f | (load t)"] {
+        for ok in ["(def (f) egglog) pipeline=f | polish", "(def (f) rewrite | relate) sub_cluster=f", "(def @inline (g) id) (def @inline (g) rewrite) prepass=g", "(def (f) (save t) | (load t)) prepass=(save t) | f | (load t)"] {
             assert!(Passes::parse(ok).is_ok(), "{ok}");
         }
         let warn = |s: &str| Passes::parse_noting(s).unwrap().1;
@@ -2827,7 +2832,7 @@ times = extra + 1 # a new variable
     fn explicit_parameters() {
         let spec = "(def @pipe (f p g) g | p) (def (twice p g) (p (p g))) (def @pipe (big k g) (size (main g)) > k) prepass=(f rewrite) | (save t) | u = (twice relate t) | (if (big 3) (load u))";
         let p = Passes::parse(spec).unwrap();
-        let sigs: Vec<String> = p.defs.iter().map(|d| lang::sig_of(d).decl()).collect();
+        let sigs: Vec<String> = p.defs[p.default_defs..].iter().map(|d| lang::sig_of(d).decl()).collect();
         assert_eq!(sigs, ["(extern @pipe (f p:pipe g:group) group)", "(extern (twice p:pipe g:group) group)", "(extern @pipe (big k:num g:group) num)"]);
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
@@ -2863,7 +2868,7 @@ times = extra + 1 # a new variable
     fn pipelines_that_give_a_number() {
         let spec = "(def (f) rewrite | size) (def @pipe (h g) g | lowbits | size > 3) (def @inline @pipe (k p g) g | p | (union id g)) prepass=split_runs = (rewrite | size) | (if ((t = rewrite | size) < f) (k (t | rewrite))) | (filter (h (lowbits | unshift)))";
         let p = Passes::parse(spec).unwrap();
-        let sigs: Vec<String> = p.defs.iter().map(|d| lang::sig_of(d).decl()).collect();
+        let sigs: Vec<String> = p.defs[p.default_defs..].iter().map(|d| lang::sig_of(d).decl()).collect();
         assert_eq!(sigs, ["(extern @pipe (f g:group) num)", "(extern @pipe (h g:group) num)", "(extern @pipe (k p:pipe g:group) group)"]);
         let s = p.to_string();
         for part in ["(def (f) rewrite | size)", "(def @pipe (h g) g | lowbits | size > 3)", "(def @inline @pipe (k p g) g | p | (union id g))", "split_runs = (rewrite | size)", "(if ((t = rewrite | size) < f) (k (t | rewrite)))", "(filter (h (lowbits | unshift)))"] {
@@ -2906,9 +2911,9 @@ times = extra + 1 # a new variable
     fn def_parameters() {
         let spec = "(def (try_without name p) (best 1 p ((off name) | p))) (def (hold r p) p | (union id (load r))) prepass=(try_without relate rewrite) | (save t) | (hold t (lowbits | rewrite))";
         let p = Passes::parse(spec).unwrap();
-        let sigs: Vec<String> = p.defs.iter().map(|d| lang::sig_of(d).to_string()).collect();
+        let sigs: Vec<String> = p.defs[p.default_defs..].iter().map(|d| lang::sig_of(d).to_string()).collect();
         assert_eq!(sigs, ["(try_without name:name p:pipe g:group) group", "(hold r:group p:pipe g:group) group"]);
-        assert_eq!(p.prepass.to_string(), "(try_without relate rewrite) | (save t) | (hold t (lowbits | rewrite))");
+        assert_eq!(p.prepass.to_string(), "(try_without relate rewrite) | (save t) | (hold t lowbits | rewrite)");
         let Pipe::Seq(steps) = &p.prepass else { panic!() };
         let Some((c, _)) = steps[0].call() else { panic!() };
         assert_eq!(c.body.to_string(), "(best 1 p ((off relate) | p))", "a call has its name arguments in place");
@@ -2928,7 +2933,7 @@ times = extra + 1 # a new variable
         for ok in [
             "(def (f a b) (load a) | (load b)) prepass=(save t) | (f t t)",
             "(def (f p) (save t) | p | (load t)) prepass=(save t) | (f ((load t) | rewrite))",
-            "(def (f r) (tag r id) | (cand r id) | (smaller r id) | (egglog r)) pipeline=(f x)",
+            "(def (f r) (tag r id) | (origin r id) | (smaller r id) | (egglog r)) pipeline=(f x)",
             "(def (f r) (if ((size (main r)) > 1 && (same (main r))) id) | (label r)) prepass=(save t) | (f t)",
         ] {
             assert!(Passes::parse(ok).is_ok(), "{ok}: {:?}", Passes::parse(ok).err());
@@ -2997,7 +3002,7 @@ times = extra + 1 # a new variable
     fn numeric_parameters() {
         let spec = "(def (with_budget n p) rewrites = n | p) (def (if_small k p) (if (size <= k) p)) (def (g q) q | rewrite)             (def (f n) (if_small (n * 2) (g ((filter (size <= n)) | (with_budget (n + 1) rewrite)))))             (def @inline (lim n p) split_runs = n | p) (def @inline (lim2 n p) (split_runs = n | p))             prepass=(f 3) | (lim none id) | (lim2 (size - 1) (with_budget 8 rewrite))";
         let p = Passes::parse(spec).unwrap();
-        let sigs: Vec<String> = p.defs.iter().map(|d| lang::sig_of(d).to_string()).collect();
+        let sigs: Vec<String> = p.defs[p.default_defs..].iter().map(|d| lang::sig_of(d).to_string()).collect();
         assert_eq!(sigs[0], "(with_budget n:num p:pipe g:group) group");
         assert_eq!(sigs[3], "(f n:num g:group) group");
         assert_eq!(sigs[4], "(lim n:num p:pipe g:group) group", "an @inline function with a numeric parameter is a function too");
@@ -3006,6 +3011,6 @@ times = extra + 1 # a new variable
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
         let plain = Passes::parse("(def @inline (g p) p | relate) prepass=(g rewrite)").unwrap();
-        assert!(plain.defs.is_empty(), "an @inline function without a numeric parameter is expanded");
+        assert!(plain.defs.len() == plain.default_defs, "an @inline function without a numeric parameter is expanded");
     }
 }

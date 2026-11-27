@@ -35,7 +35,8 @@
 # cut nor counts in time_limit/skipped.
 # @switch: a pass over one term with a switch of its name, on until `(off NAME)` or
 # `NAME = 0` turns it off (also off=NAME); the Rust code lists them in sched::INNER, with
-# the switches of parts of passes (semi/shapes, poly/masked, ...).
+# the switches of steps inside passes (semi_shapes, poly_masked, ...), which default.pipe
+# defines.
 # The comment line right before a declaration is its description.
 
 # Combinators and forms with arguments.
@@ -64,8 +65,8 @@
 (extern @pipe (again p:pipe g:group) group)
 # p timed as n/run; a changed main candidate is counted in n/won and gets origin n.
 (extern @pipe (tag n:name p:pipe g:group) group)
-# A pre-pass candidate: none when n is a pre entry turned off, else p with origin n.
-(extern @pipe (cand n:name p:pipe g:group) group)
+# p with origin n on every candidate, timed as pre/n/made (a pre-pass candidate, cand).
+(extern @pipe (origin n:name p:pipe g:group) group)
 # p taken only when its main candidate is smaller than the input's, with origin n.
 (extern @pipe (smaller n:name p:pipe g:group) group)
 # p repeated while a smaller inside takes a result, until n are taken.
@@ -189,25 +190,25 @@
 # Polish passes, used in the polish pipeline.
 
 # Complements pushed inward.
-(extern @pipe (polish/push_not t:term) term)
+(extern @pipe (polish_push_not t:term) term)
 # Pairs of leaves rebuilt together with the constants.
-(extern @pipe (polish/join_constants t:term) term)
+(extern @pipe (polish_join_constants t:term) term)
 # Leaves moved between linear groups.
-(extern @pipe (polish/join_linear t:term) term)
+(extern @pipe (polish_join_linear t:term) term)
 # over_const_bitwise as a polish pass.
-(extern @pipe (polish/over_const_bitwise t:term) term)
+(extern @pipe (polish_over_const_bitwise t:term) term)
 # over_shared_bitwise as a polish pass.
-(extern @pipe (polish/over_shared_bitwise t:term) term)
+(extern @pipe (polish_over_shared_bitwise t:term) term)
 # over_products as a polish pass.
-(extern @pipe (polish/over_products t:term) term)
+(extern @pipe (polish_over_products t:term) term)
 # recombine, skipped where a product selects by one bit.
-(extern @pipe (polish/recombine t:term) term)
+(extern @pipe (polish_recombine t:term) term)
 # Rebuilds by cases on variable shift amounts.
-(extern @pipe (polish/shift_cases t:term) term)
+(extern @pipe (polish_shift_cases t:term) term)
 # Bitwise parts written as g(A) op h(B).
-(extern @pipe (polish/decompose t:term) term)
+(extern @pipe (polish_decompose t:term) term)
 # Terms of one coefficient summed under it.
-(extern @pipe (polish/factor t:term) term)
+(extern @pipe (polish_factor t:term) term)
 
 # Number functions: features of the main candidate.
 

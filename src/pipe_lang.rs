@@ -34,7 +34,20 @@ fn name_start(c: char) -> bool {
 }
 
 fn name_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_' || c == '/'
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// The error for `w`, a word `a/b` written without spaces, when it is an old name with `/`:
+/// a one-name function or macro written `save/t`, or a name known with `_` (`polish/factor`).
+pub fn slash_name(w: &str) -> Option<String> {
+    let (h, r) = w.split_once('/')?;
+    let one_name = |h: &str| builtins::get(h).is_some_and(|s| matches!(s.params.as_slice(), [p] if matches!(p.ty, Ty::Group | Ty::Name)));
+    if !r.is_empty() && !r.contains('/') && (one_name(h) || h == "on" || h == "off") {
+        return Some(format!("write {w} as ({h} {r})"));
+    }
+    let joined = w.replace('/', "_");
+    let known = known_name(&joined) || defined_builtin(&joined) || joined.starts_with("sub_");
+    known.then(|| format!("names cannot contain '/': write {joined}"))
 }
 
 fn lex(s: &str) -> Result<Vec<Tok>, String> {
@@ -85,6 +98,13 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
             }
             c if name_start(c) => {
                 let len = cs[i..].iter().take_while(|c| name_char(**c)).count();
+                let mut end = i + len;
+                while cs.get(end) == Some(&'/') && cs.get(end + 1).is_some_and(|c| name_start(*c)) {
+                    end += 1 + cs[end + 1..].iter().take_while(|c| name_char(**c)).count();
+                }
+                if let Some(e) = slash_name(&cs[i..end].iter().collect::<String>()) {
+                    return Err(e);
+                }
                 (Tok::Name(cs[i..i + len].iter().collect()), len)
             }
             _ if s.contains("(extern") => return Err(NO_EXTERN.into()),
@@ -1684,12 +1704,9 @@ fn bare(n: &str) -> Result<Pipe, String> {
             _ => construct(n, vec![Arg::Absent; s.params.len()]).ok_or_else(|| unimplemented(s)),
         };
     }
-    // `save/t` for `(save t)`: a function of one name, or a macro.
-    let one_name = |h: &str| builtins::get(h).is_some_and(|s| matches!(s.params.as_slice(), [p] if matches!(p.ty, Ty::Group | Ty::Name)));
-    Err(match n.split_once('/') {
+    Err(match n {
         _ if n == "extern" => NO_EXTERN.into(),
         _ if builtins::MACROS.contains(&n) => format!("{n} needs parentheses: ({n} ...)"),
-        Some((h, r)) if one_name(h) || h == "on" || h == "off" => format!("write {n} as ({h} {r})"),
         _ if var_index(n).is_some() => format!("{n} is a variable, not a step: assign it with {n} = VALUE, or read it in an expression"),
         _ => format!("unknown pass {n}; known: {}", builtins::step_names().join(" ")),
     })
@@ -1750,9 +1767,9 @@ pub fn parse_with(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Pipe, 
 
 /// Whether `name` is a function the Rust code defines and calls, which `(def (NAME) p)`
 /// (written also `NAME=p`) replaces: `pipeline`, `prepass`, `polish`, `rewrite`, `simba`,
-/// `sub/NAME`.
+/// `sub_NAME`.
 pub fn defined_builtin(name: &str) -> bool {
-    ["pipeline", "prepass", "polish", "rewrite", "simba"].contains(&name) || name.strip_prefix("sub/").is_some_and(|n| crate::sched::SUBS.iter().any(|(s, _)| *s == n))
+    ["pipeline", "prepass", "polish", "rewrite", "simba"].contains(&name) || name.strip_prefix("sub_").is_some_and(|n| crate::sched::SUBS.iter().any(|(s, _)| *s == n))
 }
 
 /// Parses a definition item: `(let NAME p)`, `(def @inline (NAME) p)`, which `NAME` then
@@ -1830,9 +1847,9 @@ fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition
     if !replaces && (var_index(&name).is_some() || function.is_some() || name == "none") {
         return Err(format!("{what}: the name of a variable or function"));
     }
-    if kind == DefKind::Run && name.starts_with("sub/") && !replaces {
+    if kind == DefKind::Run && name.starts_with("sub_") && !replaces {
         let names: Vec<&str> = crate::sched::SUBS.iter().map(|(n, _)| *n).collect();
-        return Err(format!("{what}: unknown sub/NAME; known: {}", names.join(" ")));
+        return Err(format!("{what}: unknown sub_NAME; known: {}", names.join(" ")));
     }
     match defs.get(&name) {
         Some(d) if d.run => return Err(format!("{what}: {name} is already a function (def ({name}) ...)")),
@@ -2304,6 +2321,14 @@ fn app_args<'p>(b: &crate::pipe::Builtin, args: &'p [Pipe]) -> Vec<(&'p Pipe, Op
         .collect()
 }
 
+/// The position of the parameter of `params` that a call reads up to `)`, as a built-in's: the
+/// last one when it is the only pipeline parameter (written without parentheses unless it
+/// starts with a group value, which would read as the input).
+fn read_to_close(params: &[Param]) -> Option<usize> {
+    let last = params.len().checked_sub(1)?;
+    (params.iter().filter(|p| p.ty.is_step()).count() == 1 && params[last].ty.is_step() && params[last].rep == Rep::One).then_some(last)
+}
+
 /// An argument of a step that is not a pipeline.
 fn show_fixed(a: &Pipe) -> String {
     match a {
@@ -2340,7 +2365,8 @@ pub fn show(p: &Pipe) -> String {
         Pipe::Seq(ps) => form("seq", &stages(ps)),
         Pipe::Expanded(m) => form(m.head, &m.args.iter().map(show).collect::<Vec<_>>()),
         Pipe::App(Fun::Def(c), args) => {
-            let all: Vec<String> = args.iter().zip(&c.def.params).map(|(a, p)| show_call_arg(a, p)).chain(args.get(c.def.params.len()).map(stage)).collect();
+            let last = read_to_close(&c.def.params);
+            let all: Vec<String> = args.iter().zip(&c.def.params).enumerate().map(|(i, (a, p))| if Some(i) == last && !starts_with_value(a) { show(a) } else { show_call_arg(a, p) }).chain(args.get(c.def.params.len()).map(stage)).collect();
             if all.is_empty() { c.def.name.clone() } else { form(&c.def.name, &all) }
         }
         Pipe::Var(Slot::Param(_, n) | Slot::Local(n, _)) | Pipe::Name(n) => n.clone(),
@@ -2406,7 +2432,8 @@ fn pretty_at(p: &Pipe, indent: usize) -> String {
         Pipe::App(Fun::Def(c), args) if !args.is_empty() && args.len() <= c.def.params.len() => {
             let params = &c.def.params;
             let names = params.iter().take_while(|p| matches!(p.ty, Ty::Name | Ty::Num)).count();
-            let pipes: Vec<(&Pipe, bool)> = args[names..].iter().zip(&params[names..]).filter(|(_, p)| p.ty.is_step()).map(|(q, _)| (q, true)).collect();
+            let last = read_to_close(params);
+            let pipes: Vec<(&Pipe, bool)> = args.iter().zip(params).enumerate().skip(names).filter(|(_, (_, p))| p.ty.is_step()).map(|(i, (q, _))| (q, Some(i) != last || starts_with_value(q))).collect();
             if names + pipes.len() < args.len() {
                 return one;
             }
@@ -2435,9 +2462,10 @@ mod tests {
     #[test]
     fn defaults_read_back() {
         let d = Passes::default();
-        for p in [&d.pipeline, &d.prepass, &d.polish, &d.rewrite, &d.simba] {
-            assert_eq!(&parse(&show(p)).unwrap(), p, "{}", show(p));
-            assert_eq!(&parse(&pretty(p)).unwrap(), p, "{}", pretty(p));
+        for (name, p) in [("pipeline", &d.pipeline), ("prepass", &d.prepass), ("polish", &d.polish), ("rewrite", &d.rewrite), ("simba", &d.simba)] {
+            for s in [show(p), pretty(p)] {
+                assert_eq!(Passes::parse(&format!("{name}={s}")).unwrap(), d, "{s}");
+            }
         }
     }
 
@@ -2553,7 +2581,7 @@ mod tests {
             "rewrites = none | relate = 0 | cut = 1 | time_limit = (size (main t)) * 10 | rewrite",
             "(if mixed semi_leaves = 2 (time_limit = none | rewrite))",
             "(best 1 (bit_split_budget = cand_bit_splits | rewrite) (time_limit = time_limit / 2 | rewrite))",
-            "semi/shapes = 0 | rewrite",
+            "semi_shapes = 0 | rewrite",
             "keep = 1 | restarts = restarts - 1 | iter_limit = 3 | match_limit = 8 | prove_minimal = 0 | rewrite",
             "(if (rerun_input && printed && !relate) id)",
             "split_runs = relate + cut | rewrite",
@@ -2659,6 +2687,11 @@ mod tests {
             ("off", "off needs parentheses"),
             ("egglog/x", "write egglog/x as (egglog x)"),
             ("label/b", "write label/b as (label b)"),
+            ("off/relate | rewrite", "write off/relate as (off relate)"),
+            ("polish/factor", "names cannot contain '/': write polish_factor"),
+            ("(smaller polish/factor polish_factor)", "names cannot contain '/': write polish_factor"),
+            ("semi/bit_split = 0 | rewrite", "names cannot contain '/': write semi_bit_split"),
+            ("(if poly/masked id)", "names cannot contain '/': write poly_masked"),
             ("extern", NO_EXTERN),
             ("(extern (x g:group) group)", NO_EXTERN),
             ("rewrite = 1", "rewrite is a function and cannot be assigned: (rewrite t:term) term"),
@@ -2672,19 +2705,27 @@ mod tests {
     }
 
     #[test]
+    fn a_slash_between_names_divides() {
+        let same = |a: &str, b: &str| assert_eq!(parse(a).unwrap(), parse(b).unwrap(), "{a}");
+        same("split_runs = split_runs/2 | rewrite", "split_runs = split_runs / 2 | rewrite");
+        same("(if (size/2 > vars/3) id)", "(if (size / 2 > vars / 3) id)");
+        assert!(lex("semi_shapes").unwrap() == [Tok::Name("semi_shapes".into())] && lex("a/b").unwrap().len() == 3, "names have no /");
+    }
+
+    #[test]
     fn let_names_are_not_variables_or_functions() {
         let def = |s: &str| parse_definition(s, &Defs::new(), &mut Vec::new()).map(|d| d.name);
         assert_eq!(def("(let g rewrite | relate)").unwrap(), "g");
         assert_eq!(def("(def (g) rewrite | relate)").unwrap(), "g");
         assert_eq!(def("(def @inline (g) rewrite | relate)").unwrap(), "g");
-        for name in ["split_runs", "relate_parts", "time_limit", "mixed", "mul", "size", "same", "none", "pipeline", "sub/cluster", "rewrite", "fix", "on", "def", "extern"] {
+        for name in ["split_runs", "relate_parts", "time_limit", "mixed", "mul", "size", "same", "none", "pipeline", "sub_cluster", "rewrite", "fix", "on", "def", "extern"] {
             assert!(def(&format!("(let {name} id)")).is_err(), "{name}");
             assert!(def(&format!("(def @inline ({name}) id)")).is_err(), "{name}");
         }
-        for name in ["split_runs", "mixed", "size", "none", "lowbits", "fix", "on", "def", "sub/nope", "id"] {
+        for name in ["split_runs", "mixed", "size", "none", "lowbits", "fix", "on", "def", "sub_nope", "id"] {
             assert!(def(&format!("(def ({name}) id)")).is_err(), "{name}");
         }
-        for name in ["pipeline", "prepass", "polish", "rewrite", "simba", "sub/cluster"] {
+        for name in ["pipeline", "prepass", "polish", "rewrite", "simba", "sub_cluster"] {
             assert_eq!(def(&format!("(def ({name}) id)")).unwrap(), name, "a defined function of the Rust code is replaced");
         }
         for (bad, msg) in [("(def (f x) id)", "parameter x is never used"), ("(def @pure (f) id)", "unknown attribute @pure"), ("(def f id)", "expected (NAME)"), ("(def (f) id id)", "expected )")] {
@@ -2830,12 +2871,12 @@ mod tests {
     fn smallest_notes_arguments_but_not_bodies_of_calls() {
         let passes = |spec: &str| Passes::parse(spec).unwrap_or_else(|e| panic!("{spec}: {e}"));
         let p = passes("(def (f p) rewrite | p) prepass=(smallest (f tfunc) | relate)");
-        assert_eq!(expansion(&p.prepass), "(clear s) | (f (tfunc | (note s))) | (note s) | relate | (note s) | (take_min s)");
+        assert_eq!(expansion(&p.prepass), "(clear s) | (f tfunc | (note s)) | (note s) | relate | (note s) | (take_min s)");
         let Pipe::Expanded(m) = &p.prepass else { unreachable!() };
         let Some((c, _)) = m.steps[1].call() else { unreachable!() };
         assert_eq!(show(&c.body), "rewrite | p", "the body of a def is a run of its own");
         let p = passes("(def @inline (g n p) (if (size > n) rewrite) | p) prepass=(smallest (g 1 tfunc))");
-        assert_eq!(expansion(&p.prepass), "(clear s) | (g 1 (tfunc | (note s))) | (take_min s)");
+        assert_eq!(expansion(&p.prepass), "(clear s) | (g 1 tfunc | (note s)) | (take_min s)");
         let Pipe::Expanded(m) = &p.prepass else { unreachable!() };
         let Some((c, _)) = m.steps[1].call() else { unreachable!() };
         let body = show(&c.body).replace(|c: char| c.is_ascii_digit(), "");

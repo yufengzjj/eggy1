@@ -2,7 +2,7 @@
 //! (`--stats`, or `bench` with `EGGY_STATS`); off, every call here returns at once.
 //!
 //! Keys: `pre/NAME/...` pre-pass candidates, `egglog/...` and `round/...` rounds,
-//! `polish/NAME/run|won|gain`, `final/ORIGIN`, and `pass/NAME` for the passes inside a
+//! `polish_NAME/run|won|gain`, `final/ORIGIN`, and `pass/NAME` for the passes inside a
 //! rebuild: its time includes the passes it calls, `pass/NAME/self` has the time without
 //! them, `pass/NAME/smaller` counts results smaller than the pass's input, `pass/NAME/won`
 //! results kept among alternatives, and `pass/NAME/gain` sums the nodes a pass saved: for

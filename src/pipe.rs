@@ -2,7 +2,7 @@
 //! first is the main one) to another; an expression gives a number for a list. A built-in
 //! function runs through its entry of `BUILTINS`, which converts the input as its calling
 //! kind says (`builtins::Kind`): a pass over one term (`linear_mba::TERM_PASSES`, the polish
-//! passes as `polish/NAME`) runs on each candidate and replaces it by its result, the other
+//! passes as `polish_NAME`) runs on each candidate and replaces it by its result, the other
 //! steps take the list whole.
 
 use crate::builtins::{Sig, Ty};
@@ -110,7 +110,7 @@ pub fn builtin(name: &str) -> Option<&'static Builtin> {
 }
 
 /// The Rust code of the built-in function `name`: `IMPLS`, the passes over one term, or the
-/// polish passes (`polish/NAME`).
+/// polish passes (`polish_NAME`).
 fn implementation(name: &str) -> Option<Impl> {
     if let Some((_, imp)) = IMPLS.iter().find(|(n, _)| *n == name) {
         return Some(*imp);
@@ -121,7 +121,7 @@ fn implementation(name: &str) -> Option<Impl> {
             None => Impl::Each(*f),
         });
     }
-    let (_, f) = linear_mba::POLISH.iter().find(|(n, _)| name.strip_prefix("polish/") == Some(n))?;
+    let (_, f) = linear_mba::POLISH.iter().find(|(n, _)| name.strip_prefix("polish_") == Some(n))?;
     Some(Impl::Polish(*f))
 }
 
@@ -139,7 +139,7 @@ const IMPLS: &[(&str, Impl)] = &[
     ("regions", Impl::Group(regions)),
     ("again", Impl::Group(again)),
     ("tag", Impl::Group(tag)),
-    ("cand", Impl::Group(cand)),
+    ("origin", Impl::Group(origin)),
     ("smaller", Impl::Group(smaller)),
     ("wins", Impl::Group(wins)),
     ("filter", Impl::Group(|a, set, env| Ok(set.into_iter().filter(|x| env.holds(&a[0], std::slice::from_ref(x))).collect()))),
@@ -230,18 +230,8 @@ pub fn step_name(f: &str, args: &[Pipe]) -> String {
     }
 }
 
-/// The step of the internal name `name`: a built-in step called without arguments,
-/// `save/R` for `(save R)`, `egglog/L` for `(egglog L)`, `off/NAME` for `(off NAME)`.
+/// The step a built-in function `name` called without arguments is.
 pub fn resolve(name: &str) -> Option<Pipe> {
-    if let Some((h, r)) = name.split_once('/').filter(|(h, r)| !r.is_empty() && ["save", "load", "label", "clear", "note", "take_min", "egglog"].contains(h)) {
-        return Some(Pipe::app(h, vec![Pipe::Name(r.to_string())]));
-    }
-    if let Some(n) = name.strip_prefix("off/") {
-        return crate::sched::switch(n).map(|n| crate::sched::Expanded::switches(false, &[n]));
-    }
-    if let Some(n) = name.strip_prefix("on/") {
-        return crate::sched::switch(n).map(|n| crate::sched::Expanded::switches(true, &[n]));
-    }
     let b = builtin(name).filter(|b| !matches!(b.imp, Impl::Form | Impl::Missing) && !b.sig.is_number() && !b.sig.required())?;
     Some(Pipe::App(Fun::Builtin(b), Vec::new().into()))
 }
@@ -1035,17 +1025,11 @@ fn tag(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
     Ok(out)
 }
 
-fn cand(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+fn origin(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
     let [n, p] = args else { unreachable!() };
     let name = name(n);
-    if crate::sched::PRE.contains(&name) && !env.passes.pre_on(name) {
-        return Ok(Vec::new());
-    }
     let clock = std::time::Instant::now();
-    let out = scoped(|| {
-        crate::sched::bind(crate::sched::BIT_SPLIT_BUDGET, limit(Limit::CandBitSplits) as u64);
-        go(p, set, env)
-    })?;
+    let out = go(p, set, env)?;
     stats::add(&format!("pre/{name}/made"), stats::since(clock));
     Ok(out.into_iter().map(|c| Cand { origin: name.to_string(), ..c }).collect())
 }
@@ -1586,11 +1570,33 @@ mod tests {
             assert_eq!(get(REWRITES), 9);
             step("rewrites = none");
             assert_eq!(get(REWRITES), NONE);
-            step("(cand x (bit_split_budget = bit_split_budget + 1))");
-            assert_eq!(get(BIT_SPLIT_BUDGET), NONE, "cand is a scope");
+            step("(origin x (bit_split_budget = bit_split_budget + 1))");
+            assert_eq!(get(BIT_SPLIT_BUDGET), NONE, "a pipeline argument is a scope");
         });
         assert_eq!(get(crate::sched::var_index("split_runs").unwrap()), NONE);
         assert!(!is_off("relate") && get(crate::sched::CUT) == NONE);
+    }
+
+    #[test]
+    fn cand_is_defined_in_the_language() {
+        let x = "(Sub (Var \"x\") (Var \"y\"))";
+        let run = |spec: &str| {
+            let p = Passes::parse(&format!("prepass={spec}")).unwrap();
+            let env = Env::prepass(&p, 32, None, false, x);
+            PRINTED.with(|l| l.borrow_mut().clear());
+            let out = in_run(&p, None, || Cand::new(x, "input"), || go(&p.prepass, vec![Cand::new(x, "input")], &env).unwrap());
+            (out.iter().map(|c| c.origin.clone()).collect::<Vec<_>>(), PRINTED.with(|l| l.take()))
+        };
+        assert_eq!(run("(cand pre_unified unified (print bit_split_budget) | rewrite)"), (vec!["unified".to_string()], vec!["8".to_string()]), "origin n, bit_split_budget = cand_bit_splits inside");
+        assert_eq!(run("(cand pre_unified unified (print bit_split_budget)) | (print bit_split_budget)"), (vec!["unified".to_string()], vec!["8".to_string(), "none".to_string()]), "the budget ends with cand");
+        assert_eq!(run("pre_unified = 0 | (cand pre_unified unified (print 1))"), (vec![], vec![]), "a switch at 0 gives none and runs nothing");
+        assert_eq!(run("(cand 1 first id) | (origin second id)"), (vec!["second".to_string()], vec![]));
+        for off in ["1", "0"] {
+            assert_eq!(run(&format!("pre_unified = {off} | time_limit = 0 | (cand pre_unified unified none)")).0, ["input"], "skipped past the time limit, as a step");
+        }
+        let p = Passes::parse("pre=no_wide").unwrap();
+        let on = |n: &str| in_run(&p, None, || Cand::new(x, "input"), || crate::sched::get(crate::sched::var_index(n).unwrap()));
+        assert_eq!((on("pre_unified"), on("pre_no_wide"), on("pre_halve_input")), (0, 1, 0), "pre= is an assignment to the pre_ switches");
     }
 
     #[test]
@@ -1839,7 +1845,7 @@ mod tests {
         assert_eq!(step(&format!("{pick} prepass=(pick vars)")), [SUB]);
         let spec = format!("{pick} {under} {each} {keep_if} prepass=f:term->num = (size <= 5) | g:term->term = rewrite | (each g) | (keep_if f) | (filter (under 5)) | (pick size)");
         let p = Passes::parse(&spec).unwrap();
-        let sigs: Vec<String> = p.defs.iter().map(|d| crate::pipe_lang::sig_of(d).decl()).collect();
+        let sigs: Vec<String> = p.defs[p.default_defs..].iter().map(|d| crate::pipe_lang::sig_of(d).decl()).collect();
         assert_eq!(sigs, ["(extern @pipe (pick pred:group->num g:group) group)", "(extern @pipe (under k:num t:term) num)", "(extern @pipe (each f:term->term g:group) group)", "(extern @pipe (keep_if pred:term->num g:group) group)"]);
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p, "{p}");
         for (bad, msg) in [
@@ -2078,7 +2084,7 @@ mod tests {
             assert!(runs_as_declared, "{}: no implementation for its calling kind", b.sig.decl());
         }
         let term = linear_mba::TERM_PASSES.iter().map(|(n, _)| n.to_string());
-        let polish = linear_mba::POLISH.iter().map(|(n, _)| format!("polish/{n}"));
+        let polish = linear_mba::POLISH.iter().map(|(n, _)| format!("polish_{n}"));
         let mut rust: Vec<String> = IMPLS.iter().map(|(n, _)| n.to_string()).chain(term).chain(polish).collect();
         for n in &rust {
             assert!(builtin(n).is_some(), "{n} has no extern in src/builtins.pipe");

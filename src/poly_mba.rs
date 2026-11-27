@@ -824,7 +824,7 @@ pub(crate) fn simplify_poly(t: &T, w: &Ctx) -> Option<T> {
     }
     use crate::stats;
     let mut ctx = Expansion::new(w, Vec::new());
-    let (p, q) = stats::time("poly/expand", || {
+    let (p, q) = stats::time("poly_expand", || {
         let p = ctx.poly(t)?;
         let q = ctx.reduce_null(&p);
         Some((p, q))
@@ -837,7 +837,7 @@ pub(crate) fn simplify_poly(t: &T, w: &Ctx) -> Option<T> {
     if p.len().min(q.len()) > limit(Limit::PolyBranchMonos) {
         ctx.builds.set(ctx.lim.builds);
     }
-    let r = stats::time("poly/build", || ctx.build(if q.len() < p.len() { &q } else { &p }, true));
+    let r = stats::time("poly_build", || ctx.build(if q.len() < p.len() { &q } else { &p }, true));
     // As many monomials, but a null polynomial can have made coefficients huge (`2^63·y` beside
     // a factor that keeps the rest even).
     let huge = |p: &Poly| p.values().any(|&c| w.signed(c).unsigned_abs() >= 1 << (w.w - 2));
@@ -847,9 +847,9 @@ pub(crate) fn simplify_poly(t: &T, w: &Ctx) -> Option<T> {
     } else {
         r
     };
-    let r = match stats::try_pass("poly/masked", t, || masked_poly(t, p.len().min(q.len()), w)) {
+    let r = match stats::try_pass("poly_masked", t, || masked_poly(t, p.len().min(q.len()), w)) {
         Some(m) if size(&m) < size(&r) => {
-            stats::won_among("poly/masked", &[("poly/masked", size(&m)), ("poly/build", size(&r))], size(t), &m);
+            stats::won_among("poly_masked", &[("poly_masked", size(&m)), ("poly_build", size(&r))], size(t), &m);
             m
         }
         _ => r,

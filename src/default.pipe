@@ -16,7 +16,30 @@ match_limit = 64
 ban_length = 3
 cut = 0
 relate_parts = 1
-semi/peel_shapes = 0
+
+# Switches of steps inside passes (the passes themselves are switches of their extern
+# @switch): `semi_linear`'s candidate sources and `poly_mba`'s masked expansion.
+semi_grouped = 1
+semi_peel_grouped = 1
+semi_shapes = 1
+semi_pairs = 1
+semi_peel_shapes = 0
+semi_split = 1
+semi_scaled = 1
+semi_bit_split = 1
+semi_short_consts = 1
+poly_masked = 1
+
+# The pre-pass candidates `cand` builds, by origin name (`--passes pre=a,b` sets these).
+pre_unified = 1
+pre_no_wide = 1
+pre_split_bits = 1
+pre_halve_first = 1
+pre_over_products = 1
+pre_over_const_bitwise = 1
+pre_over_shared_bitwise = 1
+pre_halve_input = 1
+pre_unclustered = 1
 
 # Every variable is none until assigned: the budgets and the deadline until a pipeline binds
 # them, `restarts` and `iter_limit` until `-m` and `-i` set them.
@@ -185,6 +208,10 @@ minimal_max_size_8bit = 5
   | (assert (minimal_lanes <= 16) "minimal_lanes is at most 16")
   | (assert (minimal_max_vars <= 31) "minimal_max_vars is at most 31"))
 
+# A pre-pass candidate with origin n, built when `enabled` (a `pre_NAME` switch, or 1) is not
+# 0, on its own budget of bit_split pairs.
+(def @inline (cand enabled:num n p) (if enabled (origin n (bit_split_budget = cand_bit_splits | p)) none))
+
 # A later round: the pre-pass rebuilds, then their extraction, or the one proved minimal.
 (let later prepass | (if minimal take_minimal (egglog later)))
 
@@ -242,11 +269,11 @@ minimal_max_size_8bit = 5
 (def (prepass)
   (scope
     (save t0) | gates | lowbits | unshift | (save t)
-    | (cand first rebuild_main)
+    | (cand 1 first rebuild_main)
     # Unified operands let the regions around them share leaves, but the rebuild of the
     # input as written is sometimes smaller; dropped once it needs `unified_rewrites` rewrites.
     | (best 1 id
-        (cand unified
+        (cand pre_unified unified
           (load t) | unify_operands | (filter !(same (main t)))
           | (rewrites = unified_rewrites
              | (first tfunc_whole (rewrite | within | cluster_regions | relate | within | tfunc)))))
@@ -255,21 +282,21 @@ minimal_max_size_8bit = 5
         # A region rebuilt by `wide_blocks` is smaller there, but the other rebuilds can
         # leave subterms the abstracted rebuilds share across terms; a larger one unioned
         # beside the first rebuild made the rules finish worse as often as better.
-        (cand no_wide
+        (cand pre_no_wide no_wide
           (if used_wide
             ((load t) | ((off wide_blocks) | rebuild_main) | (save n) | (filter (size < (size (main r)))))
             none))
-        (cand no_wide_abstracted
+        (cand 1 no_wide_abstracted
           (load n)
           | ((off wide_blocks) | (union over_const_bitwise over_shared_bitwise))
           | (filter (size < (size (main r)) && size <= (size (main n)) * 3 / 4)))
-        (cand split_bits (if fits_split (split_bits | (filter !(same (main r)))) none))
-        (cand halve_first halve | (filter !(same (main r))) | rebuild_plain)
-        (cand over_products over_products | (filter !(same (main r))))
-        (cand over_const_bitwise over_const_bitwise | (filter !(same (main r))))
-        (cand over_shared_bitwise over_shared_bitwise | (filter !(same (main r))))
+        (cand pre_split_bits split_bits (if fits_split (split_bits | (filter !(same (main r)))) none))
+        (cand pre_halve_first halve_first halve | (filter !(same (main r))) | rebuild_plain)
+        (cand pre_over_products over_products over_products | (filter !(same (main r))))
+        (cand pre_over_const_bitwise over_const_bitwise over_const_bitwise | (filter !(same (main r))))
+        (cand pre_over_shared_bitwise over_shared_bitwise over_shared_bitwise | (filter !(same (main r))))
         # Halving the whole input can give semi-linear regions that are slow to search.
-        (cand halve_input
+        (cand pre_halve_input halve_input
           (semi_leaves = 2
            | (if tiny none ((load t) | halve | (filter !(same (main t))) | rebuild_plain)))))
     # A form from abstracted subterms only a little smaller than the first rebuild, or
@@ -277,7 +304,7 @@ minimal_max_size_8bit = 5
     | finish | (save f) | (filter (!abstracted || size <= (size (main f)) * 3 / 4)) | (save b) | (label b)
     # A region rebuilt in clusters is smaller there but can leave the rules a worse start
     # than rebuilding it whole.
-    | (cand unclustered
+    | (cand pre_unclustered unclustered
         (if (used_clustered && few_rewrites)
           ((load t)
            | (if !replaceable
@@ -304,16 +331,16 @@ minimal_max_size_8bit = 5
   (scope
     rewrites = polish_rewrites
     | (wins polish_wins
-        (smaller polish/push_not polish/push_not | drop_identities)
-        | (smaller polish/join_constants polish/join_constants | drop_identities)
-        | (smaller polish/join_linear (semi_leaves = 2 | polish/join_linear | drop_identities))
-        | (smaller polish/over_const_bitwise polish/over_const_bitwise | drop_identities)
-        | (smaller polish/over_shared_bitwise polish/over_shared_bitwise | drop_identities)
-        | (smaller polish/over_products polish/over_products | drop_identities)
-        | (smaller polish/recombine polish/recombine | drop_identities)
-        | (smaller polish/shift_cases polish/shift_cases | drop_identities)
-        | (smaller polish/decompose polish/decompose | drop_identities)
-        | (smaller polish/factor polish/factor | drop_identities))))
+        (smaller polish_push_not polish_push_not | drop_identities)
+        | (smaller polish_join_constants polish_join_constants | drop_identities)
+        | (smaller polish_join_linear (semi_leaves = 2 | polish_join_linear | drop_identities))
+        | (smaller polish_over_const_bitwise polish_over_const_bitwise | drop_identities)
+        | (smaller polish_over_shared_bitwise polish_over_shared_bitwise | drop_identities)
+        | (smaller polish_over_products polish_over_products | drop_identities)
+        | (smaller polish_recombine polish_recombine | drop_identities)
+        | (smaller polish_shift_cases polish_shift_cases | drop_identities)
+        | (smaller polish_decompose polish_decompose | drop_identities)
+        | (smaller polish_factor polish_factor | drop_identities))))
 
 # The rebuild of one term, what `linear_mba::rewrite` memoizes: a linear region rebuilt by
 # the smallest of `simba`, `small_blocks` and `wide_blocks`, or else its operands

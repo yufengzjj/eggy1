@@ -12,10 +12,13 @@ fn main() {
     }
     if cli.show_builtins {
         print!("{}", eggy1::builtins::listing());
-        if !cli.passes.defs.is_empty() {
-            println!("\n# --- defined by def in --passes");
-            for d in &cli.passes.defs {
-                println!("{}", eggy1::pipe_lang::sig_of(d));
+        let (default, spec) = cli.passes.defs.split_at(cli.passes.default_defs);
+        for (from, defs) in [("src/default.pipe", default), ("--passes", spec)] {
+            if !defs.is_empty() {
+                println!("\n# --- defined by def in {from}");
+                for d in defs {
+                    println!("{}", eggy1::pipe_lang::sig_of(d));
+                }
             }
         }
         return;
