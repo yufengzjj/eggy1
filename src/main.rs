@@ -5,7 +5,9 @@ use eggy1::{simplify, Cli};
 fn main() {
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
-    if let Some(spec) = matches.get_raw("passes").and_then(|mut v| v.next()) {
+    if matches.value_source("passes") == Some(clap::parser::ValueSource::CommandLine)
+        && let Some(spec) = matches.get_raw("passes").and_then(|mut v| v.next())
+    {
         for w in eggy1::passes::Passes::parse_noting(&spec.to_string_lossy()).map(|(_, w)| w).unwrap_or_default() {
             eprintln!("--passes: warning: {w}");
         }

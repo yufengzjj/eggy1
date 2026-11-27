@@ -6,7 +6,7 @@ use super::defs::{Call, Def, DefKind, Defs, Named, has_steps, parse_definition};
 use super::host::{FLAG0, INNER, Passes, RUST_VARS, defined_builtin, is_extern_switch};
 use super::lexer::{NO_EXTERN, code_part, depth_of, slash_name};
 use super::parser::{free_name, parse_assign};
-use super::vars::{PARSED, global_slot, var, var_index};
+use super::vars::{PARSED, global_slot, parsed_defines, var_index};
 
 impl Passes {
     /// A form of `--passes` or a source file: `(let ...)` or `(def ...)`.
@@ -54,7 +54,12 @@ impl Passes {
             }
             let at = |e: String| format!("line {start}: {e}");
             depth += depth_of(code);
-            form = if form.is_empty() { code.trim().to_string() } else { format!("{form}\n{code}") };
+            if form.is_empty() {
+                form.push_str(code.trim());
+            } else {
+                form.push('\n');
+                form.push_str(code);
+            }
             if depth > 0 && form.starts_with('(') {
                 continue;
             }
@@ -81,7 +86,7 @@ impl Passes {
         if let Some(e) = slash_name(name) {
             return Err(e);
         }
-        let defined = PARSED.with(|p| p.borrow().as_ref().is_some_and(|g| g.iter().any(|i| var(*i).name == name)));
+        let defined = parsed_defines(name);
         let new = match var_index(name) {
             _ if defined => false,
             Some(i) if i < FLAG0 && is_extern_switch(INNER[i]) => false,

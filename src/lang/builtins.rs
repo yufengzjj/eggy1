@@ -51,8 +51,10 @@ pub fn parse(text: &str) -> Result<Vec<Sig>, String> {
 }
 
 fn one(text: &str) -> Result<Sig, String> {
-    let spaced = text.replace('(', " ( ").replace(')', " ) ");
-    let toks: Vec<&str> = spaced.split_whitespace().collect();
+    let toks: Vec<&str> = text.split_inclusive(['(', ')']).flat_map(|s| {
+        let (word, paren) = s.split_at(s.len() - usize::from(s.ends_with(['(', ')'])));
+        word.split_whitespace().chain((!paren.is_empty()).then_some(paren))
+    }).collect();
     let bad = || format!("expected (extern [@ATTR ...] (NAME PARAM:TYPE ... INPUT:TYPE) RESULT): {text}");
     let [open, kw, rest @ ..] = toks.as_slice() else { return Err(bad()) };
     if (*open, *kw) != ("(", "extern") {

@@ -45,12 +45,14 @@ impl Passes {
     /// not follow a `|` (so `prepass=a | split_runs=4 | b` is one item); `#` starts a comment
     /// to the end of the line.
     pub fn parse(spec: &str) -> Result<Passes, String> {
-        Passes::parse_noting(spec).map(|(p, _)| p)
+        Passes::read(spec).map(|(p, _)| p)
     }
 
-    /// `parse`, and warnings about parts of `spec` that do nothing: a `let` or `def` it defines and
-    /// never uses, and what `Passes::warnings` finds.
-    pub fn parse_noting(spec: &str) -> Result<(Passes, Vec<String>), String> {
+    /// `parse`, and the `let` and `def` names `spec` defines and uses.
+    fn read(spec: &str) -> Result<(Passes, Lets), String> {
+        if spec.trim().is_empty() {
+            return Ok((DEFAULT.0.clone(), Lets::default()));
+        }
         let (mut p, mut defs) = DEFAULT.clone();
         let mut lets = Lets::default();
         let mut globals = std::mem::take(&mut p.globals);
@@ -59,6 +61,13 @@ impl Passes {
         r?;
         p.check = check_of(&defs);
         p.check()?;
+        Ok((p, lets))
+    }
+
+    /// `parse`, and warnings about parts of `spec` that do nothing: a `let` or `def` it defines and
+    /// never uses, and what `Passes::warnings` finds.
+    pub fn parse_noting(spec: &str) -> Result<(Passes, Vec<String>), String> {
+        let (p, lets) = Passes::read(spec)?;
         // The Rust code runs `check_limits` (`Passes::check`).
         let unused = lets.defined.iter().filter(|(head, _)| head != "check_limits" && !lets.used.iter().any(|n| head.split(' ').next() == Some(n)));
         let mut notes: Vec<String> = unused

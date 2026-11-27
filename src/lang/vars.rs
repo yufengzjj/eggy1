@@ -103,14 +103,28 @@ thread_local! {
 /// The position of the variable `name`: one the Rust code reads, or one that `default.pipe` or
 /// the source files of the parse under way define.
 pub fn var_index(name: &str) -> Option<usize> {
-    if let Some(i) = (0..RUST_VARS).find(|i| rust_var(*i).0 == name) {
-        return Some(i);
+    if let Some(i) = RUST_INDEX.get(name) {
+        return Some(*i);
     }
-    let i = GLOBALS.read().unwrap().iter().position(|n| *n == name)? + RUST_VARS;
+    let i = global_position(name)?;
     match PARSED.with(|p| p.borrow().as_ref().map(|g| g.contains(&i))) {
         Some(found) => found.then_some(i),
         None => DEFAULT.0.globals.contains(&i).then_some(i),
     }
+}
+
+/// The positions of the variables the Rust code reads, by name.
+static RUST_INDEX: std::sync::LazyLock<std::collections::HashMap<&'static str, usize>> = std::sync::LazyLock::new(|| (0..RUST_VARS).rev().map(|i| (rust_var(i).0, i)).collect());
+
+/// The position of the variable past `RUST_VARS` named `name`, whichever source file defined it.
+fn global_position(name: &str) -> Option<usize> {
+    Some(GLOBALS.read().unwrap().iter().position(|n| *n == name)? + RUST_VARS)
+}
+
+/// Whether the parse under way has defined the variable `name`.
+pub(crate) fn parsed_defines(name: &str) -> bool {
+    let Some(i) = RUST_INDEX.get(name).copied().or_else(|| global_position(name)) else { return false };
+    PARSED.with(|p| p.borrow().as_ref().is_some_and(|g| g.contains(&i)))
 }
 
 /// `f` with the variables `globals` defined for `var_index`, as a parse that defines them sees

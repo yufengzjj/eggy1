@@ -100,7 +100,7 @@ pub(crate) fn lex(s: &str) -> Result<Vec<Tok>, String> {
                 while cs.get(end) == Some(&'/') && cs.get(end + 1).is_some_and(|c| name_start(*c)) {
                     end += 1 + cs[end + 1..].iter().take_while(|c| name_char(**c)).count();
                 }
-                if let Some(e) = slash_name(&cs[i..end].iter().collect::<String>()) {
+                if let Some(e) = (end > i + len).then(|| slash_name(&cs[i..end].iter().collect::<String>())).flatten() {
                     return Err(e);
                 }
                 (Tok::Name(cs[i..i + len].iter().collect()), len)
