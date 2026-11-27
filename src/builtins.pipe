@@ -23,6 +23,9 @@
 # @simplify_only: only in `pipeline`, since only a simplify run has an e-graph.
 # @uncounted: skipped past the time limit like other steps, but that neither makes the run
 # cut nor counts in time_limit/skipped.
+# @switch: a pass over one term with a switch of its name, on until `(off NAME)` or
+# `NAME = 0` turns it off (also off=NAME); the Rust code lists them in sched::INNER, with
+# the switches of parts of passes (semi/shapes, poly/masked, ...).
 # The comment line right before a declaration is its description.
 
 # Combinators and forms with arguments.
@@ -96,33 +99,33 @@
 # Passes over one term.
 
 # Known-bits reasoning: bitwise operations on known bits as additions, low bits cut.
-(extern @pipe (lowbits t:term) term)
+(extern @pipe @switch (lowbits t:term) term)
 # Shifts written as masks, so regions become semi-linear.
-(extern @pipe (unshift t:term) term)
+(extern @pipe @switch (unshift t:term) term)
 # The whole term replaced by a smaller T-function form.
-(extern @pipe (tfunc_whole t:term) term)
+(extern @pipe @switch (tfunc_whole t:term) term)
 # The rewrite pipeline, memoized.
 (extern @pipe (rewrite t:term) term)
 # rewrite, counted apart.
 (extern @pipe (rewrite_top t:term) term)
 # Each region of the term rebuilt in clusters of the leaves its terms use.
-(extern @pipe (cluster_regions t:term) term)
+(extern @pipe @switch (cluster_regions t:term) term)
 # cluster_regions, counted apart.
 (extern @pipe (cluster_top t:term) term)
 # Arithmetic leaves of bitwise operations replaced by placeholders and related to the region.
-(extern @pipe (relate t:term) term)
+(extern @pipe @switch (relate t:term) term)
 # Subterms replaced by smaller T-function forms.
-(extern @pipe (tfunc t:term) term)
+(extern @pipe @switch (tfunc t:term) term)
 # Operands of bitwise operations written alike, so regions share more leaves.
-(extern @pipe (unify_operands t:term) term)
+(extern @pipe @switch (unify_operands t:term) term)
 # Sums of two products joined back into one product.
-(extern @pipe (recombine t:term) term)
+(extern @pipe @switch (recombine t:term) term)
 # Constants of product factors cut below the other factor's trailing zeros.
-(extern @pipe (cut_products t:term) term)
+(extern @pipe @switch (cut_products t:term) term)
 # 2^k*(a ^ K) + c written as (2^k*a) ^ (2^k*K + c).
-(extern @pipe (shifted_xor t:term) term)
+(extern @pipe @switch (shifted_xor t:term) term)
 # The lowbits steps for rebuilt terms only, such as cut multipliers.
-(extern @pipe (simplify_rebuilt t:term) term)
+(extern @pipe @switch (simplify_rebuilt t:term) term)
 # The end of a pre-pass rebuild: recombine, cut_products, shifted_xor, then lowbits.
 (extern @pipe (finish t:term) term)
 # Operands 2^k*a + c of bitwise operations split into high and low parts.
@@ -143,31 +146,31 @@
 # Alternatives: each gives no candidate when it finds no form.
 
 # The simba pipeline on a linear region.
-(extern @pipe (simba t:term) term?)
+(extern @pipe @switch (simba t:term) term?)
 # One bitwise term per block of at most 3 leaves of the conjunction basis.
-(extern @pipe (small_blocks t:term) term?)
+(extern @pipe @switch (small_blocks t:term) term?)
 # Block rebuild of a wide region.
-(extern @pipe (wide_blocks t:term) term?)
+(extern @pipe @switch (wide_blocks t:term) term?)
 # Polynomial MBA: expanded, reduced and factored.
-(extern @pipe (poly_mba t:term) term?)
+(extern @pipe @switch (poly_mba t:term) term?)
 # The leaves the values do not depend on set to 0, then rewritten.
-(extern @pipe (drop_unused t:term) term?)
+(extern @pipe @switch (drop_unused t:term) term?)
 # Terms grouped by the leaves they use, each group rebuilt.
-(extern @pipe (clustered t:term) term?)
+(extern @pipe @switch (clustered t:term) term?)
 # One term peeled off and the rest rebuilt.
-(extern @pipe (peel t:term) term?)
+(extern @pipe @switch (peel t:term) term?)
 # peel on the clustered form.
-(extern @pipe (peel_clustered t:term) term?)
+(extern @pipe @switch (peel_clustered t:term) term?)
 # Bit-by-bit rebuild of a region with constant masks.
-(extern @pipe (semi_linear t:term) term?)
+(extern @pipe @switch (semi_linear t:term) term?)
 # Rebuild from the region's values on {0,1}^n.
-(extern @pipe (rebuild_values t:term) term?)
+(extern @pipe @switch (rebuild_values t:term) term?)
 # A common multiple c*(v_1 + ... + v_k) of close coefficients pulled out.
-(extern @pipe (common_multiple t:term) term?)
+(extern @pipe @switch (common_multiple t:term) term?)
 # Small multiples of zero relations between leaves added, then rebuilt.
-(extern @pipe (related_leaves t:term) term?)
+(extern @pipe @switch (related_leaves t:term) term?)
 # The whole region as one bitwise term.
-(extern @pipe (one_wide_term t:term) term?)
+(extern @pipe @switch (one_wide_term t:term) term?)
 
 # Polish passes, used in the polish pipeline.
 

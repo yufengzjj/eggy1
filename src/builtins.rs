@@ -203,6 +203,8 @@ pub struct Sig {
     /// `@uncounted`: skipped past the time limit without making the run cut or counting
     /// `time_limit/skipped`.
     pub uncounted: bool,
+    /// `@switch`: a pass with a switch of its name (`sched::INNER`), on until turned off.
+    pub switch: bool,
     /// The comment line before the declaration.
     pub doc: String,
 }
@@ -261,6 +263,9 @@ impl Sig {
         let mut attrs = String::new();
         if self.pipe {
             attrs += "@pipe ";
+        }
+        if self.switch {
+            attrs += "@switch ";
         }
         if self.bookkeeping {
             attrs += "@bookkeeping ";
@@ -333,14 +338,15 @@ fn one(text: &str) -> Result<Sig, String> {
         return Err(bad());
     }
     let mut rest = rest.iter().copied().peekable();
-    let (mut pipe, mut bookkeeping, mut simplify_only, mut uncounted) = (false, false, false, false);
+    let (mut pipe, mut bookkeeping, mut simplify_only, mut uncounted, mut switch) = (false, false, false, false, false);
     while let Some(a) = rest.next_if(|t| t.starts_with('@')) {
         match a {
             "@pipe" => pipe = true,
             "@bookkeeping" => bookkeeping = true,
             "@simplify_only" => simplify_only = true,
             "@uncounted" => uncounted = true,
-            _ => return Err(format!("unknown attribute {a}; known: @pipe @bookkeeping @simplify_only @uncounted")),
+            "@switch" => switch = true,
+            _ => return Err(format!("unknown attribute {a}; known: @pipe @bookkeeping @simplify_only @uncounted @switch")),
         }
     }
     if bookkeeping && uncounted {
@@ -381,7 +387,10 @@ fn one(text: &str) -> Result<Sig, String> {
             _ => {}
         }
     }
-    Ok(Sig { name, params, input, result, pipe, bookkeeping, simplify_only, uncounted, doc: String::new() })
+    if switch && !matches!(input.ty, Ty::Term) {
+        return Err(format!("{name}: @switch is for a pass over one term"));
+    }
+    Ok(Sig { name, params, input, result, pipe, bookkeeping, simplify_only, uncounted, switch, doc: String::new() })
 }
 
 fn param(p: &str) -> Result<Param, String> {
@@ -474,6 +483,8 @@ mod tests {
         assert_eq!(get("retry").unwrap().takes(), "an expression and two pipelines");
         assert_eq!(get("id").unwrap().takes(), "no arguments");
         assert_eq!(get("save").unwrap().decl(), "(extern @pipe @bookkeeping (save r:group g:group) group)");
+        assert_eq!(get("relate").unwrap().decl(), "(extern @pipe @switch (relate t:term) term)");
+        assert!(get("simba").unwrap().switch && !get("finish").unwrap().switch);
         assert!(all().iter().all(|s| s.pipe), "every built-in can be a step");
         assert_eq!(get("simba").unwrap().kind(), Kind::Alt);
         assert_eq!(get("prepass").unwrap().kind(), Kind::Main);
@@ -493,6 +504,7 @@ mod tests {
             ("# a\n(extern (x n:int g:group) group)", "unknown type int"),
             ("# a\n(extern @pure (x g:group) group)", "unknown attribute"),
             ("# a\n(extern @bookkeeping @uncounted (x g:group) group)", "@uncounted is for"),
+            ("# a\n(extern @switch (x g:group) group)", "@switch is for a pass over one term"),
             ("# a\n(extern (x g:group) group", "unclosed"),
             ("# a\n(def (x g:group) group)", "expected (extern"),
         ] {

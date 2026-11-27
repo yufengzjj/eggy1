@@ -5,7 +5,7 @@
 
 use crate::builtins::{self, Param, Rep, Sig, Ty};
 use crate::pipe::{FEATURES, resolve};
-use crate::sched::{Call, Cmp, Def, INNER, NONE, NVARS, Pipe, is_switch, var, var_index};
+use crate::sched::{Call, Cmp, Def, INNER, NONE, Pipe, is_switch, var, var_index};
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1401,8 +1401,13 @@ fn assignable(n: &str) -> Result<usize, String> {
     } else if let Some(s) = builtins::get(n) {
         format!("{n} is a function and cannot be assigned: {s}")
     } else {
-        format!("unknown variable {n}; known: {}", (0..NVARS).map(|i| var(i).name).collect::<Vec<_>>().join(" "))
+        format!("unknown variable {n}; known: {}", crate::sched::var_names().join(" "))
     })
+}
+
+/// Whether a source file may define a variable named `n`: it names nothing yet.
+pub fn free_name(n: &str) -> bool {
+    !(known_name(n) || resolve(n).is_some() || defined_builtin(n) || FEATURES.contains(&n) || ["none", "true", "def", "extern"].contains(&n))
 }
 
 fn known_name(n: &str) -> bool {
@@ -1704,6 +1709,7 @@ pub fn def_sig(name: &str, params: &[Param]) -> Sig {
         bookkeeping: false,
         simplify_only: false,
         uncounted: false,
+        switch: false,
         doc: String::new(),
     }
 }
@@ -1952,8 +1958,9 @@ pub fn has_steps(e: &Pipe) -> bool {
     steps
 }
 /// `s` for as long as the program runs: the name of a parameter written where a switch is,
-/// which `Pipe::Switch` holds until a call puts the switch in its place.
-fn intern(s: &str) -> &'static str {
+/// which `Pipe::Switch` holds until a call puts the switch in its place, or of a variable a
+/// source file defines.
+pub(crate) fn intern(s: &str) -> &'static str {
     static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
     let mut names = NAMES.lock().unwrap();
     if let Some(n) = names.iter().find(|n| **n == s) {

@@ -10,7 +10,7 @@ eggy1 的化简流程由几条管线描述，默认的写在 `src/default.pipe` 
 <default.pipe 的赋值> | <命令行的赋值> | pipeline
 ```
 
-- `src/default.pipe` 定义各个函数（管线）和 `let` 名字（也可以写 `def`），并给所有变量赋默认值。
+- `src/default.pipe` 是一个源文件（第 12.3 节）：定义全局变量和它们的默认值，定义各个函数（管线）和 `let` 名字（也可以写 `def`）。
 - 命令行：先是 `-m N`（`restarts = N`）、`-i N`（`iter_limit = N`），再是 `--passes` 的 `NAME=VALUE` 项、`off` 列表项，按出现顺序，都排在 `default.pipe` 的赋值之后（第 12 节）。所以 `--passes restarts=5` 盖过 `-m`。
 - 从 Rust 直接进入别的管线时（测试和 `fuzz --prepass` 调用 `simplify_linear_with` 即 `prepass`、`polish`，不在任何运行里的 `rewrite`），入口换成那条管线，前面接同一段赋值（没有 `-m`、`-i` 那两步）。已经在一次运行里时，嵌套的运行不再执行它们。
 - 每次 `simplify` 都从头执行入口程序，结束时撤销所有绑定，下一个表达式重新开始。
@@ -177,7 +177,7 @@ x = e | rest    ≡  在 x = e 之下运行 rest          （绑定）
 
 > `NAME = VALUE` 在**当前作用域**里绑定变量 `NAME`；同一作用域里再赋值，就是覆盖这个绑定。读 `NAME` 时先在当前作用域找，没有就沿**调用链**往上找，直到入口程序。作用域结束时，它的绑定随之消失。
 
-- 这条规则说的是第 10 节的变量（**全局变量**，Rust 的 pass 也读它们）。给别的名字赋值是**局部变量**（第 5.5 节）：数、一组候选、函数值都可以存，按词法查找，每次运行一套，不参与这种查找。
+- 这条规则说的是第 10 节的变量（**全局变量**，定义在源文件里，见第 12.3 节；Rust 的 pass 也读它们）。给别的名字赋值是**局部变量**（第 5.5 节）：数、一组候选、函数值都可以存，按词法查找，每次运行一套，不参与这种查找。
 - **作用域**有三种：序列（`a | b | ...`，包括分组 `( ... )` 和 `(seq ...)`）、`scope`、每条管线的一次运行。其他形式（`if`、`fix`、`union`、`best`……）不是作用域：`(if C x = 1)` 的绑定落在 `if` 所在的序列里，`(if C (x = 1 | p))` 的绑定只在那条分组序列里。
 - "往上"沿调用链走（动态作用域）：`semi_leaves = 2 | polish` 里，`polish` 读到 2，除非它自己在内层再赋值。
 - 赋值原样传下候选，所以可以写在序列的任何位置。
@@ -261,7 +261,7 @@ t = (lowbits | unshift) | rewrite | (filter (size < (size t)))   # rewrite 的�
 pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub/NAME=P   # 即 (def (NAME) P)
 ```
 
-- `def`、`let` 和 `NAME=P` 一样是 `--passes` 的一项（`default.pipe` 里也可以写），不是管线里的步骤；之后的项里能用它定义的名字。属性写在 `(NAME ...)` 前，顺序随意；别的属性报 `unknown attribute`。
+- `def`、`let` 和 `NAME=P` 一样是 `--passes` 的一项，也是源文件（`default.pipe`、`file=PATH`）的顶层项（第 12.3 节），不是管线里的步骤；之后的项里能用它定义的名字。属性写在 `(NAME ...)` 前，顺序随意；别的属性报 `unknown attribute`。
 - `BODY` 是三种之一，它的类型就是函数的返回类型（第 6.5 节）：
   - 管线：返回一组候选。
   - 以数结束的管线（`lowbits | size`、`g | lowbits | size > 3`，第 7.3 节）：返回数。
@@ -618,13 +618,15 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 
 ## 10. 变量
 
+全局变量都在 `src/default.pipe` 里定义（第 12.3 节），默认值也写在那里；下面各表的"默认"就是那里的值。Rust 代码读其中大部分，它读哪些名字、怎样用（开关、预算、时限、只决定缓存大小）列在 Rust 的一张表里（`sched::INNER`、`FLAGS`、`LIMITS`、`UNREAD`、`SETTINGS`、`RUN`、`time_limit`），启动时按名字对上：表里的名字都要在源文件里有定义，否则启动就报错。`extra`、`printed`、`unclustered_relate_leaves`、`unclustered_rewrites`、`unified_rewrites`、`polish_rewrites`、`polish_wins` 只有默认管线读。上限（`max_leaves` 最多 6 等，第 5.2 节）暂时仍是 Rust 里的一张小表。
+
 ### 10.1 开关
 
-每个内部 pass 是一个开关变量，值为 0 时它被关掉：在一串步骤里返回输入，作为 alternative 时不给出形式。大多数同时也是 pass 名；`poly/masked`、`semi/*` 只是内部步骤：
+每个内部 pass 是一个开关变量，值为 0 时它被关掉：在一串步骤里返回输入，作为 alternative 时不给出形式。不赋值就是开着的（`none` 算开）。pass 的开关由 `src/builtins.pipe` 里 `extern` 的属性 `@switch` 定义（同名的开关）；`poly/masked`、`semi/*` 不是函数，是 `poly_mba`、`semi_linear` 里的步骤，它们的开关随所在的 pass 定义，不另写。全部开关：
 
 `lowbits unshift tfunc_whole relate tfunc unify_operands recombine cut_products shifted_xor simplify_rebuilt cluster_regions simba small_blocks wide_blocks poly_mba poly/masked rebuild_values common_multiple related_leaves one_wide_term semi_linear drop_unused clustered peel peel_clustered semi/grouped semi/peel_grouped semi/shapes semi/pairs semi/peel_shapes semi/semi_split semi/scaled semi/bit_split semi/short_consts`
 
-`default.pipe` 关掉的是 `semi/peel_shapes`。
+`default.pipe` 关掉的是 `semi/peel_shapes`（`semi/peel_shapes = 0`，对已有变量的赋值）。
 
 其他开关：
 
@@ -805,31 +807,64 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 
 ## 12. `--passes` 和命令行
 
-`--passes` 的值是若干**项**，依次作用在 `src/default.pipe` 之上（`default.pipe` 本身也是这样一串项）。
+`--passes` 的值是若干**项**，依次作用在 `src/default.pipe` 之上。`default.pipe` 和 `file=PATH` 读的文件是源文件，只有语言本身的顶层形式（第 12.3 节）；`NAME=VALUE`、`pipeline=P`、`off=a,b` 这样的项只是命令行的简写。
 
 ### 12.1 分项
 
 - `;` 总是分项。
-- 括号外的空白：后面一段以 `KEY=`、`KEY+=`、`KEY-=`、`(let` 或 `(def` 开头，且前一段不以 `|` 结尾时，开始新的一项，否则接在上一项后面。所以 `prepass=a | split_runs=4 | b` 是一项，`prepass=a split_runs=4` 是两项。
+- 括号外的空白：后面一段以 `KEY=`、`KEY+=`、`KEY-=`、`(let` 或 `(def` 开头，或是一个名字、再后面一段是单独的 `=`（`NAME = VALUE`），且前一段不以 `|` 结尾时，开始新的一项，否则接在上一项后面。所以 `prepass=a | split_runs=4 | b` 是一项，`prepass=a split_runs=4` 是两项。
 - `#` 到行尾是注释。
 
 ### 12.2 项
 
 | 项 | 含义 |
 |---|---|
-| `NAME=VALUE` | 入口程序里 `pipeline` 前的一步赋值。值同管线里的写法，可以是表达式。项里的空格只在后一段不像新的一项（不以 `KEY=` 开头）时才接在这一项里：`keep=keep + 1` 是一项（`Display` 就这样写），`keep=keep +1` 也是；要稳妥就不写空格 |
+| `NAME=VALUE` | 入口程序里 `pipeline` 前的一步赋值 `NAME = VALUE`，`NAME` 必须是已有的全局变量（写错名字报 `unknown variable`）。值同管线里的写法，可以是表达式。项里的空格只在后一段不像新的一项（不以 `KEY=` 开头）时才接在这一项里：`keep=keep + 1` 是一项（`Display` 就这样写），`keep=keep +1` 也是；要稳妥就不写空格 |
+| `NAME = VALUE` | `=` 两边有空格：源文件的写法（第 12.3 节），`NAME` 还不是全局变量时定义它。`--show-passes` 用它写出 `file=PATH` 定义的变量 |
 | `off=a,b`、`off+=a`、`off-=a` | 也是赋值：`off+=a` 是 `a = 0`，`off-=a` 是 `a = 1`，`off=a,b` 是把内部 pass 都设成 1 再关 `a`、`b` |
 | `pipeline=P`、`prepass=P`、`polish=P`、`rewrite=P`、`simba=P`、`sub/NAME=P` | 替换这条管线的定义：`(def (NAME) P)` 的简写 |
 | `polish=a,b,...` | 全是 polish pass 名时：依次尝试这些 `polish/NAME`，变小才保留，有一个变小就重来，至多保留 `polish_wins` 次 |
 | `(let NAME P)` | 定义名字（第 6.1 节）。`default.pipe` 定义的名字（`first_round`、`later`、`gates`、`rebuild_main`……）也能用 |
 | `(def [@inline] [@pipe] (NAME PARAM ...) P)` | 定义函数（第 6 节） |
-| `file=PATH` | 在此处读入文件里的各项 |
+| `file=PATH` | 在此处读入一个源文件（第 12.3 节） |
 | `pre=a,b`、`pre+=`、`pre-=` | 造哪些预处理候选：`unified no_wide split_bits halve_first over_products over_const_bitwise over_shared_bitwise halve_input unclustered` |
 | `schedule=...`、`schedule+=`、`schedule-=` | 每轮 egglog 的步骤，逗号分隔的 `run:RS`（back-off 调度）、`once:RS`、`sat:RS`（饱和），`RS` 是 `default-ruleset canonicalization constant-folding analysis identity-zero-element simplify` 之一 |
 
 赋值和 `off` 项按出现顺序排进入口程序；定义项（管线、`let`、`def`、`pre`、`schedule`）在读到时生效。`--show-passes` 怎样写出 `def` 见第 6.1 节。
 
 命令行的 `-m N`、`-i N` 也是入口程序里的赋值（`restarts = N`、`iter_limit = N`）；`-n`（数值类型）决定建哪个 egglog 程序，不是变量。
+
+### 12.3 源文件
+
+`src/builtins.pipe`、`src/default.pipe` 和 `--passes file=PATH` 读的文件都是源文件，只由顶层项组成：
+
+- 括号形式 `(def ...)`、`(let ...)`（`extern` 只在 `builtins.pipe`），可以跨行；
+- 赋值行 `NAME = VALUE`，一行一项，到行尾为止。`NAME` 还不是全局变量时，这一行**定义**它：之后它就是第 5.1 节的全局变量，值是入口程序里这一步赋值的结果；已经是全局变量时，这一行是对它的赋值。两种都是入口程序里的一步，按出现的顺序。每个变量开始时都是 `none`，所以 `default.pipe` 里定义成 `none` 的（`rewrites = none`、`time_limit = none`、`restarts = none`……）不产生赋值步骤，`--show-passes` 打印的入口程序里没有它们。
+- `#` 到行尾是注释。
+
+```
+keep = 2
+cut = 0
+max_leaves = 6
+semi_leaves = max_leaves
+rewrites = none
+(let later prepass | (if minimal take_minimal (egglog later)))
+(def (pipeline)
+  cut = 1
+  | ...)
+```
+
+变量名不能和函数、宏、`let`/`def` 名、特征名同名；`prepass = P` 这样给 Rust 调用的函数赋值报错，提示写 `(def (prepass) P)`。`--passes` 的简写对应的完整形式：
+
+| 简写 | 完整形式 |
+|---|---|
+| `NAME=VALUE` | 赋值 `NAME = VALUE`（只能给已有的全局变量） |
+| `pipeline=P`、`prepass=P`……、`sub/NAME=P` | `(def (pipeline) P)` 等 |
+| `polish=a,b` | `(def (polish) ...)`，函数体同 `default.pipe` 的写法 |
+| `off=a,b` | `(on <全部内部 pass>) \| (off a b)` |
+| `off+=a`、`off-=a` | `(off a)`、`(on a)` |
+
+`pre=`、`schedule=` 没有对应的语言形式，只能写在 `--passes` 里。`--passes` 也可以直接写 `(def ...)`、`(let ...)` 和带空格的 `NAME = VALUE`。
 
 ## 13. 检查与警告
 
@@ -848,16 +883,18 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 以下只给警告：`eggy1` 和 `bench` 的父进程打印到 stderr，`bench --one` 子进程不打印。
 
 - `--passes` 里定义了却没用到的 `let`、`def`（`(def (f p n) ...) is never used`）。
+- `--passes` 的源文件定义了、Rust 代码和任何管线、赋值都不读的全局变量（`NAME is defined and never read`）。
 - 没注解的 `def` 参数只用在管线和组都合适的位置（`t = r`、函数体就是 `r`），按管线算（`parameter r is used only where a pipeline or a group fits`）。
 
 以下几条对每条管线和每个 `def` 的函数体单独检查：
 
+- 新的局部变量名和某个全局变量只差一两个字母（3、4 个字母的名字差 1 个，更长的差 1 或 2 个；编辑距离）：`prepass: number variable kep is a new local variable; did you mean keep?`，和"绑定了却从不读"的警告一起给出，用来发现写错的全局变量名。
 - 绑定了却从不读的组变量；同一层又绑定了一次、中间没读的死存储（写在 `if`、`cand`、`first` 的后几支、`retry` 的 `b` 或循环体里的绑定不和外面的比较，所以 `(save t) | (if c (save t))` 这种先存默认值再覆盖的写法不算）。
 - 赋值（包括 `(on NAME)`、`(off NAME)`）是所在序列（或整条管线）的最后一步：什么也影响不到。
 - 同一条序列里同一个变量连赋两次，中间只有赋值，也没有读它。
 - 组值写在 `|` 后面（`a | t`、`a | (lowbits t)`）：丢掉前面的结果（`X drops its input`）。`(load t)` 和 `@inline @pipe` 调用生成的输入不警告。
 
-默认管线没有警告，`default.pipe` 的 `let` 都用到了，执行完 `default.pipe` 后仍为 `none` 的变量（内部 pass 的开关除外）正好是 `rewrites`、`bit_split_budget`、`time_limit`，没有命令行时还有 `restarts`、`iter_limit`（都有测试检查）。
+默认管线没有警告，`default.pipe` 的 `let` 都用到了，Rust 代码读的变量都有定义、`default.pipe` 定义的变量都有人读，执行完 `default.pipe` 后仍为 `none` 的变量（内部 pass 的开关除外）正好是 `rewrites`、`bit_split_budget`、`time_limit`，没有命令行时还有 `restarts`、`iter_limit`（都有测试检查）。
 
 ## 14. 例子
 

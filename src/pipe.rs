@@ -472,7 +472,7 @@ impl<'a> Env<'a> {
                 at => at.saturating_sub(crate::sched::epoch_ns()) / 1_000_000,
             },
             Pipe::Var(i) if *i == crate::sched::KEEP => crate::sched::read(*i).max(1),
-            Pipe::Var(i) => crate::sched::read(*i),
+            Pipe::Var(i) => crate::sched::read_var(*i),
             Pipe::Param(i, _) => {
                 let v = match self.lex.borrow().frame.as_ref().expect("a parameter outside the body of its function") {
                     f if f.call.def.params[*i].ty == Ty::Num => Some(f.values[*i]),

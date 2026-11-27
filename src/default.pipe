@@ -1,64 +1,166 @@
-# The default pass pipelines (docs/pipe-language.md), read by `sched::Passes::default`.
-# `--passes` items come after these and can use the names defined here.
+# The default pass pipelines and variables (docs/pipe-language.md), read by
+# `sched::Passes::default` after src/builtins.pipe. A source file holds forms `(let ...)` and
+# `(def ...)`, which may span lines, and lines `NAME = VALUE`: the first for a name defines
+# that variable, a later one assigns it. `--passes` items come after these and can use the
+# names defined here.
 
-# The settings every run starts with (its entry assignments; `-m`, `-i` and the
-# assignments of `--passes` follow). Every variable is `none` until assigned; only the
-# budgets `rewrites`, `bit_split_budget` and `time_limit` stay so.
-keep=2 extra=2 printed=2 rerun_input=1 prove_minimal=1 match_limit=64 ban_length=3
-cut=0 relate_parts=1
-semi/peel_shapes=0
+# The settings every run starts with (its entry assignments, in order; `-m`, `-i` and the
+# assignments of `--passes` follow). How the Rust code uses a variable it reads (a switch, a
+# budget, the deadline, a cache size) is in its list of them (`sched::VarKind`).
+keep = 2
+extra = 2
+printed = 2
+rerun_input = 1
+prove_minimal = 1
+match_limit = 64
+ban_length = 3
+cut = 0
+relate_parts = 1
+semi/peel_shapes = 0
+
+# Every variable is none until assigned: the budgets and the deadline until a pipeline binds
+# them, `restarts` and `iter_limit` until `-m` and `-i` set them.
+rewrites = none
+bit_split_budget = none
+time_limit = none
+restarts = none
+iter_limit = none
 
 # Limits of the passes.
-unclustered_relate_leaves=10 unclustered_rewrites=256 unclustered_after=1024
-unified_rewrites=128 related_rebuilds=8 related=4 bit_splits=4 cand_bit_splits=8
-splits=4 split_depth=2 split_runs=16 split_size=64 split_max_unknown_bits=2
-block_leaves=12 block_combos=32768 block_max_block=3 block_descent_rounds=4 block_spread_points=8
-cluster_depth=2 poly_builds=512 poly_branch_monos=128 polish_rewrites=2000 polish_wins=8
+unclustered_relate_leaves = 10
+unclustered_rewrites = 256
+unclustered_after = 1024
+unified_rewrites = 128
+related_rebuilds = 8
+related = 4
+bit_splits = 4
+cand_bit_splits = 8
+splits = 4
+split_depth = 2
+split_runs = 16
+split_size = 64
+split_max_unknown_bits = 2
+block_leaves = 12
+block_combos = 32768
+block_max_block = 3
+block_descent_rounds = 4
+block_spread_points = 8
+cluster_depth = 2
+poly_builds = 512
+poly_branch_monos = 128
+polish_rewrites = 2000
+polish_wins = 8
 
 # Sizes of the linear regions rebuilt.
-tiny_size=3 max_leaves=6 max_wide_leaves=16
-semi_leaves=max_leaves relate_leaves=max_wide_leaves
+tiny_size = 3
+max_leaves = 6
+max_wide_leaves = 16
+semi_leaves = max_leaves
+relate_leaves = max_wide_leaves
 
 # `lowbits`.
-lowbits_max_bits=18 lowbits_max_context_bits=18 lowbits_narrow_context_bits=12 lowbits_max_try=256 lowbits_max_values=4
-lowbits_max_product_bits=4 lowbits_budget=67108864 lowbits_wide_budget=8388608 lowbits_max_low_rebuild=64
-lowbits_refine_bits=2 lowbits_max_refine_bits=12 lowbits_refine_budget=4194304 lowbits_max_factor_terms=4
+lowbits_max_bits = 18
+lowbits_max_context_bits = 18
+lowbits_narrow_context_bits = 12
+lowbits_max_try = 256
+lowbits_max_values = 4
+lowbits_max_product_bits = 4
+lowbits_budget = 67108864
+lowbits_wide_budget = 8388608
+lowbits_max_low_rebuild = 64
+lowbits_refine_bits = 2
+lowbits_max_refine_bits = 12
+lowbits_refine_budget = 4194304
+lowbits_max_factor_terms = 4
 
 # `poly_mba`.
-poly_max_monos=4096 poly_monos_per_node=4 poly_factor_tries=3 poly_max_factor_monos=64
-poly_max_factor_vars=12 poly_max_pivots=4 poly_max_roots=16 poly_max_factor_steps=4096
-poly_max_solutions=8 poly_max_shifted=4 poly_max_shifted_monos=4 poly_shifted_rest_ratio=2 poly_max_atoms=4
-poly_max_masked_monos=16 poly_masked_monos_ratio=2 poly_max_masked_size=20
+poly_max_monos = 4096
+poly_monos_per_node = 4
+poly_factor_tries = 3
+poly_max_factor_monos = 64
+poly_max_factor_vars = 12
+poly_max_pivots = 4
+poly_max_roots = 16
+poly_max_factor_steps = 4096
+poly_max_solutions = 8
+poly_max_shifted = 4
+poly_max_shifted_monos = 4
+poly_shifted_rest_ratio = 2
+poly_max_atoms = 4
+poly_max_masked_monos = 16
+poly_masked_monos_ratio = 2
+poly_max_masked_size = 20
 
 # The rebuilds of linear regions and the shortest bitwise expressions.
-common_multiple_min=4 common_multiple_tries=2 overlap_max_values=4 overlap_max_choices=16 overlap_max_terms=3
-decompose_max_vars=5 decompose_min_free_size=10 decompose_max_free_classes=4
-decompose_fill_max_vars=3 decompose_xor_max_shared=2
-related_leaves_max_arith=4 relate_max_written_out=2 relate_max_free_product=20 relate_max_parts=8
-relate_wide_max_percent=90 unify_operands_max_leaves=8
-memo_contexts=4
+common_multiple_min = 4
+common_multiple_tries = 2
+overlap_max_values = 4
+overlap_max_choices = 16
+overlap_max_terms = 3
+decompose_max_vars = 5
+decompose_min_free_size = 10
+decompose_max_free_classes = 4
+decompose_fill_max_vars = 3
+decompose_xor_max_shared = 2
+related_leaves_max_arith = 4
+relate_max_written_out = 2
+relate_max_free_product = 20
+relate_max_parts = 8
+relate_wide_max_percent = 90
+unify_operands_max_leaves = 8
+memo_contexts = 4
 
 # Wide regions, `wide_blocks` and the bitwise expressions with free constants.
-used_leaves_budget=33554432 peel_min_size=16 peel_spread_points=16
-wide_blocks_max_term_leaves=10 wide_blocks_max_block=10
-wide_blocks_steps=4096 wide_blocks_max_tables=4096 wide_blocks_max_wide_tables=16
-wide_blocks_max_functions=64 wide_blocks_cache_size=4096 wide_blocks_descent_rounds=4 wide_blocks_min_ratio=2
-shapes_max_size=15 pairs_max_groups=8 pairs_budget=500000 pairs_max_size=12
-pairs_max_scales=12 pairs_max_carries=4096
+used_leaves_budget = 33554432
+peel_min_size = 16
+peel_spread_points = 16
+wide_blocks_max_term_leaves = 10
+wide_blocks_max_block = 10
+wide_blocks_steps = 4096
+wide_blocks_max_tables = 4096
+wide_blocks_max_wide_tables = 16
+wide_blocks_max_functions = 64
+wide_blocks_cache_size = 4096
+wide_blocks_descent_rounds = 4
+wide_blocks_min_ratio = 2
+shapes_max_size = 15
+pairs_max_groups = 8
+pairs_budget = 500000
+pairs_max_size = 12
+pairs_max_scales = 12
+pairs_max_carries = 4096
 
 # Semi-linear rebuilds.
-semi_split_max_combos=64 semi_half_flips=2 semi_max_merges=16 semi_max_code_groups=4
+semi_split_max_combos = 64
+semi_half_flips = 2
+semi_max_merges = 16
+semi_max_code_groups = 4
 
 # `polish`.
-join_constants_max_leaves=3 join_constants_max_sets=10 join_linear_max_groups=12
-join_linear_near_slack=4 join_linear_near_moves=3 join_linear_max_near_groups=8
-shift_cases_depth=2 shift_cases_max_size=64 shift_cases_amounts=2
+join_constants_max_leaves = 3
+join_constants_max_sets = 10
+join_linear_max_groups = 12
+join_linear_near_slack = 4
+join_linear_near_moves = 3
+join_linear_max_near_groups = 8
+shift_cases_depth = 2
+shift_cases_max_size = 64
+shift_cases_amounts = 2
 
 # T-function replacement and proofs (`tfunc`, also `lowbits`), and the minimality proofs.
-tfunc_max_vars=3 tfunc_max_size=7 tfunc_points=24 tfunc_max_try=256
-tfunc_max_carries=64 tfunc_max_states=512 tfunc_max_factor=255
-minimal_points=64 minimal_lanes=16 minimal_budget=2097152
-minimal_max_vars=3 minimal_max_size_4bit=7 minimal_max_size_8bit=5
+tfunc_max_vars = 3
+tfunc_max_size = 7
+tfunc_points = 24
+tfunc_max_try = 256
+tfunc_max_carries = 64
+tfunc_max_states = 512
+tfunc_max_factor = 255
+minimal_points = 64
+minimal_lanes = 16
+minimal_budget = 2097152
+minimal_max_vars = 3
+minimal_max_size_4bit = 7
+minimal_max_size_8bit = 5
 
 # A later round: the pre-pass rebuilds, then their extraction, or the one proved minimal.
 (let later prepass | (if minimal take_minimal (egglog later)))
@@ -80,7 +182,7 @@ minimal_max_vars=3 minimal_max_size_4bit=7 minimal_max_size_8bit=5
 # the same from the printed result, kept when smaller. With `--passes time_limit=MS` the
 # run stops starting passes MS ms after it starts, keeps the smallest form so far and, with
 # `cut` on, counts as cut.
-pipeline=
+(def (pipeline)
   cut = 1
   | (smallest
     (fix 1 first_round)
@@ -94,7 +196,7 @@ pipeline=
            | (smallest
                (fix 1 first_round)
                | (if moved (fix (printed - 1) later))
-               | polish)))))
+               | polish))))))
 
 # A rebuild of the main candidate: the whole term replaced by a T-function lookup, or its
 # regions rewritten, clustered, related and its subterms replaced (`~(y - 1)` replaced
@@ -114,7 +216,7 @@ pipeline=
 # The pre-pass, on one run (`scope`). Registers: `t0` the input, `t` with low bits and
 # shifts rewritten, `r` the first rebuild, `n` the rebuild without `wide_blocks`, `f`/`b`
 # the candidates finished, `u` the rebuild without clusters, `m` the ones kept.
-prepass=
+(def (prepass)
   (scope
     (save t0) | gates | lowbits | unshift | (save t)
     | (cand first rebuild_main)
@@ -169,13 +271,13 @@ prepass=
         ((load u) | (filter (size < (size m))))
         (load m)
         ((load u) | (filter (size > (size m) && size < (size t0)))))
-    | pre_done)
+    | pre_done))
 
 # The final polish, on one candidate: the polish passes in turn, each kept when smaller,
 # repeated while one is, until `polish_wins` are; on one run whose `rewrite` calls are limited.
 # `join_linear` rewrites every pair of leaf groups many times, and semi-linear groups of
-# many leaves take seconds there. `polish=a,b,...` writes the same for other passes.
-polish=
+# many leaves take seconds there. `polish=a,b,...` in --passes writes the same for other passes.
+(def (polish)
   (scope
     rewrites = polish_rewrites
     | (wins polish_wins
@@ -188,12 +290,12 @@ polish=
         | (smaller polish/recombine polish/recombine | drop_identities)
         | (smaller polish/shift_cases polish/shift_cases | drop_identities)
         | (smaller polish/decompose polish/decompose | drop_identities)
-        | (smaller polish/factor polish/factor | drop_identities)))
+        | (smaller polish/factor polish/factor | drop_identities))))
 
 # The rebuild of one term, what `linear_mba::rewrite` memoizes: a linear region rebuilt by
 # the smallest of `simba`, `small_blocks` and `wide_blocks`, or else its operands
 # rewritten; `poly_mba` taken instead when strictly smaller.
-rewrite=(again (best 1 (regions (best 1 simba small_blocks wide_blocks)) poly_mba))
+(def (rewrite) (again (best 1 (regions (best 1 simba small_blocks wide_blocks)) poly_mba)))
 
 # The rebuild of one linear region, the `simba` pass. Past `max_leaves` leaves: the
 # smallest of the region with unused leaves dropped, clustered, and peeled (only when no
@@ -201,7 +303,7 @@ rewrite=(again (best 1 (regions (best 1 simba small_blocks wide_blocks)) poly_mb
 # its clustered form, which a region too large to evaluate needs. Otherwise the
 # semi-linear rebuild, or the smallest rebuild from its values, kept when smaller than
 # the region; `one_wide_term` costs more than it gains on the cofactors of `poly_mba`.
-simba=
+(def (simba)
   (if no_leaves none
     (if wide
       ((save in)
@@ -215,4 +317,4 @@ simba=
        | (if const_bitwise
            (best 1 semi_linear)
            (best 1 rebuild_values common_multiple related_leaves (if !cofactor one_wide_term none)))
-       | (filter (size < (size in))))))
+       | (filter (size < (size in)))))))
