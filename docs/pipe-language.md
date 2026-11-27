@@ -237,18 +237,19 @@ prepass=lb | twice | finish            # 即 lowbits | relate | twice | finish
 **参数**：`(def (NAME PARAM ...) P)`、`(def @inline (NAME PARAM ...) P)`。参数不写类型，按它在 `P` 里的用法推出：
 
 - 写在步骤位置：**管线参数**（`pipe`）；
+- 写在表达式里（赋值右边、`(fix N p)`、`(best K ...)`、`(if C ...)`、`filter`、`any`、`all` 的条件等）：**数值参数**（`num`）；
 - 写在寄存器位置（`(save R)`、`(load R)`、`(label R)`、`(size R)`、`(same R)`）：**寄存器名参数**（`reg`）；
 - 写在名字位置（`(tag NAME p)`、`(cand NAME p)`、`(smaller NAME p)`、`(egglog LABEL)`、`(off NAME)`、`(on NAME)`）：**名字参数**（`name`）；
 - 作为参数传给另一个带参数的函数时，取那个参数的类型。
-- 写在表达式里（数值参数）还不支持，报 `numeric parameters are not supported yet`。
 
-推出的结果就是签名（`(try_without name:name p:pipe g:group) group`），调用处照签名检查参数的个数和种类，报错的样子和内置函数一样（`f takes a register name and a pipeline: (f r:reg p:pipe g:group) group`）。读参数的规则也和内置函数一样：只有一个管线参数、且它是最后一个时读到 `)` 为止，其他管线参数各是一个步骤，寄存器名和名字参数各是一个名字。有参数的函数单独写出时报 `NAME needs parentheses`。
+推出的结果就是签名（`(try_without name:name p:pipe g:group) group`、`(with_budget n:num p:pipe g:group) group`），调用处照签名检查参数的个数和种类，报错的样子和内置函数一样（`f takes a register name and a pipeline: (f r:reg p:pipe g:group) group`）。表达式参数处写了管线或名字、管线参数处写了数时，报错附上签名（`f takes an expression and a pipeline: (f n:num p:pipe g:group) group`）。读参数的规则也和内置函数一样：数值参数是一个 `earg`，只有一个管线参数、且它是最后一个时读到 `)` 为止，其他管线参数各是一个步骤，寄存器名和名字参数各是一个名字。有参数的函数单独写出时报 `NAME needs parentheses`。
 
 - 参数只在函数体里看得见（词法绑定），不参与变量的查找，不能赋值；不能和变量、函数、宏、`let` 名、`def` 名或函数自己同名，也不能重复。
-- 同一个参数的用法互相矛盾（既是管线又是寄存器名，或既是寄存器名又是名字）、函数体里没用到的参数，都报错。
+- 同一个参数的用法互相矛盾（既是管线又是寄存器名，既是表达式又是管线，或既是寄存器名又是名字）、函数体里没用到的参数，都报错。
+- 数值参数在**调用时**求一次值：参数可以是任何表达式（`none`、第 6.2 节的运算、外层函数的参数），对调用时的候选组、在调用处求值，同赋值右边；函数体里读到的就是这个值，函数体先改了候选也不变（`(def (f n p) p | (filter (n == 7)))` 调用成 `(f size rewrite)` 时 `n` 是调用时输入的大小）。参数不是变量：被调用的函数看不到它（写了就是未知的名字），对缓存也没有影响（缓存只记 Rust 代码读的变量；参数经过赋值影响 pass 时，记下的是被赋值的变量）。赋给有上限的变量时，和其他表达式一样在执行时检查（`(def (f n) max_leaves = n | rewrite)` 调用成 `(f 8)` 时这次运行报 `max_leaves is at most 6`）。
 - 名字参数（寄存器名和名字）在解析时代入：每处调用得到一份把名字放进去的函数体。`(off name)` 的参数在调用处检查是不是开关。寄存器的读写检查对这份函数体做，在函数自己的运行里（`(def (f r) (load r))` 调用成 `(f t)` 时报 `f reads register t before any (save t)`）。
-- 管线参数是**闭包**：传进去的管线带着调用处的运行，在函数体里每用一次就运行一次，读写的是调用处的寄存器，条件 `input` 指调用处的输入，里面的参数指调用处所在函数的参数（参数作为参数再往下传时，层层回到写下它的地方）。它所在位置的 `smallest`、`wins`、`fix`、`scope` 照常看得到它（它在函数体里运行）。所以寄存器的读写检查对管线参数在调用处做：它可能在调用里的任何时候运行，也可能运行多次或不运行（同 `fix` 的体）。
-- `@inline` 函数的参数在展开时代入（管线参数原样放进去），展开后的样子就是调用处的一部分，共享调用处的作用域和寄存器。函数体直接写成 `a | b` 时，`(NAME ARG ...)` 照样平铺进所在的序列。
+- 管线参数是**闭包**：传进去的管线带着调用处的运行，在函数体里每用一次就运行一次，读写的是调用处的寄存器，条件 `input` 指调用处的输入，里面的参数（管线参数和数值参数）指调用处所在函数的参数（参数作为参数再往下传时，层层回到写下它的地方）：`(def (f n) (g (if (size <= n) x)))` 里的条件在 `g` 里面运行，读的仍是 `f` 的 `n`。它所在位置的 `smallest`、`wins`、`fix`、`scope` 照常看得到它（它在函数体里运行）。所以寄存器的读写检查对管线参数在调用处做：它可能在调用里的任何时候运行，也可能运行多次或不运行（同 `fix` 的体）。
+- `@inline` 函数的参数在展开时代入（管线参数原样放进去），展开后的样子就是调用处的一部分，共享调用处的作用域和寄存器。函数体直接写成 `a | b` 时，`(NAME ARG ...)` 照样平铺进所在的序列。有数值参数的 `@inline` 函数同样不开新的运行，共享调用处的作用域、寄存器和 `smallest`，只是调用时先求数值参数、带上自己的参数；它的管线参数照样是闭包，读写的检查和警告按展开后的样子在调用处做。`--show-passes` 像 `def` 一样打印它的定义（`(def @inline (lim n p) split_runs = n | p)`），调用处写成 `(lim 3 rewrite)`。
 - 不允许递归（第 12 节）：函数只能调用在它之前定义的函数，调用处的管线参数也只能写已经定义的名字，所以 `def` 之间成不了环；能成环的只有经过运行时取定义的 `prepass`、`polish`，管线参数里的调用算在调用处（`(def (g p) p) prepass=(g prepass)` 报 `prepass reaches itself`）。
 
 ```
@@ -258,6 +259,13 @@ prepass=lb | twice | finish            # 即 lowbits | relate | twice | finish
 prepass=(try_without relate rewrite)         # 即 (best 1 rewrite ((off relate) | rewrite))，在 try_without 的运行里
 (def @inline (keep_in r p) (save r) | p)
 prepass=(keep_in t rewrite) | (load t)       # 即 (save t) | rewrite | (load t)
+(def (with_budget n p) rewrites = n | p)
+prepass=(with_budget 8 rewrite)              # rewrite 至多调用 8 次
+(def (if_small k p) (if (size <= k) p))
+(def (f n) (if_small (n * 2) (rewrite | (filter (size <= n)))))
+prepass=(f (size / 2))                       # n 是调用时输入大小的一半，rewrite 的结果不大于它才留下；filter 在 if_small 里运行，读 f 的 n
+(def @inline (lim n p) split_runs = n | p)
+prepass=(lim (size - 1) rewrite) | relate    # split_runs 的赋值作用到序列末尾，relate 也读到
 ```
 
 ## 6. 表达式
@@ -637,7 +645,7 @@ prepass=(keep_in t rewrite) | (load t)       # 即 (save t) | rewrite | (load t)
 
 - 名字：未知的变量、函数、`on`/`off` 名、`sub/NAME`、规则集，报错并列出已知的名字。
 - `let`、`def` 名和变量、函数、宏同名（第 4.1 节）；`def` 重新定义已有的 `let`、`def` 名，`let` 重新定义 `def` 名；`@inline` 用于 `prepass` 等内置的定义函数；未知的属性、未知的 `sub/NAME`。
-- `def` 的参数（第 5.6 节）：和已有的名字同名或重复、用法矛盾、没用到、被赋值、写在表达式里（数值参数还不支持）；`prepass` 等内置的定义函数带参数。调用处参数的个数和种类照推出的签名检查；`(off NAME)` 的名字参数在调用处检查是不是开关。
+- `def` 的参数（第 5.6 节）：和已有的名字同名或重复、用法矛盾、没用到、被赋值；`prepass` 等内置的定义函数带参数。调用处参数的个数和种类照推出的签名检查；`(off NAME)` 的名字参数在调用处检查是不是开关。
 - 定义的函数写了参数（`f takes no arguments: (f g:group) group`）、写在表达式里或 `=` 左边。
 - 赋值：给函数赋值；值超过变量的上限。
 - 条件里写了 `=`（`(if (size = 3) ...)`）：报错 "an assignment is a step; compare with =="。

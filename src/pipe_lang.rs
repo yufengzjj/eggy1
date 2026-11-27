@@ -498,12 +498,13 @@ impl Parser<'_> {
     /// read them: an expression argument (`arg`), a name, one stage per pipeline, or the
     /// whole pipeline up to `)` when one pipeline is the last and only one (`(fix 3 a | b)`).
     fn call(&mut self, s: &'static Sig) -> Result<Pipe, String> {
-        let args = self.args(s)?;
+        let args = self.args(s, false)?;
         construct(&s.name, args).ok_or_else(|| unimplemented(s))
     }
 
-    /// The arguments of a call of `s` after its name, as `call` reads them.
-    fn args(&mut self, s: &Sig) -> Result<Vec<Arg>, String> {
+    /// The arguments of a call of `s` after its name, as `call` reads them; `sig` adds the
+    /// signature to an error in an expression argument.
+    fn args(&mut self, s: &Sig, sig: bool) -> Result<Vec<Arg>, String> {
         let f = s.name.as_str();
         let arity = || format!("{f} takes {}: {s}", s.takes());
         let pipes = s.params.iter().filter(|p| p.ty == Ty::Pipe).count();
@@ -515,7 +516,8 @@ impl Parser<'_> {
                 (_, Rep::Opt) if self.at_close() => Arg::Absent,
                 (Ty::Name | Ty::Reg, Rep::Opt) if !named => Arg::Absent,
                 (_, Rep::One) if self.at_close() => return Err(arity()),
-                (Ty::Num, _) => Arg::Num(self.arg()?),
+                (Ty::Num, _) => Arg::Num(self.arg().map_err(|e| if sig { format!("{e}; {f} takes {}: {s}", s.takes()) } else { e })?),
+                (Ty::Pipe, _) if matches!(self.peek(), Some(Tok::Num(_))) => return Err(arity()),
                 (Ty::Name | Ty::Reg, _) => {
                     let n = self.name(&format!("a name after {f}"))?;
                     self.use_param(&n, p.ty)?;
@@ -544,14 +546,15 @@ impl Parser<'_> {
     /// arguments in place.
     fn def_call(&mut self, n: &str) -> Result<Pipe, String> {
         let d = self.defs[n].clone();
-        let args = self.args(&def_sig(n, &d.params))?;
+        let args = self.args(&def_sig(n, &d.params), true)?;
         self.used.push(n.to_string());
         let args: Vec<CallArg> = args
             .into_iter()
             .map(|a| match a {
                 Arg::Name(s) => CallArg::Name(s),
                 Arg::Pipe(p) => CallArg::Pipe(p),
-                _ => unreachable!("a parameter of a def is a pipeline or a name"),
+                Arg::Num(e) => CallArg::Num(e),
+                _ => unreachable!("a parameter of a def is a pipeline, an expression or a name"),
             })
             .collect();
         let open = |s: &str| self.param(s).is_some();
@@ -659,8 +662,9 @@ impl Parser<'_> {
             Some(Tok::Num(n)) => Ok(Expr::Num(n)),
             Some(Tok::Name(n)) => {
                 self.no_assign()?;
-                if self.param(&n).is_some() {
-                    return Err(format!("numeric parameters are not supported yet: {n} is used in an expression"));
+                if let Some(i) = self.param(&n) {
+                    self.use_param(&n, Ty::Num)?;
+                    return Ok(Expr::Param(i, n));
                 }
                 if let Some(d) = self.defs.get(&n).filter(|d| d.run) {
                     return Err(format!("{n} gives candidates, not a number: {}; an expression reads variables and number functions", def_sig(&n, &d.params)));
@@ -926,12 +930,13 @@ pub fn def_sig(name: &str, params: &[Param]) -> Sig {
 }
 
 fn def_head(d: &Def) -> String {
-    std::iter::once(d.name.as_str()).chain(d.params.iter().map(|p| p.name.as_str())).collect::<Vec<_>>().join(" ")
+    let head = std::iter::once(d.name.as_str()).chain(d.params.iter().map(|p| p.name.as_str())).collect::<Vec<_>>().join(" ");
+    if d.inline { format!("@inline ({head})") } else { format!("({head})") }
 }
 
 /// `(def (NAME PARAM ...) body)` on one line.
 pub fn show_def(d: &Def) -> String {
-    format!("(def ({}) {})", def_head(d), show(&d.body))
+    format!("(def {} {})", def_head(d), def_body(d, show(&d.body)))
 }
 
 /// `show_def` over several lines when it is wider than `WIDTH`.
@@ -940,7 +945,23 @@ pub fn pretty_def(d: &Def) -> String {
     if one.len() <= WIDTH {
         return one;
     }
-    format!("(def ({})\n  {})", def_head(d), pretty_at(&d.body, 2))
+    format!("(def {}\n  {})", def_head(d), def_body(d, pretty_at(&d.body, 2)))
+}
+
+/// The body `s` of `d` as written: an `@inline` sequence that is not flat in parentheses.
+fn def_body(d: &Def, s: String) -> String {
+    match &*d.body {
+        Pipe::Seq(ps) if d.inline && !d.flat && ps.len() > 1 => format!("({s})"),
+        _ => s,
+    }
+}
+
+/// The body of a call of an `@inline` function with its pipeline arguments in place, as the
+/// checks of registers and assignments see it.
+pub fn expand(c: &Call) -> Pipe {
+    let pipes = c.args.iter().map(|a| if let CallArg::Pipe(q) = a { Some(q) } else { None }).collect();
+    let s = Subst { names: Vec::new(), pipes, open: &|_| false };
+    s.pipe(&c.body).expect("no name to put in place")
 }
 
 /// The body of a call of `def` with `args`: its name arguments in place (`open` as in
@@ -973,6 +994,7 @@ impl<'s> Subst<'s> {
                     s.pipes.push(None);
                 }
                 CallArg::Pipe(q) => s.pipes.push(pipes.then_some(q)),
+                CallArg::Num(_) => s.pipes.push(None),
             }
         }
         s
@@ -1005,7 +1027,7 @@ impl<'s> Subst<'s> {
             Expr::Or(cs) => Expr::Or(cs.iter().map(|c| self.expr(c)).collect()),
             Expr::Cmp(op, x, y) => Expr::Cmp(*op, b(x), b(y)),
             Expr::Bin(op, x, y) => Expr::Bin(*op, b(x), b(y)),
-            Expr::Num(_) | Expr::Feature(_) | Expr::Is(_) | Expr::Var(_) => e.clone(),
+            Expr::Num(_) | Expr::Feature(_) | Expr::Is(_) | Expr::Var(_) | Expr::Param(..) => e.clone(),
         }
     }
 
@@ -1055,6 +1077,7 @@ impl<'s> Subst<'s> {
                         Ok(match a {
                             CallArg::Name(n) => CallArg::Name(self.name(n)),
                             CallArg::Pipe(q) => CallArg::Pipe(self.pipe(q)?),
+                            CallArg::Num(e) => CallArg::Num(self.expr(e)),
                         })
                     })
                     .collect::<Result<Vec<_>, String>>()?;
@@ -1097,6 +1120,7 @@ fn show_expr(e: &Expr, need: u8) -> String {
         Expr::Size(r) => (format!("(size {r})"), 7),
         Expr::Same(r) => (format!("(same {r})"), 7),
         Expr::Var(i) => (var(*i).name.to_string(), 7),
+        Expr::Param(_, n) => (n.clone(), 7),
         Expr::Any(c) => (format!("(any {})", show_expr(c, 1)), 7),
         Expr::All(c) => (format!("(all {})", show_expr(c, 1)), 7),
         Expr::Not(c) => (format!("!{}", show_expr(c, 7)), 3),
@@ -1228,7 +1252,7 @@ fn pretty_at(p: &Pipe, indent: usize) -> String {
         Pipe::Cand(n, q) => nested("cand", vec![n.clone()], vec![(q, false)]),
         Pipe::Smaller(n, q) => nested("smaller", vec![n.clone()], vec![(q, false)]),
         Pipe::Call(c) if !c.args.is_empty() => {
-            let names = c.args.iter().take_while(|a| matches!(a, CallArg::Name(_))).count();
+            let names = c.args.iter().take_while(|a| matches!(a, CallArg::Name(_) | CallArg::Num(_))).count();
             let pipes: Vec<(&Pipe, bool)> = c.args[names..].iter().filter_map(|a| if let CallArg::Pipe(q) = a { Some((q, true)) } else { None }).collect();
             if names + pipes.len() < c.args.len() {
                 return one;
@@ -1243,6 +1267,7 @@ fn show_call_arg(a: &CallArg) -> String {
     match a {
         CallArg::Name(n) => n.clone(),
         CallArg::Pipe(p) => stage(p),
+        CallArg::Num(e) => show_arg(e),
     }
 }
 

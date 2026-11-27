@@ -221,7 +221,8 @@ pub struct Env<'a> {
 /// run's input and registers and the arguments of the call that run is.
 struct Lex {
     input: String,
-    regs: RefCell<HashMap<String, Vec<Cand>>>,
+    /// Shared with the caller in the call of an `@inline` function.
+    regs: Rc<RefCell<HashMap<String, Vec<Cand>>>>,
     frame: Option<Frame>,
 }
 
@@ -236,6 +237,8 @@ struct Frame {
     call: std::sync::Arc<crate::sched::Call>,
     /// The run where the call is written, which its pipeline arguments run with.
     caller: Rc<Lex>,
+    /// By parameter position, the values of the numeric arguments; empty without any.
+    values: Vec<u64>,
 }
 
 impl<'a> Env<'a> {
@@ -290,6 +293,7 @@ impl<'a> Env<'a> {
             },
             Expr::Var(i) if *i == crate::sched::KEEP => crate::sched::read(*i).max(1),
             Expr::Var(i) => crate::sched::read(*i),
+            Expr::Param(i, _) => self.lex.borrow().frame.as_ref().expect("a parameter outside the body of its function").values[*i],
             Expr::Not(c) => !self.holds(c, set) as u64,
             Expr::And(cs) => cs.iter().all(|c| self.holds(c, set)) as u64,
             Expr::Or(cs) => cs.iter().any(|c| self.holds(c, set)) as u64,
@@ -482,6 +486,7 @@ fn assign_time_limit(ms: u64) {
 fn bookkeeping(p: &Pipe) -> bool {
     match p {
         Pipe::Seq(_) | Pipe::Filter(_) | Pipe::Param(..) => true,
+        Pipe::Call(c) => c.def.inline,
         Pipe::Pass(Pass::Save(_) | Pass::Load(_) | Pass::Label(_) | Pass::Off(_) | Pass::On(_) | Pass::Assign(..)) => true,
         Pipe::Pass(Pass::Set(i)) => matches!(SET_PASSES[*i], "id" | "none" | "within" | "pre_done"),
         _ => false,
@@ -657,13 +662,25 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             }
             Ok(out)
         }
+        Pipe::Call(c) if c.def.inline => {
+            let caller = env.lex.borrow().clone();
+            let values = arg_values(c, &set, env);
+            let lex = Lex { input: caller.input.clone(), regs: caller.regs.clone(), frame: Some(Frame { call: c.clone(), caller: caller.clone(), values }) };
+            let outer = env.lex.replace(Rc::new(lex));
+            let out = match &*c.body {
+                Pipe::Seq(ps) if c.def.flat => ps.iter().try_fold(set, |s, p| go(p, s, env)),
+                body => go(body, set, env),
+            };
+            env.lex.replace(outer);
+            out
+        }
         Pipe::Call(c) => {
             let input = set.first().map_or_else(String::new, |c| c.term().to_string());
             let mut run = Env::with(env.cli, env.passes, env.w, env.signed, env.trace, String::new(), &input);
             run.egg = env.egg.clone();
             run.cofactor = env.cofactor;
             if !c.args.is_empty() {
-                let frame = Frame { call: c.clone(), caller: env.lex.borrow().clone() };
+                let frame = Frame { call: c.clone(), caller: env.lex.borrow().clone(), values: arg_values(c, &set, env) };
                 run.lex = RefCell::new(Lex::new(&input, Some(frame)));
             }
             if let Some(c) = env.ctxs.borrow().last() {
@@ -702,6 +719,16 @@ fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
             Ok(set)
         }
     }
+}
+
+/// The values of the numeric arguments of `c` on the caller's candidates `set`, by parameter
+/// position; empty without any.
+fn arg_values(c: &crate::sched::Call, set: &[Cand], env: &Env) -> Vec<u64> {
+    use crate::sched::CallArg;
+    if !c.args.iter().any(|a| matches!(a, CallArg::Num(_))) {
+        return Vec::new();
+    }
+    c.args.iter().map(|a| if let CallArg::Num(e) = a { env.value(e, set) } else { 0 }).collect()
 }
 
 /// A `won` to count: the winning pass, each pass's size, the input's size.
@@ -1192,6 +1219,35 @@ mod tests {
         assert_eq!(step("(def @inline (g p) split_runs = 3 | p) prepass=(g id) | (if (split_runs == 3) id none)"), [SUB], "and its sequence");
         assert_eq!(step("(def (g p) split_runs = 3 | p) prepass=(g id) | (if (split_runs == 3) id none)"), Vec::<String>::new(), "a def's assignment ends with its run");
         assert_eq!(step("(def (w p) (save s) | (smallest p | (load s))) prepass=(w rewrite)"), [XOR, SUB], "an argument's passes are seen by the smallest it runs in");
+    }
+
+    #[test]
+    fn numeric_parameters() {
+        let step = |spec: &str| terms(&prepass_of(spec));
+        let budget = "(def (with_budget n p) rewrites = n | p)";
+        assert_eq!(step(&format!("{budget} prepass=(with_budget 0 rewrite)")), [SUB], "the argument limits the rewrites");
+        assert_eq!(step(&format!("{budget} prepass=(with_budget 8 rewrite)")), [XOR]);
+        assert_eq!(step(&format!("{budget} prepass=(with_budget none rewrite)")), [XOR], "none is an argument too");
+        assert_eq!(step("(def (f n p) p | (filter (n == 7))) prepass=(f size rewrite)"), [XOR], "evaluated once at the call, on the caller's candidates");
+        assert_eq!(step("(def @inline (f n p) p | (filter (n == 7))) prepass=(f size rewrite)"), [XOR], "also for an @inline function");
+        assert_eq!(step("(def (f n p) (if (n == 9) p)) prepass=(f (size + 2) rewrite)"), [XOR], "arithmetic in an argument");
+        assert_eq!(step("(def (f n p) (if (n == none) p)) prepass=(f (none - 1) rewrite)"), [XOR]);
+        assert_eq!(step("(def (f n p) (fix n p)) (def (g m) (f (m - 1) rewrite)) prepass=(g 1)"), [SUB], "a parameter in an argument is read in the caller's frame");
+        let closures = "(def (g m q) rewrite | (fix m q)) (def (h k r) (g (k + 1) r)) (def (f n) (h 5 (filter (n == 7))))";
+        assert_eq!(step(&format!("{closures} prepass=(f size)")), [XOR], "an argument reads the frame of the function it is written in, through two calls");
+        let shape = "(def (if_small k p) (if (size <= k) p)) (def (g q) (save u) | q | (union id (load u))) (def (f n) (if_small (n * 2) (g ((filter (size <= n)) | rewrite))))";
+        assert_eq!(step(&format!("{shape} prepass=(f 7)")), [XOR, SUB]);
+        assert_eq!(step(&format!("{shape} prepass=(f 3)")), [SUB], "k is 6, under the size");
+        assert_eq!(step(&format!("{shape} prepass=(f 4)")), [SUB], "n is 4: the filter drops the input");
+        let inline = "(def @inline (lim n p) split_runs = n | p)";
+        assert_eq!(step(&format!("{inline} prepass=(lim 3 id) | (if (split_runs == 3) id none)")), [SUB], "an @inline body shares the caller's sequence");
+        assert_eq!(step("(def @inline (hold n) (save s) | (filter (size == n))) prepass=rewrite | (hold 3) | (union id (load s))"), [XOR], "and its registers");
+        assert_eq!(step("(def @inline (hold n) (save s) | (filter (size == n))) prepass=(hold 4) | (load s)"), [SUB]);
+        assert_eq!(step("(def @inline (i m p) p | (filter (m == 1))) (def (f n) (i 1 (filter (n == 7)))) prepass=(f size)"), [SUB], "an argument of an @inline call reads the frame it is written in");
+        let passes = Passes::parse("(def (f n) max_leaves = n | rewrite) prepass=(f 8)").unwrap();
+        let env = Env::prepass(&passes, 32, None, false, SUB);
+        let e = crate::sched::in_default_run(|| go(&passes.prepass, vec![Cand::new(SUB, "input")], &env)).unwrap_err();
+        assert!(e.to_string().contains("max_leaves is at most 6"), "{e}");
     }
 
     #[test]
