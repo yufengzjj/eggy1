@@ -328,9 +328,13 @@ pub const SETTINGS: [&str; 4] = ["rewrites", "semi_leaves", "relate_leaves", "bi
 
 /// Settings of a run the Rust code reads: `keep` (pre-pass rebuilds unioned into a round,
 /// read as at least 1), `match_limit` and `ban_length` (the back-off scheduler of the next
-/// egglog round), `restarts` (`-m`) and `iter_limit` (`-i`, schedule repetitions of an egglog
-/// round).
-pub const RUN: [&str; 5] = ["keep", "match_limit", "ban_length", "restarts", "iter_limit"];
+/// egglog round), `restarts` (`-m`), `iter_limit` (`-i`, schedule repetitions of an egglog
+/// round), `num_type` (the numeric type, a position in `NUM_TYPES`; `none` is `i64`) and
+/// `trace` (`--trace`: candidates and round sizes to stderr).
+pub const RUN: [&str; 7] = ["keep", "match_limit", "ban_length", "restarts", "iter_limit", "num_type", "trace"];
+
+/// The numeric types, the values of `num_type` by position.
+pub const NUM_TYPES: [&str; 8] = ["i64", "u64", "i32", "u32", "i16", "u16", "i8", "u8"];
 
 pub(crate) const FLAG0: usize = INNER.len();
 pub(crate) const LIMIT0: usize = FLAG0 + FLAGS.len();
@@ -348,6 +352,8 @@ pub const MATCH_LIMIT: usize = RUN0 + 1;
 pub const BAN_LENGTH: usize = RUN0 + 2;
 pub const RESTARTS: usize = RUN0 + 3;
 pub const ITER_LIMIT: usize = RUN0 + 4;
+pub const NUM_TYPE: usize = RUN0 + 5;
+pub const TRACE: usize = RUN0 + 6;
 pub const DEADLINE: usize = RUN0 + RUN.len();
 /// The variables the Rust code reads; those the source files define besides follow them.
 pub const RUST_VARS: usize = DEADLINE + 1;
@@ -377,6 +383,11 @@ pub(crate) const fn rust_var(i: usize) -> (&'static str, VarKind) {
     }
 }
 
+/// The name of the numeric type `num_type` holds on this thread.
+pub fn num_type() -> &'static str {
+    NUM_TYPES.get(get(NUM_TYPE) as usize).copied().unwrap_or(NUM_TYPES[0])
+}
+
 /// The value of `l` on this thread; `none` is `usize::MAX`.
 pub fn limit(l: Limit) -> usize {
     read(LIMIT0 + l as usize) as usize
@@ -393,11 +404,11 @@ pub fn limit_u32(l: Limit) -> u32 {
     read(LIMIT0 + l as usize).min(u32::MAX as u64) as u32
 }
 
-/// `f` as part of a run of the default passes, for code called outside any pipeline: there
+/// `f` after the program `(import "default")`, for code called outside any pipeline: there
 /// every variable is `none`.
 #[cfg(test)]
 pub(crate) fn in_default_run<R>(f: impl FnOnce() -> R) -> R {
-    crate::lang::eval::in_run(&crate::passes::Passes::default(), None, || crate::cand::Cand::new("(Var \"x\")", "input"), f)
+    crate::lang::run::within(&crate::passes::Passes::default(), f)
 }
 
 /// `f` with the `INNER` passes `names` turned off, as `((off NAMES) | f)` would run it.

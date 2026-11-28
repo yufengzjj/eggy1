@@ -1,12 +1,11 @@
-# The default pass pipelines and variables (docs/pipe-language.md), read by
-# `sched::Passes::default` after src/builtins.pipe. A source file holds forms `(let ...)` and
-# `(def ...)`, which may span lines, and lines `NAME = VALUE`: the first for a name defines
-# that variable, a later one assigns it. `--passes` items come after these and can use the
-# names defined here.
+# The library of the simplification (docs/pipe-language.md), which a program reads with
+# (import "default"): the global variables and their default values, the pipelines the
+# passes call and the function `simplify`. It holds only definitions: forms `(let ...)` and
+# `(def ...)`, which may span lines, and lines `NAME = VALUE`, each defining a variable with
+# the value it has from the import on. How the Rust code uses a variable it reads (a switch,
+# a budget, the deadline, a cache size) is in its list of them (`rust_vars`).
 
-# The settings every run starts with (its entry assignments, in order; `-m`, `-i` and the
-# assignments of `--passes` follow). How the Rust code uses a variable it reads (a switch, a
-# budget, the deadline, a cache size) is in its list of them (`sched::VarKind`).
+# Settings of the simplification.
 keep = 2
 extra = 2
 printed = 2
@@ -41,13 +40,17 @@ pre_over_shared_bitwise = 1
 pre_halve_input = 1
 pre_unclustered = 1
 
-# Every variable is none until assigned: the budgets and the deadline until a pipeline binds
-# them, `restarts` and `iter_limit` until `-m` and `-i` set them.
+# Every variable is none until assigned, and a definition as none here keeps a value the
+# caller set before the program: the budgets and the deadline until a pipeline binds them,
+# `restarts` and `iter_limit` until the program sets them (`-m`, `-i`), `num_type` (read as
+# i64) and `trace` (off) likewise (`-n`, `--trace`).
 rewrites = none
 bit_split_budget = none
 time_limit = none
 restarts = none
 iter_limit = none
+num_type = none
+trace = none
 
 # Limits of the passes.
 unclustered_relate_leaves = 10
@@ -186,9 +189,9 @@ minimal_max_size_4bit = 7
 minimal_max_size_8bit = 5
 
 # The largest values of the limits the Rust code sizes tables, shifts or bit masks by; none
-# is more. Every run checks them once, after its entry assignments (`pipe::in_run`), so a
-# larger value from default.pipe or --passes ends it with the error before a pass reads it;
-# a pipeline that assigns one of them is not checked.
+# is more. `simplify` checks them when it starts, so a larger value the program assigned ends
+# the run with the error before a pass reads it; a pipeline that assigns one of them is not
+# checked.
 (let check_limits
   (assert (block_max_block <= 5) "block_max_block is at most 5")
   | (assert (max_leaves <= 6) "max_leaves is at most 6")
@@ -210,7 +213,7 @@ minimal_max_size_8bit = 5
 
 # A pre-pass candidate with origin n, built when `enabled` (a `pre_NAME` switch, or 1) is not
 # 0, on its own budget of bit_split pairs.
-(def @inline (cand enabled:num n p) (if enabled (origin n (bit_split_budget = cand_bit_splits | p)) none))
+(def @inline @timed (cand enabled:num n p) (if enabled (origin n (bit_split_budget = cand_bit_splits | p)) none))
 
 # A later round: the pre-pass rebuilds, then their extraction, or the one proved minimal.
 (let later prepass | (if minimal take_minimal (egglog later)))
@@ -226,7 +229,7 @@ minimal_max_size_8bit = 5
       (prepass | (if minimal take_minimal (egglog first)))
       ((union id prepass) | (egglog rerun_input)))))
 
-# The pipeline of `simplify`: the restart rounds while the extraction changes, extra ones
+# The pipeline `simplify` runs: the restart rounds while the extraction changes, extra ones
 # while the pre-pass still rebuilds it, polish, all keeping the smallest form seen (the
 # extraction prefers fewer non-constant nodes, results are compared by node count); then
 # the same from the printed result, kept when smaller. With `--passes time_limit=MS` the
@@ -247,6 +250,10 @@ minimal_max_size_8bit = 5
                (fix 1 first_round)
                | (if moved (fix (printed - 1) later))
                | polish))))))
+
+# The simplification of the main candidate: the limits checked, `pipeline`, the input
+# itself where that gives no candidate, and the stats of the result settled.
+(def @pipe (simplify g) g | check_limits | pipeline | (if !(any 1) (load g)) | settle)
 
 # A rebuild of the main candidate: the whole term replaced by a T-function lookup, or its
 # regions rewritten, clustered, related and its subterms replaced (`~(y - 1)` replaced

@@ -5,6 +5,7 @@
 use super::ast::{Fun, Holds, Pipe, Slot, show, show_stage, starts_with_value};
 use super::defs::{Call, expand};
 use super::host::{self, Passes, SUBS};
+use super::run::Gives;
 use super::vars::{var, var_index};
 
 impl Passes {
@@ -14,6 +15,7 @@ impl Passes {
     /// `sub_NAME`: one node `rewrite`, which any pass over one term may run) recurse on
     /// subterms, and so may the functions they call that call them again.
     pub(crate) fn check(&self) -> Result<(), String> {
+        self.check_top()?;
         let mut reach: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
         let mut needs = std::collections::HashMap::new();
         for (name, node, uses) in self.uses() {
@@ -47,7 +49,7 @@ impl Passes {
             seen
         };
         let inner = reached("rewrite");
-        let starts = ["prepass", "polish"].into_iter().chain(self.defs.iter().map(|d| d.name.as_str()));
+        let starts = ["pipeline", "prepass", "polish"].into_iter().chain(self.defs.iter().map(|d| d.name.as_str()));
         for start in starts {
             if reached(start).iter().any(|n| n == start) && !(self.defs.iter().any(|d| d.name == start) && inner.iter().any(|n| n == start)) {
                 return Err(format!("{start} reaches itself"));
@@ -56,6 +58,38 @@ impl Passes {
         for start in ["prepass", "polish", "rewrite"] {
             if let Some((n, (what, sig))) = reached(start).iter().find_map(|n| needs.get(n).map(|w| (n, w))) {
                 return Err(format!("{what} needs a simplify run and cannot be in {n}, which {start} calls: {}", sig.decl()));
+            }
+        }
+        Ok(())
+    }
+
+    /// The top-level steps of the program: a group variable read before a step binds it, a
+    /// step that computes candidates before any gives a value (the candidates start empty).
+    fn check_top(&self) -> Result<(), String> {
+        let mut uses = Uses::default();
+        let mut value = false;
+        for t in &self.program {
+            match t.gives {
+                Gives::Num => uses.expr(&t.pipe),
+                _ => uses.walk(&t.pipe),
+            }
+            if let Some(r) = &uses.unsaved {
+                return Err(format!("the program reads {} {r} before it is bound", uses.kind(r)));
+            }
+            let p = &t.pipe;
+            match t.gives {
+                Gives::Group | Gives::Nothing if !value && needs_input(p) => {
+                    let p = match p {
+                        Pipe::Bind(_, rhs) => rhs,
+                        p => p,
+                    };
+                    return Err(format!("{} has no candidates to work on at the top level of the program, which starts with none: start from a value, as in (parse \"x + y\") | ... or t = (parse \"x + y\")", show_stage(p)));
+                }
+                Gives::Group => value |= gives_value(p),
+                Gives::Text if !value && matches!(p, Pipe::App(_, args) if args.is_empty()) => {
+                    return Err(format!("{} has no candidate to work on at the top level of the program, which starts with none: write its input, as in ({} (main t))", show(p), show(p)));
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -244,7 +278,8 @@ impl Uses {
             a => unreachable!("{a:?} is not a name"),
         };
         match b.name {
-            "prepass" | "polish" => self.calls.push(b.name.into()),
+            "prepass" | "polish" | "pipeline" => self.calls.push(b.name.into()),
+            "show" | "parse" => args.iter().for_each(|a| self.walk(a)),
             "pre_done" => self.seen("t0"),
             "save" => self.bound(name(0)),
             "load" | "label" => self.read(name(0)),
@@ -430,6 +465,37 @@ fn flat_stages(p: &Pipe) -> Vec<Pipe> {
             filters.chain(body).collect()
         }
         _ => vec![p.clone()],
+    }
+}
+
+/// Whether the step `p` gives candidates that do not depend on its input: a group value, `load`.
+fn gives_value(p: &Pipe) -> bool {
+    starts_with_value(p) || matches!(p, Pipe::App(Fun::Builtin(b), _) if b.name == "load")
+}
+
+/// Whether the step `p` computes on candidates it is given before any of its steps gives a
+/// value; a binding of a group variable by its right side.
+fn needs_input(p: &Pipe) -> bool {
+    let steps = |ps: &[Pipe]| {
+        for q in ps {
+            if gives_value(q) {
+                return false;
+            }
+            if needs_input(q) {
+                return true;
+            }
+        }
+        false
+    };
+    match p {
+        Pipe::Seq(ps) => steps(ps),
+        Pipe::Expanded(m) => steps(&m.steps),
+        Pipe::Bind(Slot::Local(_, Holds::Group), rhs) => needs_input(rhs),
+        Pipe::Bind(..) => false,
+        Pipe::App(Fun::Def(c), _) if !c.def.inline => !gives_value(p),
+        Pipe::App(Fun::Builtin(b), _) if b.name == "pipeline" => true,
+        Pipe::App(Fun::Builtin(b), _) => b.timed && !gives_value(p),
+        _ => false,
     }
 }
 

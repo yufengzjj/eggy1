@@ -37,14 +37,14 @@ impl Passes {
         out
     }
 
-    /// The variables the `--passes` source files define that neither the Rust code nor any
-    /// pipeline or entry assignment reads.
+    /// The variables the program defines past `default` that neither the Rust code nor any
+    /// pipeline or top-level step reads.
     pub(crate) fn unread_globals(&self) -> Vec<&'static str> {
         let defined: Vec<usize> = self.globals[self.default_globals..].iter().copied().filter(|i| *i >= RUST_VARS).collect();
         if defined.is_empty() {
             return Vec::new();
         }
-        let mut text: Vec<String> = self.entry.iter().map(|e| if let Pipe::Bind(Slot::Global(_), v) = e { show(v) } else { show(e) }).collect();
+        let mut text: Vec<String> = self.program.iter().map(|t| if let Pipe::Bind(Slot::Global(_), v) = &t.pipe { show(v) } else { show(&t.pipe) }).collect();
         let main = [&self.pipeline, &self.prepass, &self.polish, &self.rewrite, &self.simba];
         text.extend(main.into_iter().chain(&self.subs).map(show));
         text.extend(self.defs.iter().map(|d| show_def(d)));

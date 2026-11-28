@@ -164,12 +164,16 @@ pub enum Kind {
     GroupNum,
     /// `group -> term?`: on the whole list, the candidate picked or none replacing it.
     Pick,
+    /// `text -> group`: the candidates read from a text.
+    FromText,
+    /// `term -> text`: a text of the main candidate.
+    TermText,
     /// An operator: no input, every operand written.
     Op,
 }
 
 impl Kind {
-    pub const ALL: [(Kind, &'static str); 8] = [
+    pub const ALL: [(Kind, &'static str); 10] = [
         (Kind::Group, "on the whole list (group -> group)"),
         (Kind::Each, "on each candidate (term -> term)"),
         (Kind::Alt, "alternatives, on each candidate, none when no form is found (term -> term?)"),
@@ -177,6 +181,8 @@ impl Kind {
         (Kind::TermNum, "numbers of the main candidate (term -> num)"),
         (Kind::GroupNum, "numbers of the whole list (group -> num)"),
         (Kind::Pick, "one candidate of the list, or none (group -> term?)"),
+        (Kind::FromText, "candidates read from a text (text -> group)"),
+        (Kind::TermText, "texts of the main candidate (term -> text)"),
         (Kind::Op, "operators, written between their operands (! before its one)"),
     ];
 
@@ -189,6 +195,8 @@ impl Kind {
             (Ty::Term | Ty::MaybeTerm, Ty::Num) => Kind::TermNum,
             (Ty::Group, Ty::Num) => Kind::GroupNum,
             (Ty::Group, Ty::MaybeTerm) => Kind::Pick,
+            (Ty::Text, Ty::Group) => Kind::FromText,
+            (Ty::Term | Ty::MaybeTerm, Ty::Text) => Kind::TermText,
             _ => return None,
         })
     }
@@ -205,12 +213,11 @@ pub struct Sig {
     pub result: Ty,
     /// `@pipe`: `|` fills in the input, so it can be a step.
     pub pipe: bool,
-    /// `@bookkeeping`: only moves candidates, so it runs past the time limit too.
-    pub bookkeeping: bool,
+    /// `@timed`: a call past the time limit is skipped, giving its input.
+    pub timed: bool,
     /// `@simplify_only`: only in `pipeline`.
     pub simplify_only: bool,
-    /// `@uncounted`: skipped past the time limit without making the run cut or counting
-    /// `time_limit/skipped`.
+    /// `@uncounted` (with `@timed`): its skip makes no cut and no `time_limit/skipped`.
     pub uncounted: bool,
     /// `@switch`: a pass with a switch of its name (`rust_vars::INNER`), on until turned off.
     pub switch: bool,
@@ -231,6 +238,11 @@ impl Sig {
     /// Whether it gives a number, so belongs in expressions, not steps.
     pub fn is_number(&self) -> bool {
         self.result == Ty::Num
+    }
+
+    /// Whether it gives a text, so ends a top-level statement or is the input of `parse`.
+    pub fn is_text(&self) -> bool {
+        self.result == Ty::Text
     }
 
     /// The parameter an argument at position `i` of a call is for: the last one for the
@@ -281,8 +293,8 @@ impl Sig {
         if self.switch {
             attrs += "@switch ";
         }
-        if self.bookkeeping {
-            attrs += "@bookkeeping ";
+        if self.timed {
+            attrs += "@timed ";
         }
         if self.simplify_only {
             attrs += "@simplify_only ";

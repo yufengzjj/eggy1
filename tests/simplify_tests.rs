@@ -1,7 +1,7 @@
 use eggy1::expr_convert::{ac_canon_infix, egglog_to_infix, infix_to_egglog};
 use eggy1::{
     Cli, kz_add, kz_low, kz_mul, kz_shl, kz_shr, magic_div_s, magic_div_u, magic_s, magic_u, make_egg, pow2_div,
-    simplify, simplify_round,
+    simplify,
 };
 
 /// Accept `r` if it matches any expected form exactly, or is
@@ -1566,7 +1566,13 @@ fn extract_restart() {
     // The final answer must be a fixpoint: one more round on a fresh
     // e-graph seeded with it extracts the same term again.
     let seed = infix_to_egglog(&result, true);
-    let again = simplify_round(&make_egg(&cli.num_type), &seed, &cli, true).unwrap();
+    let round = format!("(import \"default\")
+iter_limit = 2
+(parse {}) | (union id prepass) | egglog", eggy1::lang::lexer::quoted(&seed));
+    let again = match eggy1::lang::run(&round, &[]).unwrap().value {
+        Some(eggy1::lang::Value::Group(g)) => g[0].term().to_string(),
+        _ => panic!("{round} gives no candidates"),
+    };
     assert_eq!(seed, again, "simplify result is not a fixpoint");
 }
 

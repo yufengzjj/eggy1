@@ -946,23 +946,8 @@ fn rules_egraph(egg: &str) -> Result<EGraph, Error> {
     Ok(egraph)
 }
 
-/// One saturate-and-extract round on `s` together with its linear-MBA rebuild, or
-/// on the rebuild alone if `keep_input` is false and the pre-pass changed `s`.
-pub fn simplify_round(egg: &str, s: &str, cli: &Cli, keep_input: bool) -> Result<String, Error> {
-    lang::eval::in_run(&cli.passes, Some(cli), || cand::Cand::new(s, "input"), || {
-        let (alt, other) = linear_mba::simplify_linear_with(s, width_of(&cli.num_type), crate::eval::NumType::from_name(&cli.num_type).map(|t| t.signed), cli.trace, &cli.passes);
-        let mut roots: Vec<&str> = match alt != s {
-            true if !keep_input => vec![&alt],
-            true => vec![s, &alt],
-            false => vec![s],
-        };
-        roots.extend(other.iter().map(String::as_str));
-        egglog_round(egg, &roots, cli)
-    })
-}
-
 /// The extraction of a saturation round on the e-graph with the terms `roots` unioned.
-pub(crate) fn egglog_round(egg: &str, roots: &[&str], cli: &Cli) -> Result<String, Error> {
+pub(crate) fn egglog_round(egg: &str, roots: &[&str]) -> Result<String, Error> {
     // Subterms repeat a lot in large inputs; egglog reads the text once per occurrence.
     let mut table = dag::NodeTable::new();
     let ids: Vec<dag::NodeId> = roots.iter().map(|r| table.intern(&eval::parse(r))).collect();
@@ -974,7 +959,7 @@ pub(crate) fn egglog_round(egg: &str, roots: &[&str], cli: &Cli) -> Result<Strin
     thread_local! {
         static RUNS: std::cell::RefCell<Vec<(String, String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
     }
-    let schedule = cli.passes.egglog_schedule();
+    let schedule = passes::current().egglog_schedule();
     let key = format!("{schedule}\n{lets}\n{s}\n{union}");
     let hit = |(e, k, _): &&(String, String, String)| e == egg && *k == key;
     if let Some(r) = RUNS.with(|c| c.borrow().iter().find(hit).map(|(_, _, r)| r.clone())) {
@@ -1012,29 +997,34 @@ pub(crate) fn egglog_round(egg: &str, roots: &[&str], cli: &Cli) -> Result<Strin
     Ok(result)
 }
 
-/// Extract-and-restart driver: repeatedly saturate on a fresh e-graph seeded
-/// with the previous round's extraction, until a fixpoint (or the round cap
-/// `cli.max_restarts`). Restarting discards the blown-up e-graph, so later
-/// rounds resume rewriting from the smaller term with the full match budget
-/// available again.
-pub fn simplify(s: &str, cli: &Cli) -> Result<String, Error> {
-    builtin_passes::start();
-    let egg = make_egg(&cli.num_type);
-    stats::set_width(width_of(&cli.num_type));
-    let env = lang::eval::Env::new(cli, egg, s);
-    let input = cand::Cand::new(s, "input");
-    let out = lang::eval::run(&cli.passes.pipeline, vec![input.clone()], &env)?;
-    let r = out.into_iter().next().unwrap_or(input);
-    stats::add(&format!("final/{}", r.origin), 0.0);
-    let r = r.term().to_string();
-    stats::settle(&eval::parse(&r));
-    if builtin_passes::cut() {
-        stats::add("time/cut", 0.0);
+/// The egglog program of the numeric type `num_type`, made when first needed on this thread.
+pub(crate) fn egg_program(num_type: &str) -> std::rc::Rc<str> {
+    thread_local! {
+        static MADE: std::cell::RefCell<Vec<(&'static str, std::rc::Rc<str>)>> = const { std::cell::RefCell::new(Vec::new()) };
     }
-    Ok(egglog_to_infix(&r, &|n| norm_const(n, &cli.num_type)))
+    MADE.with(|m| {
+        let mut m = m.borrow_mut();
+        if let Some((_, e)) = m.iter().find(|(t, _)| *t == num_type) {
+            return e.clone();
+        }
+        let e: std::rc::Rc<str> = make_egg(num_type).into();
+        let t = rust_vars::NUM_TYPES.iter().find(|t| **t == num_type).copied().unwrap_or("i64");
+        m.push((t, e.clone()));
+        e
+    })
 }
 
-/// Whether the last `simplify` on this thread was cut short: a step skipped past a
+/// `expr` (infix or an egglog term) simplified as the command line `cli` does: the program
+/// `cli::program` writes for it, run.
+pub fn simplify(expr: &str, cli: &Cli) -> Result<String, String> {
+    let (passes, _, _) = cli::parse(cli, Some(&cli::statement(expr, false)))?;
+    match lang::execute(&passes, &[])? {
+        Some(lang::Value::Text(t)) => Ok(t),
+        _ => Err("the program gave no text".into()),
+    }
+}
+
+/// Whether the last program on this thread was cut short: a step skipped past a
 /// `time_limit` with the switch `cut` on (the default `pipeline` with `--passes time_limit=MS`).
 pub fn last_run_cut() -> bool {
     builtin_passes::cut()
@@ -1095,10 +1085,9 @@ pub struct Cli {
         long,
         default_value = "",
         hide_default_value = true,
-        value_parser = passes::Passes::parse,
         help = "Change the pass pipeline, e.g. \"extra=0 off=relate\" (see docs/pipe-language.md)"
     )]
-    pub passes: passes::Passes,
+    pub passes: String,
     #[arg(long, help = "Print the pass pipeline in --passes form and exit")]
     pub show_passes: bool,
     #[arg(long, help = "Print the signatures of the built-in pipeline functions (src/builtins.pipe) and exit")]
@@ -1116,7 +1105,7 @@ impl Default for Cli {
             iter_limit: 10,
             max_restarts: 2,
             trace: false,
-            passes: passes::Passes::default(),
+            passes: String::new(),
             show_passes: false,
             show_builtins: false,
             stats: false,

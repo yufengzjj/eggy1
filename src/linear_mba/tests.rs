@@ -266,7 +266,7 @@ fn split_bits_and_wide_regions_preserve_value() {
                 .reduce(|a, b| op(Op::Add, vec![a, b]))
                 .unwrap()
         };
-        let alt = parse(&simplify_linear(&show(&t), 8));
+        let alt = parse(&prepass_u8(&show(&t)));
         if alt == t {
             continue;
         }
@@ -406,7 +406,7 @@ fn bool_expr_cache_keeps_decompose_values_apart() {
     let tt = (0..16usize).filter(|&p| ((p ^ p >> 1) | (p >> 1 & p >> 2)) & !(p >> 2 ^ p >> 3) & 1 == 1).fold(0u64, |t, p| t | 1 << p);
     let cost = |spec: &str| {
         let p = crate::passes::Passes::parse(spec).unwrap();
-        crate::lang::eval::in_run(&p, None, || crate::cand::Cand::new("(Var \"x\")", "input"), || {
+        crate::lang::run::within(&p, || {
             let BE::E(c, _) = bool_expr_canon(tt, 4) else { panic!("not constant") };
             (c, bool_expr_cached_now(tt, 4))
         })
@@ -437,7 +437,7 @@ fn shape_candidates_follow_shapes_max_size() {
     let lv = [x, y];
     let best = |spec: &str| {
         let p = crate::passes::Passes::parse(spec).unwrap();
-        crate::lang::eval::in_run(&p, None, || crate::cand::Cand::new("(Var \"x\")", "input"), || {
+        crate::lang::run::within(&p, || {
             let w = Ctx::new(8);
             let prog = Prog::new(&t, &lv, &w);
             let base: Vec<u64> = (0..w.w).flat_map(|j| prog.run_many(4, |i, q| ((q >> i & 1) as u64) << j, &w)).collect();
@@ -479,4 +479,13 @@ fn bool_expr_matches_table() {
             }
         }
     })
+}
+
+/// The main candidate of the pre-pass of the default passes on the egglog term `egg` in `u8`.
+fn prepass_u8(egg: &str) -> String {
+    let code = format!("(import \"default\")\nnum_type = u8\n(parse {}) | prepass", crate::lang::lexer::quoted(egg));
+    match crate::lang::run::value(&code) {
+        Ok(Some(crate::lang::Value::Group(g))) => g[0].term().to_string(),
+        r => panic!("{code}: {}", r.err().unwrap_or_default()),
+    }
 }

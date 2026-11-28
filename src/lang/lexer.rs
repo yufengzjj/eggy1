@@ -139,7 +139,7 @@ fn string_at(cs: &[char]) -> Result<(String, usize), String> {
 }
 
 /// `s` written as a string literal that `string_at` reads back.
-pub(crate) fn quoted(s: &str) -> String {
+pub fn quoted(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
@@ -159,7 +159,7 @@ pub(crate) fn code_part(s: &str) -> &str {
 }
 
 /// The parentheses opened less those closed in `s`, outside string literals.
-pub(crate) fn depth_of(s: &str) -> i32 {
+pub fn depth_of(s: &str) -> i32 {
     let (mut d, mut in_str, mut esc) = (0, false, false);
     for c in s.chars() {
         match c {

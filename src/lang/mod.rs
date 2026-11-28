@@ -11,7 +11,12 @@ pub(crate) mod host;
 pub mod lexer;
 pub mod macros;
 pub mod parser;
+pub mod run;
 pub mod source;
 pub mod types;
 pub mod vars;
 pub mod warn;
+
+pub use eval::Value;
+pub use run::{Outcome, execute, run};
+pub use source::Program;

@@ -99,8 +99,8 @@ pub struct Expanded {
     pub steps: Vec<Pipe>,
     /// The steps are a scope; otherwise they run in the enclosing one, as the call would.
     pub scoped: bool,
-    /// Runs past the time limit too: its steps only bind.
-    pub bookkeeping: bool,
+    /// The macro's declaration is `@timed`: past the time limit the call is skipped whole.
+    pub timed: bool,
 }
 
 impl PartialEq for Expanded {
@@ -222,6 +222,7 @@ pub fn starts_with_value(p: &Pipe) -> bool {
         Pipe::Var(Slot::Local(_, Holds::Group)) => true,
         Pipe::Seq(ps) => ps.first().is_some_and(starts_with_value),
         Pipe::App(Fun::Def(c), _) => !c.def.step,
+        Pipe::App(Fun::Builtin(b), _) => b.sig.kind() == super::types::Kind::FromText,
         _ => false,
     }
 }
@@ -362,6 +363,7 @@ fn show_call_arg(a: &Pipe, p: &Param) -> String {
 pub fn show(p: &Pipe) -> String {
     let stages = |ps: &[Pipe]| ps.iter().map(stage).collect::<Vec<_>>();
     match p {
+        Pipe::App(Fun::Builtin(b), args) if b.sig.params.is_empty() && !args.is_empty() => form(b.name, &args.iter().map(|a| if let Pipe::Text(t) = a { quoted(t) } else { show_expr(a, 7) }).collect::<Vec<_>>()),
         Pipe::App(Fun::Builtin(b), args) if !b.sig.is_number() => {
             let shown: Vec<String> = app_args(b, args)
                 .into_iter()

@@ -5,8 +5,9 @@
 
 use crate::lang::ast::Pipe;
 use crate::lang::defs::{Def, Defs};
-use crate::lang::source::Lets;
-use crate::lang::vars::{get, parsing, var};
+use crate::lang::run::Top;
+use crate::lang::source::Program;
+use crate::lang::vars::{get, var};
 use crate::rust_vars::{BAN_LENGTH, FLAG0, INNER, ITER_LIMIT, MATCH_LIMIT, RUST_VARS, is_extern_switch};
 
 /// The rebuilds of subterms that passes inside a rebuild make (`Passes::subs`), by name, and
@@ -80,14 +81,12 @@ pub(crate) const STEPS: [(Step, &str); 3] = [(Step::Run, "run"), (Step::Once, "o
 pub struct Passes {
     /// The steps each of a round's `iter_limit` repetitions runs, in order.
     pub schedule: Vec<(Step, &'static str)>,
-    /// The assignments (`Pipe::Bind` of globals, `on` and `off`) a run starts with, in order: the
-    /// first `defaults` from `default.pipe`, the rest from `--passes` (`entry_steps`).
-    pub entry: Vec<Pipe>,
+    /// The top-level steps of the program, in order, imports in place: the first `defaults`
+    /// from the import of `default`; `Display` writes those from `shown_from` on.
+    pub program: Vec<Top>,
     pub defaults: usize,
-    /// `check_limits` of `default.pipe` (or of `--passes`, which may redefine it), run once
-    /// after the entry assignments (`eval::in_run`).
-    pub check: Pipe,
-    /// The passes `simplify` runs on its input.
+    pub shown_from: usize,
+    /// The passes the `pipeline` step runs.
     pub pipeline: Pipe,
     /// The pre-pass on one term: its first candidate is the main rebuild, the others are
     /// unioned with it.
@@ -110,32 +109,24 @@ pub struct Passes {
     /// `default_globals` in `default.pipe`.
     pub globals: Vec<usize>,
     pub default_globals: usize,
-    /// The positions in `entry` of the `--passes` items that define a variable.
+    /// The positions in `program` of the items past `default` that define a variable.
     pub defines: Vec<usize>,
 }
 
-/// The default passes, and the names `default.pipe` defines for `--passes` to use.
+/// The program `(import "default")`: the default passes, and the names `default.pipe`
+/// defines for the items after it, which a program that starts with that import starts from.
 pub(crate) static DEFAULT: std::sync::LazyLock<(Passes, Defs)> = std::sync::LazyLock::new(|| {
     crate::lang::builtins::all();
-    let mut p = Passes::base();
-    let mut defs = Defs::new();
-    let mut globals = Vec::new();
-    parsing(&mut globals, || p.apply_source(include_str!("default.pipe"), &mut defs, &mut Lets::default(), true)).and_then(|()| p.check()).unwrap_or_else(|e| panic!("src/default.pipe: {e}"));
-    p.globals = globals;
-    p.check = check_of(&defs);
+    let mut prog = Program::new();
+    prog.read_registered("default").unwrap_or_else(|e| panic!("src/{e}"));
+    let defs = prog.defs().clone();
+    let p = prog.passes;
+    p.check().unwrap_or_else(|e| panic!("src/default.pipe: {e}"));
     if let Some(e) = p.undefined().first() {
         panic!("{e}");
     }
-    p.defaults = p.entry.len();
-    p.default_defs = p.defs.len();
-    p.default_globals = p.globals.len();
     (p, defs)
 });
-
-/// The checks `(let check_limits ...)` defines in `defs`.
-pub(crate) fn check_of(defs: &Defs) -> Pipe {
-    defs.get("check_limits").map_or_else(Pipe::id, |n| n.pipe.clone())
-}
 
 impl Default for Passes {
     fn default() -> Passes {
@@ -144,8 +135,8 @@ impl Default for Passes {
 }
 
 impl Passes {
-    /// The settings `default.pipe` starts from; its pipelines are `id`.
-    fn base() -> Passes {
+    /// The passes of a program with no items: its pipelines are `id`.
+    pub(crate) fn base() -> Passes {
         use Step::*;
         let id = Pipe::id();
         Passes {
@@ -157,9 +148,9 @@ impl Passes {
                 (Saturate, "identity-zero-element"),
                 (Run, "simplify"),
             ],
-            entry: Vec::new(),
+            program: Vec::new(),
             defaults: 0,
-            check: id.clone(),
+            shown_from: 0,
             pipeline: id.clone(),
             prepass: id.clone(),
             polish: id.clone(),
@@ -274,34 +265,39 @@ mod tests {
         parse_with(s, &DEFAULT.1, &mut Vec::new()).unwrap()
     }
 
-    /// The value of variable `name` after the entry assignments of `p`.
+    /// The value of variable `name` after the program `p`.
     fn after_entry(p: &Passes, name: &str) -> u64 {
-        let i = parsing(&mut p.globals.clone(), || var_index(name)).unwrap();
-        crate::lang::eval::in_run(p, None, x, || get(i))
+        let i = crate::lang::vars::parsing(&mut p.globals.clone(), || var_index(name)).unwrap();
+        crate::lang::run::within(p, || get(i))
     }
 
     #[test]
     fn off_ends_with_its_scope() {
         let p = Passes::parse("off+=relate").unwrap();
-        crate::lang::eval::in_run(&p, None, x, || {
-            assert!(is_off("relate") && is_off("semi_peel_shapes"), "the entry assignments run first");
+        crate::lang::run::within(&p, || {
+            assert!(is_off("relate") && is_off("semi_peel_shapes"), "the program runs first");
             in_scope(|| {
                 turn_on("relate");
-                crate::lang::eval::in_run(&p, None, x, || assert!(!is_off("relate"), "a run inside a run keeps the bindings of its caller"));
+                let env = crate::lang::eval::Env::prepass(&p, 64, None, false, x().term());
+                let r = crate::lang::eval::run(&parse("(if relate id none)").unwrap(), vec![x()], &env).unwrap();
+                assert_eq!(r.len(), 1, "a run inside the program keeps the bindings of its caller");
                 turn_off("tfunc");
             });
             assert!(!is_off("tfunc") && is_off("relate"), "a pass turned off in a scope is on again after it");
         });
-        assert!(!is_off("relate") && !is_off("semi_peel_shapes"), "the entry bindings end with the run");
+        assert!(!is_off("relate") && !is_off("semi_peel_shapes"), "the bindings of the program end with it");
     }
 
     #[test]
-    fn entry_assignments() {
+    fn top_level_assignments() {
         let p = Passes::parse("extra=5 split_runs=vars*3 extra=extra+1 off=relate,tfunc off+=simba off-=tfunc").unwrap();
         assert_eq!(after_entry(&p, "extra"), 6, "items run in order, a later one reading an earlier");
-        assert_eq!(after_entry(&p, "split_runs"), 6, "a value is evaluated on the input");
+        assert_eq!(after_entry(&p, "split_runs"), 0, "a value is evaluated on the candidates of the top level, none at first");
+        let mut prog = crate::lang::Program::new();
+        prog.read("(import \"default\")\n(parse \"x - y\") | split_runs = vars * 3").unwrap();
+        assert_eq!(after_entry(&prog.finish().unwrap().0, "split_runs"), 6, "and on those a statement gives");
         assert_eq!(after_entry(&p, "keep"), 2, "default.pipe comes first");
-        crate::lang::eval::in_run(&p, None, x, || {
+        crate::lang::run::within(&p, || {
             assert!(is_off("relate") && is_off("simba") && !is_off("tfunc"));
             assert!(!is_off("semi_peel_shapes"), "off= turns every other pass on");
         });
@@ -309,18 +305,19 @@ mod tests {
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(p.to_string().contains(" extra=5 split_runs=vars * 3 extra=extra + 1 off=relate,tfunc off+=simba off-=tfunc "), "{p}");
         let p = Passes::parse("off-=semi_peel_shapes keep=0 prove_minimal=0 restarts=7 match_limit=9").unwrap();
-        assert!(crate::lang::eval::in_run(&p, None, x, || !is_off("semi_peel_shapes")));
+        assert!(crate::lang::run::within(&p, || !is_off("semi_peel_shapes")));
         assert_eq!([after_entry(&p, "keep"), after_entry(&p, "prove_minimal"), after_entry(&p, "restarts")], [0, 0, 7]);
-        assert!(crate::lang::eval::in_run(&p, None, x, || p.egglog_schedule().contains(":match-limit 9 :ban-length 3")));
+        assert!(crate::lang::run::within(&p, || p.egglog_schedule().contains(":match-limit 9 :ban-length 3")));
         let p = Passes::parse("off=").unwrap();
-        assert_eq!(p.entry[p.defaults..], [Expanded::switches(true, &INNER)]);
+        assert_eq!(p.program[p.shown_from..].iter().map(|t| t.pipe.clone()).collect::<Vec<_>>(), [Expanded::switches(true, &INNER)]);
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
-        let cli = crate::Cli { max_restarts: 5, iter_limit: 3, passes: Passes::parse("iter_limit=iter_limit*2").unwrap(), ..Default::default() };
-        let (m, i) = crate::lang::eval::in_run(&cli.passes, Some(&cli), x, || (get(RESTARTS), get(ITER_LIMIT)));
+        let cli = crate::Cli { max_restarts: 5, iter_limit: 3, passes: "iter_limit=iter_limit*2".into(), ..Default::default() };
+        let (passes, _, text) = crate::cli::parse(&cli, None).unwrap();
+        let (m, i) = crate::lang::run::within(&passes, || (get(RESTARTS), get(ITER_LIMIT)));
         assert_eq!((m, i), (5, 6), "-m and -i come before the --passes items");
-        let shown = cli.passes.show_run(5, 3);
-        assert!(shown.starts_with("# A run: keep = 2 | ") && shown.contains("| restarts = 5 | iter_limit = 3 | iter_limit = iter_limit * 2 | check_limits | pipeline\n"), "{shown}");
-        assert_eq!(Passes::parse(&shown).unwrap(), cli.passes);
+        let shown = crate::cli::one_line(&text);
+        assert_eq!(shown, "(import \"default\"); num_type = i64; restarts = 5; iter_limit = 3; iter_limit = iter_limit*2", "{shown}");
+        assert_eq!(Passes::parse(&passes.to_string()).unwrap().to_string(), passes.to_string());
         for bad in ["minimal=0", "relate=none", "nope=1", "split_runs=4 | rewrite", "keep+=1", "size=3"] {
             assert!(Passes::parse(bad).is_err(), "{bad}");
         }
@@ -329,12 +326,12 @@ mod tests {
     #[test]
     fn default_pipe_assigns_every_variable() {
         let p = Passes::default();
-        let cli = crate::Cli::default();
         let all = || (0..RUST_VARS).chain(p.globals.iter().copied().filter(|i| *i >= RUST_VARS));
-        let unset: Vec<&str> = crate::lang::eval::in_run(&p, None, x, || all().filter(|&i| var(i).kind != VarKind::Pass && get(i) == NONE).map(|i| var(i).name).collect());
-        assert_eq!(unset, ["rewrites", "bit_split_budget", "restarts", "iter_limit", "time_limit"]);
-        let unset: Vec<&str> = crate::lang::eval::in_run(&p, Some(&cli), x, || all().filter(|&i| get(i) == NONE && var(i).kind != VarKind::Pass).map(|i| var(i).name).collect());
-        assert_eq!(unset, ["rewrites", "bit_split_budget", "time_limit"], "-m and -i set restarts and iter_limit");
+        let unset: Vec<&str> = crate::lang::run::within(&p, || all().filter(|&i| var(i).kind != VarKind::Pass && get(i) == NONE).map(|i| var(i).name).collect());
+        assert_eq!(unset, ["rewrites", "bit_split_budget", "restarts", "iter_limit", "num_type", "trace", "time_limit"]);
+        let (cli, _, _) = crate::cli::parse(&crate::Cli::default(), None).unwrap();
+        let unset: Vec<&str> = crate::lang::run::within(&cli, || all().filter(|&i| get(i) == NONE && var(i).kind != VarKind::Pass).map(|i| var(i).name).collect());
+        assert_eq!(unset, ["rewrites", "bit_split_budget", "trace", "time_limit"], "-n, -m and -i set num_type, restarts and iter_limit");
         assert_eq!(get(var_index("max_leaves").unwrap()), NONE, "outside a run every variable is none");
     }
 
@@ -359,7 +356,7 @@ mod tests {
         for (n, k) in kinds {
             assert_eq!(kind(var_index(n).unwrap()), k, "{n}");
         }
-        let r = crate::lang::eval::in_run(&p, None, x, || {
+        let r = crate::lang::run::within(&p, || {
             swap_read(ReadSet::EMPTY);
             let e = Pipe::global(var_index("memo_contexts").unwrap());
             let env = crate::lang::eval::Env::prepass(&p, 64, None, false, x().term());
@@ -392,8 +389,8 @@ mod tests {
             ("minimal_max_vars", 31),
         ];
         let prepass = |spec: &str| {
-            let p = Passes::parse(spec).unwrap();
-            crate::lang::eval::run(&p.prepass, vec![x()], &crate::lang::eval::Env::prepass(&p, 64, None, false, x().term())).err().map(|e| e.to_string())
+            let (source, _) = crate::cli::passes::translate(spec).unwrap();
+            crate::lang::run(&format!("(import \"default\")\n{source}(parse \"x - y\") | check_limits"), &[]).err()
         };
         for (name, cap) in caps {
             let msg = format!("{name} is at most {cap}");
@@ -404,15 +401,14 @@ mod tests {
             }
         }
         let input = crate::cand::Cand::new("(Sub (Var \"x\") (Var \"y\"))", "input");
-        let cli = crate::Cli { passes: Passes::parse("max_leaves=7").unwrap(), ..crate::Cli::default() };
-        assert_eq!(crate::simplify(input.term(), &cli).err().map(|e| e.to_string()).as_deref(), Some("max_leaves is at most 6"), "checked when the run starts");
+        let cli = crate::Cli { passes: "max_leaves=7".into(), ..crate::Cli::default() };
+        assert_eq!(crate::simplify(input.term(), &cli).err().as_deref(), Some("max_leaves is at most 6"), "checked when simplify starts");
         let p = Passes::parse("prepass=(max_leaves = 7 | id)").unwrap();
-        let r = crate::lang::eval::run(&p.prepass, vec![input.clone()], &crate::lang::eval::Env::prepass(&p, 64, None, false, input.term()));
-        assert!(r.is_ok(), "only the entry assignments are checked, not those inside a pipeline");
-        let p = Passes::parse("prepass=(max_leaves = vars * 4 | check_limits | rewrite)").unwrap();
-        let cli = crate::Cli { passes: p, ..crate::Cli::default() };
+        let r = crate::lang::run::prepass_of(&p, input.clone(), 64, None);
+        assert!(r.is_ok(), "only simplify checks them, not an assignment inside a pipeline");
+        let cli = crate::Cli { passes: "prepass=(max_leaves = vars * 4 | check_limits | rewrite)".into(), ..crate::Cli::default() };
         let r = crate::simplify(input.term(), &cli);
-        assert_eq!(r.err().map(|e| e.to_string()).as_deref(), Some("max_leaves is at most 6"), "a pipeline can check its own assignments; a pre-pass run inside the pipeline gives its error");
+        assert_eq!(r.err().as_deref(), Some("max_leaves is at most 6"), "a pipeline can check its own assignments; a pre-pass run inside the pipeline gives its error");
     }
 
     #[test]
@@ -426,7 +422,7 @@ mod tests {
         let p = Passes::parse(&format!("file={}", f.display())).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!([after_entry(&p, "many_g0"), after_entry(&p, "many_g150"), after_entry(&p, "many_g299")], [0, 150, 299]);
-        let r = crate::lang::eval::in_run(&p, None, x, || crate::lang::eval::run(&p.prepass, vec![x()], &crate::lang::eval::Env::prepass(&p, 64, None, false, x().term())).unwrap());
+        let r = crate::lang::run::prepass_of(&p, x(), 64, None).unwrap();
         assert_eq!(r[0].term().to_string(), x().term().to_string());
     }
 
@@ -442,7 +438,7 @@ mod tests {
         let p = Passes::parse(&format!("file={}", f.display())).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let t = || crate::cand::Cand::new("(Add (And (Var \"x\") (Var \"y\")) (Or (Var \"x\") (Var \"y\")))", "input");
-        let r = crate::lang::eval::in_run(&p, None, t, || crate::lang::eval::run(&p.prepass, vec![t()], &crate::lang::eval::Env::prepass(&p, 64, None, false, t().term())).unwrap());
+        let r = crate::lang::run::prepass_of(&p, t(), 64, None).unwrap();
         assert_eq!(r[0].term(), "(Add (Var \"x\") (Var \"y\"))", "the rewrite memoized with pick = 0 is not reused with pick = 1");
     }
 
@@ -453,13 +449,13 @@ mod tests {
         let plain = Passes::parse("prepass=(scope lowbits)").unwrap();
         let scoped = Passes::parse("prepass=(scope (lowbits_max_try = 1 | lowbits) | lowbits)").unwrap();
         let none = Passes::parse("prepass=(scope (lowbits_max_try = 1 | id) | lowbits)").unwrap();
-        let run = |p: &Passes| crate::lang::eval::run(&p.prepass, vec![t()], &crate::lang::eval::Env::prepass(p, 8, None, false, t().term())).unwrap()[0].term().to_string();
+        let run = |p: &Passes| crate::lang::run::prepass_of(p, t(), 8, None).unwrap()[0].term().to_string();
         assert_eq!(run(&plain), "(Num 0)", "x*x*x + x is even");
         assert_eq!(run(&none), "(Num 0)", "the assignment ends with its sequence");
         let inner = Passes::parse("prepass=(scope lowbits_max_try = 1 | lowbits)").unwrap();
         assert_ne!(run(&inner), "(Num 0)", "with nothing enumerated nothing folds");
         assert_eq!(run(&scoped), "(Num 0)");
-        crate::lang::eval::in_run(&plain, None, t, || {
+        crate::lang::run::within(&plain, || {
             assert_eq!(limit(Limit::LowbitsMaxTry), 256);
             crate::lang::eval::run(&parse("lowbits_max_try = 1 | id").unwrap(), vec![t()], &crate::lang::eval::Env::prepass(&plain, 8, None, false, t().term())).unwrap();
             assert_eq!(limit(Limit::LowbitsMaxTry), 256, "a run ends the bindings made in it");
@@ -473,7 +469,7 @@ mod tests {
         let t = || crate::cand::Cand::new(&input, "input");
         let run = |spec: &str| {
             let p = Passes::parse(spec).unwrap();
-            crate::lang::eval::run(&p.prepass, vec![t()], &crate::lang::eval::Env::prepass(&p, 8, None, false, t().term())).unwrap()[0].term().to_string()
+            crate::lang::run::prepass_of(&p, t(), 8, None).unwrap()[0].term().to_string()
         };
         let plain = run("prepass=(scope (best 1 id poly_mba))");
         assert_eq!(plain, format!("(Mul {y} {y})"));
@@ -488,7 +484,7 @@ mod tests {
         let t = || crate::cand::Cand::new(&input, "input");
         let run = |spec: &str| {
             let p = Passes::parse(spec).unwrap();
-            let r = crate::lang::eval::run(&p.prepass, vec![t()], &crate::lang::eval::Env::prepass(&p, 32, None, false, t().term())).unwrap();
+            let r = crate::lang::run::prepass_of(&p, t(), 32, None).unwrap();
             crate::eval::size(&crate::eval::parse(r[0].term()))
         };
         let before = crate::eval::size(&crate::eval::parse(&input));
@@ -505,7 +501,7 @@ mod tests {
         let t = || crate::cand::Cand::new(&input, "input");
         let run = |spec: &str| {
             let p = Passes::parse(spec).unwrap();
-            crate::lang::eval::run(&p.prepass, vec![t()], &crate::lang::eval::Env::prepass(&p, 64, None, false, t().term())).unwrap()[0].term().to_string()
+            crate::lang::run::prepass_of(&p, t(), 64, None).unwrap()[0].term().to_string()
         };
         let plain = run("prepass=(scope tfunc)");
         assert_eq!(plain, "(And (Var \"x\") (Var \"y\"))");
@@ -520,7 +516,7 @@ mod tests {
         let t = || crate::cand::Cand::new(&input, "input");
         let run = |spec: &str| {
             let p = Passes::parse(spec).unwrap();
-            crate::lang::eval::run(&p.prepass, vec![t()], &crate::lang::eval::Env::prepass(&p, 64, None, false, t().term())).unwrap()[0].term().to_string()
+            crate::lang::run::prepass_of(&p, t(), 64, None).unwrap()[0].term().to_string()
         };
         let plain = run("prepass=(scope (best 1 id wide_blocks))");
         assert_ne!(plain, input, "a block form is smaller");
@@ -531,7 +527,7 @@ mod tests {
 
     #[test]
     fn time_limit_zero_is_a_deadline() {
-        let at = |spec: &str| crate::lang::eval::in_run(&Passes::parse(spec).unwrap(), None, x, || (get(DEADLINE), epoch_ns()));
+        let at = |spec: &str| crate::lang::run::within(&Passes::parse(spec).unwrap(), || (get(DEADLINE), epoch_ns()));
         assert_eq!(at("time_limit=none").0, NONE);
         let (deadline, now) = at("time_limit=0");
         assert!(deadline <= now, "0 is a deadline now");
@@ -571,9 +567,9 @@ mod tests {
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("pre+=nope").is_err() && Passes::parse("keep+=1").is_err());
         let p = Passes::parse("off=semi_bit_split,relate").unwrap();
-        assert_eq!(p.entry[p.defaults..], [Expanded::switches(true, &INNER), Expanded::switches(false, &["semi_bit_split", "relate"])]);
+        assert_eq!(p.program[p.shown_from..].iter().map(|t| t.pipe.clone()).collect::<Vec<_>>(), [Expanded::switches(true, &INNER), Expanded::switches(false, &["semi_bit_split", "relate"])]);
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
-        assert!(crate::lang::eval::in_run(&p, None, x, || is_off("relate") && !is_off("simba")));
+        assert!(crate::lang::run::within(&p, || is_off("relate") && !is_off("simba")));
         assert!(!is_off("relate"));
         in_scope(|| {
             turn_off("poly_mba");
@@ -595,7 +591,7 @@ mod tests {
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("split_runs+=1").is_err() && Passes::parse("split_runs=x").is_err());
         assert_eq!(limit(Limit::SplitRuns), usize::MAX, "outside a run every variable is none");
-        let got = crate::lang::eval::in_run(&p, None, x, || (limit(Limit::SplitRuns), limit(Limit::PolyBuilds), limit(Limit::SplitDepth)));
+        let got = crate::lang::run::within(&p, || (limit(Limit::SplitRuns), limit(Limit::PolyBuilds), limit(Limit::SplitDepth)));
         assert_eq!(got, (4, 64, 2));
         assert_eq!(limit(Limit::SplitRuns), usize::MAX);
         let p = Passes::parse("keep=1 pipeline=lowbits | (best 2 rewrite ((off relate tfunc) | rebuild)) | (fix 3 egglog) | polish_factor extra=0").unwrap();
@@ -648,7 +644,7 @@ times = extra + 1 # a new variable
         assert!(Passes::parse("times=1").is_err(), "a variable of one parse is unknown in another");
         let bad = [
             ("off=relate\n", "off names a function or a definition"),
-            ("lowbits | rewrite\n", "expected (let ...), (def ...) or NAME = VALUE"),
+            ("lowbits | rewrite\n", "lowbits has no candidates to work on at the top level"),
             ("prepass = lowbits\n", "a source file defines it as (def (prepass) ...)"),
             ("(def (prepass)\n  lowbits\n", "unclosed form"),
             ("(extern (x g:group) group)\n", "only read from src/builtins.pipe"),
@@ -668,7 +664,7 @@ times = extra + 1 # a new variable
             assert!(e.contains("simplify run") || e.contains("reaches itself"), "{bad}: {e}");
         }
         assert!(Passes::parse("pipeline=(fix restarts prepass | egglog | polish)").is_ok());
-        assert!(Passes::parse("prepass=(egglog x)").unwrap_err().contains("(extern @pipe @simplify_only (egglog label:name? g:group) group)"));
+        assert!(Passes::parse("prepass=(egglog x)").unwrap_err().contains("(extern @pipe @timed @simplify_only (egglog label:name? g:group) group)"));
         assert!(Passes::parse("polish=(if mixed reprint)").unwrap_err().contains("reprint needs a simplify run and cannot be in polish"));
         for bad in ["(extern (x g:group) group)", "keep=1 (extern (x g:group) group)", "pipeline=extern"] {
             assert!(Passes::parse(bad).unwrap_err().contains(NO_EXTERN), "{bad}");
@@ -685,9 +681,10 @@ times = extra + 1 # a new variable
             assert!(Passes::parse(good).is_ok(), "{good}");
         }
         assert_eq!(Passes::default().warnings(), Vec::<String>::new());
-        let mut lets = Lets::default();
-        Passes::base().apply(include_str!("default.pipe"), &mut Defs::new(), &mut lets).unwrap();
-        assert!(lets.defined.iter().all(|(n, _)| n == "check_limits" || n.split(' ').next().is_some_and(|n| lets.used.iter().any(|u| u == n))), "{:?} {:?}", lets.defined, lets.used);
+        let mut prog = crate::lang::Program::new();
+        prog.read(include_str!("default.pipe")).unwrap();
+        let unused: Vec<String> = prog.finish().unwrap().1.into_iter().filter(|w| w.contains("never used")).collect();
+        assert_eq!(unused, ["(def (simplify) ...) is never used: it runs only where a later item calls it"], "default.pipe uses its definitions but the one a program calls");
         let (_, w) = Passes::parse_noting("(let foo rewrite) (let bar lowbits) prepass=bar | (save t) | (save q) | (load t) | ((off relate) | (save x) | id) | (rewrite | (off relate))").unwrap();
         assert_eq!(w.len(), 4, "{w:?}");
         assert!(w[0].contains("let foo") && w[1].contains("group variable q") && w[2].contains("group variable x") && w[3].contains("(off relate) ends"), "{w:?}");
@@ -731,7 +728,7 @@ times = extra + 1 # a new variable
             assert!(Passes::parse(bad).is_err(), "{bad}");
         }
         with_off(&["relate"], || {
-            assert!(crate::lang::eval::in_run(&Passes::default(), None, x, || is_off("relate")));
+            assert!(crate::lang::run::within(&Passes::default(), || is_off("relate")));
         });
         assert!(!is_off("relate"));
     }
@@ -740,7 +737,7 @@ times = extra + 1 # a new variable
     fn assignment_items_and_warnings() {
         let p = Passes::parse("prepass=lowbits | split_runs=4 | rewrite").unwrap();
         assert_eq!(p.prepass.to_string(), "lowbits | split_runs = 4 | rewrite");
-        assert_eq!(p.entry, Passes::default().entry, "an assignment after | stays in the pipeline");
+        assert_eq!(p.program, Passes::default().program, "an assignment after | stays in the pipeline");
         let p = Passes::parse("prepass=lowbits split_runs=4").unwrap();
         assert_eq!((p.prepass.to_string().as_str(), after_entry(&p, "split_runs")), ("lowbits", 4));
         let p = Passes::parse("prepass=lowbits | split_runs = vars * 2 | rewrite extra=0").unwrap();

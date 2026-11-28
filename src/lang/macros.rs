@@ -16,7 +16,7 @@ impl Expanded {
     pub fn switches(on: bool, names: &[&str]) -> Pipe {
         let steps = names.iter().filter_map(|n| switch_index(n)).map(|i| Pipe::Bind(Slot::Global(i), std::sync::Arc::new(Pipe::Num(on as u64)))).collect();
         let args = names.iter().map(|n| Pipe::Name(n.to_string())).collect();
-        Pipe::Expanded(Box::new(Expanded { head: if on { "on" } else { "off" }, args, steps, scoped: false, bookkeeping: true }))
+        Pipe::Expanded(Box::new(Expanded { head: if on { "on" } else { "off" }, args, steps, scoped: false, timed: false }))
     }
 
     /// For `on` and `off`: whether it is `on`, and the names.
@@ -69,7 +69,7 @@ pub fn smallest(p: Pipe) -> Pipe {
     let mut steps = vec![Pipe::app("clear", vec![Pipe::Name(s.clone())])];
     steps.extend(body);
     steps.push(Pipe::app("take_min", vec![Pipe::Name(s)]));
-    Pipe::Expanded(Box::new(Expanded { head: "smallest", args: vec![p], steps, scoped, bookkeeping: false }))
+    Pipe::Expanded(Box::new(Expanded { head: "smallest", args: vec![p], steps, scoped, timed: super::builtins::get("smallest").is_some_and(|s| s.timed) }))
 }
 
 /// `p` with `(note s)` inside and after it (`smallest`); `inline` inside the body of an

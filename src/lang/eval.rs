@@ -7,7 +7,7 @@
 
 use super::ast::{Fun, Holds, Pipe, Slot};
 use super::builtins::{Builtin, Impl, Operator};
-use super::host::{self, Cand, Cli, Ctx, Error, Passes, Won, skipped, term_pass, width_of};
+use super::host::{self, Cand, Ctx, Error, Passes, Won, skipped, term_pass};
 use super::types::Ty;
 use super::vars::NONE;
 use std::cell::{Cell, RefCell};
@@ -18,14 +18,10 @@ pub(crate) type Steps = Result<Vec<Cand>, Error>;
 
 /// What the passes of one run share.
 pub struct Env<'a> {
-    /// Set for a `simplify` run; egglog rounds, minimality proofs and `reprint` need it.
-    pub(crate) cli: Option<&'a Cli>,
     pub(crate) passes: &'a Passes,
     pub(crate) w: u32,
     pub(crate) signed: Option<bool>,
     pub(crate) trace: bool,
-    /// The egglog program of the numeric type.
-    pub(crate) egg: Rc<str>,
     /// The run's input, group variables and arguments; those of the call where a pipeline argument
     /// is written while it runs.
     pub(crate) lex: RefCell<Rc<Lex>>,
@@ -41,11 +37,12 @@ pub struct Env<'a> {
     pub(crate) ctxs: RefCell<Vec<Ctx>>,
 }
 
-/// What a term of the language gives: a number, candidates, or a function value.
+/// What a term of the language gives: a number, candidates, a text, or a function value.
 #[derive(Clone)]
-pub(crate) enum Value {
+pub enum Value {
     Num(u64),
     Group(Vec<Cand>),
+    Text(String),
     Fn(Closure),
 }
 
@@ -69,7 +66,7 @@ impl Value {
 /// `(with_budget 8 rewrite)`) and what it reads of the run it is written in: the values its
 /// local variables had then and the call's arguments, wherever it is applied.
 #[derive(Clone)]
-pub(crate) struct Closure {
+pub struct Closure {
     pub(crate) body: std::sync::Arc<Pipe>,
     pub(crate) lex: Rc<Lex>,
 }
@@ -110,7 +107,7 @@ pub(crate) struct Lex {
 }
 
 impl Lex {
-    fn new(input: &str, frame: Option<Frame>) -> Rc<Lex> {
+    pub(crate) fn new(input: &str, frame: Option<Frame>) -> Rc<Lex> {
         Rc::new(Lex { input: input.to_string(), regs: Default::default(), notes: Default::default(), frame })
     }
 }
@@ -127,9 +124,27 @@ pub(crate) struct Frame {
 }
 
 impl<'a> Env<'a> {
-    pub(crate) fn with(cli: Option<&'a Cli>, passes: &'a Passes, w: u32, signed: Option<bool>, trace: bool, egg: String, input: &str) -> Env<'a> {
+    pub(crate) fn with(passes: &'a Passes, w: u32, signed: Option<bool>, trace: bool, input: &str) -> Env<'a> {
         let lex = RefCell::new(Lex::new(input, None));
-        Env { cli, passes, w, signed, trace, egg: egg.into(), lex, moved: Cell::new(false), wins: Cell::new(0), deferred: Default::default(), cofactor: false, ctxs: Default::default() }
+        Env { passes, w, signed, trace, lex, moved: Cell::new(false), wins: Cell::new(0), deferred: Default::default(), cofactor: false, ctxs: Default::default() }
+    }
+
+    /// The text `p` gives on `set`: a string literal, or a function that gives a text on its
+    /// input written or on the main candidate of `set`.
+    pub(crate) fn text_of(&self, p: &Pipe, set: &[Cand]) -> Result<String, Error> {
+        match p {
+            Pipe::Text(t) => Ok(t.clone()),
+            Pipe::App(Fun::Builtin(b), args) => {
+                let Impl::TermText(f) = b.imp else { unreachable!("{} gives no text", b.name) };
+                let input = match args.first() {
+                    Some(x) => self.group_of(x, set),
+                    None => set.to_vec(),
+                };
+                failed().map_or(Ok(()), Err)?;
+                Ok(input.first().map(|m| f(m, self)).unwrap_or_default())
+            }
+            p => unreachable!("{p:?} gives no text"),
+        }
     }
 
     pub(crate) fn reg(&self, r: &str) -> Vec<Cand> {
@@ -262,8 +277,7 @@ impl<'a> Env<'a> {
     /// The run of a call of `c` on `set`, with its own group variables and the call's arguments.
     fn call_env(&self, c: &std::sync::Arc<super::defs::Call>, args: &std::sync::Arc<[Pipe]>, set: &[Cand]) -> Env<'a> {
         let input = set.first().map_or_else(String::new, |c| c.term().to_string());
-        let mut run = Env::with(self.cli, self.passes, self.w, self.signed, self.trace, String::new(), &input);
-        run.egg = self.egg.clone();
+        let mut run = Env::with(self.passes, self.w, self.signed, self.trace, &input);
         run.cofactor = self.cofactor;
         if !args.is_empty() || c.def.input.is_some() {
             let caller = self.lex.borrow().clone();
@@ -317,7 +331,6 @@ pub(crate) fn scoped<R>(f: impl FnOnce() -> R) -> R {
 }
 
 thread_local! {
-    static IN_RUN: Cell<bool> = const { Cell::new(false) };
     /// The first error of the run under way that a nested run could not return.
     static FAILED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
@@ -334,43 +347,14 @@ pub(crate) fn failed() -> Option<Error> {
     FAILED.with(|f| f.borrow().clone()).map(Error::BackendError)
 }
 
-/// `f` as part of a run of `p`: when no run is under way on this thread, as the outermost
-/// scope of one, after its entry assignments (`Passes::entry_steps`, with `restarts` and
-/// `iter_limit` of `cli`) evaluated on the candidate `input` gives; they all end with it.
-pub fn in_run<R>(p: &Passes, cli: Option<&Cli>, input: impl FnOnce() -> Cand, f: impl FnOnce() -> R) -> R {
-    if IN_RUN.with(Cell::get) {
-        return f();
-    }
-    host::set_current(p);
+/// Forgets the error `fail` recorded, for a program that starts.
+pub(crate) fn clear_failed() {
     FAILED.with(|f| f.borrow_mut().take());
-    struct Out;
-    impl Drop for Out {
-        fn drop(&mut self) {
-            IN_RUN.with(|r| r.set(false));
-        }
-    }
-    scoped(|| {
-        IN_RUN.with(|r| r.set(true));
-        let _out = Out;
-        let env = Env::with(cli, p, cli.map_or(64, |c| width_of(&c.num_type)), None, false, String::new(), "");
-        let set = vec![input()];
-        for step in p.entry_steps(cli.map(|c| (c.max_restarts, c.iter_limit))) {
-            if let Err(e) = go(&step, set.clone(), &env) {
-                fail(&e);
-            }
-        }
-        if let Err(e) = go(&p.check, set, &env) {
-            fail(&e);
-        }
-        f()
-    })
 }
 
-/// The candidates `p` gives for `set`.
+/// The candidates `p` gives for `set`, as a scope of the program under way.
 pub fn run(p: &Pipe, set: Vec<Cand>, env: &Env) -> Result<Vec<Cand>, Error> {
-    let first = set.first().cloned();
-    let input = || first.unwrap_or_else(|| Cand::new(&env.lex.borrow().input, "input"));
-    in_run(env.passes, env.cli, input, || scoped(|| go(p, set, env)).and_then(|out| failed().map_or(Ok(out), Err)))
+    scoped(|| go(p, set, env)).and_then(|out| failed().map_or(Ok(out), Err))
 }
 
 /// `time_limit = ms` in the scope under way.
@@ -382,24 +366,22 @@ fn assign_time_limit(ms: u64) {
     super::vars::bind(host::DEADLINE, at);
 }
 
-/// Steps that only move candidates around: they run past a limit too, so that a sequence
-/// still has its group variables and can go on after a `time_limit = none`. A `Bind` runs
-/// its right side, whose steps are each skipped past a limit.
-pub(crate) fn bookkeeping(p: &Pipe) -> bool {
+/// Whether `p` calls a `@timed` function (a built-in, `def` or macro), which past the time
+/// limit is skipped and gives its input.
+pub(crate) fn timed(p: &Pipe) -> bool {
     match p {
-        Pipe::App(Fun::Builtin(b), _) => b.bookkeeping,
-        Pipe::App(Fun::Def(c), _) => c.def.inline,
-        Pipe::Seq(_) | Pipe::Var(_) | Pipe::Bind(..) => true,
-        Pipe::Expanded(m) => m.bookkeeping,
+        Pipe::App(Fun::Builtin(b), _) => b.timed,
+        Pipe::App(Fun::Def(c), _) => c.def.timed,
+        Pipe::Expanded(m) => m.timed,
         _ => false,
     }
 }
 
-/// Whether `p` is a step that computes candidates: a call of a built-in function (not an
-/// operator) or `def` that is neither bookkeeping nor `@uncounted` and takes no pipeline.
+/// Whether `p` is a step that computes candidates: a call of a `@timed` built-in function
+/// that is not `@uncounted` and takes no pipeline, or of a `def` that is not `inline`.
 pub(crate) fn computes(p: &Pipe) -> bool {
     match p {
-        Pipe::App(Fun::Builtin(b), _) => !b.sig.is_op() && !b.sig.bookkeeping && !b.sig.uncounted && !b.sig.params.iter().any(|q| q.ty.is_step()),
+        Pipe::App(Fun::Builtin(b), _) => b.timed && !b.uncounted && !b.sig.params.iter().any(|q| q.ty.is_step()),
         Pipe::App(Fun::Def(c), _) => !c.def.inline,
         _ => false,
     }
@@ -410,7 +392,7 @@ pub(crate) fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Steps {
     if let Some(e) = failed() {
         return Err(e);
     }
-    if !bookkeeping(p) && past(0.0) {
+    if timed(p) && past(0.0) {
         if !uncounted(p) {
             skipped(env);
         }
@@ -446,7 +428,10 @@ pub(crate) fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Steps {
         Pipe::Bind(x, e) => {
             match x {
                 Slot::Global(i) => {
-                    let v = env.value(e, &set);
+                    let v = match &**e {
+                        Pipe::Name(t) => host::NUM_TYPES.iter().position(|n| n == t).map_or(NONE, |k| k as u64),
+                        e => env.value(e, &set),
+                    };
                     match *i {
                         host::DEADLINE => assign_time_limit(v),
                         i if super::vars::is_switch(i) => super::vars::bind(i, (v != 0) as u64),
@@ -517,6 +502,8 @@ fn apply(b: &Builtin, args: &[Pipe], input: In, env: &Env) -> Result<Value, Erro
         Impl::TermNum(f) => return Ok(Value::Num(input.slice().first().map_or(0, |m| f(m, env)))),
         Impl::GroupNum(f) => return Ok(Value::Num(if input.slice().is_empty() { 0 } else { f(input.slice(), env) })),
         Impl::Num(f) => return Ok(Value::Num(f(args, input.slice(), env))),
+        Impl::FromText(f) => return f(&env.text_of(&args[0], input.slice())?, env).map(Value::Group),
+        Impl::TermText(f) => return Ok(Value::Text(input.slice().first().map(|m| f(m, env)).unwrap_or_default())),
         _ => input.vec(),
     };
     Ok(Value::Group(match b.imp {
@@ -585,7 +572,7 @@ mod tests {
             let p = Passes::parse(spec).unwrap();
             let input = Cand::new(input, "input");
             PRINTED.with(|l| l.borrow_mut().clear());
-            let r = run(&p.prepass, vec![input.clone()], &Env::prepass(&p, w, signed, false, input.term()));
+            let r = crate::lang::run::prepass_of(&p, input.clone(), w, signed);
             (r.map(|c| c.iter().map(|c| c.term().to_string()).collect::<Vec<_>>()).map_err(|e| e.to_string()), PRINTED.with(|l| l.take()))
         };
         let x3 = "(Add (Var \"x\") (Num 253))";
@@ -596,7 +583,7 @@ mod tests {
         let (r, lines) = run_on("prepass=(save t) | (print \"size\" size none max_leaves (size * 2) t rewrite some_name) | (print t)", x3, 8, Some(false));
         assert_eq!(r, Ok(vec![x3.to_string()]), "print passes the candidates on");
         assert_eq!(lines, ["size 3 none 6 6 (x + 0xfd) (rewrite t:term) term some_name", "(x + 0xfd)"]);
-        assert_eq!(run_on("prepass=(save t) | (print t)", x3, 8, Some(true)).1, ["(x - 3)"], "constants as the type prints them");
+        assert_eq!(run_on("num_type=i8 prepass=(save t) | (print t)", x3, 8, Some(true)).1, ["(x - 3)"], "constants as the type num_type prints them");
         let two = "(Add (And (Var \"x\") (Var \"y\")) (Or (Var \"x\") (Var \"y\")))";
         assert_eq!(run_on("prepass=(union id rewrite) | (save u) | (print u)", two, 64, None).1, ["((x & y) + (x | y)), (x + y)"]);
         let (_, lines) = run("(def (g) id) prepass=f:term->num = size | (print f g) | g");
@@ -623,7 +610,7 @@ mod tests {
             let p = Passes::parse(spec).unwrap();
             let input = Cand::new("(Add (Xor (Var \"x\") (Var \"y\")) (Mul (Num 2) (And (Var \"x\") (Var \"y\"))))", "input");
             PRINTED.with(|l| l.borrow_mut().clear());
-            run(&p.prepass, vec![input.clone()], &Env::prepass(&p, 64, None, false, input.term())).unwrap();
+            crate::lang::run::prepass_of(&p, input.clone(), 64, None).unwrap();
             PRINTED.with(|l| l.take())
         };
         let groups = "prepass=(save t) | (union id rewrite) | (save u) | none | (save e) | (load t)";
@@ -638,7 +625,7 @@ mod tests {
             let p = Passes::parse(&format!("prepass=(if ({cond}) id)")).unwrap();
             let input = Cand::new("(Var \"x\")", "input");
             PRINTED.with(|l| l.borrow_mut().clear());
-            run(&p.prepass, vec![input.clone()], &Env::prepass(&p, 64, None, false, input.term())).unwrap();
+            crate::lang::run::prepass_of(&p, input.clone(), 64, None).unwrap();
             PRINTED.with(|l| l.take())
         };
         let b = "((print \"b\") | size)";
@@ -705,8 +692,7 @@ mod tests {
             assert!(is_off("relate") && is_off("tfunc"), "several names in one off");
             step("(on relate)");
             assert!(!is_off("relate") && is_off("tfunc"), "the later switch counts");
-            let x = || Cand::new("(Var \"x\")", "input");
-            assert!(in_run(&passes, None, x, || !is_off("relate") && is_off("tfunc")), "a run started here keeps them");
+            assert!(crate::lang::run::within(&passes, || !is_off("relate") && is_off("tfunc")), "a run started here keeps them");
             crate::rust_vars::with_off(&["relate"], || {
                 assert!(is_off("relate"));
                 step("(on relate)");
@@ -756,7 +742,7 @@ mod tests {
             let p = Passes::parse(&format!("prepass={spec}")).unwrap();
             let env = Env::prepass(&p, 32, None, false, x);
             PRINTED.with(|l| l.borrow_mut().clear());
-            let out = in_run(&p, None, || Cand::new(x, "input"), || go(&p.prepass, vec![Cand::new(x, "input")], &env).unwrap());
+            let out = crate::lang::run::within(&p, || go(&p.prepass, vec![Cand::new(x, "input")], &env).unwrap());
             (out.iter().map(|c| c.origin.clone()).collect::<Vec<_>>(), PRINTED.with(|l| l.take()))
         };
         assert_eq!(run("(cand pre_unified unified (print bit_split_budget) | rewrite)"), (vec!["unified".to_string()], vec!["8".to_string()]), "origin n, bit_split_budget = cand_bit_splits inside");
@@ -767,8 +753,27 @@ mod tests {
             assert_eq!(run(&format!("pre_unified = {off} | time_limit = 0 | (cand pre_unified unified none)")).0, ["input"], "skipped past the time limit, as a step");
         }
         let p = Passes::parse("pre=no_wide").unwrap();
-        let on = |n: &str| in_run(&p, None, || Cand::new(x, "input"), || crate::lang::vars::get(crate::lang::vars::var_index(n).unwrap()));
+        let on = |n: &str| crate::lang::run::within(&p, || crate::lang::vars::get(crate::lang::vars::var_index(n).unwrap()));
         assert_eq!((on("pre_unified"), on("pre_no_wide"), on("pre_halve_input")), (0, 1, 0), "pre= is an assignment to the pre_ switches");
+    }
+
+    #[test]
+    fn only_timed_defs_are_skipped_past_the_time_limit() {
+        let x = "(Var \"x\")";
+        let run = |spec: &str| {
+            let p = Passes::parse(spec).unwrap();
+            let env = Env::prepass(&p, 32, None, false, x);
+            PRINTED.with(|l| l.borrow_mut().clear());
+            crate::lang::run::within(&p, || go(&p.prepass, vec![Cand::new(x, "input")], &env).unwrap());
+            PRINTED.with(|l| l.take())
+        };
+        let defs = "(def (f) (print 1)) (def @timed (g) (print 2)) (def @inline @timed (h) (print 3)) (def @inline @timed (k n) (print n))";
+        assert_eq!(run(&format!("{defs} prepass=f | g | h | (k 4)")), ["1", "2", "3", "4"]);
+        assert_eq!(run(&format!("{defs} prepass=time_limit = 0 | f | g | h | (k 4)")), ["1"]);
+        for (bad, msg) in [("(def @timed (n) size + 1)", "@timed is for a function that gives candidates"), ("(def @timed (prepass) id)", "takes no @timed")] {
+            let e = Passes::parse(bad).unwrap_err();
+            assert!(e.contains(msg), "{bad}: {e}");
+        }
     }
 
     #[test]
@@ -781,7 +786,7 @@ mod tests {
         let input = || Cand::new(x, "input");
         let step = |p: &str| go(&crate::lang::parser::parse(p).unwrap(), vec![input()], &env).unwrap();
         let extra = var_index("extra").unwrap();
-        in_run(&passes, None, input, || {
+        crate::lang::run::within(&passes, || {
             assert_eq!((get(KEEP), get(extra), get(RESTARTS)), (2, 2, NONE), "a run without -m leaves restarts none");
             step("keep = 0 | extra = keep + 3 | (if (extra == 3 && keep == 1) (save ok)) | (load ok)");
             assert_eq!(get(extra), 2, "assignments end with their sequence");
@@ -793,14 +798,14 @@ mod tests {
             assert!(step("(if rerun_input none)").len() == 1);
             assert!(step("(if (time_limit && prove_minimal) none)").is_empty(), "none holds");
         });
-        assert_eq!(get(extra), NONE, "the entry bindings end with the run");
-        let mut cli = Cli { max_restarts: 4, iter_limit: 7, ..Default::default() };
-        let counts = |cli: &Cli| in_run(&cli.passes, Some(cli), input, || (get(RESTARTS), get(crate::rust_vars::ITER_LIMIT), get(extra)));
+        assert_eq!(get(extra), NONE, "the bindings of the program end with it");
+        let mut cli = crate::Cli { max_restarts: 4, iter_limit: 7, ..Default::default() };
+        let counts = |cli: &crate::Cli| crate::lang::run::within(&crate::cli::parse(cli, None).unwrap().0, || (get(RESTARTS), get(crate::rust_vars::ITER_LIMIT), get(extra)));
         assert_eq!(counts(&cli), (4, 7, 2));
-        cli.passes = Passes::parse("extra=9 restarts=restarts+1").unwrap();
+        cli.passes = "extra=9 restarts=restarts+1".into();
         assert_eq!(counts(&cli), (5, 7, 9), "--passes items come after -m and -i");
-        cli.passes = Passes::default();
-        assert_eq!(counts(&cli), (4, 7, 2), "nothing leaks between runs");
+        cli.passes = String::new();
+        assert_eq!(counts(&cli), (4, 7, 2), "nothing leaks between programs");
     }
 
     #[test]
@@ -812,8 +817,8 @@ mod tests {
         let Pipe::App(_, args) = crate::lang::parser::parse("(fix (restarts - 1) id)").unwrap() else { unreachable!() };
         let count = &args[0];
         let rounds = |m: usize| {
-            let cli = Cli { max_restarts: m, ..Default::default() };
-            in_run(&cli.passes, Some(&cli), input, || env.times(&count, &[input()]))
+            let cli = crate::Cli { max_restarts: m, ..Default::default() };
+            crate::lang::run::within(&crate::cli::parse(&cli, None).unwrap().0, || env.times(&count, &[input()]))
         };
         for m in [0, 1, 2, 5] {
             assert_eq!(rounds(m), m.max(1) - 1, "-m {m}: the later rounds, as when restarts read as -m less 1");
@@ -1230,7 +1235,7 @@ mod tests {
     }
 
     #[test]
-    fn time_limit_skips_work_but_not_bookkeeping() {
+    fn time_limit_skips_only_timed_calls() {
         let passes = Passes::default();
         let x = "(Sub (Or (Var \"x\") (Var \"y\")) (And (Var \"x\") (Var \"y\")))";
         let env = Env::prepass(&passes, 32, None, false, x);
@@ -1244,7 +1249,7 @@ mod tests {
             step("time_limit = 1", input());
             std::thread::sleep(std::time::Duration::from_millis(5));
             assert_eq!(step("rewrite", input()), [x], "work past the limit is skipped");
-            assert_eq!(step("(load t) | (filter 1)", vec![]), [x], "bookkeeping still runs");
+            assert_eq!(step("(load t) | (filter 1)", vec![]), [x], "untimed functions still run");
             assert_eq!(step("time_limit = none | rewrite", input()), [x], "a clear restores the limit outside its sequence");
             step("time_limit = none", input());
             assert_eq!(step("rewrite", input()), ["(Xor (Var \"x\") (Var \"y\"))"], "a clear lets the rest run");

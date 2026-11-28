@@ -31,7 +31,6 @@ use shapes::*;
 use split::*;
 use tables::*;
 use wide::*;
-pub use polish::polish;
 pub(crate) use polish::POLISH;
 pub(crate) use linear::simba_memo;
 pub(crate) use split::low_consts;
@@ -972,45 +971,30 @@ pub(crate) fn const_bitwise(t: &T, w: &Ctx) -> bool {
     has_const_bitwise(t, w)
 }
 
-/// Rewrite the egglog term `egg` (W-bit wrapping semantics) with every linear
-/// MBA region, and every polynomial MBA region,
-/// rebuilt in a smaller form. Returns `egg` unchanged when nothing gets smaller.
-pub fn simplify_linear(egg: &str, w: u32) -> String {
-    simplify_linear_with(egg, w, None, false, &Passes::default()).0
-}
-
-/// `simplify_linear`, and the other rebuilds worth unioning: the next smallest (`egg` and
-/// its first rebuild are also rebuilt with bitwise operations of even operands halved,
-/// `halve`, and which result the rules finish best is not known) and the first rebuild
-/// without `clustered`, when that was used.
-pub fn simplify_linear_both(egg: &str, ty: crate::eval::NumType) -> (String, Vec<String>) {
-    simplify_linear_with(egg, ty.bits, Some(ty.signed), false, &Passes::default())
-}
-
-/// `simplify_linear_both` with the candidates of `p`, printing them to stderr when `trace`
-/// is set; `signed` as in `Ctx`.
+/// The pre-pass of `p` on the egglog term `egg` (W-bit wrapping semantics, `signed` as in
+/// `Ctx`): its smallest rebuild, and the other rebuilds worth unioning; candidates to stderr
+/// when `trace` is set. Every linear and polynomial MBA region is rebuilt in a smaller form;
+/// `egg` comes back unchanged when nothing gets smaller.
 pub fn simplify_linear_with(egg: &str, w: u32, signed: Option<bool>, trace: bool, p: &Passes) -> (String, Vec<String>) {
     type Result = (String, Vec<String>);
     type Last = Option<(String, u32, Option<bool>, bool, Passes, Vec<u64>, Result)>;
     thread_local! {
         static LAST: std::cell::RefCell<Last> = const { std::cell::RefCell::new(None) };
     }
-    crate::lang::eval::in_run(p, None, || crate::cand::Cand::new(egg, "input"), || {
-        // A variable bound where it is called (an assignment, `(off NAME)`) changes the result as `p` does.
-        let vars = crate::lang::vars::key();
-        let hit = |(e, bits, s, t, q, v, _): &&(String, u32, Option<bool>, bool, Passes, Vec<u64>, Result)| e == egg && *bits == w && *s == signed && *t == trace && q == p && *v == vars;
-        match LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.6.clone())) {
-            Some(r) => r,
-            None => {
-                let r = simplify_linear_uncached(egg, w, signed, trace, p);
-                if crate::lang::eval::failed().is_some() {
-                    return r;
-                }
-                LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, signed, trace, p.clone(), vars, r.clone())));
-                r
+    // A variable bound where it is called (an assignment, `(off NAME)`) changes the result as `p` does.
+    let vars = crate::lang::vars::key();
+    let hit = |(e, bits, s, t, q, v, _): &&(String, u32, Option<bool>, bool, Passes, Vec<u64>, Result)| e == egg && *bits == w && *s == signed && *t == trace && q == p && *v == vars;
+    match LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.6.clone())) {
+        Some(r) => r,
+        None => {
+            let r = simplify_linear_uncached(egg, w, signed, trace, p);
+            if crate::lang::eval::failed().is_some() {
+                return r;
             }
+            LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, signed, trace, p.clone(), vars, r.clone())));
+            r
         }
-    })
+    }
 }
 
 /// Rewrites of a rebuilt candidate that would break subterms the rebuild relates if done

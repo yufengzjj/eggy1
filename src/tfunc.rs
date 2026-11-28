@@ -576,7 +576,7 @@ mod tests {
         let t = crate::eval::parse(&crate::expr_convert::infix_to_egglog("x & -(x & -(x & y))", true));
         let best = |spec: &str| {
             let p = crate::passes::Passes::parse(spec).unwrap();
-            crate::lang::eval::in_run(&p, None, || crate::cand::Cand::new("(Var \"x\")", "input"), || replacement(&t, &Ctx::new(8)).map(|r| crate::eval::show(&r)))
+            crate::lang::run::within(&p, || replacement(&t, &Ctx::new(8)).map(|r| crate::eval::show(&r)))
         };
         let plain = best("");
         assert_eq!(plain.as_deref(), Some("(And (Var \"x\") (Var \"y\"))"));

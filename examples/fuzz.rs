@@ -8,6 +8,7 @@
 use clap::Parser;
 use eggy1::eval::{self, NumType, Op, Term};
 use eggy1::expr_convert::{egglog_to_infix, infix_to_egglog};
+use eggy1::lang::lexer::quoted;
 use eggy1::{Cli, simplify};
 use std::collections::BTreeMap;
 use std::io::{BufRead, Read, Write};
@@ -60,7 +61,7 @@ struct Args {
     /// `mutate` mutates, comma-separated.
     #[arg(long, default_value = "")]
     corpus: String,
-    /// Check only the pre-pass rebuilds (`simplify_linear_both` and `polish`), without the rules.
+    /// Check only the pre-pass rebuilds (`(parse s) | prepass` and `polish`), without the rules.
     #[arg(long)]
     prepass: bool,
     /// Child mode: read the type and an egglog term from stdin, print one result line.
@@ -902,8 +903,8 @@ fn run_one() {
     }
 
     if prepass_only {
-        let (alt, other) = eggy1::linear_mba::simplify_linear_both(&egg, ty);
-        let polished = eggy1::linear_mba::polish(&alt, ty);
+        let (alt, other) = prepass(&egg, &ty_name);
+        let polished = run_default(&ty_name, &format!("(parse {}) | polish", quoted(&alt))).swap_remove(0);
         let cands: Vec<(&str, &String)> = [("first", &alt), ("polished", &polished)].into_iter().chain(other.iter().map(|o| ("other", o))).collect();
         for (name, c) in &cands {
             let d = compare(&t, &eval::parse(c), ty);
@@ -930,7 +931,7 @@ fn run_one() {
         Diff::Same => println!("ok\t{}\t{}\t{out}", eval::size(&t), eval::size(&out_t)),
         d => {
             let status = if matches!(d, Diff::At(_, _, None)) { "undef" } else { "wrong" };
-            let (alt, other) = eggy1::linear_mba::simplify_linear_both(&egg, ty);
+            let (alt, other) = prepass(&egg, &ty_name);
             let stage = std::iter::once(&alt)
                 .chain(&other)
                 .find(|c| !matches!(compare(&t, &eval::parse(c), ty), Diff::Same))
@@ -938,6 +939,26 @@ fn run_one() {
             println!("{status}\t{} -> {out}; {stage}", describe(&d));
         }
     }
+}
+
+/// The egglog terms of the candidates the program `code` gives after `(import "default")` and
+/// `num_type = ty`.
+fn run_default(ty: &str, code: &str) -> Vec<String> {
+    match eggy1::lang::run(&format!("(import \"default\")
+num_type = {ty}
+{code}"), &[]) {
+        Ok(eggy1::lang::Outcome { value: Some(eggy1::lang::Value::Group(g)), .. }) => g.iter().map(|c| c.term().to_string()).collect(),
+        Ok(_) => panic!("{code} gives no candidates"),
+        Err(e) => panic!("{code}: {e}"),
+    }
+}
+
+/// The pre-pass of the default passes on the egglog term `egg`: the main rebuild, then the
+/// others unioned with it.
+fn prepass(egg: &str, ty: &str) -> (String, Vec<String>) {
+    let mut out = run_default(ty, &format!("(parse {}) | prepass", quoted(egg)));
+    let main = out.remove(0);
+    (main, out)
 }
 
 struct Outcome {

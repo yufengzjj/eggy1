@@ -10,6 +10,7 @@ use super::host::{FEATURES, defined_builtin};
 use super::lexer::{NO_EXTERN, Tok, lex, name_char, name_start, show_tok};
 use super::macros::smallest;
 use super::types::{Kind, Param, Rep, Sig, Ty};
+use super::run::{Gives, Top};
 use super::vars::{NONE, is_switch, var_index};
 use std::sync::Arc;
 
@@ -114,6 +115,17 @@ pub(crate) struct Parser<'a> {
     pub(crate) after_bar: bool,
     /// An atom already read, which the expression read next starts with.
     pub(crate) pending: Option<Pipe>,
+    /// Reading a top-level statement, whose last step may give a text.
+    pub(crate) text_tail: bool,
+}
+
+/// The local variables the top-level statements of a program bound so far, which the later
+/// ones read.
+#[derive(Clone, Default)]
+pub(crate) struct TopNames {
+    groups: Vec<String>,
+    locals: Vec<String>,
+    fns: Vec<(String, Ty)>,
 }
 
 pub(crate) fn seq_of(mut stages: Vec<Pipe>) -> Pipe {
@@ -133,7 +145,7 @@ pub(crate) fn number_seq(p: Pipe, e: Pipe) -> Pipe {
 
 impl<'a> Parser<'a> {
     pub(crate) fn new(toks: Vec<Tok>, defs: &'a Defs) -> Parser<'a> {
-        Parser { toks, at: 0, defs, used: Vec::new(), params: Vec::new(), groups: Vec::new(), fns: Vec::new(), locals: Vec::new(), no_input: false, after_bar: false, pending: None }
+        Parser { toks, at: 0, defs, used: Vec::new(), params: Vec::new(), groups: Vec::new(), fns: Vec::new(), locals: Vec::new(), no_input: false, after_bar: false, pending: None, text_tail: false }
     }
 
     /// Whether `n` is a group value: a group parameter, or a group variable bound before in
@@ -386,7 +398,7 @@ impl<'a> Parser<'a> {
         Ok(Pipe::Bind(Slot::Local(n.to_string(), Holds::Num), Arc::new(e)))
     }
 
-    fn pipe(&mut self) -> Result<Pipe, String> {
+    pub(crate) fn pipe(&mut self) -> Result<Pipe, String> {
         let (stages, tail) = self.stages_of_pipe()?;
         let p = seq_of(stages);
         match tail {
@@ -421,6 +433,13 @@ impl<'a> Parser<'a> {
             self.at += 1;
         }
         loop {
+            if !stages.is_empty() && self.text_tail && self.text_ahead() {
+                let e = self.text_value()?;
+                if let (Some(Tok::Bar), Some(m)) = (self.peek(), self.peek_at(1)) {
+                    return Err(format!("{} gives a text; {} takes candidates: a step that gives a text can only end a statement", show(&e), show_tok(Some(m))));
+                }
+                return Ok((stages, Some(e)));
+            }
             if !stages.is_empty() && self.number_step_ahead() {
                 let e = self.or()?;
                 if let (Some(Tok::Bar), Some(m)) = (self.peek(), self.peek_at(1)) {
@@ -522,8 +541,15 @@ impl<'a> Parser<'a> {
                         self.use_param(&n, Ty::pipe())?;
                         Pipe::Seq(vec![input, param_var(self.param(&n).unwrap(), n)])
                     }
+                    Some(Tok::Name(n)) if n == "import" => return Err(NO_IMPORT.into()),
                     Some(Tok::Name(n)) => match get(&n) {
                         Some(s) if s.is_number() => return Err(not_a_step(s)),
+                        Some(s) if s.is_text() => return Err(text_step(s)),
+                        Some(s) if s.kind() == Kind::FromText => {
+                            self.at += 1;
+                            let t = self.text_value()?;
+                            Pipe::App(Fun::Builtin(super::builtins::builtin(&n).unwrap()), vec![t].into())
+                        }
                         Some(s) if !s.params.is_empty() => {
                             self.at += 1;
                             self.call(s)?
@@ -555,6 +581,90 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Whether a function that gives a text is ahead, alone or called in parentheses.
+    fn text_ahead(&self) -> bool {
+        let k = usize::from(self.peek() == Some(&Tok::Open));
+        matches!(self.peek_at(k), Some(Tok::Name(n)) if self.param(n).is_none() && get(n).is_some_and(Sig::is_text))
+    }
+
+    /// A text: a string literal, or a function that gives one, alone (on the step's input) or
+    /// with its input written (`(show (main t))`).
+    fn text_value(&mut self) -> Result<Pipe, String> {
+        if let Some(Tok::Str(t)) = self.peek().cloned() {
+            self.at += 1;
+            return Ok(Pipe::Text(t));
+        }
+        if !self.text_ahead() {
+            return Err(format!("expected a text, as in \"x + y\" or (show (main t)), found {}", show_tok(self.peek())));
+        }
+        let open = self.peek() == Some(&Tok::Open);
+        self.at += usize::from(open);
+        let n = self.name("a function")?;
+        let s = get(&n).unwrap();
+        let f = Fun::Builtin(super::builtins::builtin(&n).unwrap());
+        if !open {
+            return Ok(Pipe::App(f, Vec::new().into()));
+        }
+        let input = self.group_input(true)?;
+        self.expect(Tok::Close, ")")?;
+        match input {
+            Some(x) => {
+                self.input_fits(s, s.input.as_ref().unwrap(), &x)?;
+                Ok(Pipe::App(f, vec![x].into()))
+            }
+            None => Ok(Pipe::App(f, Vec::new().into())),
+        }
+    }
+
+    /// A top-level statement: its steps, each with what it gives.
+    fn statement(&mut self) -> Result<Vec<Top>, String> {
+        let one = |pipe: Pipe, gives: Gives| Ok(vec![Top { pipe, gives }]);
+        if matches!(self.peek(), Some(Tok::Str(_))) || self.text_ahead() && self.text_is_whole() {
+            let t = self.text_value()?;
+            self.end()?;
+            return one(t, Gives::Text);
+        }
+        if let (Some(Tok::Name(n)), None) = (self.peek().cloned(), self.peek_at(1))
+            && self.fn_var(&n).is_some()
+        {
+            self.at += 1;
+            return one(self.fn_read(n), Gives::Fn);
+        }
+        if self.peek_at(1) != Some(&Tok::Colon) && self.number_ahead(false) {
+            let e = self.or()?;
+            self.end()?;
+            return one(e, Gives::Num);
+        }
+        self.text_tail = true;
+        let r = self.stages_of_pipe();
+        self.text_tail = false;
+        let (stages, tail) = r?;
+        self.end()?;
+        let mut out: Vec<Top> = stages.into_iter().map(Top::step).collect();
+        if let Some(e) = tail {
+            let gives = if matches!(e, Pipe::App(Fun::Builtin(b), _) if b.sig.is_text()) { Gives::Text } else { Gives::Num };
+            out.push(Top { pipe: e, gives });
+        }
+        Ok(out)
+    }
+
+    /// Whether the text function ahead is the whole statement: nothing follows its call.
+    fn text_is_whole(&self) -> bool {
+        if self.peek() != Some(&Tok::Open) {
+            return self.peek_at(1).is_none();
+        }
+        let mut depth = 0;
+        for (k, t) in self.toks[self.at..].iter().enumerate() {
+            match t {
+                Tok::Open => depth += 1,
+                Tok::Close if depth == 1 => return self.at + k + 1 == self.toks.len(),
+                Tok::Close => depth -= 1,
+                _ => {}
+            }
+        }
+        false
+    }
+
     /// Whether `n` is a function defined whose body is an expression.
     fn number_def(&self, n: &str) -> bool {
         self.defs.get(n).and_then(|d| d.def.as_ref()).is_some_and(|d| d.value.is_some())
@@ -582,6 +692,15 @@ impl<'a> Parser<'a> {
         }
         if self.param(n).is_some() {
             return Err(format!("parameter {n} cannot be assigned"));
+        }
+        if var_index(n) == Some(super::host::NUM_TYPE) {
+            let t = self.name("a numeric type after num_type =")?;
+            self.no_assign()?;
+            return match t.as_str() {
+                "none" => Ok(Pipe::assign(super::host::NUM_TYPE, Pipe::Num(NONE))),
+                t if super::host::NUM_TYPES.contains(&t) => Ok(Pipe::assign(super::host::NUM_TYPE, Pipe::Name(t.into()))),
+                t => Err(format!("num_type takes a numeric type, not {t}; known: {}", super::host::NUM_TYPES.join(" "))),
+            };
         }
         let number_var = var_index(n).is_some();
         let group_var = self.groups.iter().any(|g| g == n);
@@ -650,7 +769,7 @@ impl<'a> Parser<'a> {
     /// Whether a call form ahead starts with this `(`, as `stage` reads it: `on`, `off`, a
     /// function with parameters or arguments, a parameter called on a group.
     fn form_ahead(&self) -> bool {
-        let args = matches!(self.peek_at(2), Some(Tok::Name(_) | Tok::Num(_) | Tok::Open | Tok::Not));
+        let args = matches!(self.peek_at(2), Some(Tok::Name(_) | Tok::Num(_) | Tok::Open | Tok::Not | Tok::Str(_)));
         match self.peek_at(1) {
             Some(Tok::Name(n)) => {
                 n == "on"
@@ -953,7 +1072,7 @@ impl<'a> Parser<'a> {
         // for it here, which only shows.
         let def = d.def.clone().unwrap_or_else(|| {
             let body = Arc::new(d.pipe.clone());
-            Arc::new(Def { name: n.into(), params: d.params.clone(), body, inline: false, flat: d.flat, input: None, step: true, steps: false, value: None, implicit: None })
+            Arc::new(Def { name: n.into(), params: d.params.clone(), body, inline: false, flat: d.flat, input: None, step: true, steps: false, value: None, implicit: None, timed: false })
         });
         self.used.push(n.to_string());
         Some(Call::bare(&def))
@@ -1290,6 +1409,13 @@ fn no_input(f: &str) -> String {
     format!("{f} needs its input here, outside any step: write it, as in ({f} g)")
 }
 
+const NO_IMPORT: &str = "(import \"PATH\") is a top-level item of a program, not a step";
+
+/// The error for a function that gives a text written as a step.
+fn text_step(s: &Sig) -> String {
+    format!("{} gives a text, not candidates: {s}; a text ends a top-level statement, as in (parse \"x + y\") | {}, or is the input of parse", s.name, s.name)
+}
+
 /// The error for a number function written as a step.
 fn not_a_step(s: &Sig) -> String {
     format!("{} gives a number, not candidates: {s}; a step calls a function that gives candidates", s.name)
@@ -1300,6 +1426,8 @@ fn bare(n: &str) -> Result<Pipe, String> {
     if let Some(s) = get(n) {
         return match s {
             _ if s.is_number() => Err(not_a_step(s)),
+            _ if s.is_text() => Err(text_step(s)),
+            _ if s.kind() == Kind::FromText => Err(format!("{n} takes a text: ({n} \"x + y\"); {s}")),
             _ if s.required() => Err(format!("{n} needs parentheses: ({n} ...); {s}")),
             _ => construct(n, vec![Arg::Absent; s.params.len()]).ok_or_else(|| unimplemented(s)),
         };
@@ -1339,6 +1467,23 @@ pub fn parse_assign(name: &str, val: &str) -> Result<Pipe, String> {
         Ok(a)
     };
     go().map_err(|e| hyphen_hint(e, val))
+}
+
+/// The top-level statement `s` of a program: its steps, each with what it gives; `top` the
+/// local variables the statements before bound, to which it adds its own.
+pub(crate) fn parse_statement(s: &str, defs: &Defs, top: &mut TopNames, used: &mut Vec<String>) -> Result<Vec<Top>, String> {
+    let go = || {
+        let mut p = Parser::new(lex(s)?, defs);
+        p.groups = top.groups.clone();
+        p.locals = top.locals.clone();
+        p.fns = top.fns.clone();
+        let tops = p.statement()?;
+        Ok((tops, p))
+    };
+    let (tops, p) = go().map_err(|e: String| hyphen_hint(e, s))?;
+    used.extend(p.used);
+    *top = TopNames { groups: p.groups, locals: p.locals, fns: p.fns };
+    Ok(tops)
 }
 
 /// Parses `s` in the pipeline language.
@@ -1534,7 +1679,7 @@ mod tests {
 
     #[test]
     fn every_builtin_parses_to_its_application() {
-        for s in all() {
+        for s in all().iter().filter(|s| !s.is_text()) {
             let call = sample(s);
             let p = match s.is_number() {
                 true => {
@@ -1549,6 +1694,10 @@ mod tests {
                 Pipe::Expanded(m) => assert_eq!(m.head, s.name),
                 p => panic!("{}: {p:?}", s.decl()),
             }
+        }
+        for s in all().iter().filter(|s| s.is_text()) {
+            let tops = parse_statement(&format!("(parse \"x\") | {}", s.name), &Defs::new(), &mut TopNames::default(), &mut Vec::new()).unwrap();
+            assert!(matches!(&tops.last().unwrap().pipe, Pipe::App(Fun::Builtin(b), _) if b.name == s.name), "{}", s.decl());
         }
     }
 
@@ -1710,7 +1859,7 @@ mod tests {
         let def_err = |s: &str| parse_definition(s, &Defs::new(), &mut Vec::new()).err().unwrap();
         assert!(def_err("(def (f n) n = 3)").contains("parameter n cannot be assigned"));
         assert!(def_err("(def (f n) (fix n id) | n = id)").contains("parameter n cannot be assigned"));
-        assert!(parse_assign("t", "rewrite").unwrap_err().contains("unknown variable t"), "an entry assignment is to a variable that holds a number");
+        assert!(parse_assign("t", "rewrite").unwrap_err().contains("unknown variable t"), "a --passes item NAME=VALUE is to a variable that holds a number");
     }
 
     #[test]

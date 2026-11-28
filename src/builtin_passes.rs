@@ -2,15 +2,15 @@
 //! the passes over one term, the pre-pass, egglog rounds, polish, the conditions on candidates,
 //! and the combinators that count stats or need a `linear_mba::Ctx`.
 
-use crate::{Cli, linear_mba, minimal, stats, width_of};
+use crate::{linear_mba, minimal, stats};
 use crate::cand::Cand;
 use crate::eval::{Op, Term, parse, show, size};
 use crate::lang::ast::Pipe;
 use crate::lang::builtins::{Impl, name};
-use crate::lang::eval::{Env, Steps, fail, go, in_run, kept, past, scoped};
+use crate::lang::eval::{Env, Steps, fail, go, kept, past, scoped};
 use crate::linear_mba::{CLUSTERED, Ctx, WIDE};
 use crate::passes::Passes;
-use crate::rust_vars::{Limit, limit};
+use crate::rust_vars::{Limit, limit, num_type};
 use std::cell::Cell;
 
 /// The Rust code of the built-in function `name` that the simplification implements: `IMPLS`,
@@ -44,6 +44,11 @@ pub(crate) const IMPLS: &[(&str, Impl)] = &[
     ("take_minimal", Impl::Group(take_minimal)),
     ("polish", Impl::EachCand(polish_one)),
     ("reprint", Impl::Main(reprint)),
+    ("pipeline", Impl::Group(pipeline)),
+    ("settle", Impl::Group(settle)),
+    ("parse", Impl::FromText(parse_text)),
+    ("show", Impl::TermText(|c, _| crate::egglog_to_infix(c.term(), &|n| crate::norm_const(n, num_type())))),
+    ("was_cut", Impl::GroupNum(|_, _| cut() as u64)),
     ("within", Impl::Group(|_, set, _| Ok(if crate::lang::vars::get(crate::rust_vars::REWRITES) > 0 { set } else { Vec::new() }))),
     ("pre_done", Impl::Group(pre_done)),
     ("size", Impl::TermNum(|m, _| m.size() as u64)),
@@ -83,18 +88,9 @@ pub fn step_name(f: &str, args: &[Pipe]) -> String {
 }
 
 impl<'a> Env<'a> {
-    pub fn new(cli: &'a Cli, egg: String, input: &str) -> Env<'a> {
-        let signed = crate::eval::NumType::from_name(&cli.num_type).map(|t| t.signed);
-        Env::with(Some(cli), &cli.passes, width_of(&cli.num_type), signed, cli.trace, egg, input)
-    }
-
     /// A pre-pass run on `input` at width `w`, `signed` as in `linear_mba::Ctx`.
     pub fn prepass(p: &'a Passes, w: u32, signed: Option<bool>, trace: bool, input: &str) -> Env<'a> {
-        Env::with(None, p, w, signed, trace, String::new(), input)
-    }
-
-    fn cli(&self, pass: &str) -> &'a Cli {
-        self.cli.unwrap_or_else(|| panic!("{pass} needs a simplify run"))
+        Env::with(p, w, signed, trace, input)
     }
 
     fn prepass_of(&self, s: &str) -> (String, Vec<String>) {
@@ -109,15 +105,9 @@ impl<'a> Env<'a> {
         }
     }
 
-    /// `c` in infix, its constants as the final output prints them for the run's type.
+    /// `c` in infix, its constants as `show` prints them for the type `num_type`.
     pub(crate) fn infix(&self, c: &Cand) -> String {
-        let (w, signed) = (self.w, self.signed == Some(true));
-        match self.cli {
-            Some(cli) => crate::egglog_to_infix(c.term(), &|n| crate::norm_const(n, &cli.num_type)),
-            None if w >= 64 => crate::egglog_to_infix(c.term(), &|n| n),
-            None if signed => crate::egglog_to_infix(c.term(), &|n| (n << (64 - w)) >> (64 - w)),
-            None => crate::egglog_to_infix(c.term(), &|n| n & ((1i64 << w) - 1)),
-        }
+        crate::egglog_to_infix(c.term(), &|n| crate::norm_const(n, num_type()))
     }
 }
 
@@ -136,13 +126,12 @@ pub(crate) fn opaque(t: &Term) -> bool {
 
 /// The first candidate of `set` proved minimal. Without a shift, division or mulhi in the
 /// candidates, only smaller terms without them need ruling out: no rule makes one.
-pub(crate) fn proved_minimal<'s>(set: &'s [Cand], env: &Env) -> Option<&'s Cand> {
-    let cli = env.cli?;
+pub(crate) fn proved_minimal<'s>(set: &'s [Cand], _: &Env) -> Option<&'s Cand> {
     if crate::lang::vars::get(crate::rust_vars::PROVE_MINIMAL) == 0 {
         return None;
     }
     let t_only = !set.iter().any(|c| opaque(c.tree()));
-    let ty = crate::eval::NumType::from_name(&cli.num_type);
+    let ty = crate::eval::NumType::from_name(num_type());
     set.iter().find(|c| {
         let t = c.tree();
         minimal::is_tidy(t) && (ty.is_some_and(|ty| minimal::is_minimal(t, ty)) || t_only && minimal::is_t_minimal(t))
@@ -156,14 +145,14 @@ thread_local! {
     static LAST_ROUND: Cell<f64> = const { Cell::new(0.0) };
 }
 
-/// Starts a `simplify` run on this thread: no limit, no cut, no egglog round timed yet.
+/// Starts a program on this thread: no limit, no cut, no egglog round timed yet.
 pub fn start() {
     crate::lang::vars::set(crate::rust_vars::DEADLINE, crate::lang::vars::NONE);
     CUT.with(|c| c.set(false));
     LAST_ROUND.with(|r| r.set(0.0));
 }
 
-/// Whether a step was skipped past a limit with `cut` on since `start`.
+/// Whether a step was skipped past a limit with `cut` on since the program started.
 pub fn cut() -> bool {
     CUT.with(|c| c.get())
 }
@@ -325,26 +314,18 @@ pub(crate) fn run_alt(p: &Pipe, t: &Term, w: &Ctx, cofactor: bool) -> Option<Ter
 
 pub(crate) fn run_on(p: &Pipe, t: &Term, w: &Ctx, cofactor: bool) -> Option<Cand> {
     let passes = crate::passes::current();
-    let mut env = Env::with(None, &passes, w.w, w.signed, false, String::new(), "");
+    let mut env = Env::with(&passes, w.w, w.signed, false, "");
     env.cofactor = cofactor;
     env.ctxs.borrow_mut().push(w.narrow(w.w));
-    let input = || Cand::of(t.clone(), &Cand::new("", "input"), 0, 0);
-    let out = in_run(&passes, None, input, || scoped(|| go(p, vec![input()], &env)));
+    let input = Cand::of(t.clone(), &Cand::new("", "input"), 0, 0);
+    let out = scoped(|| go(p, vec![input], &env));
     out.inspect_err(fail).ok()?.into_iter().next()
-}
-
-/// `Passes::polish` of `p` on the egglog term `egg` at width `w` (`signed` as in
-/// `linear_mba::Ctx`), and the origin of its result when that is smaller.
-pub fn polish(egg: &str, w: u32, signed: Option<bool>, p: &Passes) -> (String, Option<String>) {
-    let env = Env::prepass(p, w, signed, false, egg);
-    let input = || Cand::new(egg, "input");
-    in_run(p, None, input, || polish_one(&input(), &env)).map_or((egg.to_string(), None), |c| (c.term().to_string(), Some(c.origin)))
 }
 
 /// `Passes::polish` on `c` alone, as a run of its own (its group variables, `smallest`, `wins`),
 /// when it makes it smaller.
 pub(crate) fn polish_one(c: &Cand, env: &Env) -> Option<Cand> {
-    let run = Env::with(env.cli, env.passes, env.w, env.signed, env.trace, String::new(), c.term());
+    let run = Env::with(env.passes, env.w, env.signed, env.trace, c.term());
     let out = scoped(|| go(&env.passes.polish, vec![c.clone()], &run));
     out.inspect_err(fail).ok()?.into_iter().next().filter(|r| r.size() < c.size())
 }
@@ -411,22 +392,49 @@ pub(crate) fn take_minimal(_: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
     Ok(kept(out, &set))
 }
 
-pub(crate) fn reprint(main: &Cand, env: &Env) -> Steps {
-    let cli = env.cli("reprint");
-    let out = crate::egglog_to_infix(main.term(), &|n| crate::norm_const(n, &cli.num_type));
+pub(crate) fn reprint(main: &Cand, _: &Env) -> Steps {
+    let out = crate::egglog_to_infix(main.term(), &|n| crate::norm_const(n, num_type()));
     Ok(vec![Cand::new(&crate::infix_to_egglog(&out, true), &main.origin)])
+}
+
+/// `Passes::pipeline` on `set`, as a run of its own on its main candidate.
+pub(crate) fn pipeline(_: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
+    let input = set.first().map_or_else(String::new, |c| c.term().to_string());
+    let run = Env::with(env.passes, env.w, env.signed, env.trace, &input);
+    scoped(|| go(&env.passes.pipeline, set, &run))
+}
+
+pub(crate) fn settle(_: &[Pipe], set: Vec<Cand>, _: &Env) -> Steps {
+    if let Some(r) = set.first() {
+        stats::add(&format!("final/{}", r.origin), 0.0);
+        stats::settle(r.tree());
+    }
+    if cut() {
+        stats::add("time/cut", 0.0);
+    }
+    Ok(set)
+}
+
+/// The candidate `s` stands for: an egglog term as written, or an infix expression read in
+/// egglog form.
+fn parse_text(s: &str, _: &Env) -> Steps {
+    let s = s.trim();
+    let egg = if crate::expr_convert::is_egglog(s) { s.to_string() } else { crate::infix_to_egglog(s, true) };
+    if egg.is_empty() {
+        return Err(crate::Error::BackendError(format!("parse: {s:?} is not an expression")));
+    }
+    Ok(vec![Cand::new(&egg, "input")])
 }
 
 pub(crate) fn egglog(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
     let Some(main) = set.first() else { return Ok(set) };
     let name = step_name("egglog", args);
-    let cli = env.cli(&name);
     if past_deadline(LAST_ROUND.with(|r| r.get()), env) {
         return Ok(set);
     }
     let roots: Vec<&str> = set.iter().map(Cand::term).collect();
     let clock = std::time::Instant::now();
-    let e = crate::egglog_round(&env.egg, &roots, cli)?;
+    let e = crate::egglog_round(&crate::egg_program(num_type()), &roots)?;
     LAST_ROUND.with(|r| r.set(clock.elapsed().as_secs_f64()));
     stats::add(&name, stats::since(clock));
     if env.trace {

@@ -106,6 +106,7 @@ pub fn var_index(name: &str) -> Option<usize> {
     if let Some(i) = RUST_INDEX.get(name) {
         return Some(*i);
     }
+    defaults_read();
     let i = global_position(name)?;
     match PARSED.with(|p| p.borrow().as_ref().map(|g| g.contains(&i))) {
         Some(found) => found.then_some(i),
@@ -153,8 +154,16 @@ pub(crate) fn global_slot(name: &str) -> usize {
     i
 }
 
+/// Outside a parse, the variables `default.pipe` defines read first, as `var_index` finds them.
+fn defaults_read() {
+    if PARSED.with(|p| p.borrow().is_none()) {
+        std::sync::LazyLock::force(&DEFAULT);
+    }
+}
+
 /// The names of all variables `var_index` finds, in order.
 pub fn var_names() -> Vec<&'static str> {
+    defaults_read();
     (0..count()).map(|i| var(i).name).filter(|n| var_index(n).is_some()).collect()
 }
 

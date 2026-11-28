@@ -37,6 +37,8 @@ pub struct Def {
     /// The input `value` reads where it is not written, so that a call takes it implicitly
     /// (`(def (under k) size <= k)`).
     pub implicit: Option<super::types::Ty>,
+    /// `@timed`: a call past the time limit is skipped and gives its input.
+    pub timed: bool,
 }
 
 impl Def {
@@ -124,6 +126,8 @@ pub struct Definition {
     /// The input a body that gives a number reads where it is not written (`size <= k`), so
     /// that the function takes it implicitly.
     pub implicit: Option<Ty>,
+    /// `@timed`.
+    pub timed: bool,
     /// Warnings of reading it.
     pub notes: Vec<String>,
 }
@@ -246,6 +250,7 @@ pub fn sig_of(d: &Def) -> Sig {
         sig.input = sig.params.pop();
     }
     sig.pipe = d.step;
+    sig.timed = d.timed;
     if d.value.is_some() {
         sig.result = Ty::Num;
     }
@@ -269,6 +274,7 @@ fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition
     let mut params: Vec<String> = Vec::new();
     let mut types: Vec<Option<Ty>> = Vec::new();
     let mut piped = false;
+    let mut timed = false;
     let (mut kind, name) = match head.as_str() {
         "let" => (DefKind::Let, p.name("a name after let")?),
         "def" => {
@@ -278,7 +284,8 @@ fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition
                 match p.name("an attribute after @")?.as_str() {
                     "inline" => kind = DefKind::Inline,
                     "pipe" => piped = true,
-                    a => return Err(format!("unknown attribute @{a} of def; known: @inline @pipe")),
+                    "timed" => timed = true,
+                    a => return Err(format!("unknown attribute @{a} of def; known: @inline @pipe @timed")),
                 }
             }
             p.expect(Tok::Open, "(NAME) after def")?;
@@ -339,6 +346,9 @@ fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition
         Some(_) if kind == DefKind::Run => return Err(format!("{what}: {name} is already defined by let or def @inline")),
         _ => {}
     }
+    if replaces && timed {
+        return Err(format!("{what}: {name} is called by the Rust code, which decides how the time limit stops it, so it takes no @timed"));
+    }
     if replaces && !params.is_empty() {
         return Err(format!("{what}: {name} is called by the Rust code and takes no parameters"));
     }
@@ -356,7 +366,7 @@ fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition
         *types.last_mut().unwrap() = Some(Ty::Group);
     }
     p.params = params.into_iter().zip(types).map(|(name, ty)| ParamUse { name, annotated: ty.is_some(), ty, uses: 0, loose: 0 }).collect();
-    let mut value = match kind != DefKind::Let && p.expr_ahead() {
+    let mut value = match kind != DefKind::Let && !replaces && p.expr_ahead() {
         true => {
             p.no_input = piped;
             let e = p.or()?;
@@ -369,6 +379,7 @@ fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition
     let implicit = value.as_ref().filter(|_| !piped).and_then(|e| p.input_ty(e));
     let (mut pipe, flat, tail) = match value {
         Some(_) => (Pipe::id(), false, None),
+        None if replaces => (p.pipe()?, false, None),
         None => {
             let (stages, tail) = p.stages_of_pipe()?;
             let flat = kind != DefKind::Run && stages.len() > 1;
@@ -391,6 +402,9 @@ fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition
         }
         value = Some(number_seq(std::mem::replace(&mut pipe, Pipe::id()), e));
     }
+    if timed && value.is_some() {
+        return Err(format!("{what}: @timed is for a function that gives candidates, which a call past the time limit skips"));
+    }
     let mut params = std::mem::take(&mut p.params);
     if piped {
         params.pop();
@@ -408,7 +422,7 @@ fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition
         })
         .collect::<Result<Vec<_>, String>>()?;
     used.extend(p.used);
-    Ok(Definition { name, kind, params, pipe, flat, input, step, value, implicit, notes })
+    Ok(Definition { name, kind, params, pipe, flat, input, step, value, implicit, timed, notes })
 }
 
 /// The signature of a function `(def (NAME PARAM ...) p)`: its parameters, then the
@@ -420,7 +434,7 @@ pub fn def_sig(name: &str, params: &[Param]) -> Sig {
         input: Some(Param { name: "g".into(), ty: Ty::Group, rep: Rep::One }),
         result: Ty::Group,
         pipe: true,
-        bookkeeping: false,
+        timed: false,
         simplify_only: false,
         uncounted: false,
         switch: false,
@@ -436,12 +450,9 @@ fn def_head(d: &Def) -> String {
     });
 
     let head = std::iter::once(d.name.clone()).chain(params).chain(d.input.clone()).collect::<Vec<_>>().join(" ");
-    match (d.inline, d.input.is_some()) {
-        (true, true) => format!("@inline @pipe ({head})"),
-        (true, _) => format!("@inline ({head})"),
-        (_, true) => format!("@pipe ({head})"),
-        _ => format!("({head})"),
-    }
+    let attrs = [(d.inline, "@inline "), (d.timed, "@timed "), (d.input.is_some(), "@pipe ")];
+    let attrs: String = attrs.iter().filter(|(on, _)| *on).map(|(_, a)| *a).collect();
+    format!("{attrs}({head})")
 }
 
 /// `(def (NAME PARAM ...) body)` on one line.

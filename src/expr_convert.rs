@@ -539,3 +539,12 @@ fn ast_to_egglog(ast: &Ast, is_expr: bool) -> String {
         }
     }
 }
+
+/// Whether `s` is an egglog term (`(Add (Var "x") (Num 1))`) rather than an infix expression.
+pub fn is_egglog(s: &str) -> bool {
+    const HEADS: [&str; 15] = ["Num", "Var", "Add", "Sub", "Mul", "Div", "Mod", "And", "Or", "Xor", "Shr", "Shl", "Mulhi", "Not", "Neg"];
+    let Some(rest) = s.trim_start().strip_prefix('(') else { return false };
+    let head: String = rest.chars().take_while(char::is_ascii_alphanumeric).collect();
+    let after = rest[head.len()..].trim_start();
+    HEADS.contains(&head.as_str()) && after.starts_with(|c: char| c == '(' || c == '"' || c == '-' || c.is_ascii_digit())
+}

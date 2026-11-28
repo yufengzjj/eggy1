@@ -61,19 +61,19 @@ fn one(text: &str) -> Result<Sig, String> {
         return Err(bad());
     }
     let mut rest = rest.iter().copied().peekable();
-    let (mut pipe, mut bookkeeping, mut simplify_only, mut uncounted, mut switch) = (false, false, false, false, false);
+    let (mut pipe, mut timed, mut simplify_only, mut uncounted, mut switch) = (false, false, false, false, false);
     while let Some(a) = rest.next_if(|t| t.starts_with('@')) {
         match a {
             "@pipe" => pipe = true,
-            "@bookkeeping" => bookkeeping = true,
+            "@timed" => timed = true,
             "@simplify_only" => simplify_only = true,
             "@uncounted" => uncounted = true,
             "@switch" => switch = true,
-            _ => return Err(format!("unknown attribute {a}; known: @pipe @bookkeeping @simplify_only @uncounted @switch")),
+            _ => return Err(format!("unknown attribute {a}; known: @pipe @timed @simplify_only @uncounted @switch")),
         }
     }
-    if bookkeeping && uncounted {
-        return Err("@uncounted is for a function skipped past the time limit, which @bookkeeping is not".into());
+    if uncounted && !timed {
+        return Err("@uncounted says how a skip past the time limit counts, so it needs @timed".into());
     }
     if rest.next() != Some("(") {
         return Err(bad());
@@ -93,14 +93,14 @@ fn one(text: &str) -> Result<Sig, String> {
         return Err(bad());
     }
     if OPERATORS.contains(&name.as_str()) {
-        return operator(name, params, result, pipe || bookkeeping || simplify_only || uncounted || switch);
+        return operator(name, params, result, pipe || timed || simplify_only || uncounted || switch);
     }
     let input = params.pop().ok_or_else(|| format!("{name}: the last parameter is the input, term or group"))?;
-    if input.rep != Rep::One || !matches!(input.ty, Ty::Term | Ty::Group) && !(input.ty == Ty::MaybeTerm && result == Ty::Num) {
-        return Err(format!("{name}: the input {input} must be term or group, or term? for a function that gives a number"));
+    if input.rep != Rep::One || !matches!(input.ty, Ty::Term | Ty::Group) && !(input.ty == Ty::MaybeTerm && matches!(result, Ty::Num | Ty::Text)) && !(input.ty == Ty::Text && result == Ty::Group) {
+        return Err(format!("{name}: the input {input} must be term or group, term? for a function that gives a number or a text, or text for one that gives a group"));
     }
-    if !matches!(result, Ty::Num | Ty::Term | Ty::MaybeTerm | Ty::Group) {
-        return Err(format!("{name}: a function gives num, term, term? or group"));
+    if !matches!(result, Ty::Num | Ty::Term | Ty::MaybeTerm | Ty::Group | Ty::Text) {
+        return Err(format!("{name}: a function gives num, term, term?, group or text"));
     }
     if Kind::of(&input.ty, &result).is_none() {
         return Err(format!("{name}: no calling kind takes {} to {}", input.ty, result));
@@ -118,7 +118,7 @@ fn one(text: &str) -> Result<Sig, String> {
     if switch && !matches!(input.ty, Ty::Term) {
         return Err(format!("{name}: @switch is for a pass over one term"));
     }
-    Ok(Sig { name, params, input: Some(input), result, pipe, bookkeeping, simplify_only, uncounted, switch, doc: String::new() })
+    Ok(Sig { name, params, input: Some(input), result, pipe, timed, simplify_only, uncounted, switch, doc: String::new() })
 }
 
 /// The operators of the language, as the parser reads them.
@@ -134,7 +134,7 @@ fn operator(name: String, params: Vec<Param>, result: Ty, attrs: bool) -> Result
     if attrs || result != Ty::Num || params.is_empty() || !params.iter().enumerate().all(operand) {
         return Err(format!("{name}: an operator takes numbers to num, without attributes; only its last operand may be group->num..."));
     }
-    Ok(Sig { name, params, input: None, result, pipe: false, bookkeeping: false, simplify_only: false, uncounted: false, switch: false, doc: String::new() })
+    Ok(Sig { name, params, input: None, result, pipe: false, timed: false, simplify_only: false, uncounted: false, switch: false, doc: String::new() })
 }
 
 pub(crate) fn param(p: &str) -> Result<Param, String> {
@@ -191,6 +191,7 @@ pub fn number_names() -> Vec<String> {
 pub(crate) fn sample(s: &Sig) -> String {
     match s.name.as_str() {
         "!" => return "!1".into(),
+        _ if s.kind() == Kind::FromText => return format!("({} \"x\")", s.name),
         op if s.is_op() => return format!("(1 {op} 1)"),
         _ => {}
     }
@@ -239,6 +240,10 @@ pub(crate) enum Impl {
     TermNum(fn(&Cand, &Env) -> u64),
     /// `group -> num` without arguments: on the list whole, 0 for no candidates.
     GroupNum(fn(&[Cand], &Env) -> u64),
+    /// `text -> group`: the candidates read from the text.
+    FromText(fn(&str, &Env) -> Steps),
+    /// `term -> text`: on the main candidate, the empty text without one.
+    TermText(fn(&Cand, &Env) -> String),
     /// An operator; its applications hold it (`Fun::Op`) and `Env::value` evaluates them inline.
     Operator(Operator),
 }
@@ -259,8 +264,8 @@ pub struct Builtin {
     pub name: &'static str,
     pub sig: &'static Sig,
     pub(crate) imp: Impl,
-    /// `sig.bookkeeping` and `sig.uncounted`, read for every step run.
-    pub(crate) bookkeeping: bool,
+    /// `sig.timed` and `sig.uncounted`, read for every step run.
+    pub(crate) timed: bool,
     pub(crate) uncounted: bool,
     /// For a function that gives a number (not an operator), its parameter count: an argument
     /// past them is the input written (`(minimal g)`, `(size (main r))`).
@@ -295,7 +300,7 @@ impl std::fmt::Debug for Builtin {
 /// Every built-in function, in the order of `src/builtins.pipe`, with its implementation.
 pub static BUILTINS: std::sync::LazyLock<Vec<Builtin>> = std::sync::LazyLock::new(|| {
     let imp = |sig: &Sig| implementation(&sig.name).unwrap_or(Impl::Missing);
-    super::builtins::all().iter().map(|sig| Builtin { name: sig.name.as_str(), sig, imp: imp(sig), bookkeeping: sig.bookkeeping, uncounted: sig.uncounted, input_at: (sig.is_number() && !sig.is_op()).then_some(sig.params.len()) }).collect()
+    super::builtins::all().iter().map(|sig| Builtin { name: sig.name.as_str(), sig, imp: imp(sig), timed: sig.timed, uncounted: sig.uncounted, input_at: (sig.is_number() && !sig.is_op()).then_some(sig.params.len()) }).collect()
 });
 
 /// The built-in function `name`.
@@ -587,7 +592,7 @@ fn take_min(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
 mod tests {
     use super::*;
     use crate::linear_mba;
-    use crate::lang::eval::bookkeeping;
+    use crate::lang::eval::timed;
 
     #[test]
     fn declarations() {
@@ -597,10 +602,10 @@ mod tests {
         assert_eq!(get("best").unwrap().takes(), "an expression and one or more pipelines");
         assert_eq!(get("retry").unwrap().takes(), "an expression and two pipelines");
         assert_eq!(get("id").unwrap().takes(), "no arguments");
-        assert_eq!(get("save").unwrap().decl(), "(extern @pipe @bookkeeping (save r:group g:group) group)");
-        assert_eq!(get("relate").unwrap().decl(), "(extern @pipe @switch (relate t:term) term)");
+        assert_eq!(get("save").unwrap().decl(), "(extern @pipe (save r:group g:group) group)");
+        assert_eq!(get("relate").unwrap().decl(), "(extern @pipe @switch @timed (relate t:term) term)");
         assert!(get("simba").unwrap().switch && !get("finish").unwrap().switch);
-        assert!(all().iter().all(|s| s.pipe != s.is_op()), "every built-in but an operator can be a step");
+        assert!(all().iter().all(|s| s.pipe != (s.is_op() || s.kind() == Kind::FromText)), "every built-in but an operator and parse can be a step");
         assert_eq!(get("&&").unwrap().decl(), "(extern (&& a:num b:group->num...) num)");
         assert_eq!(get("!").unwrap().kind(), Kind::Op);
         assert_eq!(all().iter().filter(|s| s.is_op()).map(|s| s.name.as_str()).collect::<Vec<_>>(), OPERATORS);
@@ -608,10 +613,10 @@ mod tests {
         assert_eq!(get("prepass").unwrap().kind(), Kind::Main);
         assert!(get("egglog").unwrap().simplify_only && !get("egglog").unwrap().required());
         assert!(all().iter().all(|s| !s.doc.is_empty()));
-        let ok = "# The input.\n(extern (x g:group) group)\n\n# Two lines\n# The second describes it.\n(extern @bookkeeping (y n:name\n  t:term) term?)";
+        let ok = "# The input.\n(extern (x g:group) group)\n\n# Two lines\n# The second describes it.\n(extern @timed (y n:name\n  t:term) term?)";
         let sigs = parse(ok).unwrap();
         assert_eq!(sigs[1].doc, "The second describes it.");
-        assert_eq!(sigs[1].decl(), "(extern @bookkeeping (y n:name t:term) term?)");
+        assert_eq!(sigs[1].decl(), "(extern @timed (y n:name t:term) term?)");
         for (bad, msg) in [
             ("(extern (x g:group) group)", "no description"),
             ("# a\n(extern (x g:group) group)\n# b\n(extern (x g:group) group)", "declared twice"),
@@ -621,7 +626,7 @@ mod tests {
             ("# a\n(extern (x n:num... g:group) group)", "only pipe and any take"),
             ("# a\n(extern (x n:int g:group) group)", "unknown type int"),
             ("# a\n(extern @pure (x g:group) group)", "unknown attribute"),
-            ("# a\n(extern @bookkeeping @uncounted (x g:group) group)", "@uncounted is for"),
+            ("# a\n(extern @uncounted (x g:group) group)", "@uncounted says how"),
             ("# a\n(extern @switch (x g:group) group)", "@switch is for a pass over one term"),
             ("# a\n(extern (x g:group) group", "unclosed"),
             ("# a\n(def (x g:group) group)", "expected (extern"),
@@ -688,6 +693,8 @@ mod tests {
                 }
                 Impl::TermNum(_) => kind == Kind::TermNum && b.sig.params.is_empty(),
                 Impl::GroupNum(_) => kind == Kind::GroupNum && b.sig.params.is_empty(),
+                Impl::FromText(_) => kind == Kind::FromText && b.sig.params.is_empty(),
+                Impl::TermText(_) => kind == Kind::TermText && b.sig.params.is_empty(),
             };
             assert!(runs_as_declared, "{}: no implementation for its calling kind", b.sig.decl());
         }
@@ -704,10 +711,10 @@ mod tests {
     }
 
     #[test]
-    fn bookkeeping_matches_the_attribute() {
-        for s in crate::lang::builtins::all().iter().filter(|s| !s.is_number()) {
+    fn timed_matches_the_attribute() {
+        for s in crate::lang::builtins::all().iter().filter(|s| !s.is_number() && !s.is_text()) {
             let call = crate::lang::builtins::sample(s);
-            assert_eq!(bookkeeping(&crate::lang::parser::parse(&call).unwrap()), s.bookkeeping, "{}", s.decl());
+            assert_eq!(timed(&crate::lang::parser::parse(&call).unwrap()), s.timed, "{}", s.decl());
         }
     }
 }

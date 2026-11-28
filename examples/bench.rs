@@ -329,7 +329,7 @@ fn run_one(args: &Args) {
         iter_limit: args.iter_limit,
         max_restarts: args.max_restarts,
         trace: args.trace,
-        passes: eggy1::passes::Passes::parse(&format!("time_limit={} {}", time_limit_ms(args), args.passes)).expect("bad --passes"),
+        passes: format!("time_limit={} {}", time_limit_ms(args), args.passes),
         expr: input.clone(),
         ..Default::default()
     };

@@ -1,56 +1,57 @@
 use clap::{CommandFactory, FromArgMatches};
 use eggy1::expr_convert::infix_to_egglog;
-use eggy1::{simplify, Cli};
+use eggy1::{Cli, cli, lang};
 
 fn main() {
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
-    if matches.value_source("passes") == Some(clap::parser::ValueSource::CommandLine)
-        && let Some(spec) = matches.get_raw("passes").and_then(|mut v| v.next())
-    {
-        for w in eggy1::passes::Passes::parse_noting(&spec.to_string_lossy()).map(|(_, w)| w).unwrap_or_default() {
+    let given = matches.value_source("passes") == Some(clap::parser::ValueSource::CommandLine);
+    let runs = !(cli.show_builtins || cli.show_passes || cli.expr.is_empty() || infix_to_egglog(&cli.expr, true).is_empty());
+    let statement = runs.then(|| cli::statement(&cli.expr, true));
+    let (passes, warnings, text) = cli::parse(&cli, statement.as_deref()).unwrap_or_else(|e| {
+        eprintln!("error: invalid value '{}' for '--passes <PASSES>': {e}\n\nFor more information, try '--help'.", cli.passes);
+        std::process::exit(2)
+    });
+    if given {
+        for w in warnings {
             eprintln!("--passes: warning: {w}");
         }
     }
     if cli.show_builtins {
-        print!("{}", eggy1::cli::listing());
-        let (default, spec) = cli.passes.defs.split_at(cli.passes.default_defs);
+        print!("{}", cli::listing());
+        let (default, spec) = passes.defs.split_at(passes.default_defs);
         for (from, defs) in [("src/default.pipe", default), ("--passes", spec)] {
             if !defs.is_empty() {
                 println!("\n# --- defined by def in {from}");
                 for d in defs {
-                    println!("{}", eggy1::lang::defs::sig_of(d));
+                    println!("{}", lang::defs::sig_of(d));
                 }
             }
         }
         return;
     }
     if cli.show_passes {
-        println!("{}", cli.passes.show_run(cli.max_restarts, cli.iter_limit));
+        println!("# The program: {}\n{passes:#}", cli::one_line(&format!("{text}{}", cli::statement("EXPR", true))));
         return;
     }
     if cli.expr.is_empty() {
         println!("please enter a expression");
         return;
     }
-    let egg_expr = infix_to_egglog(&cli.expr, true);
-    if egg_expr.is_empty() {
+    if !runs {
         println!("please enter a valid expression");
         return;
     }
     if cli.stats {
         eggy1::stats::enable();
     }
-    let result = simplify(&egg_expr, &cli);
-    if eggy1::last_run_cut() {
-        eprintln!("time limit reached: the result is the smallest form found by then");
-    }
+    let result = lang::execute(&passes, &[]);
     if cli.stats {
         eprint!("{}", eggy1::stats::report(&eggy1::stats::take()));
     }
-    if let Ok(v) = result {
-        println!("\n{}", v);
-    } else if let Err(v) = result {
-        println!("\nerror:{}", v);
+    match result {
+        Ok(Some(lang::Value::Text(v))) => println!("\n{v}"),
+        Ok(_) => println!("\nerror:the program gave no text"),
+        Err(v) => println!("\nerror:{v}"),
     }
 }

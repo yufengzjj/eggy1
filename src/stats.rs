@@ -167,18 +167,18 @@ pub fn won_among(name: &str, sizes: &[(&str, usize)], input: usize, kept: &Term)
     won(name, next, kept);
 }
 
-/// Bits of the numeric type of the current run, for comparing constants in `settle`.
-static MASK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
-
-/// Sets the width constants are compared in by `settle`.
-pub fn set_width(w: u32) {
-    MASK.store(if w >= 64 { u64::MAX } else { (1 << w) - 1 }, Relaxed);
+/// Bits of the numeric type `num_type`, for comparing constants in `settle`.
+fn type_mask() -> u64 {
+    match crate::width_of(crate::rust_vars::num_type()) {
+        w if w >= 64 => u64::MAX,
+        w => (1 << w) - 1,
+    }
 }
 
 /// A hash equal for terms that differ only in the order and grouping of the operands of
 /// `+ * & | ^` and in how constants are extended past the type's width, since the rules
 /// rearrange those freely.
-fn term_hash(t: &Term) -> u64 {
+fn term_hash(t: &Term, mask: u64) -> u64 {
     use crate::eval::Op;
     use std::hash::{Hash, Hasher};
     fn flat<'a>(t: &'a Term, op: Op, out: &mut Vec<&'a Term>) {
@@ -189,16 +189,16 @@ fn term_hash(t: &Term) -> u64 {
     }
     let mut h = std::collections::hash_map::DefaultHasher::new();
     match t {
-        Term::Num(v) => (0u8, *v as u64 & MASK.load(Relaxed)).hash(&mut h),
+        Term::Num(v) => (0u8, *v as u64 & mask).hash(&mut h),
         Term::Var(v) => (1u8, v).hash(&mut h),
         Term::Op(op @ (Op::Add | Op::Mul | Op::And | Op::Or | Op::Xor), _) => {
             let mut parts = Vec::new();
             flat(t, *op, &mut parts);
-            let mut hs: Vec<u64> = parts.into_iter().map(term_hash).collect();
+            let mut hs: Vec<u64> = parts.into_iter().map(|p| term_hash(p, mask)).collect();
             hs.sort_unstable();
             (2u8, op, hs).hash(&mut h);
         }
-        Term::Op(op, a) => (3u8, op, a.iter().map(term_hash).collect::<Vec<_>>()).hash(&mut h),
+        Term::Op(op, a) => (3u8, op, a.iter().map(|x| term_hash(x, mask)).collect::<Vec<_>>()).hash(&mut h),
     }
     h.finish()
 }
@@ -210,7 +210,7 @@ pub fn produced(key: &str, form: &Term, gain: usize) {
         return;
     }
     add_n(&format!("{key}/gain"), gain as u64, 0.0);
-    PRODUCED.lock().unwrap().push((term_hash(form), key.to_string(), gain as u64));
+    PRODUCED.lock().unwrap().push((term_hash(form, type_mask()), key.to_string(), gain as u64));
 }
 
 /// Adds the gain of each form `produced` remembered to `KEY/survived` when `result` has it
@@ -220,14 +220,14 @@ pub fn settle(result: &Term) {
     if !on() {
         return;
     }
-    fn walk(t: &Term, out: &mut std::collections::HashSet<u64>) {
-        out.insert(term_hash(t));
+    fn walk(t: &Term, mask: u64, out: &mut std::collections::HashSet<u64>) {
+        out.insert(term_hash(t, mask));
         if let Term::Op(_, a) = t {
-            a.iter().for_each(|x| walk(x, out));
+            a.iter().for_each(|x| walk(x, mask, out));
         }
     }
     let mut seen = std::collections::HashSet::new();
-    walk(result, &mut seen);
+    walk(result, type_mask(), &mut seen);
     let produced = std::mem::take(&mut *PRODUCED.lock().unwrap());
     for (h, key, gain) in produced {
         if seen.contains(&h) {
