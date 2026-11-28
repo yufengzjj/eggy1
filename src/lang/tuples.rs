@@ -1,18 +1,16 @@
-//! Tuples in the parser (`docs/lang/tuples.md`): `(a, b, ...)`, told from a call by its
-//! commas; `(index i t)` of a tuple, whose position `i` is a number written out so that its
-//! type is known when read; `(a, b) = t`; and a step that gives a tuple followed by one that
-//! takes it.
+//! Tuples in elaboration (`docs/lang/tuples.md`): `(a, b, ...)`; `(index i t)` of a tuple,
+//! whose position `i` is a number written out so that its type is known; `(a, b) = t`; and a
+//! step that gives a tuple followed by one that takes it.
 
-use super::ast::{Fun, Holds, Pipe, Slot, gives_tuple, input_of, passes_on, show, show_expr, show_tuple_input, stage, starts_with_value, value_ty};
-use super::builtins::get;
+use super::ast::{Fun, Holds, Pipe, Slot, gives_tuple, input_of, show, show_expr, show_tuple_input, stage, starts_with_value, value_ty};
 use super::defs::def_sig;
-use super::lexer::{Tok, show_tok};
-use super::parser::{Parser, Rhs, group, seq_of};
+use super::elab::{Elab, Items, Rhs, group};
+use super::syntax::{Node, Pipeline, Syn};
 use super::types::Ty;
 use super::vars::var_index;
 use std::sync::Arc;
 
-impl<'a> Parser<'a> {
+impl<'a> Elab<'a> {
     /// The type of the tuple the variable or parameter `n` holds.
     pub(crate) fn tuple_var(&self, n: &str) -> Option<Ty> {
         match self.param(n) {
@@ -26,129 +24,84 @@ impl<'a> Parser<'a> {
         self.param(n).is_none() && self.defs.get(n).and_then(|d| d.def.as_ref()).is_some_and(|d| d.tuple.is_some())
     }
 
-    /// The offset of the `)` that closes the `(` `k` tokens ahead.
-    fn close_of(&self, k: usize) -> Option<usize> {
-        let mut depth = 0;
-        for (j, t) in self.toks.get(self.at + k..)?.iter().enumerate() {
-            match t {
-                Tok::Open => depth += 1,
-                Tok::Close if depth == 1 => return Some(k + j),
-                Tok::Close => depth -= 1,
-                _ => {}
-            }
-        }
-        None
+    /// Whether the name `n` alone gives a tuple: a variable or parameter that holds one, or a
+    /// function without parameters that gives one and is applied here.
+    pub(crate) fn tuple_term_name(&self, n: &str) -> bool {
+        self.tuple_var(n).is_some() || self.tuple_def(n) && self.defs[n].params.is_empty() && (self.input || self.defs[n].def.as_ref().is_some_and(|d| !d.step))
     }
 
-    /// Whether a tuple `(a, b, ...)` starts `k` tokens ahead: a `(` with a `,` inside it, not
-    /// inside deeper parentheses.
-    pub(crate) fn tuple_literal_at(&self, k: usize) -> bool {
-        if self.peek_at(k) != Some(&Tok::Open) {
-            return false;
-        }
-        let mut depth = 0;
-        for t in &self.toks[self.at + k..] {
-            match t {
-                Tok::Open => depth += 1,
-                Tok::Close if depth == 1 => return false,
-                Tok::Close => depth -= 1,
-                Tok::Comma if depth == 1 => return true,
-                _ => {}
-            }
-        }
-        false
-    }
-
-    /// The offset past the expression argument `k` tokens ahead.
-    fn skip_arg(&self, k: usize) -> usize {
-        match self.peek_at(k) {
-            Some(Tok::Not) => self.skip_arg(k + 1),
-            Some(Tok::Open) => self.close_of(k).map_or(k, |c| c + 1),
-            Some(_) => k + 1,
-            None => k,
-        }
-    }
-
-    /// Whether a term that gives a tuple starts `k` tokens ahead: a tuple, a variable or
-    /// parameter that holds one, a call of a function that gives one, `(index i t)` of a tuple
-    /// (which may give any type), or a pipeline in parentheses that gives one.
-    pub(crate) fn tuple_term_at(&self, k: usize) -> bool {
-        match self.peek_at(k) {
-            Some(Tok::Name(n)) => self.tuple_var(n).is_some() || self.tuple_def(n) && self.defs[n].params.is_empty() && (self.input || self.defs[n].def.as_ref().is_some_and(|d| !d.step)),
-            Some(Tok::Open) => self.tuple_literal_at(k) || matches!(self.peek_at(k + 1), Some(Tok::Name(n)) if self.tuple_def(n)) || self.tuple_index_at(k) || self.paren_tuple_at(k),
+    /// Whether `x` gives a tuple by what it is written of: a tuple, a name that gives one, a
+    /// call of a function that gives one, or `(index i t)` of such a tuple.
+    pub(crate) fn tuple_term_known(&self, x: &Syn) -> bool {
+        match &x.node {
+            Node::Name(n) => self.tuple_term_name(n),
+            Node::Tuple(_) => true,
+            Node::Paren(_) => x.head_name().is_some_and(|n| self.tuple_def(n)) || self.index_of_known(x),
             _ => false,
         }
     }
 
-    /// A parser of the same text and names, at `k` tokens ahead.
-    fn trial(&self, k: usize) -> Parser<'a> {
-        let mut p = Parser::new(self.toks.clone(), self.defs);
-        p.at = self.at + k;
-        (p.params, p.groups, p.fns, p.locals, p.tuples) = (self.params.clone(), self.groups.clone(), self.fns.clone(), self.locals.clone(), self.tuples.clone());
-        p
+    /// Whether `x` is `(index i t)` of a tuple `t` known by what it is written of.
+    fn index_of_known(&self, x: &Syn) -> bool {
+        self.index_form(x).is_some_and(|t| self.tuple_term_known(t))
     }
 
-    /// Whether a pipeline in parentheses that gives a tuple starts `k` tokens ahead
-    /// (`((mk 3) | (print "x"))`): read on trial where it has a `|` and names something that
-    /// may give a tuple.
-    fn paren_tuple_at(&self, k: usize) -> bool {
-        let Some(c) = self.close_of(k) else { return false };
-        let inner = &self.toks[self.at + k + 1..self.at + c];
-        let mut depth = 0;
-        let bar = inner.iter().any(|t| {
-            match t {
-                Tok::Open => depth += 1,
-                Tok::Close => depth -= 1,
-                _ => {}
-            }
-            depth == 0 && *t == Tok::Bar
-        });
-        let tuple_name = |n: &str| self.tuple_var(n).is_some() || self.tuple_def(n) || get(n).is_some_and(|s| s.result.positions().is_some());
-        if !bar || !inner.iter().any(|t| matches!(t, Tok::Comma) || matches!(t, Tok::Name(n) if tuple_name(n))) {
-            return false;
+    /// The tuple of `(index i t)` where `x` is written so.
+    fn index_form<'s>(&self, x: &'s Syn<'s>) -> Option<&'s Syn<'s>> {
+        let (st, rest) = x.head_stage()?;
+        (st.items[0].name() == Some("index") && self.param("index").is_none() && rest.is_empty() && st.items.len() >= 3).then(|| &st.items[2])
+    }
+
+    /// `(index i t)` where `x` is written so and `t` gives a tuple: its position `i` and the
+    /// type of that position; where `t` is a pipeline in parentheses that gives a group, the
+    /// `index` of the group, as a step. `None` for anything else.
+    pub(crate) fn tuple_index(&mut self, x: &Syn) -> Result<Option<(Pipe, Ty)>, String> {
+        let Some(t) = self.index_form(x) else { return Ok(None) };
+        if self.tuple_term_known(t) {
+            return self.index_tuple(x, None).map(Some);
         }
-        let mut p = self.trial(k + 1);
-        matches!(p.stages_of_pipe(), Ok((stages, None)) if p.peek() == Some(&Tok::Close) && stages.iter().rev().find(|q| !passes_on(q)).is_some_and(gives_tuple))
-    }
-
-    /// Whether `(index i t)` of a tuple `t` starts `k` tokens ahead.
-    pub(crate) fn tuple_index_at(&self, k: usize) -> bool {
-        self.peek_at(k) == Some(&Tok::Open) && matches!(self.peek_at(k + 1), Some(Tok::Name(n)) if n == "index" && self.param(n).is_none()) && self.tuple_term_at(self.skip_arg(k + 2))
-    }
-
-    /// The type of the position `(index i t)` `k` tokens ahead gives, where `t` is a tuple.
-    pub(crate) fn index_ty_at(&self, k: usize) -> Option<Ty> {
-        if !self.tuple_index_at(k) {
-            return None;
+        if t.paren().is_none_or(|p| p.stages.len() < 2) {
+            return Ok(None);
         }
-        self.trial(k).index_tuple().ok().map(|(_, t)| t)
+        let p = self.stage(t)?;
+        if let Some(ty) = value_ty(&p).filter(|ty| ty.positions().is_some()) {
+            return self.index_tuple(x, Some((p, ty))).map(Some);
+        }
+        let mut c = Items::of(x);
+        let i = self.earg_of(&mut c)?;
+        let (st, _) = x.head_stage().unwrap();
+        if let Some(y) = st.items.get(3) {
+            return Err(format!("expected ), found {}", self.tok(y.at)));
+        }
+        let index = Pipe::App(Fun::Builtin(super::builtins::builtin("index").unwrap()), vec![i].into());
+        Ok(Some((Pipe::Seq(vec![p, index]), Ty::Group)))
     }
 
-    /// Whether an expression of the tuple kind starts after the `(`s `k` counts: `(index i t)`
-    /// of a tuple whose position `i` is a number.
-    pub(crate) fn number_index_at(&self, k: usize) -> bool {
-        k > 0 && self.index_ty_at(k - 1) == Some(Ty::Num)
-    }
-
-    /// `(index i t)` of a tuple `t`, and the type of its position `i`.
-    pub(crate) fn index_tuple(&mut self) -> Result<(Pipe, Ty), String> {
-        self.expect(Tok::Open, "(")?;
-        self.at += 1;
-        let i = match self.peek() {
-            Some(Tok::Num(i)) => {
-                let i = *i;
-                self.at += 1;
-                i
-            }
+    /// `(index i t)` of a tuple `t`, `t` elaborated when given, and the type of its position
+    /// `i`.
+    fn index_tuple(&mut self, x: &Syn, given: Option<(Pipe, Ty)>) -> Result<(Pipe, Ty), String> {
+        let (st, _) = x.head_stage().unwrap();
+        let tx = &st.items[2];
+        let i = match &st.items[1].node {
+            Node::Num(i) => *i,
             _ => {
-                let e = self.arg()?;
-                let (t, ty) = self.tuple_term()?;
+                let mut c = Items::of(x);
+                let e = self.earg_of(&mut c)?;
+                let (t, ty) = match given {
+                    Some(g) => g,
+                    None => self.tuple_term(tx)?,
+                };
                 let t = show_tuple_input(&t);
                 return Err(format!("(index {} {t}): a position of a tuple is a number written out, as in (index 0 {t}), since each position has its own type ({t} is {ty})", show_expr(&e, 7)));
             }
         };
-        let (t, _) = self.tuple_term()?;
-        self.expect(Tok::Close, ")")?;
+        let (t, _) = match given {
+            Some(g) => g,
+            None => self.tuple_term(tx)?,
+        };
+        if let Some(y) = st.items.get(3) {
+            return Err(format!("expected ), found {}", self.tok(y.at)));
+        }
         let shown = show_tuple_input(&t);
         self.index_of(t, i, &shown)
     }
@@ -163,69 +116,59 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// A term that gives a tuple, as `tuple_term_at` finds one, and the tuple's type.
-    pub(crate) fn tuple_term(&mut self) -> Result<(Pipe, Ty), String> {
-        self.tuple_term_for(None)
+    /// A term that gives a tuple, and the tuple's type.
+    pub(crate) fn tuple_term(&mut self, x: &Syn) -> Result<(Pipe, Ty), String> {
+        self.tuple_term_for(x, None)
     }
 
     /// `tuple_term` where a tuple of type `want` is taken, which a tuple written out reads its
     /// positions by.
-    fn tuple_term_for(&mut self, want: Option<&Ty>) -> Result<(Pipe, Ty), String> {
-        match self.peek().cloned() {
-            Some(Tok::Name(n)) if self.tuple_var(&n).is_some() => {
-                let ty = self.tuple_var(&n).unwrap();
-                self.at += 1;
-                self.use_param(&n, ty.clone())?;
-                Ok((Pipe::Var(Slot::Local(n, Holds::Tuple(Box::new(ty.clone())))), ty))
+    fn tuple_term_for(&mut self, x: &Syn, want: Option<&Ty>) -> Result<(Pipe, Ty), String> {
+        let not_tuple = |e: &Self| format!("expected a tuple, as in (1, t), a variable that holds one or a call of a function that gives one; found {}", e.tok(x.at));
+        match &x.node {
+            Node::Name(n) if self.tuple_var(n).is_some() => {
+                let ty = self.tuple_var(n).unwrap();
+                self.use_param(n, ty.clone())?;
+                Ok((Pipe::Var(Slot::Local(n.to_string(), Holds::Tuple(Box::new(ty.clone())))), ty))
             }
-            Some(Tok::Name(n)) if self.tuple_term_at(0) => {
-                self.at += 1;
-                self.used.push(n.clone());
-                let p = self.defs[&n].pipe.clone();
+            Node::Name(n) if self.tuple_term_name(n) => {
+                self.used.push(n.to_string());
+                let p = self.defs[*n].pipe.clone();
                 let ty = value_ty(&p).expect("a call of a function that gives a tuple");
                 Ok((p, ty))
             }
-            Some(Tok::Open) if self.tuple_literal_at(0) => self.tuple_literal(want),
-            Some(Tok::Open) if self.tuple_index_at(0) => {
-                let (p, ty) = self.index_tuple()?;
-                match ty.positions() {
-                    Some(_) => Ok((p, ty)),
-                    None => Err(format!("{} gives {ty}, not a tuple", show(&p))),
+            Node::Tuple(_) => self.tuple_literal(x, want),
+            Node::Paren(_) if self.index_form(x).is_some() => match self.tuple_index(x)? {
+                Some((p, ty)) if ty.positions().is_some() => Ok((p, ty)),
+                Some((p, ty)) => Err(format!("{} gives {ty}, not a tuple", show(&p))),
+                None => Err(not_tuple(self)),
+            },
+            Node::Paren(_) if x.head_name().is_some_and(|n| self.tuple_def(n)) => {
+                let n = x.head_name().unwrap().to_string();
+                let mut c = Items::of(x);
+                let p = self.def_call_in(&n, &mut c)?;
+                let ty = value_ty(&p).expect("a call of a function that gives a tuple");
+                Ok((p, ty))
+            }
+            Node::Paren(_) => {
+                let p = self.stage(x)?;
+                match value_ty(&p).filter(|t| t.positions().is_some()) {
+                    Some(ty) => Ok((p, ty)),
+                    None => Err(not_tuple(self)),
                 }
             }
-            Some(Tok::Open) if self.paren_tuple_at(0) => {
-                self.at += 1;
-                let (stages, _) = self.stages_of_pipe()?;
-                self.expect(Tok::Close, ")")?;
-                let p = seq_of(stages);
-                let ty = value_ty(&p).expect("a pipeline that gives a tuple");
-                Ok((p, ty))
-            }
-            Some(Tok::Open) if self.tuple_term_at(0) => {
-                let Some(Tok::Name(n)) = self.peek_at(1).cloned() else { unreachable!("a call is ahead") };
-                self.at += 2;
-                let p = self.def_call(&n)?;
-                self.expect(Tok::Close, ")")?;
-                let ty = value_ty(&p).expect("a call of a function that gives a tuple");
-                Ok((p, ty))
-            }
-            t => Err(format!("expected a tuple, as in (1, t), a variable that holds one or a call of a function that gives one; found {}", show_tok(t.as_ref()))),
+            _ => Err(not_tuple(self)),
         }
     }
 
     /// `(a, b, ...)`: each position read as `position` reads it, where a tuple of type `want`
     /// is taken by the type of that position.
-    pub(crate) fn tuple_literal(&mut self, want: Option<&Ty>) -> Result<(Pipe, Ty), String> {
-        self.expect(Tok::Open, "(")?;
+    pub(crate) fn tuple_literal(&mut self, x: &Syn, want: Option<&Ty>) -> Result<(Pipe, Ty), String> {
+        let positions = x.tuple().expect("a tuple");
         let mut ps = Vec::new();
-        loop {
+        for pl in positions {
             let at = want.and_then(Ty::positions).and_then(|ts| ts.get(ps.len()));
-            ps.push(self.position(at)?);
-            match self.next() {
-                Some(Tok::Comma) => {}
-                Some(Tok::Close) => break,
-                x => return Err(format!("expected , or ) in a tuple, found {}", show_tok(x.as_ref()))),
-            }
+            ps.push(self.inside(|e| e.position(pl, at))?);
         }
         let ts: Vec<Ty> = ps.iter().map(|(_, t)| t.clone()).collect();
         let ty = if ts.contains(&Ty::Any) { Ty::Tuple(ts.into()) } else { Ty::tuple(ts)? };
@@ -238,15 +181,17 @@ impl<'a> Parser<'a> {
     /// pipeline in parentheses), as the right side of an assignment reads it. A function
     /// written alone that lacks at most its input is applied to the step's input where `want`
     /// is no function type and the step has an input, else it is the function value.
-    fn position(&mut self, want: Option<&Ty>) -> Result<(Pipe, Ty), String> {
-        let alone = matches!(self.peek_at(1), Some(Tok::Comma | Tok::Close));
-        let out = match self.peek().cloned() {
-            Some(Tok::Name(n)) if self.peek_at(1) == Some(&Tok::Assign) => return Err(format!("a position of a tuple is a value, not an assignment: {n} = ...")),
-            Some(Tok::Name(n)) if alone && let Some(s) = self.bare_fn(&n) => match want.filter(|w| w.is_function()) {
+    fn position(&mut self, pl: &Pipeline, want: Option<&Ty>) -> Result<(Pipe, Ty), String> {
+        let st = &pl.stages[0];
+        let x = &st.items[0];
+        let alone = st.items.len() == 1 && pl.stages.len() == 1;
+        let out = match &x.node {
+            Node::Assign(super::syntax::Lhs::Name(n), _) => return Err(format!("a position of a tuple is a value, not an assignment: {n} = ...")),
+            Node::Name(n) if alone && let Some(s) = self.bare_fn(n) => match want.filter(|w| w.is_function()) {
                 None if self.input || s.input.is_none() => match s.result {
-                    Ty::Num => (self.or()?, Ty::Num),
-                    Ty::Text => (self.text_value()?, Ty::Text),
-                    _ => (self.stage()?, Ty::Group),
+                    Ty::Num => (self.expr(x)?, Ty::Num),
+                    Ty::Text => (self.text_value(x)?, Ty::Text),
+                    _ => (self.stage(x)?, Ty::Group),
                 },
                 w => {
                     let ty = w.cloned().unwrap_or_else(|| {
@@ -254,50 +199,41 @@ impl<'a> Parser<'a> {
                         Ty::Fn(Box::new(input), Box::new(s.result.clone()))
                     });
                     let outer = std::mem::replace(&mut self.input, true);
-                    let f = self.fn_rhs("a position", &ty.to_string(), &ty);
+                    let f = self.fn_rhs("a position", &ty, x);
                     self.input = outer;
                     (f?, ty)
                 }
             },
-            Some(Tok::Str(t)) => {
-                self.at += 1;
-                (Pipe::Text(t), Ty::Text)
-            }
-            _ if self.text_ahead() => (self.text_value()?, Ty::Text),
-            _ if self.tuple_index_at(0) && self.index_ty_at(0) == Some(Ty::Num) => (self.or()?, Ty::Num),
-            _ if self.tuple_index_at(0) => self.index_tuple()?,
-            _ if self.tuple_term_at(0) => self.tuple_term_for(want.filter(|w| w.positions().is_some()))?,
-            Some(Tok::Name(n)) if alone && self.param(&n).is_none() && self.fn_var(&n).is_some() => {
-                self.at += 1;
-                let f = self.fn_read(n);
+            Node::Str(t) => (Pipe::Text(t.to_string()), Ty::Text),
+            _ if self.text_fn(x) => (self.text_value(x)?, Ty::Text),
+            _ if let Some((p, t)) = self.tuple_index(x)? => (p, t),
+            _ if self.tuple_term_known(x) => self.tuple_term_for(x, want.filter(|w| w.positions().is_some()))?,
+            Node::Name(n) if alone && self.param(n).is_none() && self.fn_var(n).is_some() => {
+                let f = self.fn_read(n.to_string());
                 let Pipe::Var(Slot::Local(_, Holds::Fn(t))) = &f else { unreachable!("a function variable read") };
                 let t = t.clone();
                 (f, t)
             }
-            Some(Tok::Name(n)) if alone && self.param(&n).is_some_and(|i| self.params[i].ty.as_ref().is_some_and(Ty::is_function)) => {
-                self.at += 1;
-                let i = self.param(&n).unwrap();
-                self.count_param(&n);
-                (Pipe::Var(Slot::Param(i, n)), self.params[i].ty.clone().unwrap())
+            Node::Name(n) if alone && self.param(n).is_some_and(|i| self.params[i].ty.as_ref().is_some_and(Ty::is_function)) => {
+                let i = self.param(n).unwrap();
+                self.count_param(n);
+                (Pipe::Var(Slot::Param(i, n.to_string())), self.params[i].ty.clone().unwrap())
             }
-            Some(Tok::Name(n)) if alone && self.group_value(&n) => {
-                self.at += 1;
-                self.use_param(&n, Ty::Group)?;
-                (group(n), Ty::Group)
+            Node::Name(n) if alone && self.group_value(n) => {
+                self.use_param(n, Ty::Group)?;
+                (group(n.to_string()), Ty::Group)
             }
-            Some(Tok::Name(n)) if alone && self.param(&n).is_none() && self.unknown(&n) && self.local_kind(&n).is_none() => {
-                self.at += 1;
-                self.group_name(&n)?;
-                (group(n), Ty::Group)
+            Node::Name(n) if alone && self.param(n).is_none() && self.unknown(n) && self.local_kind(n).is_none() => {
+                self.group_name(n)?;
+                (group(n.to_string()), Ty::Group)
             }
-            Some(Tok::Name(n)) if alone && self.param(&n).is_some_and(|i| self.params[i].ty.is_none()) => {
-                self.at += 1;
-                self.count_param(&n);
-                self.holes.push(n.clone());
-                (Pipe::Var(Slot::Param(self.param(&n).unwrap(), n)), Ty::Any)
+            Node::Name(n) if alone && self.param(n).is_some_and(|i| self.params[i].ty.is_none()) => {
+                self.count_param(n);
+                self.holes.push(n.to_string());
+                (Pipe::Var(Slot::Param(self.param(n).unwrap(), n.to_string())), Ty::Any)
             }
-            _ if self.number_ahead(true) => (self.or()?, Ty::Num),
-            _ => match self.rhs_group(true, false)? {
+            _ if self.rhs_number(x, true) => (self.expr(x)?, Ty::Num),
+            _ => match self.rhs_step(x)? {
                 Rhs::Num(e) => (e, Ty::Num),
                 Rhs::Group(p) if gives_tuple(&p) => {
                     let t = value_ty(&p).unwrap();
@@ -306,25 +242,13 @@ impl<'a> Parser<'a> {
                 Rhs::Group(p) => (p, Ty::Group),
             },
         };
-        if self.peek() == Some(&Tok::Bar) {
+        if pl.stages.len() > 1 {
             return Err(format!("a position of a tuple is one value or step: write a pipeline in parentheses, as in (({} | ...), 1)", stage(&out.0)));
         }
-        Ok(out)
-    }
-
-    /// What kind of local variable `n` is bound as so far in the text.
-    pub(crate) fn local_kind(&self, n: &str) -> Option<&'static str> {
-        if self.groups.iter().any(|g| g == n) {
-            Some("group")
-        } else if self.locals.iter().any(|l| l == n) {
-            Some("number")
-        } else if self.fn_var(n).is_some() {
-            Some("function")
-        } else if self.tuples.iter().any(|(t, _)| t == n) {
-            Some("tuple")
-        } else {
-            None
+        if let Some(y) = st.items.get(1) {
+            return Err(format!("expected , or ) in a tuple, found {}", self.tok(y.at)));
         }
+        Ok(out)
     }
 
     /// `n = t`: the tuple `t` of type `ty` bound to the local variable `n`.
@@ -340,35 +264,36 @@ impl<'a> Parser<'a> {
         Ok(Pipe::Bind(Slot::Local(n.to_string(), Holds::Tuple(Box::new(ty))), Arc::new(t)))
     }
 
-    /// Whether a destructuring `(a, b, ...) = ...` is ahead.
-    pub(crate) fn unpack_ahead(&self) -> bool {
-        self.tuple_literal_at(0) && self.close_of(0).is_some_and(|c| self.peek_at(c + 1) == Some(&Tok::Assign))
+    /// The right side `x` of an assignment where it gives a tuple by what it is written of,
+    /// and the tuple's type.
+    pub(crate) fn tuple_rhs(&mut self, x: &Syn) -> Result<Option<(Pipe, Ty)>, String> {
+        match self.tuple_term_known(x) {
+            true => self.tuple_term(x).map(Some),
+            false => Ok(None),
+        }
     }
 
     /// `(a, b, ...) = t`: each name bound to its position of the tuple `t`, as a local
     /// variable of the kind the position's type says.
-    pub(crate) fn unpack(&mut self) -> Result<Pipe, String> {
-        self.expect(Tok::Open, "(")?;
-        let mut names: Vec<String> = Vec::new();
-        loop {
-            let n = self.name("a name in (a, b, ...) = ...")?;
-            if names.contains(&n) {
-                return Err(format!("{n} is written twice in ({}, {n}, ...) = ...", names.join(", ")));
-            }
-            names.push(n);
-            match self.next() {
-                Some(Tok::Comma) => {}
-                Some(Tok::Close) => break,
-                x => return Err(format!("expected , or ) in ({}, ...) = ..., found {}", names.join(", "), show_tok(x.as_ref()))),
+    pub(crate) fn unpack(&mut self, names: &[&str], rhs: &Syn) -> Result<Pipe, String> {
+        for (i, n) in names.iter().enumerate() {
+            if names[..i].contains(n) {
+                return Err(format!("{n} is written twice in ({}, {n}, ...) = ...", names[..i].join(", ")));
             }
         }
         let lhs = format!("({})", names.join(", "));
-        self.expect(Tok::Assign, &format!("= after {lhs}"))?;
-        if !self.tuple_term_at(0) {
-            return Err(format!("{lhs} = ... takes a tuple, as in {lhs} = (1, t), a variable that holds one or a call of a function that gives one; found {}", show_tok(self.peek())));
-        }
-        let (e, ty) = self.tuple_term()?;
-        self.no_assign()?;
+        let takes = |e: &Self| format!("{lhs} = ... takes a tuple, as in {lhs} = (1, t), a variable that holds one or a call of a function that gives one; found {}", e.tok(rhs.at));
+        let (e, ty) = match () {
+            _ if self.tuple_term_known(rhs) => self.tuple_term(rhs)?,
+            _ if rhs.paren().is_some_and(|p| p.stages.len() > 1) => {
+                let p = self.stage(rhs)?;
+                match value_ty(&p).filter(|t| t.positions().is_some()) {
+                    Some(ty) => (p, ty),
+                    None => return Err(takes(self)),
+                }
+            }
+            _ => return Err(takes(self)),
+        };
         let ts = ty.positions().expect("a tuple type").to_vec();
         let shown = show_tuple_input(&e);
         if ts.len() != names.len() {
@@ -391,73 +316,89 @@ impl<'a> Parser<'a> {
             }
             self.local_name(n)?;
             match &holds {
-                Holds::Num if !self.locals.contains(n) => self.locals.push(n.clone()),
-                Holds::Group if !self.groups.contains(n) => self.groups.push(n.clone()),
-                Holds::Fn(t) => self.fns.push((n.clone(), t.clone())),
-                Holds::Tuple(t) => self.tuples.push((n.clone(), (**t).clone())),
+                Holds::Num if !self.locals.iter().any(|l| l == n) => self.locals.push(n.to_string()),
+                Holds::Group if !self.groups.iter().any(|g| g == n) => self.groups.push(n.to_string()),
+                Holds::Fn(t) => self.fns.push((n.to_string(), t.clone())),
+                Holds::Tuple(t) => self.tuples.push((n.to_string(), (**t).clone())),
                 _ => {}
             }
-            slots.push(Slot::Local(n.clone(), holds));
+            slots.push(Slot::Local(n.to_string(), holds));
         }
         Ok(Pipe::Unpack(slots.into(), Arc::new(e)))
     }
 
     /// The argument for the parameter of type `want` (a tuple) of a call; `whose` names it.
-    pub(crate) fn tuple_arg(&mut self, want: &Ty, whose: &dyn Fn() -> String) -> Result<Pipe, String> {
-        if let Some(Tok::Name(n)) = self.peek().cloned()
-            && self.param(&n).is_some_and(|i| self.params[i].ty.is_none())
+    pub(crate) fn tuple_arg(&mut self, c: &mut Items, want: &Ty, whose: &dyn Fn() -> String) -> Result<Pipe, String> {
+        let Some(x) = c.peek() else { return Err(format!("{}; found {}", whose(), self.tok(c.tok()))) };
+        if let Node::Name(n) = &x.node
+            && self.param(n).is_some_and(|i| self.params[i].ty.is_none())
         {
-            self.at += 1;
-            self.use_param(&n, want.clone())?;
-            return Ok(Pipe::Var(Slot::Local(n, Holds::Tuple(Box::new(want.clone())))));
+            c.next();
+            self.use_param(n, want.clone())?;
+            return Ok(Pipe::Var(Slot::Local(n.to_string(), Holds::Tuple(Box::new(want.clone())))));
         }
-        if !self.tuple_term_at(0) {
-            return Err(format!("{}; found {}", whose(), show_tok(self.peek())));
-        }
-        let (e, ty) = self.tuple_term_for(Some(want))?;
+        let (e, ty) = match () {
+            _ if self.tuple_term_known(x) => {
+                c.next();
+                self.tuple_term_for(x, Some(want))?
+            }
+            _ if x.paren().is_some_and(|p| p.stages.len() > 1) => {
+                c.next();
+                let p = self.stage(x)?;
+                match value_ty(&p).filter(|t| t.positions().is_some()) {
+                    Some(ty) => (p, ty),
+                    None => return Err(format!("{}; found {}", whose(), self.tok(x.at))),
+                }
+            }
+            _ => return Err(format!("{}; found {}", whose(), self.tok(x.at))),
+        };
         if ty != *want && !self.fill_holes(&e, &ty, want) {
             return Err(format!("{}; {} is {ty}", whose(), show_tuple_input(&e)));
         }
         Ok(e)
     }
 
-    /// The step after `| ` that takes the tuple of type `ty` the step `origin` gives, without
-    /// the tuple, which the run puts in: `(index i)`, which takes its position `i`, or a call
-    /// of a function whose last parameter takes that tuple; and the type it gives.
-    pub(crate) fn tuple_taker(&mut self, origin: &Pipe, ty: &Ty) -> Result<(Pipe, Ty), String> {
+    /// The step `x` after `| ` that takes the tuple of type `ty` the step `origin` gives,
+    /// without the tuple, which the run puts in: `(index i)`, which takes its position `i`, or a
+    /// call of a function whose last parameter takes that tuple; and the type it gives.
+    pub(crate) fn tuple_taker(&mut self, origin: &Pipe, ty: &Ty, x: &Syn) -> Result<(Pipe, Ty), String> {
         let shown = stage(origin);
-        if self.peek() == Some(&Tok::Open) && matches!(self.peek_at(1), Some(Tok::Name(n)) if n == "index" && self.param(n).is_none()) {
-            let end = self.skip_arg(2);
-            if self.peek_at(end) == Some(&Tok::Close) {
-                let Some(Tok::Num(i)) = self.peek_at(2).cloned() else {
-                    self.at += 2;
-                    let e = self.arg()?;
-                    return Err(format!("{shown} | (index {}): a position of a tuple is a number written out, as in (index 0), since each position has its own type ({shown} is {ty})", show_expr(&e, 7)));
-                };
-                self.at += 4;
-                return self.index_of(input_of(ty.clone()), i, &shown);
-            }
+        if let Some((st, [])) = x.head_stage()
+            && st.items[0].name() == Some("index")
+            && self.param("index").is_none()
+            && st.items.len() == 2
+        {
+            let Node::Num(i) = st.items[1].node else {
+                let mut c = Items::of(x);
+                let e = self.earg_of(&mut c)?;
+                return Err(format!("{shown} | (index {}): a position of a tuple is a number written out, as in (index 0), since each position has its own type ({shown} is {ty})", show_expr(&e, 7)));
+            };
+            return self.index_of(input_of(ty.clone()), i, &shown);
         }
-        let (open, n) = match (self.peek().cloned(), self.peek_at(1).cloned()) {
-            (Some(Tok::Name(n)), _) => (false, n),
-            (Some(Tok::Open), Some(Tok::Name(n))) => (true, n),
+        let (open, n) = match &x.node {
+            Node::Name(n) => (false, n.to_string()),
+            Node::Paren(_) => (true, x.head_name().unwrap_or("").to_string()),
             _ => (false, String::new()),
         };
         let takes = self.param(&n).is_none().then(|| self.defs.get(&n)).flatten().and_then(|d| d.def.clone()).filter(|d| d.params.last().is_some_and(|p| p.ty.positions().is_some()));
-        let Some(d) = takes else { return Err(format!("{shown} gives {ty}; {}", self.takes_ahead())) };
+        let Some(d) = takes else { return Err(format!("{shown} gives {ty}; {}", self.takes(x))) };
         let last = d.params.last().unwrap();
         if last.ty != *ty && !self.fill_holes(origin, ty, &last.ty) {
             return Err(format!("{n} takes {last}: {}; {shown} gives {ty}", super::defs::sig_of(&d)));
         }
-        self.at += 1 + usize::from(open);
         let rest = def_sig(&n, &d.params[..d.params.len() - 1]);
-        let args = match open && !rest.params.is_empty() {
-            true => self.args(&rest, true)?,
+        let args = match open {
+            true => {
+                let mut c = Items::of(x);
+                let a = match rest.params.is_empty() {
+                    true => Vec::new(),
+                    false => self.inside(|e| e.args(&rest, true, &mut c))?,
+                };
+                self.close(&c)?;
+                a
+            }
             false => Vec::new(),
         };
-        if open {
-            self.expect(Tok::Close, ")")?;
-        }
         self.used.push(n.clone());
         let gives = match (&d.tuple, &d.value) {
             (Some(t), _) => t.clone(),
@@ -493,29 +434,56 @@ impl<'a> Parser<'a> {
             _ => false,
         }
     }
+}
 
-    /// A type written after `:`: a name, a tuple type `(A, B, ...)`, or `A->B`.
-    pub(crate) fn type_text(&mut self) -> Result<String, String> {
-        let mut t = self.type_atom("a type after :")?;
-        while self.peek() == Some(&Tok::Arrow) {
-            self.at += 1;
-            t = format!("{t}->{}", self.type_atom("a type after ->")?);
+/// The body `p` of a definition with the parameters written alone in positions of its tuples
+/// (`holes`) read by the types `params` now have: each such position read as a parameter of
+/// that type, and the types of the tuples and of the variables bound to them made again.
+pub(crate) fn fill(p: &Pipe, params: &[super::infer::ParamUse], bound: &mut Vec<(String, Ty)>) -> Pipe {
+    let all = |ps: &[Pipe], bound: &mut Vec<(String, Ty)>| ps.iter().map(|q| fill(q, params, bound)).collect::<Vec<_>>();
+    match p {
+        Pipe::Tuple(ps) => Pipe::Tuple(
+            ps.iter()
+                .map(|(q, t)| match (t, q) {
+                    (Ty::Any, Pipe::Var(Slot::Param(i, n))) => {
+                        let ty = params[*i].ty.clone().unwrap_or(Ty::Any);
+                        let read = match &ty {
+                            Ty::Group | Ty::Term => group(n.clone()),
+                            t @ Ty::Tuple(_) => Pipe::Var(Slot::Local(n.clone(), Holds::Tuple(Box::new(t.clone())))),
+                            _ => q.clone(),
+                        };
+                        let ty = if ty == Ty::Term { Ty::Group } else { ty };
+                        (read, ty)
+                    }
+                    (t, q) => {
+                        let q = fill(q, params, bound);
+                        let t = match t {
+                            Ty::Tuple(_) => value_ty(&q).unwrap_or_else(|| t.clone()),
+                            t => t.clone(),
+                        };
+                        (q, t)
+                    }
+                })
+                .collect(),
+        ),
+        Pipe::Seq(ps) => Pipe::Seq(all(ps, bound)),
+        Pipe::App(f, args) => Pipe::App(f.clone(), all(args, bound).into()),
+        Pipe::Bind(Slot::Local(n, Holds::Tuple(t)), q) => {
+            let q = fill(q, params, bound);
+            let t = value_ty(&q).unwrap_or_else(|| (**t).clone());
+            bound.push((n.clone(), t.clone()));
+            Pipe::Bind(Slot::Local(n.clone(), Holds::Tuple(Box::new(t))), Arc::new(q))
         }
-        Ok(t)
-    }
-
-    fn type_atom(&mut self, what: &str) -> Result<String, String> {
-        if self.peek() != Some(&Tok::Open) {
-            return self.name(what);
+        Pipe::Var(Slot::Local(n, Holds::Tuple(t))) => {
+            let t = bound.iter().rev().find(|(m, _)| m == n).map_or_else(|| (**t).clone(), |(_, t)| t.clone());
+            Pipe::Var(Slot::Local(n.clone(), Holds::Tuple(Box::new(t))))
         }
-        self.at += 1;
-        let mut ts = vec![self.type_text()?];
-        while self.peek() == Some(&Tok::Comma) {
-            self.at += 1;
-            ts.push(self.type_text()?);
-        }
-        self.expect(Tok::Close, ") after a tuple type")?;
-        Ok(format!("({})", ts.join(", ")))
+        Pipe::Bind(x, q) => Pipe::Bind(x.clone(), Arc::new(fill(q, params, bound))),
+        Pipe::Index(q, i) => Pipe::Index(Arc::new(fill(q, params, bound)), *i),
+        Pipe::Unpack(x, q) => Pipe::Unpack(x.clone(), Arc::new(fill(q, params, bound))),
+        Pipe::Expanded(m) => Pipe::Expanded(Box::new(super::ast::Expanded { args: all(&m.args, bound), steps: all(&m.steps, bound), ..(**m).clone() })),
+        Pipe::FnValue(q) => Pipe::FnValue(Arc::new(fill(q, params, bound))),
+        Pipe::Num(_) | Pipe::Name(_) | Pipe::Text(_) | Pipe::Var(_) => p.clone(),
     }
 }
 

@@ -150,6 +150,7 @@ const TUPLE: &str = "tuple variable";
 impl Uses {
     fn walk(&mut self, p: &Pipe) {
         match p {
+            Pipe::App(Fun::Builtin(b), _) if b.sig.is_number() => self.expr(p),
             Pipe::App(Fun::Builtin(b), args) => self.app(b, args),
             Pipe::Bind(Slot::Local(r, Holds::Group), p) => {
                 self.walk(p);

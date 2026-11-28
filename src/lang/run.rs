@@ -4,7 +4,7 @@
 use super::ast::{Holds, Pipe, Slot};
 use super::eval::{Env, Lex, StepKind, Value, clear_failed, failed, go, scoped, step_kind, step_on};
 use super::host::{self, NUM_TYPE, Passes, TRACE};
-use super::parser::parse_assign;
+use super::elab::parse_assign;
 use super::source::Program;
 use super::vars::{NONE, get, parsing};
 

@@ -181,7 +181,7 @@ mod tests {
     use super::*;
     use crate::cli::passes::polish;
     use crate::lang::ast::{Expanded, show};
-    use crate::lang::parser::parse;
+    use crate::lang::elab::parse;
     use crate::lang::vars::{NONE, ReadSet, VarKind, epoch_ns, in_scope, kind, swap_read, var_index, var_names};
     use crate::rust_vars::{DEADLINE, Limit, RESTARTS, RUST_VARS, is_off, limit, turn_off, turn_on, with_off};
 
@@ -191,7 +191,7 @@ mod tests {
 
     /// `s` parsed with the names `default.pipe` defines, as a pipeline on one term.
     fn parse_default(s: &str) -> Pipe {
-        crate::lang::parser::parse_on(s, &DEFAULT.1, &mut Vec::new(), crate::lang::flow::Flow::One).unwrap()
+        crate::lang::elab::parse_on(s, &DEFAULT.1, &mut Vec::new(), crate::lang::flow::Flow::One).unwrap()
     }
 
     /// The value of variable `name` after the program `p`.

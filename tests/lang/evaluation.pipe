@@ -330,3 +330,36 @@ u | main | show
 # expect stderr: x, y x, y 3 z
 # expect stderr: (x + y) 
 # expect value: y
+
+# ---
+# 4. Rule 2 at the start of a pipeline in parentheses: a function that gives a number, on the
+# step's input, gives the value the next step takes.
+(import "default")
+(def (double n:num) n * 2)
+t = (parse "x + y")
+x = (t | main | (size | double))
+(print x (t | main | (size | double)) ((t | main | vars) | double))
+t | main | (mul + 1 | double)
+
+# expect stderr: 6 6 4
+# expect value: 2
+
+# ---
+# 2.4 The first step of a body may give a number: a variable, a call, an expression.
+(import "default")
+(def (double n:num) n * 2)
+(def (g u:term) u | (size | double))
+(def (k) (size main) | double)
+(def (f) (lowbits | main | size) + 1)
+(def (m) keep | double)
+(def (q u:term) u | n = (size | double) | (print n) | n)
+keep = 5
+t = (parse "x + y")
+(print g k f m)
+(print (t | main | g) (t | k) (t | f) (t | m))
+t | main | q
+
+# expect stderr: (g u:term) num (k g:group) num (f g:group) num (m g:group) num
+# expect stderr: 6 6 4 10
+# expect stderr: 6
+# expect value: 6

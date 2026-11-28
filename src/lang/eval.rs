@@ -862,7 +862,7 @@ mod tests {
 
     /// `s` parsed with the names `default.pipe` defines, as a pipeline on one term.
     fn parse_default(s: &str) -> Pipe {
-        crate::lang::parser::parse_on(s, &crate::passes::DEFAULT.1, &mut Vec::new(), crate::lang::flow::Flow::One).unwrap()
+        crate::lang::elab::parse_on(s, &crate::passes::DEFAULT.1, &mut Vec::new(), crate::lang::flow::Flow::One).unwrap()
     }
 
     #[test]
@@ -973,7 +973,7 @@ mod tests {
         let x = "(Var \"x\")";
         let env = Env::prepass(&passes, 32, None, false, x);
         let input = || Cand::new(x, "input");
-        let Pipe::App(_, args) = crate::lang::parser::parse("(fix (restarts - 1) id)").unwrap() else { unreachable!() };
+        let Pipe::App(_, args) = crate::lang::elab::parse("(fix (restarts - 1) id)").unwrap() else { unreachable!() };
         let count = &args[0];
         let rounds = |m: usize| {
             let cli = crate::Cli { max_restarts: m, ..Default::default() };
@@ -1041,7 +1041,7 @@ mod tests {
     fn none_as_a_count_is_no_limit() {
         let passes = Passes::default();
         let env = Env::prepass(&passes, 32, None, false, SUB);
-        let Pipe::App(_, args) = crate::lang::parser::parse("(filter none)").unwrap() else { unreachable!() };
+        let Pipe::App(_, args) = crate::lang::elab::parse("(filter none)").unwrap() else { unreachable!() };
         crate::rust_vars::in_default_run(|| assert_eq!(env.times(&args[0], &[]), usize::MAX));
     }
 

@@ -2,7 +2,7 @@
 //! literals, comments and parentheses.
 
 use super::builtins::get;
-use super::parser::known_name;
+use super::elab::known_name;
 use super::types::Ty;
 use super::vars::NONE;
 

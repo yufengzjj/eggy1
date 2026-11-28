@@ -1,10 +1,10 @@
-//! The macros of the pipeline language, expanded when parsed: `(smallest p)`, `(on NAME ...)`
+//! The macros of the pipeline language, expanded when elaborated: `(smallest p)`, `(on NAME ...)`
 //! and `(off NAME ...)`.
 
 use super::ast::{Expanded, Fun, Holds, Pipe, Slot};
 use super::defs::Call;
 use super::host::{self, INNER, switch_index};
-use super::parser::Parser;
+use super::elab::{Elab, Items};
 use super::types::Ty;
 use std::sync::Arc;
 
@@ -31,13 +31,13 @@ impl Expanded {
     }
 }
 
-impl<'a> Parser<'a> {
+impl<'a> Elab<'a> {
     /// The macro `(off NAME ...)` or `(on NAME ...)` after its name: one pass for all the
     /// names, since a sequence of them would end their effect.
-    pub(crate) fn switches(&mut self, f: &str) -> Result<Pipe, String> {
+    pub(crate) fn switches(&mut self, f: &str, c: &mut Items) -> Result<Pipe, String> {
         let mut ns = Vec::new();
-        while !self.at_close() {
-            let n = self.name(&format!("a pass name after {f}"))?;
+        while !c.at_close() {
+            let n = self.name_item(c, &format!("a pass name after {f}"))?;
             if self.param(&n).is_some() {
                 self.use_param(&n, Ty::Name)?;
                 ns.push(n);
@@ -162,7 +162,7 @@ fn noted_expr(e: &Pipe, s: &str, inline: bool) -> Pipe {
 mod tests {
     use super::*;
     use crate::lang::ast::show;
-    use crate::lang::parser::parse;
+    use crate::lang::elab::parse;
     use crate::passes::Passes;
 
     /// The steps `(smallest ...)` in `p` expands to, its note registers named `s`, `t`, ... in

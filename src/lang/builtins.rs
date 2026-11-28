@@ -1,5 +1,5 @@
 //! The built-in functions of the pipeline language: their signatures, declared in
-//! `src/builtins.pipe` (`docs/lang-lib/builtins.md`), which the parser reads calls by and the
+//! `src/builtins.pipe` (`docs/lang-lib/builtins.md`), which elaboration reads calls by and the
 //! checks read the attributes of; the dispatch table `BUILTINS`, which pairs each with its
 //! implementation; and the implementations that do not depend on the simplification: the
 //! combinators, the operators, `print` and `assert`.
@@ -180,7 +180,7 @@ fn one(text: &str) -> Result<Sig, String> {
     Ok(Sig { name, params, input: Some(input), result, timed, uncounted, switch, doc: String::new() })
 }
 
-/// The operators of the language, as the parser reads them.
+/// The operators of the language, as the reader reads them.
 pub const OPERATORS: [&str; 13] = ["+", "-", "*", "/", "<", "<=", ">", ">=", "==", "!=", "&&", "||", "!"];
 
 /// The declaration of an operator: numbers to a number, no input and no attribute; only the
@@ -792,7 +792,7 @@ mod tests {
     fn timed_matches_the_attribute() {
         for s in crate::lang::builtins::all().iter().filter(|s| !s.is_number() && !s.is_text()) {
             let call = crate::lang::builtins::sample(s);
-            assert_eq!(timed(&crate::lang::parser::parse(&call).unwrap()), s.timed, "{}", s.decl());
+            assert_eq!(timed(&crate::lang::elab::parse(&call).unwrap()), s.timed, "{}", s.decl());
         }
     }
 }

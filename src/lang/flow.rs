@@ -233,6 +233,7 @@ pub(crate) fn is_expr(p: &Pipe) -> bool {
         Pipe::App(Fun::Builtin(b), _) => b.sig.is_number(),
         Pipe::App(Fun::Op(..), _) | Pipe::Num(_) => true,
         Pipe::App(Fun::Def(c), _) => c.def.value.is_some(),
+        Pipe::Seq(ps) => ps.last().is_some_and(is_expr),
         Pipe::Index(..) => value_ty(p) == Some(Ty::Num),
         Pipe::Var(Slot::Global(_) | Slot::Local(_, Holds::Num)) => true,
         Pipe::Var(Slot::Local(_, Holds::Fn(t))) => matches!(t, Ty::Fn(_, b) if **b == Ty::Num),

@@ -2,10 +2,12 @@
 //! `(let ...)`, `(def ...)`, `(import "PATH")`, `NAME = VALUE` and statements, in order.
 
 use super::ast::{Holds, Pipe, Slot};
-use super::defs::{Call, Def, DefKind, Defs, Head, Named, declared, has_steps, head_of, parse_definition_lexed, sig_of};
+use super::defs::{Call, Def, DefKind, Defs, Named, declared, has_steps, sig_of};
+use super::reader::head_of;
+use super::syntax::Head;
 use super::host::{self, DEFAULT, FLAG0, INNER, Passes, RUST_VARS, is_extern_switch};
 use super::lexer::{NO_EXTERN, Tok, code_part, depth_of, lex, may_join_names, slash_name};
-use super::parser::{TopNames, can_be_local, free_name, parse_assign_on, parse_statement};
+use super::elab::{TopNames, can_be_local, free_name, parse_assign_on, parse_statement};
 use super::run::{Gives, Top};
 use super::vars::{PARSED, global_slot, parsed_defines, parsing, var_index};
 
@@ -77,14 +79,14 @@ impl Program {
 
 impl Passes {
     /// A form of a program: `(let ...)` or `(def ...)`.
-    pub(crate) fn form(&mut self, item: &str, toks: Option<Vec<Tok>>, defs: &mut Defs, lets: &mut Lets) -> Result<(), String> {
+    pub(crate) fn form(&mut self, item: &str, toks: Option<&[Tok]>, defs: &mut Defs, lets: &mut Lets) -> Result<(), String> {
         if item.starts_with("(extern") {
             return Err(NO_EXTERN.into());
         }
         if !(item.starts_with("(let") || item.starts_with("(def")) {
             return Err(format!("expected (let ...), (def ...) or NAME = VALUE: {item}"));
         }
-        let d = parse_definition_lexed(item, toks, defs, &mut lets.used)?;
+        let d = super::defs::definition(item, toks, defs, &mut lets.used)?;
         lets.notes.extend(d.notes.iter().cloned());
         let numeric = d.params.iter().any(|p| p.ty.is_expr());
         let head = std::iter::once(d.name.as_str()).chain(d.params.iter().map(|p| p.name.as_str())).collect::<Vec<_>>().join(" ");
@@ -214,13 +216,13 @@ impl Passes {
         let mut lexed = vec![None; items.len()];
         let ahead = Passes::called_ahead(&items, &mut lexed, defs);
         if ahead.is_empty() {
-            return self.items(&items, lexed, &[], &[], defs, lets, lines, false);
+            return self.items(&items, &lexed, &[], &[], defs, lets, lines, false);
         }
         // Read twice when a call before a definition took another signature than the
         // definition gives, the second time with the signatures the first found.
         let outer = std::mem::take(&mut lets.ahead);
         let saved = (self.clone(), defs.clone(), lets.clone(), PARSED.with(|g| g.borrow().clone()));
-        let first = self.items(&items, lexed, &ahead, &[], defs, lets, lines, true);
+        let first = self.items(&items, &lexed, &ahead, &[], defs, lets, lines, true);
         let r = if first.is_ok() && !lets.ahead.retry {
             first
         } else {
@@ -228,7 +230,7 @@ impl Passes {
             (*self, *defs, *lets) = (saved.0, saved.1, saved.2);
             PARSED.with(|g| *g.borrow_mut() = saved.3);
             lets.ahead.second = true;
-            self.items(&items, vec![None; items.len()], &ahead, &found, defs, lets, lines, false).map_err(|e| match ahead.iter().map(|(_, h)| h).find(|h| !found.iter().any(|d| d.name == h.name) && e.contains(&h.name)) {
+            self.items(&items, &lexed, &ahead, &found, defs, lets, lines, false).map_err(|e| match ahead.iter().map(|(_, h)| h).find(|h| !found.iter().any(|d| d.name == h.name) && e.contains(&h.name)) {
                 Some(h) => format!("{e}; {} is called before its definition, where a call reads it by its head: a function that gives a group, its parameters of the types written", h.name),
                 None => e,
             })
@@ -238,14 +240,14 @@ impl Passes {
     }
 
     /// The functions `ahead` are declared before their items (`declare`); `lexed` holds the
-    /// tokens of the items lexed before;
+    /// tokens of the items lexed before, which an item lexes itself otherwise;
     /// `all`: past an error too, which the result gives, to find the later definitions.
     #[allow(clippy::too_many_arguments)]
-    fn items(&mut self, items: &[(usize, String)], lexed: Vec<Option<Lexed>>, ahead: &[(usize, Head)], found: &[std::sync::Arc<Def>], defs: &mut Defs, lets: &mut Lets, lines: bool, all: bool) -> Result<(), String> {
+    fn items(&mut self, items: &[(usize, String)], lexed: &[Option<Lexed>], ahead: &[(usize, Head)], found: &[std::sync::Arc<Def>], defs: &mut Defs, lets: &mut Lets, lines: bool, all: bool) -> Result<(), String> {
         let mut first = Ok(());
         for (k, ((start, item), toks)) in items.iter().zip(lexed).enumerate() {
             self.declare(ahead.iter().filter(|(at, _)| *at == k).map(|(_, h)| h), found, defs, lets);
-            let toks = toks.and_then(Result::ok).filter(|_| !may_join_names(item));
+            let toks = toks.as_ref().and_then(|t| t.as_deref().ok()).filter(|_| !may_join_names(item));
             if let Err(e) = self.item(item, toks, defs, lets) {
                 first = first.and(Err(if lines { format!("line {start}: {e}") } else { e }));
                 if !all {
@@ -257,7 +259,7 @@ impl Passes {
     }
 
     /// One top-level item.
-    fn item(&mut self, item: &str, toks: Option<Vec<Tok>>, defs: &mut Defs, lets: &mut Lets) -> Result<(), String> {
+    fn item(&mut self, item: &str, toks: Option<&[Tok]>, defs: &mut Defs, lets: &mut Lets) -> Result<(), String> {
         let head = item.strip_prefix('(').map(|r| r.split(|c: char| c.is_whitespace() || c == '(' || c == ')').next().unwrap_or(""));
         match head {
             Some("import") => return self.import_item(item, defs, lets),
@@ -291,7 +293,7 @@ impl Passes {
     }
 
     /// A statement: its steps join the program's.
-    fn statement(&mut self, item: &str, toks: Option<Vec<Tok>>, defs: &Defs, lets: &mut Lets) -> Result<(), String> {
+    fn statement(&mut self, item: &str, toks: Option<&[Tok]>, defs: &Defs, lets: &mut Lets) -> Result<(), String> {
         let tops = parse_statement(item, toks, defs, &mut lets.top, &mut lets.used)?;
         self.program.extend(tops);
         Ok(())
@@ -462,3 +464,4 @@ impl Lets {
         self.importing.iter().any(|(k, _)| k == "default" || k == "prelude")
     }
 }
+

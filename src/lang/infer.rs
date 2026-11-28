@@ -1,11 +1,11 @@
 //! The types of the parameters of a `def` that has none written, inferred from its body alone:
-//! the parser records each use whose position fixes a type (`ParamUse`), and the flow check
+//! elaboration records each use whose position fixes a type (`ParamUse`), and the flow check
 //! (`flow`) walked over the body joins those with what each step gives and the next takes;
 //! each parameter gets one type, or the error of uses that disagree or of none that fixes it.
 
 use super::ast::{Pipe, show_stage};
 use super::flow::{Flow, expr, step};
-use super::parser::Parser;
+use super::elab::Elab;
 use super::types::{Param, Ty};
 
 /// A parameter of the function whose body is read, and the type the uses read so far give it.
@@ -17,7 +17,7 @@ pub(crate) struct ParamUse {
     pub(crate) uses: usize,
 }
 
-impl<'a> Parser<'a> {
+impl<'a> Elab<'a> {
     pub(crate) fn param(&self, n: &str) -> Option<usize> {
         self.params.iter().position(|p| p.name == n)
     }
@@ -43,7 +43,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Records `n` written as a step: one with a type must fit a pipeline; one without gets
-    /// its type from the flow of the body (`solve`).
+    /// its type from the flow of the body (`infer::solve`).
     pub(crate) fn step_param(&mut self, n: &str) -> Result<(), String> {
         match self.param(n).and_then(|i| self.params[i].ty.clone()) {
             Some(_) => self.use_param(n, Ty::pipe()),

@@ -6,7 +6,7 @@ use crate::lang::Program;
 use crate::lang::ast::{Pipe, Slot, pretty, show, show_assigned};
 use crate::lang::defs::{pretty_def, show_def, sig_of};
 use crate::lang::lexer::{code_part, is_old_syntax, quoted, slash_name};
-use crate::lang::parser::{parse, parse_assign};
+use crate::lang::elab::{parse, parse_assign};
 use crate::lang::source::{is_name, top_assignment};
 use crate::lang::vars::{var, var_index, var_names};
 use crate::passes::{DEFAULT, Passes, RULESETS, STEPS, Step};
