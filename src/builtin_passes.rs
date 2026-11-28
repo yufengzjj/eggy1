@@ -641,10 +641,10 @@ pub(crate) fn settle(_: &[Pipe], set: Vec<Cand>, _: &Env) -> Steps {
 /// egglog form.
 fn parse_text(s: &str, _: &Env) -> Steps {
     let s = s.trim();
-    let egg = if crate::expr_convert::is_egglog(s) { s.to_string() } else { crate::infix_to_egglog(s, true) };
-    if egg.is_empty() {
-        return Err(crate::Error::BackendError(format!("parse: {s:?} is not an expression")));
-    }
+    let egg = match crate::expr_convert::is_egglog(s) {
+        true => crate::eval::check(s).map(|_| s.to_string()).map_err(|e| crate::Error::BackendError(format!("parse: {s:?}: {e}")))?,
+        false => crate::expr_convert::parse_infix(s).map_err(|e| crate::Error::BackendError(format!("parse: {s:?}: {e}")))?,
+    };
     Ok(vec![Cand::new(&egg, "input")])
 }
 

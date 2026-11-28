@@ -1,12 +1,11 @@
 use clap::{CommandFactory, FromArgMatches};
-use eggy1::expr_convert::infix_to_egglog;
 use eggy1::{Cli, cli, lang};
 
 fn main() {
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     let given = matches.value_source("passes") == Some(clap::parser::ValueSource::CommandLine);
-    let runs = !(cli.show_builtins || cli.show_passes || cli.expr.is_empty() || infix_to_egglog(&cli.expr, true).is_empty());
+    let runs = !(cli.show_builtins || cli.show_passes || cli.expr.trim().is_empty());
     let statement = runs.then(|| cli::statement(&cli.expr, true));
     let (passes, warnings, text) = cli::parse(&cli, statement.as_deref()).unwrap_or_else(|e| {
         eprintln!("error: invalid value '{}' for '--passes <PASSES>': {e}\n\nFor more information, try '--help'.", cli.passes);
@@ -51,7 +50,13 @@ fn main() {
     }
     match result {
         Ok(Some(lang::Value::Text(v))) => println!("\n{v}"),
-        Ok(_) => println!("\nerror:the program gave no text"),
-        Err(v) => println!("\nerror:{v}"),
+        Ok(_) => {
+            eprintln!("error: the program gave no text");
+            std::process::exit(1)
+        }
+        Err(v) => {
+            eprintln!("error: {v}");
+            std::process::exit(1)
+        }
     }
 }

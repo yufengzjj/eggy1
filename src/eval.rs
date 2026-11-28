@@ -153,6 +153,56 @@ pub fn parse(s: &str) -> Term {
     parse_at(&toks, &mut i)
 }
 
+/// Why `s` is not an egglog term `parse` reads, if it is not.
+pub fn check(s: &str) -> Result<(), String> {
+    let toks: Vec<String> = s.replace('(', " ( ").replace(')', " ) ").split_whitespace().map(String::from).collect();
+    let mut i = 0;
+    check_at(&toks, &mut i)?;
+    match toks.get(i) {
+        None => Ok(()),
+        Some(t) => Err(format!("unexpected '{t}' after the term")),
+    }
+}
+
+fn check_at(t: &[String], i: &mut usize) -> Result<(), String> {
+    let tok = |i: usize| t.get(i).map(String::as_str).ok_or("the term ends early");
+    if tok(*i)? != "(" {
+        return Err(format!("expected '(', found '{}'", tok(*i)?));
+    }
+    let head = tok(*i + 1)?;
+    *i += 2;
+    match head {
+        "Num" => {
+            tok(*i)?.parse::<i64>().map_err(|_| format!("bad Num literal '{}'", tok(*i).unwrap_or("")))?;
+            *i += 1;
+        }
+        "Var" => {
+            let v = tok(*i)?;
+            if v == ")" || v == "(" {
+                return Err("Var needs a name".into());
+            }
+            *i += 1;
+        }
+        _ => {
+            Op::from_name(head).ok_or_else(|| format!("unknown constructor {head}"))?;
+            let mut n = 0;
+            while tok(*i)? != ")" {
+                check_at(t, i)?;
+                n += 1;
+            }
+            let want = if matches!(head, "Not" | "Neg") { 1 } else { 2 };
+            if n != want {
+                return Err(format!("{head} takes {want} operands, found {n}"));
+            }
+        }
+    }
+    if tok(*i)? != ")" {
+        return Err(format!("expected ')', found '{}'", tok(*i)?));
+    }
+    *i += 1;
+    Ok(())
+}
+
 fn parse_at(t: &[String], i: &mut usize) -> Term {
     assert_eq!(t[*i], "(", "expected '(' in egglog term");
     let head = t[*i + 1].clone();

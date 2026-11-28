@@ -285,3 +285,22 @@ fn literals_wrap_modulo_2_64() {
     assert_eq!(infix_to_egglog("x + 18446744073709551617", true), infix_to_egglog("x + 1", true));
     assert_eq!(infix_to_egglog("x + 0x1fffffffffffffffe", true), infix_to_egglog("x + 0xfffffffffffffffe", true));
 }
+
+#[test]
+fn malformed_input_is_an_error() {
+    assert_eq!(parse_infix("x*2 + mulhi(x, 3)").unwrap(), infix_to_egglog("x*2 + mulhi(x, 3)", true));
+    for (e, msg) in [
+        ("(a + ", "expected an operand, found the end of the expression"),
+        ("a + b)", "unexpected ')' after the expression"),
+        ("a < b", "'<' and '>' are only read as '<<' and '>>'"),
+        ("a $ b", "unexpected character '$'"),
+        ("foo(a, b)", "unknown function foo"),
+        ("mulhi(a b)", "expected ',' in call to mulhi, found 'b'"),
+    ] {
+        assert!(parse_infix(e).unwrap_err().contains(msg), "{e}");
+    }
+    assert!(eggy1::eval::check("(Add (Var \"x\") (Num 0))").is_ok());
+    assert_eq!(eggy1::eval::check("(Add (Var \"x\")").unwrap_err(), "the term ends early");
+    assert_eq!(eggy1::eval::check("(Add (Var \"x\") (Num 1) (Num 2))").unwrap_err(), "Add takes 2 operands, found 3");
+    assert_eq!(eggy1::eval::check("(Neg (Num x))").unwrap_err(), "bad Num literal 'x'");
+}

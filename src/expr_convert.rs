@@ -139,8 +139,8 @@ fn is_left_associative(_op: &str) -> bool {
 
 /// Parse tokens using a recursive descent Pratt parser.
 /// Returns (parsed AST, remaining tokens).
-fn parse_infix_expr(tokens: &[Token], min_prec: u8) -> (Ast, &[Token]) {
-    let (mut left, mut rest) = parse_atom(tokens);
+fn parse_infix_expr(tokens: &[Token], min_prec: u8) -> Result<(Ast, &[Token]), String> {
+    let (mut left, mut rest) = parse_atom(tokens)?;
 
     while let Some(&Token::Operator(ref op)) = rest.first() {
         let prec = precedence(op);
@@ -153,52 +153,77 @@ fn parse_infix_expr(tokens: &[Token], min_prec: u8) -> (Ast, &[Token]) {
             prec
         };
         rest = &rest[1..];
-        let (right, remaining) = parse_infix_expr(rest, next_min_prec);
+        let (right, remaining) = parse_infix_expr(rest, next_min_prec)?;
         left = Ast::BinaryOp(op.clone(), Box::new(left), Box::new(right));
         rest = remaining;
     }
-    (left, rest)
+    Ok((left, rest))
 }
 
 fn is_unary_op(op: &str) -> bool {
     matches!(op, "-" | "~" | "Num")
 }
 
-fn parse_atom(tokens: &[Token]) -> (Ast, &[Token]) {
+fn parse_atom(tokens: &[Token]) -> Result<(Ast, &[Token]), String> {
     match tokens.first() {
-        Some(Token::Num(num)) => (Ast::Num(*num), &tokens[1..]),
-        // Function-call syntax: currently only `mulhi(a, b)` (high half of product).
+        Some(Token::Num(num)) => Ok((Ast::Num(*num), &tokens[1..])),
         Some(Token::Operand(s)) if matches!(tokens.get(1), Some(Token::LParen)) => {
-            let (a, r1) = parse_infix_expr(&tokens[2..], 0);
+            if s != "mulhi" {
+                return Err(format!("unknown function {s}; the only one is mulhi(a, b)"));
+            }
+            let (a, r1) = parse_infix_expr(&tokens[2..], 0)?;
             let r2 = match r1.first() {
                 Some(Token::Comma) => &r1[1..],
-                _ => panic!("expected ',' in call to {}", s),
+                t => return Err(format!("expected ',' in call to {s}, found {}", token_text(t))),
             };
-            let (b, r3) = parse_infix_expr(r2, 0);
+            let (b, r3) = parse_infix_expr(r2, 0)?;
             let r4 = match r3.first() {
                 Some(RParen) => &r3[1..],
-                _ => panic!("expected ')' in call to {}", s),
+                t => return Err(format!("expected ')' in call to {s}, found {}", token_text(t))),
             };
-            (
-                Ast::BinaryOp(s.clone(), Box::new(a), Box::new(b)),
-                r4,
-            )
+            Ok((Ast::BinaryOp(s.clone(), Box::new(a), Box::new(b)), r4))
         }
-        Some(Token::Operand(s)) => (Ast::Operand(s.clone()), &tokens[1..]),
+        Some(Token::Operand(s)) => Ok((Ast::Operand(s.clone()), &tokens[1..])),
         Some(Token::LParen) => {
-            let (expr, rest) = parse_infix_expr(&tokens[1..], 0);
-            if let Some(RParen) = rest.first() {
-                (expr, &rest[1..])
-            } else {
-                panic!("Mismatched parentheses");
+            let (expr, rest) = parse_infix_expr(&tokens[1..], 0)?;
+            match rest.first() {
+                Some(RParen) => Ok((expr, &rest[1..])),
+                t => Err(format!("expected ')', found {}", token_text(t))),
             }
         }
         Some(Token::Operator(c)) if is_unary_op(c) => {
-            let (operand, rest) = parse_atom(&tokens[1..]);
-            (Ast::UnaryOp(c.clone(), Box::new(operand)), rest)
+            let (operand, rest) = parse_atom(&tokens[1..])?;
+            Ok((Ast::UnaryOp(c.clone(), Box::new(operand)), rest))
         }
-        _ => panic!("Unexpected token at atom"),
+        t => Err(format!("expected an operand, found {}", token_text(t))),
     }
+}
+
+fn token_text(t: Option<&Token>) -> String {
+    match t {
+        None => "the end of the expression".into(),
+        Some(Token::Num(n)) => format!("{n}"),
+        Some(Token::Operand(s)) | Some(Token::Operator(s)) => format!("'{s}'"),
+        Some(Token::LParen) => "'('".into(),
+        Some(RParen) => "')'".into(),
+        Some(Token::Comma) => "','".into(),
+    }
+}
+
+/// The egglog term of an infix expression, or why it is not one.
+pub fn parse_infix(expr: &str) -> Result<String, String> {
+    if let Some(c) = expr.chars().find(|c| !(c.is_ascii_alphanumeric() || " _()+-*/%&|^~,<>".contains(*c))) {
+        return Err(format!("unexpected character '{c}'"));
+    }
+    if expr.replace("<<", "").replace(">>", "").contains(['<', '>']) {
+        return Err("'<' and '>' are only read as '<<' and '>>'".into());
+    }
+    let tokens = tokenize(expr);
+    let (ast, rest) = parse_infix_expr(&tokens, 0)?;
+    if let Some(t) = rest.first() {
+        return Err(format!("unexpected {} after the expression", token_text(Some(t))));
+    }
+    Ok(prefix_to_egglog(&ast_to_prefix(&ast), true))
 }
 
 /// Canonical form modulo associativity/commutativity of + * & | ^ :
@@ -206,7 +231,7 @@ fn parse_atom(tokens: &[Token]) -> (Ast, &[Token]) {
 /// AC-equivalent expressions produce identical strings.
 pub fn ac_canon_infix(expr: &str) -> String {
     let tokens = tokenize(expr);
-    let (ast, rest) = parse_infix_expr(&tokens, 0);
+    let (ast, rest) = parse_infix_expr(&tokens, 0).unwrap_or_else(|e| panic!("{e}: {expr}"));
     assert!(rest.is_empty(), "Unconsumed tokens: {:?}", rest);
     ac_canon(&ast)
 }
@@ -243,7 +268,7 @@ fn ac_flatten(op: &str, ast: &Ast, out: &mut Vec<String>) {
 
 pub fn infix_to_prefix(expr: &str) -> String {
     let tokens = tokenize(expr);
-    let (ast, rest) = parse_infix_expr(&tokens, 0);
+    let (ast, rest) = parse_infix_expr(&tokens, 0).unwrap_or_else(|e| panic!("{e}: {expr}"));
     assert!(rest.is_empty(), "Unconsumed tokens: {:?}", rest);
     ast_to_prefix(&ast)
 }
