@@ -75,6 +75,8 @@
 (import "default")
 (def (prepass_steps) (if (mixed main) (save t)) | (seq t))
 
+# expect warning: prepass_steps: (seq t) does not use its input; the value of the step before is dropped
+
 # ---
 (import "default")
 (def (prepass_steps) (fix 3 (union (filter (same (main t))) id) | (save t)))
@@ -95,10 +97,14 @@
 (import "default")
 (def (prepass_steps) t = (u = id) | (seq u) | (seq t))
 
+# expect warning: prepass_steps: (seq t) does not use its input; the value of the step before is dropped
+
 # ---
 (import "default")
 (def (f p:pipe) p | none)
 (def (prepass_steps) (f t = rewrite) | (seq t))
+
+# expect warning: prepass_steps: (seq t) does not use its input; the value of the step before is dropped
 
 # ---
 (import "default")
@@ -134,13 +140,19 @@
 (import "default")
 (def (prepass_steps) (save t) | (if (mixed main) (save t)) | (seq t))
 
+# expect warning: prepass_steps: (seq t) does not use its input; the value of the step before is dropped
+
 # ---
 (import "default")
 (def (prepass_steps) (save t) | (cand pre_unified unified (save t)) | (seq t))
 
+# expect warning: prepass_steps: (seq t) does not use its input; the value of the step before is dropped
+
 # ---
 (import "default")
 (def (prepass_steps) (fix 3 (save t) | rewrite) | (seq t))
+
+# expect warning: prepass_steps: (seq t) does not use its input; the value of the step before is dropped
 
 # ---
 (import "default")
@@ -150,6 +162,10 @@
 (import "default")
 (def (prepass_steps) (save t) | (first rewrite (save t)) | (seq t))
 
+# expect warning: prepass_steps: (seq t) does not use its input; the value of the step before is dropped
+
 # ---
 (import "default")
 (def (prepass_steps) (if (mixed main) (save t) (save t)) | (seq t))
+
+# expect warning: prepass_steps: (seq t) does not use its input; the value of the step before is dropped

@@ -4,7 +4,6 @@
 (print f)
 
 # expect stderr: (f p:pipe g:group) group
-# expect value: group []
 
 # ---
 (import "default")
@@ -12,7 +11,6 @@
 (print f)
 
 # expect stderr: (f g:term) group
-# expect value: group []
 
 # ---
 (import "default")
@@ -21,7 +19,6 @@
 
 # expect stderr: (f g:term) group
 # expect warning: f: number variable x is bound and never read
-# expect value: group []
 
 # ---
 (import "default")
@@ -30,7 +27,6 @@
 
 # expect stderr: (f g:group) group
 # expect warning: f: number variable x is bound and never read
-# expect value: group []
 
 # ---
 (import "default")
@@ -38,7 +34,6 @@
 (print f)
 
 # expect stderr: (f g:group) group
-# expect value: group []
 
 # ---
 (import "default")
@@ -46,7 +41,6 @@
 (print f)
 
 # expect stderr: (f p:pipe g:group) group
-# expect value: group []
 
 # ---
 (import "default")
@@ -54,7 +48,6 @@
 (print k)
 
 # expect stderr: (k g:term) group
-# expect value: group []
 
 # ---
 (import "default")
@@ -62,7 +55,6 @@
 (print f)
 
 # expect stderr: (f t:term p:pipe) group
-# expect value: group []
 
 # ---
 (import "default")
@@ -70,7 +62,6 @@
 (print f)
 
 # expect stderr: (f p:pipe g:term) group
-# expect value: group []
 
 # ---
 (import "default")
@@ -78,7 +69,6 @@
 (print f)
 
 # expect stderr: (f p:pipe g:group) group
-# expect value: group []
 
 # ---
 (import "default")
@@ -86,7 +76,6 @@
 (print twice)
 
 # expect stderr: (twice p:pipe g:group) group
-# expect value: group []
 
 # ---
 (import "default")
@@ -94,7 +83,6 @@
 (print f)
 
 # expect stderr: (f r:pipe g:group) group
-# expect value: group []
 
 # ---
 (import "default")
@@ -103,7 +91,6 @@
 
 # expect stderr: (f p:term->term g:term) group
 # expect warning: f: number variable x is bound and never read
-# expect value: group []
 
 # ---
 (import "default")
@@ -111,4 +98,3 @@
 (print h)
 
 # expect stderr: (h g:term) num
-# expect value: group []

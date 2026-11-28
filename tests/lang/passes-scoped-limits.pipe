@@ -15,7 +15,6 @@ r = (t | (scope (lowbits_max_try = 1 | lowbits) | lowbits))
 # expect stderr: the assignment ends with its sequence: 0
 # expect stderr: with nothing enumerated nothing folds: (((x * (x * x)) + x) & 1)
 # expect stderr: 0
-# expect value: group []
 
 # ---
 (import "default")
@@ -34,7 +33,6 @@ r = (t | (scope (poly_max_monos = 0 | (best 1 id (poly_mba rewrite simba_steps))
 # expect stderr: no product is multiplied out: (((x + y) * (x + y)) - ((x * x) + (2 * (x * y))))
 # expect stderr: the assignment ends with its sequence: (y * y)
 # expect stderr: the memo keeps the scopes apart: (y * y)
-# expect value: group []
 
 # ---
 (import "default")
@@ -55,7 +53,6 @@ r = (t | (scope (join_linear_max_groups = 0 | (polish_join_linear rewrite)) | (p
 # expect stderr: no region is moved in: 15
 # expect stderr: the assignment ends with its sequence: 12
 # expect stderr: the memo keeps the scopes apart: 12
-# expect value: group []
 
 # ---
 (import "default")
@@ -73,7 +70,6 @@ r = (t | (scope (tfunc_max_size = 2 | tfunc) | tfunc))
 # expect stderr: no table entry is small enough: (x & -(x & -(x & y)))
 # expect stderr: the assignment ends with its sequence: (x & y)
 # expect stderr: the tables keep the values apart: (x & y)
-# expect value: group []
 
 # ---
 (import "default")
@@ -94,7 +90,6 @@ r = (t | (scope (wide_blocks_max_block = 2 | (best 1 id wide_blocks)) | (best 1 
 # expect stderr: no block is small enough: 1
 # expect stderr: the assignment ends with its sequence: 1
 # expect stderr: the cache keeps the scopes apart: 1
-# expect value: group []
 
 # ---
 (import "default")

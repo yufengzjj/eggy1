@@ -1,8 +1,8 @@
 //! Running a program: its source text read into `Passes` (`source::Program`), checked, and
-//! its top-level steps run once, in order, as one sequence that starts from no candidates.
+//! its top-level steps run once, in order, as one sequence that starts with no input.
 
 use super::ast::{Holds, Pipe, Slot};
-use super::eval::{Env, Lex, Value, clear_failed, failed, go, scoped};
+use super::eval::{Env, Lex, StepKind, Value, clear_failed, failed, go, scoped, step_kind, step_on};
 use super::host::{self, NUM_TYPE, Passes, TRACE};
 use super::parser::parse_assign;
 use super::source::Program;
@@ -27,11 +27,15 @@ pub struct Top {
 }
 
 impl Top {
-    /// A step of a pipeline: a binding gives nothing, any other step candidates.
+    /// A step of a pipeline: an assignment or a switch gives nothing, an expression a number or
+    /// a text, any other step candidates.
     pub(crate) fn step(pipe: Pipe) -> Top {
         let gives = match &pipe {
             Pipe::Bind(..) => Gives::Nothing,
             Pipe::Expanded(m) if m.switch_names().is_some() => Gives::Nothing,
+            Pipe::Text(_) => Gives::Text,
+            Pipe::App(super::ast::Fun::Builtin(b), _) if b.sig.is_text() => Gives::Text,
+            p if step_kind(p) == StepKind::Value => Gives::Num,
             _ => Gives::Group,
         };
         Top { pipe, gives }
@@ -74,6 +78,7 @@ pub fn execute_then<R>(p: &Passes, globals: &[(&str, &str)], f: impl FnOnce() ->
             set = go(&step, set, &top_env(p, &lex)).map_err(|e| e.to_string())?;
         }
         let (mut env, mut at) = (top_env(p, &lex), settings());
+        // The value the last step gave or passed on: none until a step gives one.
         let (mut last, mut value) = (Gives::Nothing, None);
         for t in &p.program {
             if settings() != at {
@@ -83,12 +88,14 @@ pub fn execute_then<R>(p: &Passes, globals: &[(&str, &str)], f: impl FnOnce() ->
                 at = settings();
             }
             match t.gives {
-                Gives::Nothing | Gives::Group => set = go(&t.pipe, set, &env).map_err(|e| e.to_string())?,
-                Gives::Num => value = Some(Value::Num(env.value(&t.pipe, &set))),
-                Gives::Text => value = Some(Value::Text(env.text_of(&t.pipe, &set).map_err(|e| e.to_string())?)),
                 Gives::Fn => {
                     let Pipe::Var(Slot::Local(n, Holds::Fn(_))) = &t.pipe else { unreachable!("a function value is a function variable") };
                     value = lex.regs.borrow().get(n).cloned();
+                }
+                _ => {
+                    let had = value.is_some();
+                    let v = step_on(&t.pipe, value.take().unwrap_or(Value::Group(Vec::new())), &env).map_err(|e| e.to_string())?;
+                    value = (had || step_kind(&t.pipe) != StepKind::Nothing).then_some(v);
                 }
             }
             if let Some(e) = failed() {
@@ -96,11 +103,7 @@ pub fn execute_then<R>(p: &Passes, globals: &[(&str, &str)], f: impl FnOnce() ->
             }
             last = t.gives;
         }
-        let value = match last {
-            Gives::Nothing => None,
-            Gives::Group => Some(Value::Group(set)),
-            _ => value,
-        };
+        let value = if last == Gives::Nothing { None } else { value };
         Ok((value, f()))
     })
 }

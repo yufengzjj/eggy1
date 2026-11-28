@@ -671,7 +671,6 @@ impl<'s> Subst<'s> {
                 None if m.is_call() => Pipe::Expanded(Box::new(Expanded { args: all(&m.args)?, steps: all(&m.steps)?, ..(**m).clone() })),
                 None => smallest(self.pipe(&m.args[0])?),
             },
-            Pipe::Drop(q, e) => Pipe::Drop(Arc::new(self.pipe(q)?), *e),
             Pipe::Bind(Slot::Local(n, Holds::Group), q) => Pipe::Bind(Slot::Local(self.name(n), Holds::Group), Arc::new(self.pipe(q)?)),
             Pipe::Bind(x, q) => Pipe::Bind(x.clone(), Arc::new(self.pipe(q)?)),
             Pipe::FnValue(q) => Pipe::FnValue(Arc::new(self.pipe(q)?)),

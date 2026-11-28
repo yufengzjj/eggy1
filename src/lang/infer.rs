@@ -183,7 +183,7 @@ impl Infer {
             Flow::One => It::Ty(Ty::Term),
             Flow::Num => It::Ty(Ty::Num),
             Flow::Text => It::Ty(Ty::Text),
-            Flow::Unknown => return None,
+            Flow::Unknown | Flow::None => return None,
         })
     }
 

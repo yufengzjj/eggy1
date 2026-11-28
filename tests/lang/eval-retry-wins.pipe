@@ -24,4 +24,3 @@ r = (sub | (wins 1 (smaller s rewrite)))
 # expect stderr: (wins 0 (smaller s rewrite)): ((x | y) - (x & y))
 # expect stderr: (wins 0 none): ((x | y) - (x & y))
 # expect stderr: (wins 1 (smaller s rewrite)): (x ^ y)
-# expect value: group []

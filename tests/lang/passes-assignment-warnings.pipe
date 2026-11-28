@@ -49,6 +49,7 @@
 (import "default")
 (def (prepass_steps) (save rewrits) | rewrite | (seq rewrits))
 
+# expect warning: prepass_steps: (seq rewrits) does not use its input; the value of the step before is dropped
 # expect warning: prepass_steps: group variable rewrits is a new local variable; did you mean rewrites?
 
 # ---

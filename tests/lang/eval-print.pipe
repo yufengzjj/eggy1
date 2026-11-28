@@ -5,7 +5,6 @@ r = (x3 | main | (assert (size == 3) "three"))
 (print r)
 
 # expect stderr: (x + 0xfd)
-# expect value: group []
 
 # ---
 (import "default")
@@ -14,10 +13,9 @@ x3 = (parse "x + 253")
 r = (x3 | main | (save t) | (print "size" size none max_leaves (size * 2) t rewrite some_name) | (print t))
 (print "print passes the group on:" r)
 
-# expect stderr: size 3 none 6 6 (x + 0xfd) (rewrite g:group) group some_name
+# expect stderr: size 3 none 6 6 (x + 0xfd) (x + 0xfd) some_name
 # expect stderr: (x + 0xfd)
 # expect stderr: print passes the group on: (x + 0xfd)
-# expect value: group []
 
 # ---
 (import "default")
@@ -42,7 +40,7 @@ two | main | (union id rewrite) | (save u) | (print u)
 x3 = (parse "x + 253")
 x3 | main | f:term->num = size | (print f g) | g
 
-# expect stderr: f:term->num (g g:group) group
+# expect stderr: f:term->num (x + 0xfd)
 # expect value: group [(Add (Var "x") (Num 253))]
 
 # ---
@@ -52,7 +50,7 @@ x3 | main | f:term->num = size | (print f g) | g
 x3 = (parse "x + 253")
 x3 | main | (print fix l k rewrite)
 
-# expect stderr: (fix n:num p:pipe g:group) group (l g:group) group (k p:pipe g:group) group (rewrite g:group) group
+# expect stderr: (fix n:num p:pipe g:group) group (x + 0xfd) (k p:pipe g:group) group (x + 0xfd)
 # expect value: group [(Add (Var "x") (Num 253))]
 
 # ---
@@ -62,3 +60,13 @@ x3 | main | (save t) | (print t) | (assert (size (main t)) "m")
 
 # expect stderr: (x + 0xfd)
 # expect value: group [(Add (Var "x") (Num 253))]
+
+# ---
+# At the top-level start, before any value, a function written alone is a function value.
+(import "default")
+(def (g) id)
+(let l rewrite | lowbits)
+(def @inline (k p:pipe) p | rewrite)
+(print fix l k rewrite g)
+
+# expect stderr: (fix n:num p:pipe g:group) group (l g:group) group (k p:pipe g:group) group (rewrite g:group) group (g g:group) group

@@ -5,4 +5,5 @@ num_type = u32
 (parse "(x | y) - (x & y)") | c | (save r) | (print r)
 
 # expect stderr: (x ^ y)
+# expect warning: c: (seq t) does not use its input; the value of the step before is dropped
 # expect value: group [(Xor (Var "x") (Var "y"))]

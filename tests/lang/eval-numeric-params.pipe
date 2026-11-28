@@ -68,6 +68,7 @@ sub | c16 | (save r) | (print "an argument of an @inline call reads the frame it
 # expect stderr: and its group variables: (x ^ y)
 # expect stderr: (hold 4) | (seq s): ((x | y) - (x & y))
 # expect stderr: an argument of an @inline call reads the frame it is written in: ((x | y) - (x & y))
+# expect warning: c15: (seq s) does not use its input; the value of the step before is dropped
 # expect value: group [(Sub (Or (Var "x") (Var "y")) (And (Var "x") (Var "y")))]
 
 # ---

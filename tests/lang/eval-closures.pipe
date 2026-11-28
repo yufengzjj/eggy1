@@ -43,5 +43,9 @@ sub | c10 | (save r) | (print "a smallest in a def body notes what a parameter's
 # expect stderr: and its sequence: ((x | y) - (x & y))
 # expect stderr: a def's assignment ends with its run: 
 # expect stderr: a smallest in a def body notes what a parameter's argument returns: (x ^ y), ((x | y) - (x & y))
+# expect warning: c2: (seq s) does not use its input; the value of the step before is dropped
 # expect warning: g3: group variable u is bound and never read
+# expect warning: f4: (seq r) does not use its input; the value of the step before is dropped
+# expect warning: c7: (seq s) does not use its input; the value of the step before is dropped
+# expect warning: w: (seq s) does not use its input; the value of the step before is dropped
 # expect value: group [(Xor (Var "x") (Var "y")), (Sub (Or (Var "x") (Var "y")) (And (Var "x") (Var "y")))]

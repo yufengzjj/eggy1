@@ -23,7 +23,7 @@
 | `pre=a,b`、`pre+=a`、`pre-=a` | 预处理造哪些重建，对开关 `pre_NAME`（《[化简库的变量](lang-lib/variables.md)》 第 1 节）的赋值：`pre=a,b` 把 `pre_a`、`pre_b` 设成 1、其余 `pre_*` 设成 0，`pre+=a` 是 `pre_a = 1`，`pre-=a` 是 `pre_a = 0`；名字是 `unified no_wide split_bits halve_first over_products over_const_bitwise over_shared_bitwise halve_input unclustered` |
 | `schedule=...`、`schedule+=`、`schedule-=` | 每轮 egglog 的步骤，逗号分隔的 `run:RS`（back-off 调度）、`once:RS`、`sat:RS`（饱和），`RS` 是 `default-ruleset canonicalization constant-folding analysis identity-zero-element simplify` 之一 |
 
-各项按出现顺序成为程序的项；`schedule` 项没有语言的写法，由命令行直接改程序的调度。`--show-passes` 怎样写出 `def` 见《[函数定义](lang/functions.md)》 第 1 节。顶层的赋值在顶层的组上求值，那时组是空的，所以 `split_runs=(vars main)*3` 得 0（要按输入算就写进管线里）；单独的 `vars` 在组上报错（《[组、元素和管线](lang/pipeline.md)》 第 2 节）。
+各项按出现顺序成为程序的项；`schedule` 项没有语言的写法，由命令行直接改程序的调度。`--show-passes` 怎样写出 `def` 见《[函数定义](lang/functions.md)》 第 1 节。顶层的赋值写在表达式之前，那时程序还没有输入，所以读输入的 `split_runs=(vars main)*3` 报 `main has no input here`（要按输入算就写进管线里）；单独的 `vars` 在组上报错（《[组、元素和管线](lang/pipeline.md)》 第 2 节）。
 
 命令行的 `-n T`、`-m N`、`-i N`、`--trace` 也是程序里的赋值（`num_type = T`、`restarts = N`、`iter_limit = N`、`trace = 1`）。
 

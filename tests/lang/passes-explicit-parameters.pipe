@@ -3,8 +3,6 @@
 (def (k r:group n:num p:pipe x:name) (seq r) | (fix n p) | (tag x id))
 (def (prepass_steps) (save t) | (k t 2 id x))
 
-# expect warning: prepass_steps: (k t 2 id x) does not take the input; its value is dropped — write ((k t 2 id x) | ...) to start from it
-
 # ---
 (import "default")
 (def (big k g:group) (size (main g)) > k)

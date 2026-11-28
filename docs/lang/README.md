@@ -22,7 +22,7 @@ eggy1 执行的是语言写的程序：调用方给出一段源文本，从上�
 - `(import "PATH")`：只能写在顶层，解析时处理（不是运行时的函数）。先按导入它的文件所在的目录找（调用方给的文本按当前目录），再找宿主登记的源文件（化简部分把 `src/default.pipe` 编进程序，登记为 `"default"`），都没有时报错。被导入文件的各项在导入的位置展开：定义照常登记，顶层语句在那里执行。同一个程序里一个文件只导入一次（再写不起作用），成环报错并列出环上的文件（`import cycle: a.pipe -> b.pipe -> a.pipe`）。不分命名空间，重名照现有规则报错。`src/builtins.pipe` 不经 `import`，内置函数登记时就带上了。
 - **语句**：任何步骤、管线或表达式（`(parse "x + y") | simplify | main | show`、`t = (parse "x")`、`(print "hello world")`、`1 + 2`）。
 
-顶层是**一条序列**：各项的步骤依次是它的步骤（`a | b` 写在顶层就是两步），组从**空**开始，给出组的步骤把结果交给下一步，给出数、文本或函数值的语句不改变组，赋值和没有返回值的步骤照常传下。每条语句是一条管线的开头，所以以值开头的语句（`(parse s)`、组变量）从那个值开始。顶层的赋值绑定在程序最外层的作用域里，程序结束时撤销。所以 `(print "hello world")` 直接能写；要用组时先由一个值开头：`(parse s)`、组变量。在还没有值的时候写一个计算组的步骤（`rewrite`、`simplify`、`t = rewrite`，单独的 `show`），检查时报错 `rewrite has no group to work on at the top level of the program, which starts with none: start from a value, ...`。
+顶层是**一条序列**：各项的步骤依次是它的步骤（`a | b` 写在顶层就是两步），开头**没有输入**（不是空组）；给出值的步骤（组、数或文本）把值交给下一步，赋值和没有返回值的步骤照常传下。每条语句是一条管线的开头，所以以值开头的语句（`(parse s)`、组变量）从那个值开始。顶层的赋值绑定在程序最外层的作用域里，程序结束时撤销。所以 `(print "hello world")` 直接能写（程序没有值）；要用组时先由一个值开头：`(parse s)`、组变量。在还没有值的时候写一个读输入的步骤或调用（`rewrite`、`simplify`、`t = rewrite`、单独的 `show`、`(size main)`、`(moved)`），检查时报错 `rewrite has no input here: the top level of the program starts with none; write its input, as in (rewrite t), or start from a value, as in t | rewrite; ...`。
 
 程序的**结果**是最后一条顶层语句的值：数、组、文本或函数值（最后一步给出组时是那时的组）；最后一项是定义或赋值时没有值（赋值不给出值，以免和 `x = e` 读右边的规则混淆）。
 

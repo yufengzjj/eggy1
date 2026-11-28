@@ -72,7 +72,6 @@ h * 2
 u = (parse "x") | (print size h)
 
 # expect stderr: (size t:term?) num (h t:term) num
-# expect value: group []
 
 # ---
 (import "default")

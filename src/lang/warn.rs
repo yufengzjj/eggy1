@@ -22,7 +22,7 @@ impl Passes {
             out.extend(dead.iter().map(|r| format!("{name}: {} {r} is bound again before its value is read", uses.kind(r))));
             out.extend(uses.idle_assign.iter().map(|t| format!("{name}: {t} ends its sequence and changes nothing")));
             out.extend(uses.reassigned.iter().map(|v| format!("{name}: {v} is assigned again before anything reads it")));
-            out.extend(uses.dropping.iter().map(|v| format!("{name}: {v} does not take the input; its value is dropped — write ({v} | ...) to start from it")));
+            out.extend(uses.dropping.iter().map(|v| format!("{name}: {v} does not use its input; the value of the step before is dropped")));
             let params = self.defs.iter().find(|d| d.name == name).map_or_else(Vec::new, |d| d.bound());
             let mut locals: Vec<&String> = uses.saved.iter().filter(|r| !params.contains(r)).collect();
             locals.sort();

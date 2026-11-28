@@ -83,11 +83,13 @@
 (import "default")
 (def (prepass_steps) (save t) | rewrite | t)
 
-# expect warning: prepass_steps: t does not take the input; its value is dropped — write (t | ...) to start from it
+# expect warning: prepass_steps: t does not use its input; the value of the step before is dropped
 
 # ---
 (import "default")
 (def (prepass_steps) (save t) | rewrite | (seq t))
+
+# expect warning: prepass_steps: (seq t) does not use its input; the value of the step before is dropped
 
 # ---
 (import "default")

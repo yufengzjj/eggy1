@@ -43,12 +43,8 @@ pub enum Pipe {
     Bind(Slot, std::sync::Arc<Pipe>),
     /// A macro call as written and what it expands to, which is what runs.
     Expanded(Box<Expanded>),
-    /// A step after `|` that gives a value without taking the input (a group variable, a call
-    /// with all its arguments written): it runs, its value is dropped and the input passes on.
-    /// The flag: it is an expression (a number or a text), not steps.
-    Drop(std::sync::Arc<Pipe>, bool),
-    /// A function that gives a number, built-in or `def`, written alone in an `any` argument
-    /// (`print`) where it is not applied: it lacks other arguments, or the step has no input.
+    /// A function, built-in, `def` or `let`, written alone in an `any` argument (`print`) where
+    /// it is not applied: it lacks other arguments, or the step has no input.
     FnValue(std::sync::Arc<Pipe>),
 }
 
@@ -153,16 +149,9 @@ impl Pipe {
         }
     }
 
-    /// Whether this is a function written as a value, without arguments, that gives
-    /// candidates, or a function variable: `print` writes its signature.
+    /// Whether this is a function value or a function variable: `print` writes its signature.
     pub fn is_function_value(&self) -> bool {
-        match self {
-            Pipe::Var(Slot::Local(_, Holds::Fn(_))) => true,
-            Pipe::App(Fun::Builtin(b), _) => !b.sig.is_number(),
-            Pipe::App(Fun::Def(c), _) => c.def.value.is_none(),
-            Pipe::FnValue(_) => true,
-            _ => false,
-        }
+        matches!(self, Pipe::Var(Slot::Local(_, Holds::Fn(_))) | Pipe::FnValue(_))
     }
 
     /// Whether this gives a term? (`(main r)`, `(index i r)`, `main`): steps whose last picks
@@ -212,8 +201,6 @@ impl Pipe {
             Pipe::Bind(Slot::Local(_, Holds::Group), p) => f(p),
             Pipe::Bind(Slot::Local(_, Holds::Fn(t)), p) if t.is_step() => f(p),
             Pipe::Bind(_, e) => e.each_in_expr(f),
-            Pipe::Drop(q, false) => f(q),
-            Pipe::Drop(q, true) => q.each_in_expr(f),
             Pipe::Num(_) | Pipe::Name(_) | Pipe::Text(_) | Pipe::Var(_) | Pipe::FnValue(_) => {}
         }
     }
@@ -404,17 +391,6 @@ pub fn show(p: &Pipe) -> String {
         Pipe::Expanded(m) if m.args.is_empty() => m.head.to_string(),
         Pipe::Expanded(m) => form(m.head, &m.args.iter().map(|a| if m.is_call() { stage(a) } else { show(a) }).collect::<Vec<_>>()),
         Pipe::FnValue(q) => show(q),
-        Pipe::Drop(q, _) => match &**q {
-            // A call with its input written, as written: after `|` it drops its value.
-            Pipe::Seq(ps) if matches!(&ps[..], [Pipe::Var(Slot::Local(_, Holds::Group)), Pipe::App(..)]) => {
-                let (Pipe::Var(Slot::Local(g, _)), call) = (&ps[0], show(&ps[1])) else { unreachable!() };
-                match call.strip_suffix(')') {
-                    Some(c) if call.starts_with('(') => format!("{c} {g})"),
-                    _ => format!("({call} {g})"),
-                }
-            }
-            q => show(q),
-        },
         Pipe::App(Fun::Def(c), args) => {
             let last = read_to_close(&c.def.params);
             let all: Vec<String> = args.iter().zip(&c.def.params).enumerate().map(|(i, (a, p))| if Some(i) == last { show(a) } else { show_call_arg(a, p) }).chain(args.get(c.def.params.len()).map(stage)).collect();
@@ -473,7 +449,6 @@ pub(crate) fn pretty_at(p: &Pipe, indent: usize) -> String {
             lines.join(&format!("\n{}| ", " ".repeat(indent)))
         }
         Pipe::Seq(ps) => nested("seq", vec![], many(ps)),
-        Pipe::Drop(q, false) => pretty_at(q, indent),
         Pipe::Expanded(m) if m.switch_names().is_none() && !m.is_call() => nested(m.head, vec![], m.args.iter().map(|a| (a, false)).collect()),
         Pipe::App(Fun::Builtin(b), args) if b.sig.params.iter().any(|q| q.ty.is_step()) => {
             let all = app_args(b, args);

@@ -5,4 +5,3 @@ n_print = 6
 
 # expect stderr: hello world
 # expect stderr: n is 6 42
-# expect value: group []

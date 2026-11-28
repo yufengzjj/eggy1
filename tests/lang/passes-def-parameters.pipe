@@ -8,6 +8,8 @@
 (def (f p:pipe) (save t) | p | (seq t))
 (def (prepass_steps) (save t) | (f ((seq t) | rewrite)))
 
+# expect warning: f: (seq t) does not use its input; the value of the step before is dropped
+
 # ---
 (import "default")
 (def (f r) (tag r id) | (origin r id) | (smaller r id) | (egglog r))

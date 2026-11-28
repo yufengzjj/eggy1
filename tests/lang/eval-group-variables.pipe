@@ -66,8 +66,14 @@ sub | c18 | (save r) | (print "t = (split_runs = 3 | id):" r)
 # expect stderr: the right side is a scope: (x ^ y)
 # expect stderr: (off tfunc) | tfunc: ((x | y) - (x & y))
 # expect stderr: t = (split_runs = 3 | id): ((x | y) - (x & y))
+# expect warning: c1: (seq t) does not use its input; the value of the step before is dropped
 # expect warning: c2: group variable t is bound and never read
+# expect warning: c5a: (seq t) does not use its input; the value of the step before is dropped
+# expect warning: c5b: (seq t) does not use its input; the value of the step before is dropped
+# expect warning: c7: (seq t) does not use its input; the value of the step before is dropped
+# expect warning: c9: (seq t) does not use its input; the value of the step before is dropped
 # expect warning: c12: group variable t is bound and never read
+# expect warning: c14: (seq u) does not use its input; the value of the step before is dropped
 # expect warning: c16: group variable t is bound and never read
 # expect warning: c16: (off tfunc) ends its sequence and changes nothing
 # expect warning: c18: group variable t is bound and never read

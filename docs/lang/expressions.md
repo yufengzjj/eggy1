@@ -22,7 +22,7 @@
 
 ## 3. 数值函数
 
-数值函数对当前输入现算，什么都不存。输入是 `term` 的数值函数要一个项：在组上写 `(size main)`、`(size (index i r))`，单独写 `size` 时报错（《[组、元素和管线](pipeline.md)》 第 2 节）；在逐个元素的条件里（`filter`、`any`、`all`）和 `main | ...` 之后它拿到的就是一个项。**组为空、项为 none 时，数值函数都得 0**。程序顶层在给出值的一步之前没有输入，那里单独写的数值函数报错（`size has no input here ...`，《[函数](functions.md)》 第 8 节）；写了括号的 `(moved)`、写出输入的 `(size (main t))` 照常求值。（`none` 只表示变量没赋值，数值函数不会得 `none`。）
+数值函数对当前输入现算，什么都不存。输入是 `term` 的数值函数要一个项：在组上写 `(size main)`、`(size (index i r))`，单独写 `size` 时报错（《[组、元素和管线](pipeline.md)》 第 2 节）；在逐个元素的条件里（`filter`、`any`、`all`）和 `main | ...` 之后它拿到的就是一个项。**组为空、项为 none 时，数值函数都得 0**。程序顶层在给出值的一步之前没有输入（不是空组），那里读输入的数值函数报错，单独写的和写了括号的一样（`size + 1`、`(moved)`、`(size main)` 报 `... has no input here ...`，《[函数](functions.md)》 第 8 节）；要在空组上求值就从一个空组开始：`empty = ((parse "x") | none)` 之后 `empty | (print (size main))` 写 0。（`none` 只表示变量没赋值，数值函数不会得 `none`。）
 
 **形状**（一个项的数）：`size`（节点数）、`vars`、`depth`、`mul`（乘积数）、`bitconst`（与常数的位运算数）、`arith_in_bit`（位运算下的算术数）、`shift`、`div`。
 

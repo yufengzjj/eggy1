@@ -148,6 +148,8 @@
 (def (f) (save t) | (seq t))
 (def (prepass_steps) (save t) | f | (seq t))
 
+# expect warning: prepass_steps: (seq t) does not use its input; the value of the step before is dropped
+
 # ---
 (import "default")
 (def (f) rewrite)

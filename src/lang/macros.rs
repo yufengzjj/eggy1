@@ -75,6 +75,9 @@ pub fn smallest(p: Pipe) -> Pipe {
 /// `@inline` call, where a parameter's argument has the notes of the text it is written in.
 fn noted_stage(p: &Pipe, s: &str, inline: bool) -> Vec<Pipe> {
     let q = noted(p, s, inline);
+    if super::eval::step_kind(p) == super::eval::StepKind::Value {
+        return vec![q];
+    }
     if super::eval::computes(p) || matches!(p, Pipe::Var(Slot::Param(..) | Slot::Local(_, Holds::Fn(_)))) && !inline { vec![q, Pipe::app("note", vec![Pipe::Name(s.into())])] } else { vec![q] }
 }
 
@@ -118,7 +121,6 @@ fn noted(p: &Pipe, s: &str, inline: bool) -> Pipe {
             Pipe::Bind(x.clone(), Arc::new(q))
         }
         Pipe::Expanded(m) => Pipe::Expanded(Box::new(Expanded { steps: noted_stages(&m.steps, s, inline), ..(**m).clone() })),
-        Pipe::Drop(q, e) => Pipe::Drop(Arc::new(if *e { noted_expr(q, s, inline) } else { noted_one(q, s, inline) }), *e),
         Pipe::Num(_) | Pipe::Name(_) | Pipe::Text(_) | Pipe::Var(_) | Pipe::FnValue(_) => p.clone(),
     }
 }

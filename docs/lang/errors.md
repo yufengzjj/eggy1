@@ -24,6 +24,6 @@
 - 绑定了却从不读的组变量；同一层又绑定了一次、中间没读的死存储（写在 `if`（`cand`）、`first` 的后几支、`retry` 的 `b` 或循环体里的绑定不和外面的比较，所以 `(save t) | (if c (save t))` 这种先存默认值再覆盖的写法不算）。
 - 赋值（包括 `(on NAME)`、`(off NAME)`）是所在序列（或整条管线）的最后一步：什么也影响不到。
 - 同一条序列里同一个变量连赋两次，中间只有赋值，也没有读它。
-- 不用输入的值写在 `|` 后面（`a | t`、`a | (lowbits t)`、`a | (size (main t))`）：它的值被丢掉（`t does not take the input; its value is dropped — write (t | ...) to start from it`，《[组、元素和管线](pipeline.md)》 第 2 节）。`(seq t)`、`(t | ...)` 和带输入的 `@inline` 调用生成的绑定不警告。
+- 不用输入的一步（`a | t`、`a | (lowbits t)`、`a | (size (main t))`、`a | (t | ...)`）丢掉了前一步给出、没人读过的值：`t does not use its input; the value of the step before is dropped`（《[组、元素和管线](pipeline.md)》 第 2 节）。管线开头和 `(save R)` 之后不警告，带输入的 `@inline` 调用生成的绑定也不警告。
 
 默认管线没有警告，`default.pipe` 的 `let`、`def` 除了给程序调用的 `simplify` 都用到了，Rust 代码读的变量都有定义、`default.pipe` 定义的变量都有人读，执行完 `default.pipe` 后仍为 `none` 的变量（内部 pass 的开关除外）正好是 `rewrites`、`bit_split_budget`、`time_limit`、`trace`，没有命令行时还有 `restarts`、`iter_limit`、`num_type`（都有测试检查）。顶层的项不做警告检查（程序本来就以赋值结束）。

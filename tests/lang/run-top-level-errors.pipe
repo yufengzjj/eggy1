@@ -1,30 +1,30 @@
 # Top-level programs that are errors: no group to work on, unbound group variables, wrong kinds.
 lowbits
 
-# expect error: lowbits has no group to work on at the top level of the program, which starts with none: start from a value, as in (parse "x + y") | ... or t = (parse "x + y")
+# expect error: lowbits has no input here: the top level of the program starts with none; write its input, as in (lowbits t), or start from a value, as in t | lowbits; (lowbits t:term) term
 
 # ---
 (import "default")
 simplify
 
-# expect error: simplify has no group to work on at the top level of the program, which starts with none: start from a value, as in (parse "x + y") | ... or t = (parse "x + y")
+# expect error: simplify has no input here: the top level of the program starts with none; write its input, as in (simplify t), or start from a value, as in t | simplify; (simplify g:group) group
 
 # ---
 (import "default")
 t = (parse "x")
 simplify
 
-# expect error: simplify has no group to work on at the top level of the program, which starts with none: start from a value, as in (parse "x + y") | ... or t = (parse "x + y")
+# expect error: simplify has no input here: the top level of the program starts with none; write its input, as in (simplify t), or start from a value, as in t | simplify; (simplify g:group) group
 
 # ---
 t = (lowbits | unshift)
 
-# expect error: (lowbits | unshift) has no group to work on at the top level of the program, which starts with none: start from a value, as in (parse "x + y") | ... or t = (parse "x + y")
+# expect error: lowbits has no input here: the top level of the program starts with none; write its input, as in (lowbits t), or start from a value, as in t | lowbits; (lowbits t:term) term
 
 # ---
 show
 
-# expect error: show has no element to work on at the top level of the program, which starts with none: write its input, as in (show (main t))
+# expect error: show has no input here: the top level of the program starts with none; write its input, as in (show (main t)), or start from a value, as in t | main | show; (show t:term?) text
 
 # ---
 (import "default")

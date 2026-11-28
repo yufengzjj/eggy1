@@ -219,14 +219,14 @@ mod tests {
 
     #[test]
     fn top_level_assignments() {
-        let p = Passes::parse("extra=5 split_runs=(vars main)*3 extra=extra+1 off=relate,tfunc off+=simba off-=tfunc").unwrap();
+        let p = Passes::parse("extra=5 split_runs=(extra + 1)*3 extra=extra+1 off=relate,tfunc off+=simba off-=tfunc").unwrap();
         crate::lang::run::within(&p, || {
             assert!(is_off("relate") && is_off("simba") && !is_off("tfunc"));
             assert!(!is_off("semi_peel_shapes"), "off= turns every other pass on");
         });
         assert!(!is_off("relate") && get(var_index("extra").unwrap()) == NONE, "nothing leaks out of a run");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
-        assert!(p.to_string().contains(" extra=5 split_runs=(vars main) * 3 extra=extra + 1 off=relate,tfunc off+=simba off-=tfunc "), "{p}");
+        assert!(p.to_string().contains(" extra=5 split_runs=(extra + 1) * 3 extra=extra + 1 off=relate,tfunc off+=simba off-=tfunc "), "{p}");
         let p = Passes::parse("off-=semi_peel_shapes keep=0 prove_minimal=0 restarts=7 match_limit=9").unwrap();
         assert!(crate::lang::run::within(&p, || !is_off("semi_peel_shapes")));
         assert_eq!([after_entry(&p, "keep"), after_entry(&p, "prove_minimal"), after_entry(&p, "restarts")], [0, 0, 7]);
@@ -445,7 +445,7 @@ times = extra + 1 # a new variable
         assert!(Passes::parse("times=1").is_err(), "a variable of one parse is unknown in another");
         let bad = [
             ("off=relate\n", "off names a function or a definition"),
-            ("lowbits | rewrite\n", "lowbits has no group to work on at the top level"),
+            ("lowbits | rewrite\n", "lowbits has no input here"),
             ("prepass_steps = lowbits\n", "a source file defines it as (def (prepass_steps) ...)"),
             ("(def (prepass_steps)\n  lowbits\n", "unclosed form"),
             ("(extern (x g:group) group)\n", "only read from src/builtins.pipe"),

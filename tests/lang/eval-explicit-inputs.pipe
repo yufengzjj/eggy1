@@ -32,7 +32,7 @@ sub | c8 | (save r) | (print "a group input written in an expression:" r)
 (def (c9) main | (save t) | u = (twice rewrite t) | (seq u))
 sub | c9 | (save r) | (print "a function value called as (p g):" r)
 (def (c10) main | (save t) | none | (twice rewrite t))
-sub | c10 | (save r) | (print "its value is dropped:" r)
+sub | c10 | (save r) | (print "a call with its input written gives its value, the value before is dropped:" r)
 (def (big k g:group) (size (main g)) > k)
 (def (c11) main | (if (big 5) rewrite))
 sub | c11 | (save r) | (print "a function giving a number, its input the step's:" r)
@@ -77,7 +77,7 @@ sub | c23 | (save r) | (print "it shares the caller's group variables:" r)
 # expect stderr: a term input written in an expression: (x ^ y)
 # expect stderr: a group input written in an expression: (x ^ y)
 # expect stderr: a function value called as (p g): (x ^ y)
-# expect stderr: its value is dropped: 
+# expect stderr: a call with its input written gives its value, the value before is dropped: (x ^ y)
 # expect stderr: a function giving a number, its input the step's: (x ^ y)
 # expect stderr: (if (big 9) rewrite): ((x | y) - (x & y))
 # expect stderr: its input written: (x ^ y)
@@ -91,12 +91,16 @@ sub | c23 | (save r) | (print "it shares the caller's group variables:" r)
 # expect stderr: each call binds its own: (x ^ y), ((x | y) - (x & y))
 # expect stderr: an explicit input: (x ^ y)
 # expect stderr: it shares the caller's group variables: (x ^ y)
-# expect warning: c10: (twice rewrite t) does not take the input; its value is dropped — write ((twice rewrite t) | ...) to start from it
+# expect warning: c2: (t | (f id)) | id does not use its input; the value of the step before is dropped
+# expect warning: c3: t | (f id) does not use its input; the value of the step before is dropped
+# expect warning: c6: (f6 (main t) id) | id does not use its input; the value of the step before is dropped
+# expect warning: c10: t | (twice rewrite) does not use its input; the value of the step before is dropped
+# expect warning: c18: (seq u) does not use its input; the value of the step before is dropped
+# expect warning: c22: t | (k20 id) | id does not use its input; the value of the step before is dropped
+# expect warning: c23: (seq u) does not use its input; the value of the step before is dropped
 # expect value: group [(Xor (Var "x") (Var "y"))]
 
 # ---
 (import "default")
 (def (twice p g) (p (p g)))
 (def (prepass_steps) (save t) | (twice rewrite t))
-
-# expect warning: prepass_steps: (twice rewrite t) does not take the input; its value is dropped — write ((twice rewrite t) | ...) to start from it

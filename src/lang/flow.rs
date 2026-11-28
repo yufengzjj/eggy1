@@ -36,8 +36,41 @@ pub(crate) enum Flow {
     Text,
     /// Not known where it is read (a parameter's argument, a function variable).
     Unknown,
+    /// No input: the top level of a program before a step gives a value.
+    None,
     /// A group or a term, the type variable `k` while a function's parameters are inferred.
     Var(usize),
+}
+
+/// The error for the function `n` with signature `s`, called where the step has no input.
+pub(crate) fn no_input(n: &str, s: &super::types::Sig) -> String {
+    let element = s.input.as_ref().is_some_and(|i| i.ty != Ty::Group) && (s.is_number() || s.is_text());
+    let (call, from) = match element {
+        false => (format!("({n} t)"), format!("t | {n}")),
+        true => (format!("({n} (main t))"), format!("t | main | {n}")),
+    };
+    format!("{n} has no input here: the top level of the program starts with none; write its input, as in {call}, or start from a value, as in {from}; {s}")
+}
+
+/// The error for a call of `f` on `input` where it has none (`no_input`), or where it is a
+/// number or a text and `f` takes candidates.
+fn needs(input: Flow, f: &Fun) -> Result<(), String> {
+    let given = match input {
+        Flow::None => "",
+        Flow::Num => "a number",
+        Flow::Text => "a text",
+        _ => return Ok(()),
+    };
+    let (n, s) = match f {
+        Fun::Builtin(b) => (b.name.to_string(), b.sig.clone()),
+        Fun::Def(c) => (c.def.name.clone(), super::defs::sig_of(&c.def)),
+        Fun::Op(..) => return Ok(()),
+    };
+    match &s.input {
+        _ if given.is_empty() => Err(no_input(&n, &s)),
+        Some(i) if matches!(i.ty, Ty::Group | Ty::Term | Ty::MaybeTerm) => Err(format!("{n} takes {i}; its input here is {given}: {s}")),
+        _ => Ok(()),
+    }
 }
 
 /// The input type of `b`, `None` for a function without one.
@@ -71,9 +104,13 @@ pub(crate) fn step(cx: &mut Infer, p: &Pipe, input: Flow) -> Result<Flow, String
             expr(cx, p, input)?;
             if b.sig.is_text() { Flow::Text } else { Flow::Num }
         }
-        Pipe::App(Fun::Builtin(b), args) => {
+        Pipe::App(f @ Fun::Builtin(b), args) => {
             let input = match takes(b) {
-                Some(t) => cx.joint(input, t)?,
+                Some(t) if b.sig.kind() == Kind::FromText => cx.joint(Flow::Text, t)?,
+                Some(t) => {
+                    needs(input, f)?;
+                    cx.joint(input, t)?
+                }
                 None => input,
             };
             builtin_args(cx, b, args, input)?;
@@ -90,7 +127,10 @@ pub(crate) fn step(cx: &mut Infer, p: &Pipe, input: Flow) -> Result<Flow, String
             expr(cx, p, input)?;
             Flow::Num
         }
-        Pipe::App(Fun::Def(c), args) => {
+        Pipe::App(f @ Fun::Def(c), args) => {
+            if c.def.step {
+                needs(input, f)?;
+            }
             let input = cx.joint(input, &def_takes(&c.def))?;
             def_args(cx, c, args, input)?;
             Flow::Group
@@ -100,7 +140,14 @@ pub(crate) fn step(cx: &mut Infer, p: &Pipe, input: Flow) -> Result<Flow, String
             Flow::Num
         }
         Pipe::Expanded(m) if m.switch_names().is_some() => input,
-        Pipe::Expanded(m) if m.is_call() => step(cx, &m.steps[0], input)?,
+        Pipe::Expanded(m) if m.is_call() => match step(cx, &m.steps[0], input) {
+            // The function written out is the one without an input, not a step of its body.
+            Err(e) if input == Flow::None && e.contains(" has no input here") => {
+                let n = m.head;
+                return Err(format!("{n} has no input here: the top level of the program starts with none; write its input, as in ({n} t), or start from a value, as in t | {n}"));
+            }
+            r => r?,
+        },
         Pipe::Expanded(m) => {
             step(cx, &m.args[0], input)?;
             Flow::Group
@@ -118,20 +165,24 @@ pub(crate) fn step(cx: &mut Infer, p: &Pipe, input: Flow) -> Result<Flow, String
             expr(cx, e, input)?;
             input
         }
-        Pipe::Drop(q, true) => {
-            expr(cx, q, input)?;
-            input
-        }
-        Pipe::Drop(q, false) => {
-            step(cx, q, input)?;
-            input
-        }
         Pipe::Num(_) | Pipe::Name(_) | Pipe::Text(_) | Pipe::FnValue(_) => input,
     })
 }
 
+/// Whether `p`, an argument of `print`, is a step that gives a group or a term: a function
+/// written alone and applied.
+pub(crate) fn is_group_step(p: &Pipe) -> bool {
+    match p {
+        Pipe::App(Fun::Builtin(b), _) => !b.sig.is_number() && !b.sig.is_text(),
+        Pipe::App(Fun::Def(c), _) => c.def.value.is_none(),
+        Pipe::Expanded(_) => true,
+        Pipe::Seq(ps) => ps.last().is_some_and(|q| !is_expr(q)),
+        _ => false,
+    }
+}
+
 /// Whether `p`, the last of a sequence, is an expression: the sequence gives a number.
-fn is_expr(p: &Pipe) -> bool {
+pub(crate) fn is_expr(p: &Pipe) -> bool {
     match p {
         Pipe::App(Fun::Builtin(b), _) => b.sig.is_number(),
         Pipe::App(Fun::Op(..), _) | Pipe::Num(_) => true,
@@ -145,14 +196,17 @@ fn is_expr(p: &Pipe) -> bool {
 /// Checks the expression `e` evaluated on `input`.
 pub(crate) fn expr(cx: &mut Infer, e: &Pipe, input: Flow) -> Result<(), String> {
     match e {
-        Pipe::App(Fun::Builtin(b), args) => {
+        Pipe::App(f @ Fun::Builtin(b), args) => {
             let at = b.input_at(args).or((b.sig.is_text() && !args.is_empty()).then_some(0));
             let (own, args) = match at {
                 Some(k) => (step(cx, &args[k], input)?, &args[..k]),
                 None => (input, &args[..]),
             };
             let own = match takes(b) {
-                Some(t) => cx.joint(own, t)?,
+                Some(t) => {
+                    needs(own, f)?;
+                    cx.joint(own, t)?
+                }
                 None => own,
             };
             if own == Flow::Group && takes(b).is_some_and(|t| matches!(t, Ty::Term | Ty::MaybeTerm)) {
@@ -169,17 +223,21 @@ pub(crate) fn expr(cx: &mut Infer, e: &Pipe, input: Flow) -> Result<(), String> 
             }
             expr(cx, last, f)
         }
-        Pipe::App(Fun::Def(c), args) => {
+        Pipe::App(f @ Fun::Def(c), args) => {
             let own = match args.get(c.def.params.len()) {
                 Some(q) => step(cx, q, input)?,
                 None => input,
             };
+            if c.def.step || c.def.implicit.is_some() {
+                needs(own, f)?;
+            }
             let own = cx.joint(own, &def_takes(&c.def))?;
             if own == Flow::Group && c.def.implicit == Some(Ty::Term) {
                 cx.fail(format!("{} takes one term and its input here is a group: write the element, as in ({} ... main)", c.def.name, c.def.name))?;
             }
             def_args(cx, c, args, input)
         }
+        Pipe::Var(Slot::Local(n, Holds::Fn(t))) if input == Flow::None => Err(format!("{n} has no input here: the top level of the program starts with none; it holds {t}")),
         Pipe::Var(Slot::Local(n, Holds::Fn(Ty::Fn(a, _)))) if input == Flow::Group && **a == Ty::Term => cx.fail(format!("{n} takes one term and its input here is a group: write the element, as in ({n} main)")),
         _ => Ok(()),
     }
@@ -202,6 +260,9 @@ fn builtin_args(cx: &mut Infer, b: &Builtin, args: &[Pipe], input: Flow) -> Resu
         let Some(p) = b.sig.params.get(i).or_else(|| b.sig.params.last().filter(|p| p.rep == super::types::Rep::Many)) else { continue };
         match &p.ty {
             Ty::Any if matches!(a, Pipe::Var(Slot::Local(..)) | Pipe::Name(_) | Pipe::Text(_)) || a.is_function_value() => {}
+            Ty::Any if is_group_step(a) => {
+                step(cx, a, input)?;
+            }
             Ty::Any | Ty::Num => expr(cx, a, input)?,
             t => arg(cx, t, a, input)?,
         }

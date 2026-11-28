@@ -1,7 +1,7 @@
 //! The checks of the pipelines a run may use (`Passes::check`): group variables read before
 //! they are bound; and what a pipeline uses, which the warnings read too.
 
-use super::ast::{Fun, Holds, Pipe, Slot, show, show_stage, starts_with_value};
+use super::ast::{Fun, Holds, Pipe, Slot, show};
 use super::defs::{Call, expand};
 use super::host::Passes;
 use super::run::Gives;
@@ -26,11 +26,9 @@ impl Passes {
         Ok(())
     }
 
-    /// The top-level steps of the program: a group variable read before a step binds it, a
-    /// step that computes candidates before any gives a value (the candidates start empty).
+    /// The top-level steps of the program: a group variable read before a step binds it.
     fn check_top(&self) -> Result<(), String> {
         let mut uses = Uses::default();
-        let mut value = false;
         for t in &self.program {
             match t.gives {
                 Gives::Num => uses.expr(&t.pipe),
@@ -38,21 +36,6 @@ impl Passes {
             }
             if let Some(r) = &uses.unsaved {
                 return Err(format!("the program reads {} {r} before it is bound", uses.kind(r)));
-            }
-            let p = &t.pipe;
-            match t.gives {
-                Gives::Group | Gives::Nothing if !value && needs_input(p) => {
-                    let p = match p {
-                        Pipe::Bind(_, rhs) => rhs,
-                        p => p,
-                    };
-                    return Err(format!("{} has no group to work on at the top level of the program, which starts with none: start from a value, as in (parse \"x + y\") | ... or t = (parse \"x + y\")", show_stage(p)));
-                }
-                Gives::Group => value |= gives_value(p),
-                Gives::Text if !value && matches!(p, Pipe::App(_, args) if args.is_empty()) => {
-                    return Err(format!("{} has no element to work on at the top level of the program, which starts with none: write its input, as in ({} (main t))", show(p), show(p)));
-                }
-                _ => {}
             }
         }
         Ok(())
@@ -66,10 +49,13 @@ impl Passes {
         for d in &self.defs {
             super::flow::body(d).map_err(|e| format!("{}: {e}", d.name))?;
         }
-        let mut f = Flow::Group;
+        let mut f = Flow::None;
         for t in &self.program {
             match t.gives {
-                Gives::Num | Gives::Text => expr(cx, &t.pipe, f)?,
+                Gives::Num | Gives::Text => {
+                    expr(cx, &t.pipe, f)?;
+                    f = if t.gives == Gives::Num { Flow::Num } else { Flow::Text };
+                }
                 Gives::Fn => {}
                 _ => f = step(cx, &t.pipe, f)?,
             }
@@ -149,7 +135,7 @@ pub(crate) struct Uses {
     /// The group variables bound again where they are `pending`: the earlier value is never
     /// read.
     pub(crate) dead: Vec<String>,
-    /// The steps after a `|` that give a value without taking the input, which is dropped.
+    /// The steps that do not use their input after a step that gives a value, which is dropped.
     pub(crate) dropping: Vec<String>,
     /// The local variables bound or read as numbers or function values; the others are
     /// group variables.
@@ -197,13 +183,6 @@ impl Uses {
                 self.call_args(c, args);
             }
             Pipe::Var(Slot::Param(..)) => {}
-            Pipe::Drop(q, number) => {
-                let s = show(p);
-                if !s.contains('#') {
-                    self.dropping.push(s);
-                }
-                if *number { self.expr(q) } else { self.walk(q) }
-            }
             e => self.expr(e),
         }
     }
@@ -229,6 +208,24 @@ impl Uses {
                 }
                 Pipe::Expanded(m) if m.switch_names().is_some() => m.switch_names().unwrap().1.into_iter().filter_map(var_index).for_each(|i| self.assigned(&mut pending, i)),
                 _ => pending.clear(),
+            }
+        }
+        // A value is dropped where a step that does not use its input follows a step that
+        // gives one and nothing read it since; `(save R)` keeps the value it is given.
+        let mut unread = false;
+        for p in ps {
+            match super::eval::step_kind(p) {
+                _ if matches!(p, Pipe::App(Fun::Builtin(b), _) if b.name == "save") => unread = false,
+                super::eval::StepKind::Nothing => unread &= !uses_input(p),
+                _ => {
+                    if unread && !uses_input(p) {
+                        let s = show(p);
+                        if !s.contains('#') {
+                            self.dropping.push(s);
+                        }
+                    }
+                    unread = true;
+                }
             }
         }
         ps.iter().for_each(|p| self.walk(p));
@@ -284,6 +281,7 @@ impl Uses {
                 Pipe::Var(Slot::Local(r, Holds::Group)) => self.read(r),
                 Pipe::Name(_) | Pipe::Text(_) => {}
                 f if f.is_function_value() => {}
+                s if super::flow::is_group_step(s) => self.walk(s),
                 e => self.expr(e),
             }),
             "scope" => self.walk(&args[0]),
@@ -438,36 +436,6 @@ fn flat_stages(p: &Pipe) -> Vec<Pipe> {
     }
 }
 
-/// Whether the step `p` gives a group that does not depend on its input: it starts with a value.
-fn gives_value(p: &Pipe) -> bool {
-    starts_with_value(p)
-}
-
-/// Whether the step `p` computes on candidates it is given before any of its steps gives a
-/// value; a binding of a group variable by its right side.
-fn needs_input(p: &Pipe) -> bool {
-    let steps = |ps: &[Pipe]| {
-        for q in ps {
-            if gives_value(q) {
-                return false;
-            }
-            if needs_input(q) {
-                return true;
-            }
-        }
-        false
-    };
-    match p {
-        Pipe::Seq(ps) => steps(ps),
-        Pipe::Expanded(m) => steps(&m.steps),
-        Pipe::Bind(Slot::Local(_, Holds::Group), rhs) => needs_input(rhs),
-        Pipe::Bind(..) => false,
-        Pipe::App(Fun::Def(c), _) if !c.def.inline => !gives_value(p),
-        Pipe::App(Fun::Builtin(b), _) => b.timed && !gives_value(p),
-        _ => false,
-    }
-}
-
 /// Whether `e` reads the variable at `i`.
 fn reads_var(e: &Pipe, i: usize) -> bool {
     let group = |p: &Pipe| matches!(p, Pipe::Var(Slot::Local(_, Holds::Group)));
@@ -484,5 +452,40 @@ fn reads_var(e: &Pipe, i: usize) -> bool {
             c.def.steps || args.get(c.def.params.len()).is_some_and(|p| !group(p)) || num.into_iter().any(|(e, _)| reads_var(e, i))
         }
         _ => false,
+    }
+}
+
+/// Whether the step `p` reads the value it is given.
+fn uses_input(p: &Pipe) -> bool {
+    match p {
+        Pipe::Num(_) | Pipe::Text(_) | Pipe::Name(_) | Pipe::FnValue(_) => false,
+        Pipe::Var(Slot::Global(_) | Slot::Local(_, Holds::Num | Holds::Group)) => false,
+        Pipe::Seq(ps) => {
+            for q in ps {
+                if uses_input(q) {
+                    return true;
+                }
+                if super::eval::step_kind(q) != super::eval::StepKind::Nothing {
+                    return false;
+                }
+            }
+            false
+        }
+        Pipe::Bind(Slot::Local(_, Holds::Fn(_)), _) => false,
+        Pipe::Bind(_, e) => uses_input(e),
+        Pipe::Expanded(m) if m.switch_names().is_some() => false,
+        Pipe::App(Fun::Builtin(b), args) if b.sig.kind() == super::types::Kind::Effect => args.iter().any(uses_input),
+        Pipe::Expanded(m) if m.is_call() => m.steps.first().is_some_and(uses_input),
+        Pipe::App(Fun::Op(..), args) => args.iter().any(uses_input),
+        Pipe::App(Fun::Builtin(b), args) => match b.input_at(args) {
+            Some(k) => uses_input(&args[k]),
+            None => b.sig.input.is_some() && b.sig.kind() != super::types::Kind::FromText,
+        },
+        Pipe::App(Fun::Def(c), args) => match args.get(c.def.params.len()) {
+            Some(q) => uses_input(q),
+            None if args.len() < c.def.params.len() => true,
+            None => c.def.step || c.def.implicit.is_some() || args.iter().zip(&c.def.params).any(|(a, q)| q.ty == super::types::Ty::Num && uses_input(a)),
+        },
+        _ => true,
     }
 }

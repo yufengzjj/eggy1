@@ -521,26 +521,27 @@ pub(crate) fn assert(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
 }
 
 fn print(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
-    let shown: Vec<String> = args
-        .iter()
-        .map(|a| match a {
+    let infix = |g: &[Cand]| g.iter().map(|c| env.infix(c)).collect::<Vec<_>>().join(", ");
+    let show = |a: &Pipe| -> Result<String, super::host::Error> {
+        Ok(match a {
             Pipe::Text(t) => t.clone(),
             Pipe::Name(n) => n.clone(),
             Pipe::Var(Slot::Local(n, Holds::Fn(t))) => format!("{n}:{t}"),
-            Pipe::App(Fun::Builtin(b), _) if !b.sig.is_number() => b.sig.to_string(),
-            Pipe::App(Fun::Def(c), _) if c.def.value.is_none() => super::defs::sig_of(&c.def).to_string(),
             Pipe::FnValue(f) => match &**f {
                 Pipe::App(Fun::Def(c), _) => super::defs::sig_of(&c.def).to_string(),
                 Pipe::App(Fun::Builtin(b), _) => b.sig.to_string(),
                 f => unreachable!("a function value is a def or a built-in: {f:?}"),
             },
-            Pipe::Var(Slot::Local(g, Holds::Group)) => env.reg(g).iter().map(|c| env.infix(c)).collect::<Vec<_>>().join(", "),
+            Pipe::Var(Slot::Local(g, Holds::Group)) => infix(&env.reg(g)),
+            s if super::flow::is_group_step(s) => infix(&super::eval::go(s, set.clone(), env)?),
+            Pipe::App(Fun::Builtin(b), _) if b.sig.is_text() => env.text_of(a, &set)?,
             e => match env.value(e, &set) {
                 NONE => "none".into(),
                 v => v.to_string(),
             },
         })
-        .collect();
+    };
+    let shown = args.iter().map(show).collect::<Result<Vec<_>, _>>()?;
     let line = shown.join(" ");
     #[cfg(test)]
     PRINTED.with(|p| p.borrow_mut().push(line.clone()));

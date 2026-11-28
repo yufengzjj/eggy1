@@ -5,7 +5,7 @@ use super::ast::{Holds, Pipe, Slot};
 use super::defs::{Call, Def, DefKind, Defs, Head, Named, declared, has_steps, head_of, parse_definition_lexed, sig_of};
 use super::host::{self, DEFAULT, FLAG0, INNER, Passes, RUST_VARS, is_extern_switch};
 use super::lexer::{NO_EXTERN, Tok, code_part, depth_of, lex, may_join_names, slash_name};
-use super::parser::{TopNames, free_name, parse_assign_on, parse_statement};
+use super::parser::{TopNames, can_be_local, free_name, parse_assign_on, parse_statement};
 use super::run::{Gives, Top};
 use super::vars::{PARSED, global_slot, parsed_defines, parsing, var_index};
 
@@ -267,7 +267,7 @@ impl Passes {
         let default = lets.in_default();
         let Some((name, val)) = top_assignment(item) else { return self.statement(item, toks, defs, lets) };
         if var_index(name).is_some() || slash_name(name).is_some() {
-            return self.assign_top(name, val, default, lets.top.value, defs).map_err(|e| format!("{item}: {e}"));
+            return self.assign_top(name, val, default, &lets.top, defs).map_err(|e| format!("{item}: {e}"));
         }
         let mut top = lets.top.clone();
         let mut used = Vec::new();
@@ -278,7 +278,15 @@ impl Passes {
                 self.program.extend(tops);
                 Ok(())
             }
-            _ => self.assign_top(name, val, default, lets.top.value, defs).map_err(|e| format!("{item}: {e}")),
+            // `NAME = VALUE` is a statement where `NAME` can be a local variable: its error is
+            // that reading's.
+            Err(e) if can_be_local(name, defs) => Err(e),
+            r => {
+                if r.is_ok() {
+                    lets.used.extend(used);
+                }
+                self.assign_top(name, val, default, &lets.top, defs).map_err(|e| format!("{item}: {e}"))
+            }
         }
     }
 
@@ -345,8 +353,9 @@ impl Passes {
 
     /// `name = val` as a top-level item: the definition of the variable `name` when it is
     /// none yet, else an assignment to it. Every variable is `none` until assigned, so a
-    /// definition of `default` as `none` adds no step. `input`: a statement before gave a value.
-    pub(crate) fn assign_top(&mut self, name: &str, val: &str, default: bool, input: bool, defs: &Defs) -> Result<(), String> {
+    /// definition of `default` as `none` adds no step. `top`: the local variables the
+    /// statements before bound, and whether one gave a value.
+    pub(crate) fn assign_top(&mut self, name: &str, val: &str, default: bool, top: &TopNames, defs: &Defs) -> Result<(), String> {
         if let Some(e) = slash_name(name) {
             return Err(e);
         }
@@ -376,7 +385,7 @@ impl Passes {
         if new && !default {
             self.defines.push(self.program.len());
         }
-        self.program.push(Top { pipe: parse_assign_on(name, val, input)?, gives: Gives::Nothing });
+        self.program.push(Top { pipe: parse_assign_on(name, val, defs, top)?, gives: Gives::Nothing });
         Ok(())
     }
 }

@@ -231,14 +231,23 @@ impl<'a> Env<'a> {
             },
             Pipe::Seq(ps) => {
                 let (e, steps) = ps.split_last().expect("a sequence that gives a number has a last step");
-                let set = match steps {
-                    [Pipe::Var(Slot::Local(r, Holds::Group))] => self.reg(r),
-                    steps => scoped(|| steps.iter().try_fold(set.to_vec(), |s, p| go(p, s, self))).unwrap_or_else(|e| {
+                let v = match steps {
+                    [Pipe::Var(Slot::Local(r, Holds::Group))] => Value::Group(self.reg(r)),
+                    steps => scoped(|| run_seq(steps, Value::Group(set.to_vec()), self)).unwrap_or_else(|e| {
                         fail(&e);
-                        Vec::new()
+                        Value::Group(Vec::new())
                     }),
                 };
-                self.value(e, &set)
+                match v {
+                    Value::Group(g) => self.value(e, &g),
+                    v => step_on(e, v, self).map_or_else(
+                        |e| {
+                            fail(&e);
+                            0
+                        },
+                        Value::num,
+                    ),
+                }
             }
             Pipe::App(Fun::Def(c), args) => {
                 let c = &c.latest(args, &self.passes.defs);
@@ -441,6 +450,73 @@ pub(crate) fn computes(p: &Pipe) -> bool {
     }
 }
 
+/// What a step of a sequence passes on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum StepKind {
+    /// Candidates.
+    Group,
+    /// A number or a text.
+    Value,
+    /// Nothing of its own: the value it is given (`print`, assignments, switches).
+    Nothing,
+}
+
+pub(crate) fn step_kind(p: &Pipe) -> StepKind {
+    match p {
+        Pipe::Bind(..) => StepKind::Nothing,
+        Pipe::Expanded(m) if m.switch_names().is_some() => StepKind::Nothing,
+        Pipe::App(Fun::Builtin(b), _) if b.sig.kind() == super::types::Kind::Effect => StepKind::Nothing,
+        Pipe::Text(_) => StepKind::Value,
+        Pipe::App(Fun::Builtin(b), _) if b.sig.is_text() => StepKind::Value,
+        Pipe::Seq(ps) => match ps.iter().rev().map(step_kind).find(|k| *k != StepKind::Nothing) {
+            Some(StepKind::Value) => StepKind::Value,
+            Some(_) => StepKind::Group,
+            None => StepKind::Nothing,
+        },
+        p if super::flow::is_expr(p) => StepKind::Value,
+        _ => StepKind::Group,
+    }
+}
+
+/// The steps `ps` in turn, each on the value the one before gives.
+pub(crate) fn run_seq(ps: &[Pipe], v: Value, env: &Env) -> Result<Value, Error> {
+    ps.iter().try_fold(v, |v, p| step_on(p, v, env))
+}
+
+/// The step `p` on the value `v` the step before gave: candidates go to `p` as they are, a
+/// number or a text is the input of the function `p` calls without it, and a step that gives
+/// nothing passes `v` on.
+pub(crate) fn step_on(p: &Pipe, v: Value, env: &Env) -> Result<Value, Error> {
+    match (step_kind(p), v) {
+        (StepKind::Group | StepKind::Nothing, Value::Group(g)) => go(p, g, env).map(Value::Group),
+        (StepKind::Nothing, v) => {
+            go(p, Vec::new(), env)?;
+            Ok(v)
+        }
+        (StepKind::Value, Value::Group(g)) => {
+            let v = match p {
+                Pipe::Text(_) => Value::Text(env.text_of(p, &g)?),
+                Pipe::App(Fun::Builtin(b), _) if b.sig.is_text() => Value::Text(env.text_of(p, &g)?),
+                p => Value::Num(env.value(p, &g)),
+            };
+            failed().map_or(Ok(v), Err)
+        }
+        (kind, v) => {
+            let input = match v {
+                Value::Num(n) => Pipe::Num(n),
+                Value::Text(t) => Pipe::Text(t),
+                _ => unreachable!("a step is given candidates, a number or a text"),
+            };
+            let Pipe::App(f, args) = p else { unreachable!("{p:?} takes no number or text") };
+            let call = Pipe::App(f.clone(), args.iter().cloned().chain([input]).collect());
+            match kind {
+                StepKind::Group => go(&call, Vec::new(), env).map(Value::Group),
+                _ => step_on(&call, Value::Group(Vec::new()), env),
+            }
+        }
+    }
+}
+
 pub(crate) fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Steps {
     // Every candidate equals the input, so stopping anywhere keeps the result right.
     if let Some(e) = failed() {
@@ -458,7 +534,10 @@ pub(crate) fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Steps {
     }
     match p {
         Pipe::App(Fun::Builtin(b), args) => apply(b, args, In::Own(set), env).map(Value::group),
-        Pipe::Seq(ps) => scoped(|| ps.iter().try_fold(set, |s, p| go(p, s, env))),
+        Pipe::Seq(ps) => match scoped(|| run_seq(ps, Value::Group(set), env))? {
+            Value::Group(g) => Ok(g),
+            _ => Err(Error::BackendError(format!("{} gives a number or a text where a group is wanted", super::ast::show(p)))),
+        },
         Pipe::Expanded(m) => {
             let steps = || m.steps.iter().try_fold(set, |s, p| go(p, s, env));
             if m.scoped { scoped(steps) } else { steps() }
@@ -499,23 +578,6 @@ pub(crate) fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Steps {
         Pipe::Var(Slot::Param(i, _)) => env.apply_param(*i, In::Own(set), false).map(Value::group),
         Pipe::Var(Slot::Local(n, Holds::Fn(_))) => env.apply_var(n, In::Own(set), false).map(Value::group),
         Pipe::Var(Slot::Local(r, Holds::Group)) => Ok(env.reg(r)),
-        Pipe::Drop(q, _) if matches!(&**q, Pipe::Var(Slot::Local(_, Holds::Group))) => Ok(set),
-        Pipe::Drop(q, true) => {
-            match &**q {
-                Pipe::Text(_) => {}
-                q if matches!(q, Pipe::App(Fun::Builtin(b), _) if b.sig.is_text()) => {
-                    env.text_of(q, &set)?;
-                }
-                q => {
-                    env.value(q, &set);
-                }
-            }
-            Ok(set)
-        }
-        Pipe::Drop(q, false) => {
-            scoped(|| go(q, set.clone(), env))?;
-            Ok(set)
-        }
         Pipe::Bind(x, e) => {
             match x {
                 Slot::Global(i) => {
@@ -580,7 +642,7 @@ pub(crate) fn reads(p: &Pipe, names: &mut Vec<String>, params: &mut Vec<usize>) 
         }
         Pipe::Seq(ps) => all(ps),
         Pipe::Expanded(m) => all(&m.steps),
-        Pipe::Bind(_, q) | Pipe::Drop(q, _) => reads(q, names, params),
+        Pipe::Bind(_, q) => reads(q, names, params),
         Pipe::Num(_) | Pipe::Text(_) | Pipe::Var(Slot::Global(_)) | Pipe::FnValue(_) => {}
     }
 }

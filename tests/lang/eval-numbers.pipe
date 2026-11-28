@@ -2,9 +2,9 @@
 (import "default")
 num_type = u32
 empty = ((parse "x") | none)
-(print "on no elements:" (size main) (mul main) (vars main) (mixed main) (input main) (moved) (tiny main) (size (main empty)) (same (main empty) main) (any 1) (all 1))
-(print "!tiny:" !(tiny main))
-(print "a comparison compares the zeros:" ((size main) < (size (main empty)) + 1) ((size main) > (size (main empty))))
+empty | (print "on no elements:" (size main) (mul main) (vars main) (mixed main) (input main) (moved) (tiny main) (size (main empty)) (same (main empty) main) (any 1) (all 1))
+empty | (print "!tiny:" !(tiny main))
+empty | (print "a comparison compares the zeros:" ((size main) < (size (main empty)) + 1) ((size main) > (size (main empty))))
 (print "a variable is read without elements too:" split_runs)
 sub = (parse "(x | y) - (x & y)")
 sub | main | (print "an empty group variable:" (size (main empty)) size)
@@ -43,4 +43,3 @@ x | main | (fix (mul < 1) rewrite) | (filter (size == 5)) | (save r) | (print "a
 # expect stderr: none none none none 0 0 0 3 none 0 none
 # expect stderr: none none 1 1 0
 # expect stderr: 1 none 1
-# expect value: group []

@@ -1,0 +1,93 @@
+# A step passes its value on, a number or a text too, to a step whose input takes it; a step with no value passes on the value it is given.
+(import "default")
+(def (double n:num) n * 2)
+t = (parse "x + y")
+t | main | size | double
+
+# expect value: 6
+
+# ---
+(import "default")
+(def (double n:num) n * 2)
+(def (add k n:num) n + k)
+(parse "x") | 1 | double | (print "no value of its own") | (add 1)
+
+# expect stderr: no value of its own
+# expect value: 3
+
+# ---
+# A step that does not use its input gives its own value: the value before is dropped.
+(import "default")
+(def (f) main | (union id rewrite) | (parse "y") | main)
+(parse "x") | f
+
+# expect warning: f: (parse "y") does not use its input; the value of the step before is dropped
+# expect value: group [(Var "y")]
+
+# ---
+(import "default")
+t = (parse "x + y")
+t | main | show | parse | main | (print size)
+
+# expect stderr: 3
+# expect value: group [(Add (Var "x") (Var "y"))]
+
+# ---
+(import "default")
+(def (double n:num) n * 2)
+(def (f) main | size | double | (print "inside a def:") | double)
+(parse "x + y") | (print (f))
+
+# expect stderr: inside a def:
+# expect stderr: 12
+# expect value: group [(Add (Var "x") (Var "y"))]
+
+# ---
+(import "default")
+(def (double n:num) n * 2)
+x = ((parse "x + y") | main | size | double)
+x
+
+# expect value: 6
+
+# ---
+# Only a type that does not fit is an error.
+(import "default")
+(def (double n:num) n * 2)
+t = (parse "x + y")
+t | size | double
+
+# expect error: size takes t:term? and gives num; its input here is a group: write the element, as in (size main) or (size (index i r))
+
+# ---
+(import "default")
+(def (double n:num) n * 2)
+size | double
+
+# expect error: size is a function value here, term->num, since the top level of the program starts with no input; double takes n:num
+
+# ---
+(import "default")
+(parse "x") | 1 | lowbits
+
+# expect error: 1 gives num; lowbits takes t:term
+
+# ---
+# The top level starts with no input: a call that reads it is an error there.
+(import "default")
+(print (moved))
+
+# expect error: moved has no input here: the top level of the program starts with none; write its input, as in (moved t), or start from a value, as in t | moved; (moved g:group) num
+
+# ---
+(import "default")
+(def (h) size + 1)
+(print (h))
+
+# expect error: h has no input here: the top level of the program starts with none; write its input, as in (h (main t)), or start from a value, as in t | main | h; (h t:term) num
+
+# ---
+(import "default")
+(print (size main))
+
+# expect error: main has no input here: the top level of the program starts with none; write its input, as in (main t), or start from a value, as in t | main

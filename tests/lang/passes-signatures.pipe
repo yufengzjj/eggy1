@@ -6,7 +6,6 @@
 (print try_without hold)
 
 # expect stderr: (try_without name:name p:pipe g:group) group (hold r:group p:pipe g:group) group
-# expect value: group []
 
 # ---
 (import "default")
@@ -20,7 +19,6 @@
 (print with_budget f lim)
 
 # expect stderr: (with_budget n:num p:pipe g:group) group (f n:num g:group) group (lim n:num p:pipe g:group) group
-# expect value: group []
 
 # ---
 (import "default")
@@ -30,7 +28,6 @@
 (print f twice big)
 
 # expect stderr: (f p:pipe g:group) group (twice p:pipe g:group) group (big k:num g:group) num
-# expect value: group []
 
 # ---
 (import "default")
@@ -40,4 +37,3 @@
 (print f h k)
 
 # expect stderr: (f g:group) num (h g:group) num (k p:pipe g:group) group
-# expect value: group []
