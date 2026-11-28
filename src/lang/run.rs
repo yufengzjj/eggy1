@@ -17,6 +17,7 @@ pub enum Gives {
     Num,
     Text,
     Fn,
+    Tuple,
 }
 
 /// A step of a program's top level.
@@ -31,10 +32,16 @@ impl Top {
     /// a text, any other step candidates.
     pub(crate) fn step(pipe: Pipe) -> Top {
         let gives = match &pipe {
-            Pipe::Bind(..) => Gives::Nothing,
+            Pipe::Bind(..) | Pipe::Unpack(..) => Gives::Nothing,
             Pipe::Expanded(m) if m.switch_names().is_some() => Gives::Nothing,
             Pipe::Text(_) => Gives::Text,
             Pipe::App(super::ast::Fun::Builtin(b), _) if b.sig.is_text() => Gives::Text,
+            p if super::ast::gives_tuple(p) => Gives::Tuple,
+            p @ Pipe::Index(..) => match super::ast::value_ty(p) {
+                Some(super::types::Ty::Num) => Gives::Num,
+                Some(super::types::Ty::Text) => Gives::Text,
+                _ => Gives::Group,
+            },
             p if step_kind(p) == StepKind::Value => Gives::Num,
             _ => Gives::Group,
         };

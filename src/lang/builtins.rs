@@ -50,7 +50,54 @@ pub fn parse(text: &str) -> Result<Vec<Sig>, String> {
     Ok(out)
 }
 
+/// `text` with each tuple type `(A, B)` written `[A,B]`, one word for the split into tokens.
+fn tuple_words(text: &str) -> String {
+    let cs: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < cs.len() {
+        let close = (cs[i] == '(')
+            .then(|| {
+                let mut depth = 0;
+                (i..cs.len()).find(|&j| {
+                    depth += i32::from(cs[j] == '(') - i32::from(cs[j] == ')');
+                    depth == 0
+                })
+            })
+            .flatten();
+        let top_comma = |j: usize| {
+            let mut depth = 0;
+            cs[i..j].iter().any(|c| {
+                depth += i32::from(*c == '(') - i32::from(*c == ')');
+                depth == 1 && *c == ','
+            })
+        };
+        match close {
+            Some(j) if top_comma(j) => {
+                out.extend(cs[i..=j].iter().filter(|c| !c.is_whitespace()).map(|c| match c {
+                    '(' => '[',
+                    ')' => ']',
+                    c => *c,
+                }));
+                i = j + 1;
+            }
+            _ => {
+                out.push(cs[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// A type word of `tuple_words` read back.
+fn unword(w: &str) -> String {
+    w.replace('[', "(").replace(']', ")")
+}
+
 fn one(text: &str) -> Result<Sig, String> {
+    let words = tuple_words(text);
+    let text = words.as_str();
     let toks: Vec<&str> = text.split_inclusive(['(', ')']).flat_map(|s| {
         let (word, paren) = s.split_at(s.len() - usize::from(s.ends_with(['(', ')'])));
         word.split_whitespace().chain((!paren.is_empty()).then_some(paren))
@@ -81,14 +128,14 @@ fn one(text: &str) -> Result<Sig, String> {
     loop {
         match rest.next() {
             Some(")") => break,
-            Some(p) => params.push(param(p).map_err(|e| format!("{name}: {e}"))?),
+            Some(p) => params.push(param(&unword(p)).map_err(|e| format!("{name}: {e}"))?),
             None => return Err(bad()),
         }
     }
     let result = match rest.next().ok_or_else(|| format!("{name}: expected a result type"))? {
         ")" => None,
         r => {
-            let r = Ty::parse(r).map_err(|e| format!("{name}: {e}"))?;
+            let r = Ty::parse(&unword(r)).map_err(|e| format!("{name}: {e}"))?;
             if rest.next() != Some(")") {
                 return Err(bad());
             }
@@ -111,8 +158,8 @@ fn one(text: &str) -> Result<Sig, String> {
     if input.rep != Rep::One || !matches!(input.ty, Ty::Term | Ty::Group) && !(input.ty == Ty::MaybeTerm && matches!(result, Ty::Num | Ty::Text)) && !(input.ty == Ty::Text && result == Ty::Group) {
         return Err(format!("{name}: the input {input} must be term or group, term? for a function that gives a number or a text, or text for one that gives a group"));
     }
-    if !matches!(result, Ty::Num | Ty::Term | Ty::MaybeTerm | Ty::Group | Ty::Text) {
-        return Err(format!("{name}: a function gives num, term, term?, group or text"));
+    if !matches!(result, Ty::Num | Ty::Term | Ty::MaybeTerm | Ty::Group | Ty::Text | Ty::Tuple(_)) {
+        return Err(format!("{name}: a function gives num, term, term?, group, text or a tuple"));
     }
     if Kind::of(&input.ty, &result).is_none() {
         return Err(format!("{name}: no calling kind takes {} to {}", input.ty, result));
@@ -533,6 +580,7 @@ fn print(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
                 f => unreachable!("a function value is a def or a built-in: {f:?}"),
             },
             Pipe::Var(Slot::Local(g, Holds::Group)) => infix(&env.reg(g)),
+            a if matches!(a, Pipe::Index(..)) || super::ast::gives_tuple(a) => shown(&env.tuple_value(a, &set)?, super::ast::value_ty(a).as_ref(), env),
             s if super::flow::is_group_step(s) => infix(&super::eval::go(s, set.clone(), env)?),
             Pipe::App(Fun::Builtin(b), _) if b.sig.is_text() => env.text_of(a, &set)?,
             e => match env.value(e, &set) {
@@ -547,6 +595,22 @@ fn print(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
     PRINTED.with(|p| p.borrow_mut().push(line.clone()));
     eprintln!("{line}");
     Ok(set)
+}
+
+/// The value `v` of type `ty` as `print` writes it: a group's elements in infix, a function by
+/// its type, a tuple as `(a, b, ...)`.
+fn shown(v: &Value, ty: Option<&Ty>, env: &Env) -> String {
+    match v {
+        Value::Num(NONE) => "none".into(),
+        Value::Num(n) => n.to_string(),
+        Value::Group(g) => g.iter().map(|c| env.infix(c)).collect::<Vec<_>>().join(", "),
+        Value::Text(t) => t.clone(),
+        Value::Fn(_) => ty.map_or_else(|| "function".into(), Ty::to_string),
+        Value::Tuple(vs) => {
+            let ts = ty.and_then(Ty::positions);
+            format!("({})", vs.iter().enumerate().map(|(i, v)| shown(v, ts.and_then(|ts| ts.get(i)), env)).collect::<Vec<_>>().join(", "))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -625,7 +689,11 @@ mod tests {
         let sigs = parse(ok).unwrap();
         assert_eq!(sigs[1].doc, "The second describes it.");
         assert_eq!(sigs[1].decl(), "(extern @timed (y n:name t:term) term?)");
+        let tuples = parse("# A tuple.\n(extern (z lims:(num, (num, pipe)) g:group) (group, num))").unwrap();
+        assert_eq!(tuples[0].decl(), "(extern (z lims:(num, (num, pipe)) g:group) (group, num))");
+        assert_eq!(tuples[0].kind(), Kind::Tuple);
         for (bad, msg) in [
+            ("# a\n(extern (x g:group) (group, term))", "a tuple holds"),
             ("(extern (x g:group) group)", "no description"),
             ("# a\n(extern (x g:group) group)\n# b\n(extern (x g:group) group)", "declared twice"),
             ("# a\n(extern (x g:group) term)", "no calling kind"),

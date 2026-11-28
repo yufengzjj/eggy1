@@ -24,6 +24,7 @@ pub(crate) enum Tok {
     At,
     Colon,
     Arrow,
+    Comma,
 }
 
 pub(crate) fn name_start(c: char) -> bool {
@@ -57,6 +58,9 @@ pub(crate) fn lex(s: &str) -> Result<Vec<Tok>, String> {
     let cs: Vec<char> = s.chars().collect();
     let mut out = Vec::new();
     let mut i = 0;
+    // For each `(` open, whether a name is written right before it, as in `f(a, b)`, which
+    // separates no tuple's positions.
+    let mut call = Vec::new();
     while i < cs.len() {
         let c = cs[i];
         let next = cs.get(i + 1).copied();
@@ -76,8 +80,15 @@ pub(crate) fn lex(s: &str) -> Result<Vec<Tok>, String> {
                 let (text, len) = string_at(&cs[i..])?;
                 (Tok::Str(text), len)
             }
-            '(' => (Tok::Open, 1),
-            ')' => (Tok::Close, 1),
+            '(' => {
+                call.push(i > 0 && name_char(cs[i - 1]));
+                (Tok::Open, 1)
+            }
+            ')' => {
+                call.pop();
+                (Tok::Close, 1)
+            }
+            ',' if call.last() == Some(&true) => return Err("unexpected character ',' in pipeline".into()),
             '|' if two('|') => (Tok::Or, 2),
             '|' => (Tok::Bar, 1),
             '&' if two('&') => (Tok::And, 2),
@@ -91,6 +102,7 @@ pub(crate) fn lex(s: &str) -> Result<Vec<Tok>, String> {
             '=' => (Tok::Assign, 1),
             '@' => (Tok::At, 1),
             ':' => (Tok::Colon, 1),
+            ',' => (Tok::Comma, 1),
             '-' if two('>') => (Tok::Arrow, 2),
             '+' | '-' | '*' | '/' => (Tok::Arith(c), 1),
             c if c.is_ascii_digit() => {
@@ -200,6 +212,7 @@ pub(crate) fn show_tok(t: Option<&Tok>) -> String {
             Tok::At => "@".into(),
             Tok::Colon => ":".into(),
             Tok::Arrow => "->".into(),
+            Tok::Comma => ",".into(),
         },
     }
 }

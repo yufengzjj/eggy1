@@ -38,16 +38,23 @@ fn run_child(path: &Path, section: usize) {
     match lang::run(source, &[]) {
         Ok(out) => {
             out.warnings.iter().for_each(|w| tagged("warning", w));
-            match out.value {
-                None => {}
-                Some(Value::Num(u64::MAX)) => tagged("value", "none"),
-                Some(Value::Num(n)) => tagged("value", &n.to_string()),
-                Some(Value::Text(t)) => tagged("value", &t),
-                Some(Value::Group(g)) => tagged("value", &format!("group [{}]", g.iter().map(|c| c.term()).collect::<Vec<_>>().join(", "))),
-                Some(Value::Fn(_)) => tagged("value", "function"),
+            if let Some(v) = out.value {
+                tagged("value", &shown(&v));
             }
         }
         Err(e) => tagged("error", &e),
+    }
+}
+
+/// A value as the expectations write it.
+fn shown(v: &Value) -> String {
+    match v {
+        Value::Num(u64::MAX) => "none".into(),
+        Value::Num(n) => n.to_string(),
+        Value::Text(t) => t.clone(),
+        Value::Group(g) => format!("group [{}]", g.iter().map(|c| c.term()).collect::<Vec<_>>().join(", ")),
+        Value::Fn(_) => "function".into(),
+        Value::Tuple(vs) => format!("({})", vs.iter().map(shown).collect::<Vec<_>>().join(", ")),
     }
 }
 

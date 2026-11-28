@@ -37,13 +37,15 @@ pub struct Env<'a> {
     pub(crate) ctxs: RefCell<Vec<Ctx>>,
 }
 
-/// What a term of the language gives: a number, candidates, a text, or a function value.
+/// What a term of the language gives: a number, candidates, a text, a function value, or a
+/// tuple of those.
 #[derive(Clone)]
 pub enum Value {
     Num(u64),
     Group(Vec<Cand>),
     Text(String),
     Fn(Closure),
+    Tuple(Rc<[Value]>),
 }
 
 impl Value {
@@ -134,6 +136,10 @@ impl<'a> Env<'a> {
     pub(crate) fn text_of(&self, p: &Pipe, set: &[Cand]) -> Result<String, Error> {
         match p {
             Pipe::Text(t) => Ok(t.clone()),
+            Pipe::Index(..) => match self.tuple_value(p, set)? {
+                Value::Text(t) => Ok(t),
+                _ => Ok(String::new()),
+            },
             Pipe::App(Fun::Builtin(b), args) => {
                 let Impl::TermText(f) = b.imp else { unreachable!("{} gives no text", b.name) };
                 let input = match args.first() {
@@ -225,6 +231,15 @@ impl<'a> Env<'a> {
                 v.unwrap_or_else(|| self.apply_param(*i, In::Ref(set), true).map_or(0, Value::num))
             }
             Pipe::Var(Slot::Local(n, Holds::Fn(_))) => self.apply_var(n, In::Ref(set), true).map_or(0, Value::num),
+            Pipe::Index(..) => match self.tuple_value(e, set) {
+                Ok(Value::Num(n)) => n,
+                Ok(Value::Fn(c)) => self.apply_in(&c.body, c.lex, In::Ref(set), true).map_or(0, Value::num),
+                Ok(_) => 0,
+                Err(e) => {
+                    fail(&e);
+                    0
+                }
+            },
             Pipe::Var(Slot::Local(n, _)) => match self.lex.borrow().regs.borrow().get(n) {
                 Some(Value::Num(v)) => *v,
                 _ => 0,
@@ -292,6 +307,52 @@ impl<'a> Env<'a> {
                 Vec::new()
             }),
         }
+    }
+
+    /// The tuple `p` gives on `set`, or the value of its position where `p` is `(index i t)`:
+    /// a tuple, a tuple variable, a call of a function that gives one, or steps that end in one.
+    pub(crate) fn tuple_value(&self, p: &Pipe, set: &[Cand]) -> Result<Value, Error> {
+        failed().map_or(Ok(()), Err)?;
+        Ok(match p {
+            Pipe::Tuple(ps) => Value::Tuple(ps.iter().map(|(q, t)| self.position(q, t, set)).collect::<Result<Rc<[Value]>, Error>>()?),
+            Pipe::Var(Slot::Local(n, _)) => self.lex.borrow().regs.borrow().get(n).cloned().unwrap_or_else(|| Value::Tuple(Rc::from([]))),
+            Pipe::Index(t, i) => match self.tuple_value(t, set)? {
+                Value::Tuple(vs) => vs.get(*i).cloned().unwrap_or_else(|| Value::Tuple(Rc::from([]))),
+                _ => unreachable!("{t:?} gives no tuple"),
+            },
+            Pipe::App(Fun::Def(c), args) => {
+                let c = c.latest(args, &self.passes.defs);
+                if c.def.timed && past(0.0) {
+                    skipped(self);
+                    return self.tuple_value(args.last().expect("a @timed function that gives a tuple takes one"), set);
+                }
+                return deeper(|| c.def.name.clone(), || {
+                    let run = self.call_env(&c, args, set);
+                    scoped(|| run.tuple_value(&c.body, set))
+                });
+            }
+            Pipe::Seq(ps) => scoped(|| run_seq(ps, Value::Group(set.to_vec()), self))?,
+            p => unreachable!("{p:?} gives no tuple"),
+        })
+    }
+
+    /// The tuple `p` gives on `set`.
+    pub(crate) fn tuple(&self, p: &Pipe, set: &[Cand]) -> Result<Rc<[Value]>, Error> {
+        match self.tuple_value(p, set)? {
+            Value::Tuple(vs) => Ok(vs),
+            _ => unreachable!("{p:?} gives no tuple"),
+        }
+    }
+
+    /// The position `q` of type `t` of a tuple, on `set`.
+    fn position(&self, q: &Pipe, t: &Ty, set: &[Cand]) -> Result<Value, Error> {
+        Ok(match t {
+            Ty::Num => Value::Num(self.value(q, set)),
+            Ty::Group => Value::Group(self.group_of(q, set)),
+            Ty::Text => Value::Text(self.text_of(q, set)?),
+            _ if matches!(t, Ty::Tuple(_)) || matches!(q, Pipe::Index(..)) => self.tuple_value(q, set)?,
+            _ => Value::Fn(capture(&std::sync::Arc::new(q.clone()), &self.lex.borrow())),
+        })
     }
 
     /// The run of a call of `c` on `set`, with its own group variables and the call's arguments.
@@ -461,9 +522,24 @@ pub(crate) enum StepKind {
     Nothing,
 }
 
+/// Whether the step `p` takes `v`, a number, a text or a tuple, as its last argument: a call,
+/// for a tuple one that lacks only its last parameter, a tuple.
+fn takes_value(p: &Pipe, v: &Value) -> bool {
+    match (p, v) {
+        (Pipe::App(Fun::Def(c), args), Value::Tuple(_)) => args.len() + 1 == c.def.params.len() && c.def.params.last().is_some_and(|q| q.ty.positions().is_some()),
+        (_, Value::Tuple(_) | Value::Fn(_)) => false,
+        (p, _) => matches!(p, Pipe::App(..)),
+    }
+}
+
+thread_local! {
+    /// The tuples `step_on` has put in as the last argument of a call so far, which name the next.
+    static TAKEN: Cell<u64> = const { Cell::new(0) };
+}
+
 pub(crate) fn step_kind(p: &Pipe) -> StepKind {
     match p {
-        Pipe::Bind(..) => StepKind::Nothing,
+        Pipe::Bind(..) | Pipe::Unpack(..) => StepKind::Nothing,
         Pipe::Expanded(m) if m.switch_names().is_some() => StepKind::Nothing,
         Pipe::App(Fun::Builtin(b), _) if b.sig.kind() == super::types::Kind::Effect => StepKind::Nothing,
         Pipe::Text(_) => StepKind::Value,
@@ -473,7 +549,7 @@ pub(crate) fn step_kind(p: &Pipe) -> StepKind {
             Some(_) => StepKind::Group,
             None => StepKind::Nothing,
         },
-        p if super::flow::is_expr(p) => StepKind::Value,
+        p if super::flow::is_expr(p) || matches!(p, Pipe::Index(..)) || super::ast::gives_tuple(p) => StepKind::Value,
         _ => StepKind::Group,
     }
 }
@@ -497,22 +573,41 @@ pub(crate) fn step_on(p: &Pipe, v: Value, env: &Env) -> Result<Value, Error> {
             let v = match p {
                 Pipe::Text(_) => Value::Text(env.text_of(p, &g)?),
                 Pipe::App(Fun::Builtin(b), _) if b.sig.is_text() => Value::Text(env.text_of(p, &g)?),
+                p if matches!(p, Pipe::Index(..)) || super::ast::gives_tuple(p) => env.tuple_value(p, &g)?,
                 p => Value::Num(env.value(p, &g)),
             };
             failed().map_or(Ok(v), Err)
         }
+        (_, Value::Tuple(vs)) if matches!(p, Pipe::Index(q, _) if super::ast::is_input(q)) => {
+            let Pipe::Index(_, i) = p else { unreachable!() };
+            Ok(vs[*i].clone())
+        }
+        // A step that does not take the value it is given starts from none.
+        (_, v) if !takes_value(p, &v) => step_on(p, Value::Group(Vec::new()), env),
         (kind, v) => {
+            // A tuple goes in as a variable of the run under a name of its own, which the call
+            // reads when its arguments are bound.
+            let held = matches!(v, Value::Tuple(_)).then(|| format!("{}{}", super::ast::INPUT, TAKEN.with(|n| n.replace(n.get() + 1))));
             let input = match v {
                 Value::Num(n) => Pipe::Num(n),
                 Value::Text(t) => Pipe::Text(t),
-                _ => unreachable!("a step is given candidates, a number or a text"),
+                v @ Value::Tuple(_) => {
+                    let n = held.clone().unwrap();
+                    env.lex.borrow().regs.borrow_mut().insert(n.clone(), v);
+                    Pipe::Var(Slot::Local(n, Holds::Tuple(Box::new(Ty::Any))))
+                }
+                _ => unreachable!("a step is given candidates, a number, a text or a tuple"),
             };
-            let Pipe::App(f, args) = p else { unreachable!("{p:?} takes no number or text") };
+            let Pipe::App(f, args) = p else { unreachable!("{p:?} takes no number, text or tuple") };
             let call = Pipe::App(f.clone(), args.iter().cloned().chain([input]).collect());
-            match kind {
+            let out = match kind {
                 StepKind::Group => go(&call, Vec::new(), env).map(Value::Group),
                 _ => step_on(&call, Value::Group(Vec::new()), env),
+            };
+            if let Some(n) = held {
+                env.lex.borrow().regs.borrow_mut().remove(&n);
             }
+            out
         }
     }
 }
@@ -578,6 +673,26 @@ pub(crate) fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Steps {
         Pipe::Var(Slot::Param(i, _)) => env.apply_param(*i, In::Own(set), false).map(Value::group),
         Pipe::Var(Slot::Local(n, Holds::Fn(_))) => env.apply_var(n, In::Own(set), false).map(Value::group),
         Pipe::Var(Slot::Local(r, Holds::Group)) => Ok(env.reg(r)),
+        Pipe::Index(..) => match env.tuple_value(p, &set)? {
+            Value::Group(g) => Ok(g),
+            Value::Fn(c) => env.apply_in(&c.body, c.lex, In::Own(set), false).map(Value::group),
+            _ => Ok(set),
+        },
+        Pipe::Tuple(_) | Pipe::Var(Slot::Local(_, Holds::Tuple(_))) => {
+            env.tuple_value(p, &set)?;
+            Ok(set)
+        }
+        Pipe::Unpack(slots, e) => {
+            let vs = env.tuple(e, &set)?;
+            let lex = env.lex.borrow();
+            let mut regs = lex.regs.borrow_mut();
+            for (x, v) in slots.iter().zip(vs.iter()) {
+                if let Slot::Local(n, _) = x {
+                    regs.insert(n.clone(), v.clone());
+                }
+            }
+            Ok(set)
+        }
         Pipe::Bind(x, e) => {
             match x {
                 Slot::Global(i) => {
@@ -596,6 +711,7 @@ pub(crate) fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Steps {
                         Holds::Num => Value::Num(env.value(e, &set)),
                         Holds::Group => Value::Group(scoped(|| go(e, set.clone(), env))?),
                         Holds::Fn(_) => Value::Fn(capture(e, &env.lex.borrow())),
+                        Holds::Tuple(_) => env.tuple_value(e, &set)?,
                     };
                     env.lex.borrow().regs.borrow_mut().insert(r.clone(), v);
                 }
@@ -642,7 +758,8 @@ pub(crate) fn reads(p: &Pipe, names: &mut Vec<String>, params: &mut Vec<usize>) 
         }
         Pipe::Seq(ps) => all(ps),
         Pipe::Expanded(m) => all(&m.steps),
-        Pipe::Bind(_, q) => reads(q, names, params),
+        Pipe::Bind(_, q) | Pipe::Index(q, _) | Pipe::Unpack(_, q) => reads(q, names, params),
+        Pipe::Tuple(ps) => ps.iter().for_each(|(q, _)| reads(q, names, params)),
         Pipe::Num(_) | Pipe::Text(_) | Pipe::Var(Slot::Global(_)) | Pipe::FnValue(_) => {}
     }
 }
@@ -714,7 +831,12 @@ fn arg_values(c: &super::defs::Call, args: &[Pipe], set: &[Cand], env: &Env) -> 
 /// caller's run `env`, and its input parameter to `set`.
 fn bind_args(c: &super::defs::Call, args: &[Pipe], lex: &Lex, set: &[Cand], caller: &Lex, env: &Env) {
     let terms: Vec<(String, Vec<Cand>)> = c.def.params.iter().zip(args).filter(|(p, _)| p.ty == Ty::Term).map(|(p, a)| (p.name.clone(), env.group_of(a, set).into_iter().take(1).collect())).collect();
+    let tuples: Vec<(String, Value)> = c.def.params.iter().zip(args).filter(|(p, _)| p.ty.positions().is_some()).map(|(p, a)| (p.name.clone(), env.tuple_value(a, set).unwrap_or_else(|e| {
+        fail(&e);
+        Value::Tuple(Rc::from([]))
+    }))).collect();
     let mut regs = lex.regs.borrow_mut();
+    regs.extend(tuples);
     for (p, a) in c.def.params.iter().zip(args) {
         if let (Ty::Group, Pipe::Var(Slot::Local(r, _))) = (&p.ty, a) {
             let g = match caller.regs.borrow().get(r) {

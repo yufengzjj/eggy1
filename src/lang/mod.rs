@@ -15,6 +15,7 @@ pub mod macros;
 pub mod parser;
 pub mod run;
 pub mod source;
+pub(crate) mod tuples;
 pub mod types;
 pub mod vars;
 pub mod warn;

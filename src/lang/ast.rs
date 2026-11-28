@@ -46,6 +46,13 @@ pub enum Pipe {
     /// A function, built-in, `def` or `let`, written alone in an `any` argument (`print`) where
     /// it is not applied: it lacks other arguments, or the step has no input.
     FnValue(std::sync::Arc<Pipe>),
+    /// A tuple `(a, b, ...)`: each position and its type, evaluated on the input.
+    Tuple(std::sync::Arc<[(Pipe, Ty)]>),
+    /// `(index i t)` of a tuple `t`: its position `i`, whose type is known when parsed.
+    Index(std::sync::Arc<Pipe>, usize),
+    /// `(a, b, ...) = t`: each local variable bound to its position of the tuple `t`, the input
+    /// passing on.
+    Unpack(std::sync::Arc<[Slot]>, std::sync::Arc<Pipe>),
 }
 
 /// A variable or parameter, resolved when parsed.
@@ -69,6 +76,7 @@ pub enum Holds {
     Num,
     Group,
     Fn(super::types::Ty),
+    Tuple(Box<super::types::Ty>),
 }
 
 /// The function an `App` applies: a built-in, an operator (a built-in too, its `Impl` held
@@ -201,6 +209,15 @@ impl Pipe {
             Pipe::Bind(Slot::Local(_, Holds::Group), p) => f(p),
             Pipe::Bind(Slot::Local(_, Holds::Fn(t)), p) if t.is_step() => f(p),
             Pipe::Bind(_, e) => e.each_in_expr(f),
+            Pipe::Tuple(ps) => {
+                for (q, t) in ps.iter() {
+                    match t.is_expr() {
+                        true => q.each_in_expr(f),
+                        false => f(q),
+                    }
+                }
+            }
+            Pipe::Index(q, _) | Pipe::Unpack(_, q) => f(q),
             Pipe::Num(_) | Pipe::Name(_) | Pipe::Text(_) | Pipe::Var(_) | Pipe::FnValue(_) => {}
         }
     }
@@ -230,13 +247,59 @@ pub(crate) fn op_of(p: &Pipe) -> Option<(Operator, &[Pipe])> {
 /// Whether `p` gives its group whatever its input: it starts with a group value.
 pub fn starts_with_value(p: &Pipe) -> bool {
     match p {
-        Pipe::Var(Slot::Local(_, Holds::Group)) => true,
+        Pipe::Var(Slot::Local(_, Holds::Group | Holds::Tuple(_))) => true,
+        Pipe::Index(t, _) => starts_with_value(t) && !value_ty(p).is_some_and(|t| t.is_function()),
         Pipe::Seq(ps) => ps.first().is_some_and(starts_with_value),
         Pipe::Expanded(m) if m.is_call() => m.steps.first().is_some_and(starts_with_value),
         Pipe::App(Fun::Def(c), _) => !c.def.step,
         Pipe::App(Fun::Builtin(b), _) => b.sig.kind() == super::types::Kind::FromText,
         _ => false,
     }
+}
+
+/// The type of the value `p` gives where it is a tuple or a position of one: a tuple, a tuple
+/// variable, a call of a function that gives a tuple, `(index i t)` of a tuple, or a sequence
+/// that ends in one; `None` for anything else.
+pub fn value_ty(p: &Pipe) -> Option<Ty> {
+    match p {
+        Pipe::Tuple(ps) => Some(Ty::Tuple(ps.iter().map(|(_, t)| t.clone()).collect())),
+        Pipe::Var(Slot::Local(_, Holds::Tuple(t))) => Some((**t).clone()),
+        Pipe::Index(t, i) => value_ty(t)?.positions()?.get(*i).cloned(),
+        Pipe::App(Fun::Def(c), _) => c.def.tuple.clone(),
+        Pipe::App(Fun::Builtin(b), _) => b.sig.result.positions().map(|_| b.sig.result.clone()),
+        Pipe::Seq(ps) => ps.iter().rev().find(|q| !passes_on(q)).and_then(value_ty),
+        _ => None,
+    }
+}
+
+/// The name of the tuple a step is given, which `(index i)` after a tuple reads: no name of
+/// the language.
+pub(crate) const INPUT: &str = "#input";
+
+/// The tuple of type `ty` the step is given, read.
+pub(crate) fn input_of(ty: Ty) -> Pipe {
+    Pipe::Var(Slot::Local(INPUT.into(), Holds::Tuple(Box::new(ty))))
+}
+
+/// Whether `p` reads the tuple the step is given (`input_of`).
+pub(crate) fn is_input(p: &Pipe) -> bool {
+    matches!(p, Pipe::Var(Slot::Local(n, Holds::Tuple(_))) if n == INPUT)
+}
+
+/// Whether the step `p` gives no value of its own, passing on the one it is given: an
+/// assignment, a switch, `print` or `assert`.
+pub(crate) fn passes_on(p: &Pipe) -> bool {
+    match p {
+        Pipe::Bind(..) | Pipe::Unpack(..) => true,
+        Pipe::Expanded(m) => m.switch_names().is_some(),
+        Pipe::App(Fun::Builtin(b), _) => b.sig.kind() == super::types::Kind::Effect,
+        _ => false,
+    }
+}
+
+/// Whether `p` gives a tuple.
+pub fn gives_tuple(p: &Pipe) -> bool {
+    value_ty(p).is_some_and(|t| t.positions().is_some())
 }
 
 /// The right side of an assignment.
@@ -391,6 +454,14 @@ pub fn show(p: &Pipe) -> String {
         Pipe::Expanded(m) if m.args.is_empty() => m.head.to_string(),
         Pipe::Expanded(m) => form(m.head, &m.args.iter().map(|a| if m.is_call() { stage(a) } else { show(a) }).collect::<Vec<_>>()),
         Pipe::FnValue(q) => show(q),
+        Pipe::Tuple(ps) => format!("({})", ps.iter().map(|(q, t)| if t.is_expr() { show_expr(q, 1) } else { stage(q) }).collect::<Vec<_>>().join(", ")),
+        Pipe::Index(q, i) if is_input(q) => format!("(index {i})"),
+        Pipe::Index(q, i) => format!("(index {i} {})", show_tuple_input(q)),
+        Pipe::Unpack(slots, q) => {
+            let names: Vec<&str> = slots.iter().map(|x| if let Slot::Local(n, _) = x { n.as_str() } else { unreachable!("a tuple binds local variables") }).collect();
+            format!("({}) = {}", names.join(", "), show_tuple_input(q))
+        }
+        Pipe::Bind(Slot::Local(n, Holds::Tuple(_)), q) => format!("{n} = {}", show_tuple_input(q)),
         Pipe::App(Fun::Def(c), args) => {
             let last = read_to_close(&c.def.params);
             let all: Vec<String> = args.iter().zip(&c.def.params).enumerate().map(|(i, (a, p))| if Some(i) == last { show(a) } else { show_call_arg(a, p) }).chain(args.get(c.def.params.len()).map(stage)).collect();
@@ -405,6 +476,29 @@ pub fn show(p: &Pipe) -> String {
         Pipe::Bind(Slot::Global(i), v) => format!("{} = {}", var(*i).name, show_assigned(v)),
         Pipe::Bind(Slot::Param(..), _) => unreachable!("a parameter is not assigned"),
         e => show_expr(e, 1),
+    }
+}
+
+/// `q` written where a value is taken: a call with its input written as written
+/// (`(f x g)`), else as a stage.
+fn show_input(q: &Pipe) -> String {
+    match q {
+        Pipe::Seq(ps) if matches!(&ps[..], [Pipe::Var(Slot::Local(_, Holds::Group)), Pipe::App(..)]) => {
+            let (Pipe::Var(Slot::Local(g, _)), call) = (&ps[0], show(&ps[1])) else { unreachable!() };
+            match call.strip_suffix(')') {
+                Some(c) if call.starts_with('(') => format!("{c} {g})"),
+                _ => format!("({call} {g})"),
+            }
+        }
+        q => show(q),
+    }
+}
+
+/// `q` written where a tuple is taken: as `show_input`, a sequence in parentheses.
+pub(crate) fn show_tuple_input(q: &Pipe) -> String {
+    match q {
+        Pipe::Seq(ps) if ps.len() == 2 && matches!(ps[0], Pipe::Var(Slot::Local(_, Holds::Group))) => show_input(q),
+        q => stage(q),
     }
 }
 

@@ -16,8 +16,12 @@ pub mod passes;
 pub fn listing() -> String {
     let mut out = String::from("# The built-in functions (src/builtins.pipe), by how they are called.\n");
     for (kind, title) in Kind::ALL {
+        let sigs: Vec<_> = all().iter().filter(|s| s.kind() == kind).collect();
+        if sigs.is_empty() {
+            continue;
+        }
         out += &format!("\n# --- {title}\n");
-        for s in all().iter().filter(|s| s.kind() == kind) {
+        for s in sigs {
             out += &format!("# {}\n{}\n", s.doc, s.decl());
         }
     }

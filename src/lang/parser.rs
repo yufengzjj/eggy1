@@ -3,7 +3,7 @@
 //! assigns a variable, conditions are expressions (`(if (mul >= 4 && shift < 1) (off
 //! small_blocks))`). Parsed into `ast::Pipe`, names resolved by their signatures.
 
-use super::ast::{Fun, Holds, Pipe, Slot, show, show_expr, stage, starts_with_value};
+use super::ast::{Fun, Holds, Pipe, Slot, gives_tuple, show, show_expr, stage, starts_with_value, value_ty};
 use super::builtins::{MACROS, get, number_names, resolve, step_names};
 use super::defs::{Call, Def, Defs, def_sig};
 use super::infer::ParamUse;
@@ -92,7 +92,7 @@ fn name_expr(n: &str) -> Result<Pipe, String> {
 }
 
 /// The type of the value `e` gives: a text or a number.
-fn value_ty(e: &Pipe) -> Ty {
+fn expr_ty(e: &Pipe) -> Ty {
     match e {
         Pipe::Text(_) => Ty::Text,
         Pipe::App(Fun::Builtin(b), _) if b.sig.is_text() => Ty::Text,
@@ -101,7 +101,7 @@ fn value_ty(e: &Pipe) -> Ty {
 }
 
 /// The right side of an assignment, by the type of what it gives.
-enum Rhs {
+pub(crate) enum Rhs {
     Num(Pipe),
     Group(Pipe),
 }
@@ -119,6 +119,11 @@ pub(crate) struct Parser<'a> {
     pub(crate) fns: Vec<(String, Ty)>,
     /// The local variables that hold a number bound so far in the text (`n = (size * 2)`).
     pub(crate) locals: Vec<String>,
+    /// The local variables that hold a tuple bound so far in the text, and their types.
+    pub(crate) tuples: Vec<(String, Ty)>,
+    /// The parameters without a type written alone in a position of a tuple, whose type the
+    /// tuple's has to wait for (`any` there until the definition is read again).
+    pub(crate) holes: Vec<String>,
     /// An atom already read, which the expression read next starts with.
     pub(crate) pending: Option<Pipe>,
     /// Reading a top-level statement, whose last step may give a text.
@@ -137,6 +142,7 @@ pub(crate) struct TopNames {
     fns: Vec<(String, Ty)>,
     /// A statement gave a value, which the later ones take as their input.
     pub(crate) value: bool,
+    tuples: Vec<(String, Ty)>,
 }
 
 pub(crate) fn seq_of(mut stages: Vec<Pipe>) -> Pipe {
@@ -147,6 +153,7 @@ pub(crate) fn seq_of(mut stages: Vec<Pipe>) -> Pipe {
 /// its steps are one scope alike, and it shows the same.
 pub(crate) fn number_seq(p: Pipe, e: Pipe) -> Pipe {
     let mut ps = match p {
+        Pipe::Seq(ps) if ps.is_empty() => return e,
         Pipe::Seq(ps) if ps.len() > 1 => ps,
         p => vec![p],
     };
@@ -156,12 +163,12 @@ pub(crate) fn number_seq(p: Pipe, e: Pipe) -> Pipe {
 
 impl<'a> Parser<'a> {
     pub(crate) fn new(toks: Vec<Tok>, defs: &'a Defs) -> Parser<'a> {
-        Parser { toks, at: 0, defs, used: Vec::new(), params: Vec::new(), groups: Vec::new(), fns: Vec::new(), locals: Vec::new(), pending: None, text_tail: false, input: true }
+        Parser { toks, at: 0, defs, used: Vec::new(), params: Vec::new(), groups: Vec::new(), fns: Vec::new(), locals: Vec::new(), tuples: Vec::new(), holes: Vec::new(), pending: None, text_tail: false, input: true }
     }
 
     /// Whether `n` is a group value: a group parameter, or a group variable bound before in
     /// the text that names nothing else.
-    fn group_value(&self, n: &str) -> bool {
+    pub(crate) fn group_value(&self, n: &str) -> bool {
         match self.param(n) {
             Some(i) => matches!(self.params[i].ty, Some(Ty::Group | Ty::Term)),
             None => self.groups.iter().any(|g| g == n) && !self.defs.contains_key(n) && !known_name(n) && resolve(n).is_none(),
@@ -209,7 +216,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Whether `n` names no variable, function, definition or word of the language.
-    fn unknown(&self, n: &str) -> bool {
+    pub(crate) fn unknown(&self, n: &str) -> bool {
         !(self.defs.contains_key(n) || known_name(n) || resolve(n).is_some() || ["none", "true", "def", "extern"].contains(&n))
     }
 
@@ -217,6 +224,12 @@ impl<'a> Parser<'a> {
     /// of a variable, number function or numeric parameter, maybe after `(`.
     pub(crate) fn expr_ahead(&self) -> bool {
         let k = (0..).find(|k| self.peek_at(*k) != Some(&Tok::Open)).unwrap();
+        if self.tuple_literal_at(0) {
+            return false;
+        }
+        if self.tuple_index_at(k.saturating_sub(1)) {
+            return self.number_index_at(k);
+        }
         match self.peek_at(k) {
             Some(Tok::Num(_) | Tok::Not) => true,
             Some(Tok::Name(n)) if self.peek_at(k + 1) != Some(&Tok::Assign) => match self.param(n) {
@@ -234,11 +247,11 @@ impl<'a> Parser<'a> {
         self.toks.get(self.at)
     }
 
-    fn peek_at(&self, k: usize) -> Option<&Tok> {
+    pub(crate) fn peek_at(&self, k: usize) -> Option<&Tok> {
         self.toks.get(self.at + k)
     }
 
-    fn next(&mut self) -> Option<Tok> {
+    pub(crate) fn next(&mut self) -> Option<Tok> {
         let t = self.toks.get(self.at).cloned();
         self.at += 1;
         t
@@ -259,7 +272,7 @@ impl<'a> Parser<'a> {
     }
 
     /// The type of the function variable `n` bound before in the text.
-    fn fn_var(&self, n: &str) -> Option<Ty> {
+    pub(crate) fn fn_var(&self, n: &str) -> Option<Ty> {
         self.fns.iter().rev().find(|(f, _)| f == n).map(|(_, t)| t.clone())
     }
 
@@ -295,7 +308,7 @@ impl<'a> Parser<'a> {
     }
 
     /// The function variable `n` read.
-    fn fn_read(&self, n: String) -> Pipe {
+    pub(crate) fn fn_read(&self, n: String) -> Pipe {
         let t = self.fn_var(&n).unwrap_or_else(Ty::pipe);
         Pipe::Var(Slot::Local(n, Holds::Fn(t)))
     }
@@ -354,11 +367,7 @@ impl<'a> Parser<'a> {
 
     /// `n:TYPE = f` after the `:`: the variable `n` bound to the function `f` of that type.
     fn typed_bind(&mut self, n: &str) -> Result<Pipe, String> {
-        let mut t = self.name("a type after :")?;
-        while self.peek() == Some(&Tok::Arrow) {
-            self.at += 1;
-            t = format!("{t}->{}", self.name("a type after ->")?);
-        }
+        let t = self.type_text()?;
         let ty = Ty::parse(&t).ok().filter(Ty::is_function).ok_or_else(|| format!("{n}:{t} = ...: a function variable takes a function type, as in term->num or term->term"))?;
         self.expect(Tok::Assign, &format!("= after {n}:{t}"))?;
         let outer = std::mem::replace(&mut self.input, true);
@@ -370,7 +379,7 @@ impl<'a> Parser<'a> {
     }
 
     /// The right side of `n:t = ...`, a function of type `ty`.
-    fn fn_rhs(&mut self, n: &str, t: &str, ty: &Ty) -> Result<Pipe, String> {
+    pub(crate) fn fn_rhs(&mut self, n: &str, t: &str, ty: &Ty) -> Result<Pipe, String> {
         Ok(match ty.is_step() {
             true => {
                 self.no_bar(&format!("{n}:{t} ="))?;
@@ -392,7 +401,7 @@ impl<'a> Parser<'a> {
 
     /// An error where `n` cannot be a new local variable: a parameter, or the name of a
     /// variable of `VARS`, a function, a definition or a word of the language.
-    fn local_name(&self, n: &str) -> Result<(), String> {
+    pub(crate) fn local_name(&self, n: &str) -> Result<(), String> {
         if self.param(n).is_some() {
             return Err(format!("parameter {n} cannot be assigned"));
         }
@@ -413,6 +422,9 @@ impl<'a> Parser<'a> {
         if self.locals.iter().any(|l| l == n) {
             return Err(format!("{n} is a number variable, so it cannot hold a function value"));
         }
+        if self.tuples.iter().any(|(t, _)| t == n) {
+            return Err(format!("{n} is a tuple variable, so it cannot hold a function value"));
+        }
         self.local_name(n)?;
         self.fns.push((n.to_string(), ty.clone()));
         Ok(Pipe::Bind(Slot::Local(n.to_string(), Holds::Fn(ty)), Arc::new(f)))
@@ -430,6 +442,7 @@ impl<'a> Parser<'a> {
         let p = seq_of(stages);
         match tail {
             Some(e) => Err(format!("{} | {} gives a number, not a group: a pipeline that ends in a number goes where a number does, as in x = (a | size)", show(&p), show_expr(&e, 1))),
+            None if gives_tuple(&p) => Err(format!("{} gives {}, not a group: a tuple goes where one is taken, as in t = ... or ... | (index 0)", show(&p), value_ty(&p).unwrap())),
             None => Ok(p),
         }
     }
@@ -439,6 +452,12 @@ impl<'a> Parser<'a> {
     /// names no step.
     fn number_step_ahead(&self) -> bool {
         let k = (0..).find(|k| self.peek_at(*k) != Some(&Tok::Open)).unwrap();
+        if self.tuple_literal_at(0) {
+            return false;
+        }
+        if self.tuple_index_at(k.saturating_sub(1)) {
+            return self.number_index_at(k);
+        }
         match self.peek_at(k) {
             Some(Tok::Num(_) | Tok::Not) => true,
             Some(Tok::Name(_)) if matches!(self.peek_at(k + 1), Some(Tok::Assign | Tok::Colon)) => false,
@@ -452,7 +471,7 @@ impl<'a> Parser<'a> {
 
     /// The input the step ahead takes, for an error after a step that gives no group: its
     /// input parameter, or `a group`.
-    fn takes_ahead(&self) -> String {
+    pub(crate) fn takes_ahead(&self) -> String {
         let k = (0..).find(|k| self.peek_at(*k) != Some(&Tok::Open)).unwrap();
         let input = match self.peek_at(k) {
             Some(Tok::Name(n)) if self.param(n).is_none() => match get(n) {
@@ -516,6 +535,19 @@ impl<'a> Parser<'a> {
             };
             let p = self.stage()?;
             self.input |= starts_with_value(&p);
+            if gives_tuple(&p) && self.peek() == Some(&Tok::Bar) {
+                let (steps, last) = self.then_applied(p)?;
+                stages.extend(steps);
+                if last.is_some() {
+                    return Ok((stages, last));
+                }
+                self.input = true;
+                if self.peek() != Some(&Tok::Bar) {
+                    break;
+                }
+                self.at += 1;
+                continue;
+            }
             match p {
                 Pipe::Seq(ps) if flat => stages.extend(ps),
                 p => stages.push(p),
@@ -548,14 +580,24 @@ impl<'a> Parser<'a> {
     }
 
     /// The value `e` of a step and the functions after each `|` whose input takes the value
-    /// the step before gives, as steps; the value that ends the pipeline, or `None` where the
-    /// last step gives a group (a `|` may follow it). A `|` before a function that takes
-    /// another type is an error.
+    /// the step before gives, as steps; the number or text that ends the pipeline, or `None`
+    /// where the last step gives a group (a `|` may follow it) or a tuple. A `|` before a
+    /// function that takes another type is an error.
     fn then_applied(&mut self, mut e: Pipe) -> Result<(Vec<Pipe>, Option<Pipe>), String> {
         let (mut steps, mut after) = (Vec::new(), Vec::new());
-        let mut ty = value_ty(&e);
+        let mut ty = value_ty(&e).unwrap_or_else(|| expr_ty(&e));
         loop {
-            if let Some((n, s)) = self.taker_ahead(&ty) {
+            if ty.positions().is_some() && self.peek() == Some(&Tok::Bar) && !self.no_value_ahead() {
+                self.at += 1;
+                let (f, gives) = self.tuple_taker(&e, &ty)?;
+                steps.push(std::mem::replace(&mut e, f));
+                steps.append(&mut after);
+                if !matches!(gives, Ty::Num | Ty::Text | Ty::Tuple(_)) && !gives.is_function() {
+                    steps.push(e);
+                    return Ok((steps, None));
+                }
+                ty = gives;
+            } else if let Some((n, s)) = self.taker_ahead(&ty) {
                 self.at += 1;
                 let f = self.taking(&n, &s)?;
                 steps.push(std::mem::replace(&mut e, f));
@@ -572,6 +614,11 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+        if self.peek() != Some(&Tok::Bar) && !matches!(ty, Ty::Num | Ty::Text) {
+            steps.push(e);
+            steps.append(&mut after);
+            return Ok((steps, None));
+        }
         if self.peek() != Some(&Tok::Bar) {
             return Ok(match after.pop() {
                 Some(last) => {
@@ -585,7 +632,8 @@ impl<'a> Parser<'a> {
         self.at += 1;
         let given = match ty {
             Ty::Text => format!("{} gives text", show(&e)),
-            _ => format!("{} gives num", show_expr(&e, 1)),
+            Ty::Num => format!("{} gives num", show_expr(&e, 1)),
+            t => format!("{} gives {t}", stage(&e)),
         };
         Err(format!("{given}; {}", self.takes_ahead()))
     }
@@ -622,7 +670,7 @@ impl<'a> Parser<'a> {
         self.call_of(n, args, None)
     }
 
-    fn stage(&mut self) -> Result<Pipe, String> {
+    pub(crate) fn stage(&mut self) -> Result<Pipe, String> {
         if let (Some(Tok::Name(n)), Some(Tok::Assign)) = (self.peek().cloned(), self.peek_at(1)) {
             self.at += 2;
             return self.assign(&n);
@@ -630,6 +678,9 @@ impl<'a> Parser<'a> {
         if let (Some(Tok::Name(n)), Some(Tok::Colon)) = (self.peek().cloned(), self.peek_at(1)) {
             self.at += 2;
             return self.typed_bind(&n);
+        }
+        if self.unpack_ahead() {
+            return self.unpack();
         }
         let k = usize::from(self.peek() == Some(&Tok::Open));
         if let Some(e) = self.old_form(k) {
@@ -669,6 +720,17 @@ impl<'a> Parser<'a> {
     /// A stage as `stage` reads it.
     fn stage_of(&mut self) -> Result<Pipe, String> {
         let args_follow = |p: &Self| matches!(p.peek_at(1), Some(Tok::Name(_) | Tok::Num(_) | Tok::Open | Tok::Not));
+        if self.tuple_literal_at(0) || matches!(self.peek(), Some(Tok::Name(n)) if self.tuple_var(n).is_some()) {
+            return Ok(self.tuple_term()?.0);
+        }
+        if self.tuple_index_at(0) {
+            let (p, t) = self.index_tuple()?;
+            return match t {
+                Ty::Group | Ty::Tuple(_) => Ok(p),
+                t if t.is_step() => Ok(p),
+                t => Err(format!("{} gives {t}, not a group", show(&p))),
+            };
+        }
         match self.next() {
             Some(Tok::Name(n)) if self.group_value(&n) => {
                 self.use_param(&n, Ty::Group)?;
@@ -763,14 +825,14 @@ impl<'a> Parser<'a> {
     }
 
     /// Whether a function that gives a text is ahead, alone or called in parentheses.
-    fn text_ahead(&self) -> bool {
+    pub(crate) fn text_ahead(&self) -> bool {
         let k = usize::from(self.peek() == Some(&Tok::Open));
         matches!(self.peek_at(k), Some(Tok::Name(n)) if self.param(n).is_none() && get(n).is_some_and(Sig::is_text))
     }
 
     /// A text: a string literal, or a function that gives one, alone (on the step's input) or
     /// with its input written (`(show (main t))`).
-    fn text_value(&mut self) -> Result<Pipe, String> {
+    pub(crate) fn text_value(&mut self) -> Result<Pipe, String> {
         if let Some(Tok::Str(t)) = self.peek().cloned() {
             self.at += 1;
             return Ok(Pipe::Text(t));
@@ -920,6 +982,12 @@ impl<'a> Parser<'a> {
         if let (Some(Tok::Open), Some(e)) = (self.peek(), self.old_form(1)) {
             return Err(e.into());
         }
+        if self.tuple_term_at(0) && (!self.tuple_index_at(0) || self.index_ty_at(0).is_some_and(|t| t.positions().is_some())) {
+            let (e, ty) = self.tuple_term()?;
+            self.no_assign()?;
+            return self.bind_tuple(n, e, ty);
+        }
+        let tuple_var = self.tuples.iter().any(|(t, _)| t == n);
         let rhs = match self.number_ahead(number_var) {
             true => self.or().map(Rhs::Num),
             false => self.rhs_group(number_var, true),
@@ -929,10 +997,16 @@ impl<'a> Parser<'a> {
             Rhs::Num(e) if number_var => self.assign_number(n, e),
             Rhs::Num(e) if group_var => Err(format!("{n} is a group variable, so it cannot hold a number: {} gives a number", show_expr(&e, 1))),
             Rhs::Num(e) if self.fn_var(n).is_some() => Err(format!("{n} is a function variable, so it cannot hold a number: {} gives a number; write {n}:TYPE = ... for a function", show_expr(&e, 1))),
+            Rhs::Num(e) if tuple_var => Err(format!("{n} is a tuple variable, so it cannot hold a number: {} gives a number", show_expr(&e, 1))),
+            Rhs::Group(p) if gives_tuple(&p) => {
+                let ty = value_ty(&p).unwrap();
+                self.bind_tuple(n, p, ty)
+            }
             Rhs::Num(e) => self.bind_num(n, e),
             Rhs::Group(p) if number_var => Err(format!("{n} is a variable that holds a number, so it cannot be bound to a group: {} gives a group", stage(&p))),
             Rhs::Group(p) if self.locals.iter().any(|l| l == n) => Err(format!("{n} is a number variable, so it cannot be bound to a group: {} gives a group", stage(&p))),
             Rhs::Group(p) if self.fn_var(n).is_some() => Err(format!("{n} is a function variable, so it cannot be bound to a group: {} gives a group", stage(&p))),
+            Rhs::Group(p) if tuple_var => Err(format!("{n} is a tuple variable, so it cannot be bound to a group: {} gives a group", stage(&p))),
             Rhs::Group(p) => self.bind(n, p),
         }
     }
@@ -942,9 +1016,18 @@ impl<'a> Parser<'a> {
     /// a number (for a name that is also a step or an untyped parameter, where `number_var`,
     /// but a step where a `|` follows it inside parentheses), or a name that names nothing,
     /// unless written alone (`t = u` binds a group variable).
-    fn number_ahead(&self, number_var: bool) -> bool {
+    pub(crate) fn number_ahead(&self, number_var: bool) -> bool {
         let k = (0..).find(|k| self.peek_at(*k) != Some(&Tok::Open)).unwrap();
+        if self.tuple_literal_at(0) {
+            return false;
+        }
+        if self.tuple_index_at(k.saturating_sub(1)) {
+            return self.number_index_at(k);
+        }
         let Some(Tok::Name(n)) = self.peek_at(k) else { return true };
+        if self.tuple_term_at(k) {
+            return false;
+        }
         let after = self.peek_at(k + 1);
         if after == Some(&Tok::Assign) {
             return false;
@@ -999,7 +1082,7 @@ impl<'a> Parser<'a> {
     /// The right side of an assignment that does not start as an expression: a pipeline in
     /// parentheses, which gives a number where it ends in one (`(a | size) > 3`), or one step
     /// (`top`: as `bound_step` reads it).
-    fn rhs_group(&mut self, number_var: bool, top: bool) -> Result<Rhs, String> {
+    pub(crate) fn rhs_group(&mut self, number_var: bool, top: bool) -> Result<Rhs, String> {
         if self.peek() != Some(&Tok::Open) || self.form_ahead() {
             return Ok(Rhs::Group(if top { self.bound_step()? } else { self.stage()? }));
         }
@@ -1109,6 +1192,9 @@ impl<'a> Parser<'a> {
         if self.fn_var(n).is_some() {
             return Err(format!("{n} is a function variable, so it cannot name a group variable"));
         }
+        if self.tuples.iter().any(|(t, _)| t == n) {
+            return Err(format!("{n} is a tuple variable, so it cannot name a group variable"));
+        }
         if self.locals.iter().any(|l| l == n) {
             return Err(format!("{n} is a number variable, so it cannot name a group variable"));
         }
@@ -1119,7 +1205,7 @@ impl<'a> Parser<'a> {
     }
 
     /// An error where a comparison was meant and `=` written.
-    fn no_assign(&self) -> Result<(), String> {
+    pub(crate) fn no_assign(&self) -> Result<(), String> {
         match self.peek() {
             Some(Tok::Assign) => Err("an assignment is a step; compare with ==".into()),
             _ => Ok(()),
@@ -1159,7 +1245,7 @@ impl<'a> Parser<'a> {
 
     /// An expression argument of a form: a number, a name, `!` and an argument, or a
     /// parenthesized expression.
-    fn arg(&mut self) -> Result<Pipe, String> {
+    pub(crate) fn arg(&mut self) -> Result<Pipe, String> {
         let e = self.arg_of()?;
         self.no_assign()?;
         Ok(e)
@@ -1243,6 +1329,7 @@ impl<'a> Parser<'a> {
                 (_, Rep::Opt) if self.at_close() => Arg::Absent,
                 (Ty::Name | Ty::Group, Rep::Opt) if !named => Arg::Absent,
                 (_, Rep::One) if self.at_close() => return Err(arity()),
+                (t @ Ty::Tuple(_), _) => Arg::Num(self.tuple_arg(t, &whose)?),
                 (t, _) if t.is_expr() => Arg::Num(self.arg().map_err(|e| if sig { format!("{e}; {f} takes {}: {s}", s.arity()) } else { e })?),
                 (t, _) if t.is_step() && matches!(self.peek(), Some(Tok::Num(_))) => return Err(arity()),
                 (Ty::Group, _) => {
@@ -1304,7 +1391,7 @@ impl<'a> Parser<'a> {
         // for it here, which only shows.
         let def = d.def.clone().unwrap_or_else(|| {
             let body = Arc::new(d.pipe.clone());
-            Arc::new(Def { name: n.into(), params: d.params.clone(), body, inline: false, flat: d.flat, input: None, step: true, steps: false, value: None, implicit: None, timed: false, slot: None })
+            Arc::new(Def { name: n.into(), params: d.params.clone(), body, inline: false, flat: d.flat, input: None, step: true, steps: false, value: None, implicit: None, tuple: None, timed: false, slot: None })
         });
         self.used.push(n.to_string());
         Some(Pipe::FnValue(Arc::new(Call::bare(&def))))
@@ -1313,7 +1400,7 @@ impl<'a> Parser<'a> {
     /// The signature of the function `n` names when it lacks at most its input written alone:
     /// a built-in, a `def` (one that gives a number without parameters) or a `let`; `None` for
     /// another name.
-    fn bare_fn(&self, n: &str) -> Option<Sig> {
+    pub(crate) fn bare_fn(&self, n: &str) -> Option<Sig> {
         if self.param(n).is_some() || self.locals.iter().any(|l| l == n) || self.fn_var(n).is_some() {
             return None;
         }
@@ -1332,6 +1419,12 @@ impl<'a> Parser<'a> {
     /// applied where it can be (the step has an input, or the function takes none), else it is
     /// a function value.
     fn any_arg(&mut self) -> Result<Pipe, String> {
+        if self.tuple_index_at(0) {
+            return Ok(self.index_tuple()?.0);
+        }
+        if self.tuple_term_at(0) {
+            return Ok(self.tuple_term()?.0);
+        }
         let Some(Tok::Str(_) | Tok::Name(_)) = self.peek() else { return self.arg() };
         let n = match self.next() {
             Some(Tok::Str(t)) => return Ok(Pipe::Text(t)),
@@ -1531,6 +1624,17 @@ impl<'a> Parser<'a> {
         if let Some(e) = self.pending.take() {
             return Ok(e);
         }
+        if self.tuple_literal_at(0) {
+            let (p, t) = self.tuple_literal(None)?;
+            return Err(format!("{} gives {t}, not a number: read a position with (index i ...)", show(&p)));
+        }
+        if self.tuple_index_at(0) {
+            let (p, t) = self.index_tuple()?;
+            return match t {
+                Ty::Num => Ok(p),
+                t => Err(format!("{} gives {t}, not a number", show(&p))),
+            };
+        }
         match self.next() {
             Some(Tok::Num(n)) => Ok(Pipe::Num(n)),
             Some(Tok::Name(n)) => {
@@ -1566,6 +1670,9 @@ impl<'a> Parser<'a> {
                 }
                 if self.group_value(&n) {
                     return Err(format!("{n} is a group, not a number: read it with (size {n}) or a function of it, ({n} ...)"));
+                }
+                if let Some(t) = self.tuple_var(&n) {
+                    return Err(format!("{n} holds {t}, not a number: read a position with (index i {n})"));
                 }
                 let e = name_expr(&n)?;
                 Ok(e)
@@ -1741,13 +1848,14 @@ pub(crate) fn parse_statement(s: &str, toks: Option<Vec<Tok>>, defs: &Defs, top:
         p.locals = top.locals.clone();
         p.fns = top.fns.clone();
         p.input = top.value;
+        p.tuples = top.tuples.clone();
         let tops = p.statement()?;
         Ok((tops, p))
     };
     let (tops, p) = go().map_err(|e: String| hyphen_hint(e, s))?;
     used.extend(p.used);
     let value = top.value || tops.iter().any(|t| matches!(t.gives, Gives::Group) && starts_with_value(&t.pipe));
-    *top = TopNames { groups: p.groups, locals: p.locals, fns: p.fns, value };
+    *top = TopNames { groups: p.groups, locals: p.locals, fns: p.fns, value, tuples: p.tuples };
     Ok(tops)
 }
 

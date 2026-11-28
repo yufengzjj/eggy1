@@ -1,0 +1,295 @@
+# Tuples: construction, nested tuples, index on tuples and on groups, print.
+t = (1, 2 + 3)
+(print t)
+u = ((parse "x + y"), (t, "text"), 7)
+(print u)
+(print (index 0 u) (index 1 (index 1 u)) (index 2 u))
+(print ((index 1 t) * 2))
+g = ((parse "x") | (union id (parse "y")))
+n = 1
+(print (size (index n g)) (size (index 0 g)))
+(index 1 u)
+
+# expect stderr: (1, 5)
+# expect stderr: ((x + y), ((1, 5), text), 7)
+# expect stderr: (x + y) text 7
+# expect stderr: 10
+# expect stderr: 1 1
+# expect value: ((1, 5), text)
+
+# ---
+# A position past the end is an error when the program is read.
+t = (1, 2)
+(print (index 2 t))
+
+# expect error: (index 2 t) is out of range: (num, num) has positions 0 to 1
+
+# ---
+# The position of a tuple is a number written out.
+t = (1, 2)
+n = 0
+(print (index n t))
+
+# expect error: (index n t): a position of a tuple is a number written out, as in (index 0 t), since each position has its own type (t is (num, num))
+
+# ---
+# Destructuring binds each name by the type of its position.
+f:term->num = size
+(r, k) = ((parse "x + y"), 3)
+(h, ab) = (f, (k + 1, 9))
+(a, b) = ab
+(print r k a b)
+(print (h (main r)))
+(c, d) = (1, (2, 3))
+(e, w) = d
+e + w + c
+
+# expect stderr: (x + y) 3 4 9
+# expect stderr: 3
+# expect value: 6
+
+# ---
+# Destructuring takes as many names as the tuple has positions.
+(a, b) = (1, 2, 3)
+
+# expect error: (a, b) = (1, 2, 3) binds 2 names, but (1, 2, 3) is (num, num, num), which has 3 positions
+
+# ---
+# A name already bound as another kind of variable cannot take a position of another type.
+g = (parse "x")
+(n, g) = (1, 2)
+
+# expect error: g is a group variable, so it cannot hold position 1 of (1, 2), which is num
+
+# ---
+# A variable holds a number, a group, a function or a tuple, not a text.
+(a, b) = (1, "text")
+
+# expect error: b would hold position 1 of (1, "text"), which is text: a variable holds a number, a group, a function or a tuple
+
+# ---
+# A tuple variable holds a tuple only.
+(def (f) t = (1, 2) | t = 3)
+
+# expect error: t is a tuple variable, so it cannot hold a number: 3 gives a number
+
+# ---
+# Functions that take and give tuples, their parameter types inferred.
+(def (mk n) (n + 1, n))
+(def (swap t:(num, num)) ((index 1 t), (index 0 t)))
+(def (sum t:(num, num)) (index 0 t) + (index 1 t))
+(def (swap2 u) (swap u))
+(def (twice_sum u) (sum u) * 2)
+(print mk swap swap2)
+(print (mk 4) (swap (mk 4)) (swap2 (swap (mk 4))) (sum (mk 4)) (twice_sum (mk 1)))
+(print ((3, 4) | sum) ((mk 2) | swap | sum))
+s = (swap (5, 6))
+(sum s)
+
+# expect stderr: (mk n:num) (num, num) (swap t:(num, num)) (num, num) (swap2 u:(num, num)) (num, num)
+# expect stderr: (5, 4) (4, 5) (5, 4) 9 6
+# expect stderr: 7 5
+# expect value: 11
+
+# ---
+# A tuple goes from a step to the next one that takes it: (index i), or a function whose
+# last parameter takes that tuple.
+(def (pair n:num g:group) (g, n))
+(def (snd t:(group, num)) (index 1 t))
+(print pair)
+p = (parse "x + y")
+(print (p | (pair 3) | snd))
+p | (pair 4) | (index 0) | main | show
+
+# expect stderr: (pair n:num g:group) (group, num)
+# expect stderr: 3
+# expect value: (x + y)
+
+# ---
+# A position may hold a function value; a tuple parameter may hold one too.
+(def (score fs:(term->num, num)) (h, k) = fs | (filter (h <= k)))
+f:term->num = size
+fs = (f, 1)
+(print fs)
+(print score)
+(parse "x + y") | (union id (parse "x")) | (score fs)
+
+# expect stderr: (term->num, 1)
+# expect stderr: (score fs:(term->num, num) g:group) group
+# expect value: group [(Var "x")]
+
+# ---
+# A tuple fits only a step that takes a tuple of its type.
+(def (pair n:num g:group) (g, n))
+(def (fst t:(num, num)) (index 0 t))
+(parse "x") | (pair 3) | fst
+
+# expect error: fst takes t:(num, num): (fst t:(num, num)) num; (pair 3) gives (group, num)
+
+# ---
+(def (pair n:num g:group) (g, n))
+(parse "x") | (pair 3) | main
+
+# expect error: (pair 3) gives (group, num); main takes g:group
+
+# ---
+(def (pair n:num g:group) (g, n))
+n = 1
+(parse "x") | (pair 3) | (index n)
+
+# expect error: (pair 3) | (index n): a position of a tuple is a number written out, as in (index 0), since each position has its own type ((pair 3) is (group, num))
+
+# ---
+(1, 2) | (print "a tuple goes to a step that takes it")
+
+# expect stderr: a tuple goes to a step that takes it
+# expect value: (1, 2)
+
+# ---
+# After a step, a tuple that reads no input is a value of its own: the value before is dropped.
+(def (f) id | (1, 2))
+(parse "x") | f
+
+# expect warning: f: (1, 2) does not use its input; the value of the step before is dropped
+# expect value: (1, 2)
+
+# ---
+# A function that gives a tuple is a run of its own.
+(def @inline (pair n:num) (n, n))
+
+# expect error: def @inline (pair n): a function that gives a tuple is a run of its own, so it cannot be @inline or a let
+
+# ---
+# A parameter written alone in a position gets its type from its other uses, also later ones.
+(def (twin n) (n, n + 1))
+(def (swap t:(num, num)) ((index 1 t), (index 0 t)))
+(def (sw2 u) (u, (swap u)))
+(def (wrap r) (r, (size (main r))))
+(def (lit u) (swap (u, 3)))
+(print twin sw2 lit)
+(print (twin 4) (sw2 (1, 2)) (lit 7))
+(wrap (parse "x + y"))
+
+# expect stderr: (twin n:num) (num, num) (sw2 u:(num, num)) ((num, num), (num, num)) (lit u:num) (num, num)
+# expect stderr: (4, 5) ((1, 2), (2, 1)) (3, 7)
+# expect value: (group [(Add (Var "x") (Var "y"))], 3)
+
+# ---
+# A parameter written alone in a position and nowhere else has no type to infer.
+(def (wrap u) (u, 1))
+
+# expect error: def (wrap u): cannot infer the type of u in wrap: write u:TYPE
+
+# ---
+(def (wrap u) (index 0 (u, 1)))
+
+# expect error: def (wrap u): cannot infer the type of u in wrap: write u:TYPE
+
+# ---
+# A step with no value passes a tuple on to the next step.
+(def (mk n) (n + 1, n))
+(def (swap t:(num, num)) ((index 1 t), (index 0 t)))
+(def (sum t:(num, num)) (index 0 t) + (index 1 t))
+(def (f a) (mk a) | (print "made" a) | k = a * 2 | (assert (k > 0) "positive") | swap)
+(print f)
+(print (f 3))
+(mk 2) | (print "a") | n = 5 | (on lowbits) | (print n) | sum
+
+# expect stderr: (f a:num) (num, num)
+# expect stderr: made 3
+# expect stderr: (3, 4)
+# expect stderr: a
+# expect stderr: 5
+# expect value: 5
+
+# ---
+# The steps between run after the tuple, in the scope of the sequence they are written in.
+(def (mk n) (n + 1, n))
+(def (swap t:(num, num)) ((index 1 t), (index 0 t)))
+keep = 2
+t = ((mk 1) | keep = 7 | (print "inside" keep) | swap)
+(print t keep)
+(c, d) = ((1, 2) | (print "unpack"))
+(print c d (index 1 ((mk 8) | (print "index"))))
+(mk 3) | keep = 5 | (index 0)
+keep
+
+# expect stderr: inside 7
+# expect stderr: (1, 2) 2
+# expect stderr: unpack
+# expect stderr: index
+# expect stderr: 1 2 8
+# expect value: 5
+
+# ---
+# A step that passes a tuple on gives it as the input of its arguments, which take a term or a group.
+(def (pair n:num g:group) (g, n))
+(parse "x") | (pair 2) | (print size)
+
+# expect error: size takes t:term?; its input here is a tuple: (size t:term?) num
+
+# ---
+(def (pair n:num g:group) (g, n))
+(parse "x") | (pair 2) | n = (size * 2)
+
+# expect error: size takes t:term?; its input here is a tuple: (size t:term?) num
+
+# ---
+(def (pair n:num g:group) (g, n))
+(parse "x") | (pair 3) | (print "x") | main
+
+# expect error: (pair 3) gives (group, num); main takes g:group
+
+# ---
+# A @timed function that gives the tuple its last parameter takes; past the time limit a call
+# gives that tuple.
+(def @timed (bump t:(num, num)) ((index 0 t) + 1, (index 1 t)))
+(print bump)
+(print (bump (1, 2)) ((5, 6) | bump | bump))
+(print ((3, 4) | time_limit = 0 | bump))
+(bump (7, 8))
+
+# expect stderr: (bump t:(num, num)) (num, num)
+# expect stderr: (2, 2) (7, 6)
+# expect stderr: (3, 4)
+# expect value: (8, 8)
+
+# ---
+(def @timed (mk n:num) (n, n))
+
+# expect error: def (mk n): @timed is for a function that gives what it takes, which a call past the time limit gives instead: a group, or the tuple its last parameter takes
+
+# ---
+(def @timed (pair n:num g:group) (g, n))
+
+# expect error: def (pair n g): @timed is for a function that gives what it takes, which a call past the time limit gives instead: a group, or the tuple its last parameter takes
+
+# ---
+# A function written alone in a position is applied to the step's input, each position to the
+# same input; at the top level before any value it is the function value.
+(print (size, 1))
+t = (parse "x + y")
+(print (t | main | (size, mul)))
+(print (t | ((size main) + 1, (mul main), id, "a")))
+t | main | (size, (depth, show))
+
+# expect stderr: (term->num, 1)
+# expect stderr: (3, 0)
+# expect stderr: (4, 0, (x + y), a)
+# expect value: (3, (1, (x + y)))
+
+# ---
+# Where a function type is taken, a function written alone is the function value.
+(def (score fs:(term->num, num)) (h, k) = fs | (filter (h <= k)))
+(parse "x + y") | (union id (parse "x")) | (score (size, 1))
+
+# expect value: group [(Var "x")]
+
+# ---
+# A tuple step uses its input when a position does.
+(def (f) main | (size, 1))
+(print f)
+(parse "x") | main | f
+
+# expect stderr: (f g:group) (num, num)
+# expect value: (1, 1)

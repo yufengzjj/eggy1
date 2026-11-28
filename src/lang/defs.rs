@@ -1,7 +1,7 @@
 //! Definitions: `(let NAME p)` and `(def ...)`, the functions they define, the types of their
 //! parameters inferred from the body, and their calls with the arguments put in place.
 
-use super::ast::{Expanded, Fun, Holds, Pipe, Slot, WIDTH, piped, pretty_at, show, show_expr, starts_with_value};
+use super::ast::{Expanded, Fun, Holds, Pipe, Slot, WIDTH, piped, pretty_at, show, show_expr, starts_with_value, value_ty};
 use super::builtins::{MACROS, get, resolve};
 use super::host::{self, INNER};
 use super::lexer::{Tok, lex};
@@ -40,6 +40,9 @@ pub struct Def {
     /// The input `value` reads where it is not written, so that a call takes it implicitly
     /// (`(def (under k) size <= k)`).
     pub implicit: Option<super::types::Ty>,
+    /// The type of the tuple the body gives (`body` then is that tuple or a pipeline that ends
+    /// in one); `None` for a function that gives a group or a number.
+    pub tuple: Option<super::types::Ty>,
     /// `@timed`: a call past the time limit is skipped and gives its input.
     pub timed: bool,
     /// The position in `Passes::defs`, which a later definition of the name takes over; a call
@@ -55,7 +58,7 @@ impl Def {
 
     /// Whether a run of its body alone is a call: no parameters, no input, candidates.
     pub fn bare(&self) -> bool {
-        self.params.is_empty() && self.input.is_none() && self.value.is_none()
+        self.params.is_empty() && self.input.is_none() && self.value.is_none() && self.tuple.is_none()
     }
 
     /// Whether a parameter is a name, which a call puts in place in its own copy of the body;
@@ -66,7 +69,7 @@ impl Def {
 
     /// The group variables bound when the body starts: the group parameters and the input.
     pub fn bound(&self) -> Vec<String> {
-        let groups = self.params.iter().filter(|p| matches!(p.ty, super::types::Ty::Group | super::types::Ty::Term)).map(|p| p.name.clone());
+        let groups = self.params.iter().filter(|p| matches!(p.ty, super::types::Ty::Group | super::types::Ty::Term | super::types::Ty::Tuple(_))).map(|p| p.name.clone());
         groups.chain(self.input.clone()).collect()
     }
 }
@@ -167,6 +170,8 @@ pub struct Definition {
     /// The input a body that gives a number reads where it is not written (`size <= k`), so
     /// that the function takes it implicitly.
     pub implicit: Option<Ty>,
+    /// The type of the tuple the body gives.
+    pub tuple: Option<Ty>,
     /// `@timed`.
     pub timed: bool,
     /// Warnings of reading it.
@@ -304,6 +309,9 @@ pub fn sig_of(d: &Def) -> Sig {
     if d.value.is_some() {
         sig.result = Ty::Num;
     }
+    if let Some(t) = &d.tuple {
+        sig.result = t.clone();
+    }
     if let Some(t) = &d.implicit {
         let name = d.input.clone().unwrap_or_else(|| if *t == Ty::Term { "t".into() } else { "g".into() });
         sig.input = Some(Param { name, ty: t.clone(), rep: Rep::One });
@@ -358,14 +366,11 @@ fn head(p: &mut Parser, s: &str) -> Result<Head, String> {
                 let n = p.name(&format!("a parameter name or ) in (def ({name} ...)"))?;
                 let ty = if p.peek() == Some(&Tok::Colon) {
                     p.at += 1;
-                    let mut t = p.name("a type after :")?;
-                    while p.peek() == Some(&Tok::Arrow) {
-                        p.at += 1;
-                        t = format!("{t}->{}", p.name("a type after ->")?);
-                    }
+                    let t = p.type_text()?;
                     match Ty::parse(&t) {
                         Ok(ty) if matches!(ty, Ty::Fn(..)) && !ty.is_function() => return Err(format!("type {t} of parameter {n}: a function takes one input, term or group, and gives num, term, term? or group")),
                         Ok(ty) if !matches!(ty, Ty::MaybeTerm | Ty::Text | Ty::Any) => Some(ty),
+                        Err(e) if t.contains('(') => return Err(format!("type {t} of parameter {n}: {e}")),
                         _ => return Err(format!("unknown type {t} of parameter {n}; known: pipe group term num name, and A->B as in term->num")),
                     }
                 } else {
@@ -397,11 +402,25 @@ pub(crate) fn declared(h: &Head, slot: usize) -> Option<Def> {
         return None;
     }
     let params: Vec<Param> = h.params.iter().zip(&h.types).map(|(n, t)| Param { name: n.clone(), ty: t.clone().unwrap(), rep: Rep::One }).collect();
-    Some(Def { name: h.name.clone(), params, body: Arc::new(Pipe::id()), inline: false, flat: false, input: None, step: true, steps: false, value: None, implicit: None, timed: h.timed, slot: Some(slot) })
+    Some(Def { name: h.name.clone(), params, body: Arc::new(Pipe::id()), inline: false, flat: false, input: None, step: true, steps: false, value: None, implicit: None, tuple: None, timed: h.timed, slot: Some(slot) })
 }
 
 fn definition(s: &str, toks: Option<Vec<Tok>>, defs: &Defs, used: &mut Vec<String>) -> Result<Definition, String> {
-    let mut p = Parser::new(toks.map_or_else(|| lex(s), Ok)?, defs);
+    let toks = toks.map_or_else(|| lex(s), Ok)?;
+    let mut known: Vec<(String, Ty)> = Vec::new();
+    loop {
+        match definition_with(s, toks.clone(), defs, used, &known)? {
+            Ok(d) => return Ok(d),
+            Err(more) => known.extend(more),
+        }
+    }
+}
+
+/// `definition` with the types `known` of the parameters written alone in a position of a
+/// tuple, which the reading before inferred; `Err` gives the types of more such parameters,
+/// for a reading again.
+fn definition_with(s: &str, toks: Vec<Tok>, defs: &Defs, used: &mut Vec<String>, known: &[(String, Ty)]) -> Result<Result<Definition, Vec<(String, Ty)>>, String> {
+    let mut p = Parser::new(toks, defs);
     let Head { mut kind, name, params, types, timed } = head(&mut p, s)?;
     let head: String = std::iter::once(name.as_str()).chain(params.iter().map(String::as_str)).collect::<Vec<_>>().join(" ");
     let what = match kind {
@@ -431,72 +450,106 @@ fn definition(s: &str, toks: Option<Vec<Tok>>, defs: &Defs, used: &mut Vec<Strin
         }
     }
     p.params = params.into_iter().zip(types).map(|(name, ty)| ParamUse { name, annotated: ty.is_some(), ty, uses: 0 }).collect();
+    for (n, t) in known {
+        if let Some(i) = p.param(n) {
+            p.params[i].ty = Some(t.clone());
+        }
+    }
     // A definition of a function that gives a group again reads a pipeline of them.
     let candidates = defs.get(&name).and_then(|d| d.def.as_ref()).is_some_and(|d| d.value.is_none());
-    let start = p.at;
-    let mut value = match kind != DefKind::Let && !candidates && p.expr_ahead() {
-        true => {
-            let e = p.or()?;
-            kind = DefKind::Run;
-            Some(e)
-        }
-        false => None,
-    };
-    if value.is_some() && p.peek() == Some(&Tok::Bar) {
-        // Read again as a pipeline, whose error names the number before `|`.
-        p.at = start;
-        p.pipe()?;
-    }
-    let implicit = value.as_ref().and_then(|e| p.input_ty(e));
-    let lead = value.is_none() && matches!((p.peek(), p.params.last()), (Some(Tok::Name(n)), Some(u)) if *n == u.name && matches!(u.ty, None | Some(Ty::Term | Ty::Group))) && matches!(p.toks.get(p.at + 1), Some(Tok::Bar | Tok::Close));
-    let (mut pipe, flat, tail, lead) = match value {
-        Some(_) => (Pipe::id(), false, None, None),
-        None if lead => {
-            let g = p.name("a parameter")?;
-            p.count_param(&g);
-            let first = vec![group(g.clone())];
-            let (stages, tail) = if p.peek() == Some(&Tok::Close) { (first, None) } else { p.stages_after(first)? };
-            if let (true, Some(e)) = (candidates, &tail) {
-                return Err(format!("{} | {} gives a number, not a group: a pipeline that ends in a number goes where a number does, as in x = (a | size)", show(&seq_of(stages)), show_expr(e, 1)));
+    let mut read = || -> Result<_, String> {
+        let start = p.at;
+        let value = match kind != DefKind::Let && !candidates && p.expr_ahead() {
+            true => {
+                let e = p.or()?;
+                kind = DefKind::Run;
+                Some(e)
             }
-            let flat = !candidates && kind != DefKind::Run && stages.len() > 1;
-            (seq_of(stages), flat, tail, Some(g))
+            false => None,
+        };
+        if value.is_some() && p.peek() == Some(&Tok::Bar) {
+            // Read again as a pipeline, whose error names the number before `|`.
+            p.at = start;
+            p.pipe()?;
         }
-        None if candidates => (p.pipe()?, false, None, None),
-        None => {
-            let (stages, tail) = p.stages_of_pipe()?;
-            let flat = kind != DefKind::Run && stages.len() > 1;
-            (seq_of(stages), flat, tail, None)
+        let implicit = value.as_ref().and_then(|e| p.input_ty(e));
+        let lead = value.is_none() && matches!((p.peek(), p.params.last()), (Some(Tok::Name(n)), Some(u)) if *n == u.name && matches!(u.ty, None | Some(Ty::Term | Ty::Group))) && matches!(p.toks.get(p.at + 1), Some(Tok::Bar | Tok::Close));
+        let (pipe, flat, tail, lead) = match value {
+            Some(_) => (Pipe::id(), false, None, None),
+            None if lead => {
+                let g = p.name("a parameter")?;
+                p.count_param(&g);
+                let first = vec![group(g.clone())];
+                let (stages, tail) = if p.peek() == Some(&Tok::Close) { (first, None) } else { p.stages_after(first)? };
+                if let (true, Some(e)) = (candidates, &tail) {
+                    return Err(format!("{} | {} gives a number, not a group: a pipeline that ends in a number goes where a number does, as in x = (a | size)", show(&seq_of(stages)), show_expr(e, 1)));
+                }
+                let flat = !candidates && kind != DefKind::Run && stages.len() > 1;
+                (seq_of(stages), flat, tail, Some(g))
+            }
+            None if candidates => (p.pipe()?, false, None, None),
+            None => {
+                let (stages, tail) = p.stages_of_pipe()?;
+                let flat = kind != DefKind::Run && stages.len() > 1;
+                (seq_of(stages), flat, tail, None)
+            }
+        };
+        p.expect(Tok::Close, ")")?;
+        p.end()?;
+        let whole = tail.as_ref().map(|e| number_seq(pipe.clone(), e.clone()));
+        let body = match (&value, &whole) {
+            (Some(v), _) => (None, Some(v)),
+            (None, Some(w)) => (None, Some(w)),
+            (None, None) => (Some(&pipe), None),
+        };
+        super::infer::solve(&mut p.params, &what, &name, body.0, body.1, implicit == Some(Ty::Term), lead.as_deref())?;
+        Ok((pipe, flat, tail, lead, value, implicit))
+    };
+    let read = read();
+    // A parameter written alone in a position of a tuple gives the tuple its type, which its
+    // other uses infer: the definition is read again with it.
+    if !p.holes.is_empty() {
+        let mut more = Vec::new();
+        for n in std::mem::take(&mut p.holes) {
+            match p.param(&n).and_then(|i| p.params[i].ty.clone()) {
+                Some(t) if !more.iter().any(|(m, _)| *m == n) => more.push((n, t)),
+                Some(_) => {}
+                None => return Err(format!("{what}: cannot infer the type of {n} in {name}: write {n}:TYPE")),
+            }
         }
+        return Ok(Err(more));
+    }
+    let (mut pipe, flat, tail, lead, mut value, implicit) = read?;
+    let tuple = value_ty(&pipe).filter(|t| value.is_none() && tail.is_none() && t.positions().is_some());
+    if tuple.is_some() && kind != DefKind::Run {
+        return Err(format!("{what}: a function that gives a tuple is a run of its own, so it cannot be @inline or a let"));
+    }
+    let implicit = match &tuple {
+        Some(_) => p.tuple_reads(&pipe).then_some(Ty::Group),
+        None => implicit,
     };
-    p.expect(Tok::Close, ")")?;
-    p.end()?;
-    let whole = tail.as_ref().map(|e| number_seq(pipe.clone(), e.clone()));
-    let body = match (&value, &whole) {
-        (Some(v), _) => (None, Some(v)),
-        (None, Some(w)) => (None, Some(w)),
-        (None, None) => (Some(&pipe), None),
-    };
-    super::infer::solve(&mut p.params, &what, &name, body.0, body.1, implicit == Some(Ty::Term), lead.as_deref())?;
     let starts = starts_with_value(&pipe);
     // The last parameter is the input where it is a group the body starts from or reads.
     let input = match p.params.last() {
-        Some(u) if (value.is_some() || starts) && u.ty == Some(Ty::Group) || lead.is_some() => Some(u.name.clone()),
+        Some(u) if (value.is_some() || tuple.is_some() || starts) && u.ty == Some(Ty::Group) || lead.is_some() => Some(u.name.clone()),
         _ => None,
     };
     let implicit = match p.params.last().and_then(|u| u.ty.clone()) {
         Some(Ty::Term) if lead.is_some() => Some(Ty::Term),
         _ => implicit.filter(|_| input.is_none()),
     };
-    let step = input.is_some() || value.is_none() && !starts || implicit.is_some();
+    let step = input.is_some() || value.is_none() && tuple.is_none() && !starts || implicit.is_some();
     if let Some(e) = tail {
         if kind != DefKind::Run {
             return Err(format!("{what}: a function that gives a number is a run of its own, so it cannot be @inline or a let"));
         }
         value = Some(number_seq(std::mem::replace(&mut pipe, Pipe::id()), e));
     }
-    if timed && value.is_some() {
-        return Err(format!("{what}: @timed is for a function that gives a group, which a call past the time limit skips"));
+    // A call skipped past the time limit gives what it takes: its group input, or the tuple
+    // its last parameter takes.
+    let takes_tuple = tuple.is_some() && p.params.last().and_then(|u| u.ty.as_ref()) == tuple.as_ref();
+    if timed && (value.is_some() || tuple.is_some() && !takes_tuple) {
+        return Err(format!("{what}: @timed is for a function that gives what it takes, which a call past the time limit gives instead: a group, or the tuple its last parameter takes"));
     }
     let mut params = std::mem::take(&mut p.params);
     if input.is_some() {
@@ -505,13 +558,16 @@ fn definition(s: &str, toks: Option<Vec<Tok>>, defs: &Defs, used: &mut Vec<Strin
     if kind == DefKind::Inline && params.iter().any(|u| u.ty == Some(Ty::Term)) {
         return Err(format!("{what}: a term parameter is for a def that runs, not @inline"));
     }
+    if kind == DefKind::Inline && params.iter().any(|u| u.ty.as_ref().is_some_and(|t| t.positions().is_some())) {
+        return Err(format!("{what}: a tuple parameter is for a def that runs, not @inline"));
+    }
     let notes = Vec::new();
     let params: Vec<Param> = params.into_iter().map(|u| Param { name: u.name, ty: u.ty.expect("solve gives every parameter its type"), rep: Rep::One }).collect();
     if kind == DefKind::Run {
         super::flow::body_of(&params, input.as_deref(), implicit.as_ref(), value.as_ref(), &pipe).map_err(|e| format!("{name}: {e}"))?;
     }
     used.extend(p.used);
-    Ok(Definition { name, kind, params, pipe, flat, input, step, value, implicit, timed, notes })
+    Ok(Ok(Definition { name, kind, params, pipe, flat, input, step, value, implicit, tuple, timed, notes }))
 }
 
 /// The signature of a function `(def (NAME PARAM ...) p)`: its parameters, then the
@@ -671,6 +727,15 @@ impl<'s> Subst<'s> {
                 None if m.is_call() => Pipe::Expanded(Box::new(Expanded { args: all(&m.args)?, steps: all(&m.steps)?, ..(**m).clone() })),
                 None => smallest(self.pipe(&m.args[0])?),
             },
+            Pipe::Tuple(ps) => Pipe::Tuple(ps.iter().map(|(q, t)| Ok((self.pipe(q)?, t.clone()))).collect::<Result<Vec<_>, String>>()?.into()),
+            Pipe::Index(q, i) => Pipe::Index(Arc::new(self.pipe(q)?), *i),
+            Pipe::Unpack(slots, q) => {
+                let slots = slots.iter().map(|x| match x {
+                    Slot::Local(n, Holds::Group) => Slot::Local(self.name(n), Holds::Group),
+                    x => x.clone(),
+                });
+                Pipe::Unpack(slots.collect(), Arc::new(self.pipe(q)?))
+            }
             Pipe::Bind(Slot::Local(n, Holds::Group), q) => Pipe::Bind(Slot::Local(self.name(n), Holds::Group), Arc::new(self.pipe(q)?)),
             Pipe::Bind(x, q) => Pipe::Bind(x.clone(), Arc::new(self.pipe(q)?)),
             Pipe::FnValue(q) => Pipe::FnValue(Arc::new(self.pipe(q)?)),

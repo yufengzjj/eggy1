@@ -4,7 +4,7 @@
 //! element written (`(size main)`). The same walk infers the types of a function's parameters
 //! (`infer`), where a value whose type is not known yet takes the type of the input it goes to.
 
-use super::ast::{Fun, Holds, Pipe, Slot, show_expr};
+use super::ast::{Fun, Holds, Pipe, Slot, show_expr, value_ty};
 use super::builtins::Builtin;
 use super::defs::Def;
 use super::infer::Infer;
@@ -34,6 +34,7 @@ pub(crate) enum Flow {
     One,
     Num,
     Text,
+    Tuple,
     /// Not known where it is read (a parameter's argument, a function variable).
     Unknown,
     /// No input: the top level of a program before a step gives a value.
@@ -59,6 +60,7 @@ fn needs(input: Flow, f: &Fun) -> Result<(), String> {
         Flow::None => "",
         Flow::Num => "a number",
         Flow::Text => "a text",
+        Flow::Tuple => "a tuple",
         _ => return Ok(()),
     };
     let (n, s) = match f {
@@ -71,6 +73,12 @@ fn needs(input: Flow, f: &Fun) -> Result<(), String> {
         Some(i) if matches!(i.ty, Ty::Group | Ty::Term | Ty::MaybeTerm) => Err(format!("{n} takes {i}; its input here is {given}: {s}")),
         _ => Ok(()),
     }
+}
+
+/// Whether the call of `c` with `args` lacks only its last parameter, a tuple, which the step
+/// before gives.
+fn takes_tuple(c: &super::defs::Call, args: &[Pipe]) -> bool {
+    args.len() + 1 == c.def.params.len() && c.def.params.last().is_some_and(|p| p.ty.positions().is_some())
 }
 
 /// The input type of `b`, `None` for a function without one.
@@ -117,6 +125,7 @@ pub(crate) fn step(cx: &mut Infer, p: &Pipe, input: Flow) -> Result<Flow, String
             match b.sig.kind() {
                 Kind::Each | Kind::Alt if input == Flow::One => Flow::One,
                 Kind::Pick => Flow::One,
+                Kind::Tuple => Flow::Tuple,
                 Kind::Effect => input,
                 // These give their input, or part of it.
                 Kind::Group if matches!(b.name, "save" | "label" | "clear" | "note" | "id" | "filter" | "within" | "settle" | "pre_done") => input,
@@ -127,11 +136,48 @@ pub(crate) fn step(cx: &mut Infer, p: &Pipe, input: Flow) -> Result<Flow, String
             expr(cx, p, input)?;
             Flow::Num
         }
-        Pipe::App(f @ Fun::Def(c), args) => {
-            if c.def.step {
-                needs(input, f)?;
+        Pipe::App(f @ Fun::Def(c), args) if c.def.tuple.is_some() => {
+            let input = match takes_tuple(c, args) {
+                true => input,
+                false => {
+                    if c.def.step {
+                        needs(input, f)?;
+                    }
+                    cx.joint(input, &def_takes(&c.def))?
+                }
+            };
+            def_args(cx, c, args, input)?;
+            Flow::Tuple
+        }
+        Pipe::Tuple(ps) => {
+            positions(cx, ps, input)?;
+            Flow::Tuple
+        }
+        Pipe::Index(t, _) => {
+            step(cx, t, input)?;
+            match value_ty(p) {
+                Some(Ty::Group) => Flow::Group,
+                Some(Ty::Num) => Flow::Num,
+                Some(Ty::Text) => Flow::Text,
+                Some(Ty::Tuple(_)) => Flow::Tuple,
+                _ => Flow::Unknown,
             }
-            let input = cx.joint(input, &def_takes(&c.def))?;
+        }
+        Pipe::Unpack(_, e) | Pipe::Bind(Slot::Local(_, Holds::Tuple(_)), e) => {
+            step(cx, e, input)?;
+            input
+        }
+        Pipe::Var(Slot::Local(_, Holds::Tuple(_))) => Flow::Tuple,
+        Pipe::App(f @ Fun::Def(c), args) => {
+            let input = match takes_tuple(c, args) {
+                true => input,
+                false => {
+                    if c.def.step {
+                        needs(input, f)?;
+                    }
+                    cx.joint(input, &def_takes(&c.def))?
+                }
+            };
             def_args(cx, c, args, input)?;
             Flow::Group
         }
@@ -187,6 +233,7 @@ pub(crate) fn is_expr(p: &Pipe) -> bool {
         Pipe::App(Fun::Builtin(b), _) => b.sig.is_number(),
         Pipe::App(Fun::Op(..), _) | Pipe::Num(_) => true,
         Pipe::App(Fun::Def(c), _) => c.def.value.is_some(),
+        Pipe::Index(..) => value_ty(p) == Some(Ty::Num),
         Pipe::Var(Slot::Global(_) | Slot::Local(_, Holds::Num)) => true,
         Pipe::Var(Slot::Local(_, Holds::Fn(t))) => matches!(t, Ty::Fn(_, b) if **b == Ty::Num),
         _ => false,
@@ -228,6 +275,9 @@ pub(crate) fn expr(cx: &mut Infer, e: &Pipe, input: Flow) -> Result<(), String> 
                 Some(q) => step(cx, q, input)?,
                 None => input,
             };
+            if takes_tuple(c, args) {
+                return def_args(cx, c, args, input);
+            }
             if c.def.step || c.def.implicit.is_some() {
                 needs(own, f)?;
             }
@@ -239,8 +289,29 @@ pub(crate) fn expr(cx: &mut Infer, e: &Pipe, input: Flow) -> Result<(), String> 
         }
         Pipe::Var(Slot::Local(n, Holds::Fn(t))) if input == Flow::None => Err(format!("{n} has no input here: the top level of the program starts with none; it holds {t}")),
         Pipe::Var(Slot::Local(n, Holds::Fn(Ty::Fn(a, _)))) if input == Flow::Group && **a == Ty::Term => cx.fail(format!("{n} takes one term and its input here is a group: write the element, as in ({n} main)")),
+        Pipe::Index(t, _) => step(cx, t, input).map(|_| ()),
+        Pipe::Tuple(ps) => positions(cx, ps, input),
         _ => Ok(()),
     }
+}
+
+/// Checks the positions of a tuple evaluated on `input`: expressions, and steps whose groups
+/// the positions hold.
+fn positions(cx: &mut Infer, ps: &[(Pipe, Ty)], input: Flow) -> Result<(), String> {
+    for (q, t) in ps {
+        match t {
+            Ty::Num | Ty::Text => expr(cx, q, input)?,
+            Ty::Group => {
+                let gives = step(cx, q, input)?;
+                cx.result(gives, &Ty::Group)?;
+            }
+            Ty::Tuple(_) => {
+                step(cx, q, input)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// The error for `b` with `args` given a group where it takes one term.
@@ -302,6 +373,7 @@ fn arg(cx: &mut Infer, t: &Ty, a: &Pipe, input: Flow) -> Result<(), String> {
             let gives = step(cx, a, given(i))?;
             cx.result(gives, r)
         }
+        Ty::Tuple(_) => step(cx, a, input).map(|_| ()),
         _ => Ok(()),
     }
 }

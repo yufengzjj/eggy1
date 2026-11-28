@@ -18,6 +18,8 @@ pub enum Ty {
     Any,
     /// `A->B`, `A->B->C` being `A->(B->C)`.
     Fn(Box<Ty>, Box<Ty>),
+    /// `(A, B, ...)`: a tuple of two or more values, each position of its own type.
+    Tuple(Box<[Ty]>),
     /// The result of a function declared without one (`print`, `assert`): a step that gives it
     /// passes its input on.
     Nothing,
@@ -74,8 +76,25 @@ impl Ty {
         }
     }
 
-    /// Reads `num`, `pipe`, `term->num`, `term->group->num`, ...
+    /// The types of the positions of a tuple type.
+    pub fn positions(&self) -> Option<&[Ty]> {
+        match self {
+            Ty::Tuple(ts) => Some(ts),
+            _ => None,
+        }
+    }
+
+    /// Reads `num`, `pipe`, `term->num`, `term->group->num`, `(num, group)`, ...
     pub fn parse(s: &str) -> Result<Ty, String> {
+        if s.contains('(') {
+            let cs: Vec<char> = s.chars().filter(|c| !c.is_whitespace()).collect();
+            let mut at = 0;
+            let ty = Ty::parse_at(&cs, &mut at, s)?;
+            return match at == cs.len() {
+                true => Ok(ty),
+                false => Err(format!("unknown type {s}")),
+            };
+        }
         let unknown = |w: &str| format!("unknown type {w}; known: num term term? group name text any pipe, and A->B");
         let mut parts: Vec<&str> = s.split("->").collect();
         let atom = |w: &str| if w == "pipe" { Some(Ty::pipe()) } else { Ty::WORDS.iter().find(|(n, _)| *n == w).map(|(_, t)| t.clone()) };
@@ -90,6 +109,49 @@ impl Ty {
         Ok(ty)
     }
 
+    /// The type at `at` of `cs` (`s` without spaces): `A`, `A->B`, `(A)` or `(A, B, ...)`.
+    fn parse_at(cs: &[char], at: &mut usize, s: &str) -> Result<Ty, String> {
+        let first = match cs.get(*at) {
+            Some('(') => {
+                *at += 1;
+                let mut ts = vec![Ty::parse_at(cs, at, s)?];
+                while cs.get(*at) == Some(&',') {
+                    *at += 1;
+                    ts.push(Ty::parse_at(cs, at, s)?);
+                }
+                if cs.get(*at) != Some(&')') {
+                    return Err(format!("unknown type {s}"));
+                }
+                *at += 1;
+                match ts.len() {
+                    1 => ts.pop().unwrap(),
+                    _ => Ty::tuple(ts)?,
+                }
+            }
+            _ => {
+                let w: String = cs[*at..].iter().take_while(|c| c.is_ascii_alphanumeric() || **c == '_' || **c == '?').collect();
+                *at += w.len();
+                Ty::parse(&w)?
+            }
+        };
+        if cs.get(*at..*at + 2) != Some(&['-', '>']) {
+            return Ok(first);
+        }
+        *at += 2;
+        if first == Ty::MaybeTerm {
+            return Err(format!("term? is only a result, in {s}"));
+        }
+        Ok(Ty::Fn(Box::new(first), Box::new(Ty::parse_at(cs, at, s)?)))
+    }
+
+    /// The tuple type of `ts`: positions hold numbers, groups, texts, functions or tuples.
+    pub fn tuple(ts: Vec<Ty>) -> Result<Ty, String> {
+        if let Some(t) = ts.iter().find(|t| !(matches!(t, Ty::Num | Ty::Group | Ty::Text | Ty::Tuple(_)) || t.is_function())) {
+            return Err(format!("a tuple holds numbers, groups, texts, functions and tuples, not {t}"));
+        }
+        Ok(Ty::Tuple(ts.into()))
+    }
+
     /// What an argument of this type is, for messages.
     pub(crate) fn what(&self) -> &'static str {
         match self {
@@ -100,6 +162,7 @@ impl Ty {
             Ty::Name => "a name",
             Ty::Text => "a text",
             Ty::Any => "a value",
+            Ty::Tuple(_) => "a tuple",
             _ => "a term",
         }
     }
@@ -111,6 +174,7 @@ impl fmt::Display for Ty {
             _ if self.is_pipe() => write!(f, "pipe"),
             Ty::Fn(a, b) if matches!(**a, Ty::Fn(..)) && !a.is_pipe() => write!(f, "({a})->{b}"),
             Ty::Fn(a, b) => write!(f, "{a}->{b}"),
+            Ty::Tuple(ts) => write!(f, "({})", ts.iter().map(Ty::to_string).collect::<Vec<_>>().join(", ")),
             Ty::Nothing => Ok(()),
             t => write!(f, "{}", Ty::WORDS.iter().find(|(_, w)| w == t).unwrap().0),
         }
@@ -164,6 +228,8 @@ pub enum Kind {
     FromText,
     /// `term -> text`: a text of one candidate.
     TermText,
+    /// `group -> (A, B, ...)` or `term -> (A, B, ...)`: a tuple.
+    Tuple,
     /// An operator: no input, every operand written.
     Op,
     /// No input and no result (`print`, `assert`): run for what it does, the input passing on.
@@ -171,7 +237,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [(Kind, &'static str); 11] = [
+    pub const ALL: [(Kind, &'static str); 12] = [
         (Kind::Group, "on the whole group (group -> group)"),
         (Kind::Each, "on each element (term -> term)"),
         (Kind::Alt, "alternatives, on each element, none when no form is found (term -> term?)"),
@@ -181,6 +247,7 @@ impl Kind {
         (Kind::Pick, "one element of the group, or none (group -> term?)"),
         (Kind::FromText, "a group read from a text (text -> group)"),
         (Kind::TermText, "texts of one term (term -> text)"),
+        (Kind::Tuple, "tuples (group -> (A, B, ...))"),
         (Kind::Op, "operators, written between their operands (! before its one)"),
         (Kind::Effect, "no result: run for what they do, the input passing on"),
     ];
@@ -196,6 +263,7 @@ impl Kind {
             (Ty::Group, Ty::MaybeTerm) => Kind::Pick,
             (Ty::Text, Ty::Group) => Kind::FromText,
             (Ty::Term | Ty::MaybeTerm, Ty::Text) => Kind::TermText,
+            (Ty::Term | Ty::Group, Ty::Tuple(_)) => Kind::Tuple,
             _ => return None,
         })
     }
@@ -333,6 +401,9 @@ mod tests {
             ("pipe->num", "pipe->num"),
             ("term->term?", "term->term?"),
             ("group->group->group", "group->pipe"),
+            ("(num,group)", "(num, group)"),
+            ("(num, (group, text), term->num)", "(num, (group, text), term->num)"),
+            ("(term->num)->num", "(term->num)->num"),
         ] {
             let t = Ty::parse(s).unwrap();
             assert_eq!(t.to_string(), shown, "{s}");
@@ -342,7 +413,7 @@ mod tests {
         assert_eq!(curried, Ty::Fn(Box::new(Ty::Term), Box::new(Ty::Fn(Box::new(Ty::Group), Box::new(Ty::Num)))));
         assert_eq!(Ty::Fn(Box::new(Ty::parse("term->num").unwrap()), Box::new(Ty::Num)).to_string(), "(term->num)->num");
         assert!(Ty::parse("pipe").unwrap().is_pipe() && Ty::parse("term->num").unwrap().is_expr() && !Ty::parse("term->term").unwrap().is_expr());
-        for (bad, msg) in [("int", "unknown type int"), ("term->", "unknown type term->"), ("->num", "unknown type ->num"), ("term?->num", "term? is only a result")] {
+        for (bad, msg) in [("int", "unknown type int"), ("term->", "unknown type term->"), ("->num", "unknown type ->num"), ("term?->num", "term? is only a result"), ("(num, term)", "a tuple holds"), ("(num, group", "unknown type (num, group"), ("(num, int)", "unknown type int")] {
             let e = Ty::parse(bad).unwrap_err();
             assert!(e.contains(msg), "{bad}: {e}");
         }

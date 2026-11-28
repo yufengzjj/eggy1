@@ -145,6 +145,7 @@ pub(crate) struct Uses {
 const GROUP: &str = "group variable";
 const NUMBER: &str = "number variable";
 const FUNCTION: &str = "function variable";
+const TUPLE: &str = "tuple variable";
 
 impl Uses {
     fn walk(&mut self, p: &Pipe) {
@@ -167,7 +168,26 @@ impl Uses {
                 self.expr(e);
                 self.bound_as(r, NUMBER);
             }
+            Pipe::Bind(Slot::Local(r, Holds::Tuple(_)), e) => {
+                self.walk(e);
+                self.bound_as(r, TUPLE);
+            }
             Pipe::Bind(_, v) => self.expr(v),
+            Pipe::Var(Slot::Local(r, Holds::Tuple(_))) if r != super::ast::INPUT => self.read_as(r, TUPLE),
+            Pipe::Tuple(ps) => self.positions(ps),
+            Pipe::Index(t, _) => self.walk(t),
+            Pipe::Unpack(slots, e) => {
+                self.walk(e);
+                for x in slots.iter() {
+                    match x {
+                        Slot::Local(r, Holds::Group) => self.bound(r),
+                        Slot::Local(r, Holds::Num) => self.bound_as(r, NUMBER),
+                        Slot::Local(r, Holds::Fn(_)) => self.bound_as(r, FUNCTION),
+                        Slot::Local(r, Holds::Tuple(_)) => self.bound_as(r, TUPLE),
+                        x => unreachable!("{x:?} is not a local variable"),
+                    }
+                }
+            }
             Pipe::Seq(ps) => self.seq(ps),
             Pipe::Expanded(m) if m.switch_names().is_some() => {}
             Pipe::Expanded(m) if m.is_call() => m.steps.iter().for_each(|q| self.walk(q)),
@@ -184,6 +204,16 @@ impl Uses {
             }
             Pipe::Var(Slot::Param(..)) => {}
             e => self.expr(e),
+        }
+    }
+
+    /// The positions of a tuple: expressions, and the others as steps.
+    fn positions(&mut self, ps: &[(Pipe, super::types::Ty)]) {
+        for (q, t) in ps {
+            match t.is_expr() {
+                true => self.expr(q),
+                false => self.walk(q),
+            }
         }
     }
 
@@ -413,6 +443,9 @@ impl Uses {
             }
             Pipe::Var(Slot::Local(r, Holds::Fn(_))) => self.read_as(r, FUNCTION),
             Pipe::Var(Slot::Local(r, Holds::Num)) => self.read_as(r, NUMBER),
+            Pipe::Var(Slot::Local(r, Holds::Tuple(_))) if r != super::ast::INPUT => self.read_as(r, TUPLE),
+            Pipe::Tuple(ps) => self.positions(ps),
+            Pipe::Index(t, _) => self.walk(t),
             Pipe::Expanded(m) if m.is_call() => m.steps.iter().for_each(|q| self.walk(q)),
             _ => {}
         }
@@ -459,7 +492,10 @@ fn reads_var(e: &Pipe, i: usize) -> bool {
 fn uses_input(p: &Pipe) -> bool {
     match p {
         Pipe::Num(_) | Pipe::Text(_) | Pipe::Name(_) | Pipe::FnValue(_) => false,
+        Pipe::Var(Slot::Local(n, Holds::Tuple(_))) => n == super::ast::INPUT,
         Pipe::Var(Slot::Global(_) | Slot::Local(_, Holds::Num | Holds::Group)) => false,
+        Pipe::Tuple(ps) => ps.iter().any(|(q, t)| !t.is_function() && uses_input(q)),
+        Pipe::Index(t, _) | Pipe::Unpack(_, t) => uses_input(t),
         Pipe::Seq(ps) => {
             for q in ps {
                 if uses_input(q) {

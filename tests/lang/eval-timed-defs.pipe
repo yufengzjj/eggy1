@@ -22,7 +22,7 @@ v = (parse "x")
 (import "default")
 (def @timed (n) size + 1)
 
-# expect error: def (n): @timed is for a function that gives a group, which a call past the time limit skips
+# expect error: def (n): @timed is for a function that gives what it takes, which a call past the time limit gives instead: a group, or the tuple its last parameter takes
 
 # ---
 (import "default")

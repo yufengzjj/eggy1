@@ -68,12 +68,14 @@ enum It {
     Var(usize),
     Ty(Ty),
     Fn(Box<It>, Box<It>),
+    Tuple(Vec<It>),
 }
 
 impl It {
     fn of(t: &Ty) -> It {
         match t {
             Ty::Fn(a, b) => It::Fn(Box::new(It::of(a)), Box::new(It::of(b))),
+            Ty::Tuple(ts) => It::Tuple(ts.iter().map(It::of).collect()),
             Ty::MaybeTerm => It::Ty(Ty::Term),
             t => It::Ty(t.clone()),
         }
@@ -149,6 +151,7 @@ impl Infer {
                 (It::Ty(Ty::Group), It::Ty(Ty::Group)) => "pipe".into(),
                 _ => format!("{}->{}", self.show(&a), self.show(&b)),
             },
+            It::Tuple(ts) => format!("({})", ts.iter().map(|t| self.show(t)).collect::<Vec<_>>().join(", ")),
         }
     }
 
@@ -161,6 +164,7 @@ impl Infer {
             }
             (It::Ty(x), It::Ty(y)) => x == y,
             (It::Fn(a, b), It::Fn(c, d)) => self.unify(&a, &c) && self.unify(&b, &d),
+            (It::Tuple(xs), It::Tuple(ys)) => xs.len() == ys.len() && xs.iter().zip(&ys).all(|(x, y)| self.unify(x, y)),
             _ => false,
         }
     }
@@ -172,6 +176,7 @@ impl Infer {
             It::Ty(Ty::Term) => Flow::One,
             It::Ty(Ty::Num) => Flow::Num,
             It::Ty(Ty::Text) => Flow::Text,
+            It::Tuple(_) => Flow::Tuple,
             _ => Flow::Unknown,
         }
     }
@@ -183,7 +188,7 @@ impl Infer {
             Flow::One => It::Ty(Ty::Term),
             Flow::Num => It::Ty(Ty::Num),
             Flow::Text => It::Ty(Ty::Text),
-            Flow::Unknown | Flow::None => return None,
+            Flow::Tuple | Flow::Unknown | Flow::None => return None,
         })
     }
 
@@ -251,7 +256,7 @@ impl Infer {
                 (a, b)
             }
             It::Fn(a, b) => (*a, *b),
-            It::Ty(_) => return Err(format!("parameter {n} is used as {} and as a step", self.show(&t))),
+            It::Ty(_) | It::Tuple(_) => return Err(format!("parameter {n} is used as {} and as a step", self.show(&t))),
         };
         self.link(Infer::it_of(input), &a)?;
         let each = matches!(self.resolve(&a), It::Ty(Ty::Term)) && self.now(input) == Flow::Group;
@@ -283,6 +288,7 @@ impl Infer {
             It::Var(_) => None,
             It::Ty(t) => Some(t),
             It::Fn(a, b) => Some(Ty::Fn(Box::new(self.ty_of(&a)?), Box::new(self.ty_of(&b)?))),
+            It::Tuple(ts) => Some(Ty::Tuple(ts.iter().map(|t| self.ty_of(t)).collect::<Option<_>>()?)),
         }
     }
 

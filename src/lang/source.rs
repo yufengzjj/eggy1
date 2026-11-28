@@ -104,7 +104,7 @@ impl Passes {
         let (pipe, def) = if d.kind == DefKind::Run || inline {
             let body = std::sync::Arc::new(d.value.clone().map_or(d.pipe, |v| Pipe::app("filter", vec![v])));
             let slot = earlier.as_ref().and_then(|e| e.slot);
-            let def = std::sync::Arc::new(Def { name: d.name.clone(), params: d.params.clone(), body, inline, flat: inline && d.flat, input: d.input.clone(), step: d.step, steps: d.value.as_ref().is_some_and(has_steps), value: d.value.clone(), implicit: d.implicit.clone(), timed: d.timed, slot: Some(slot.unwrap_or(self.defs.len())) });
+            let def = std::sync::Arc::new(Def { name: d.name.clone(), params: d.params.clone(), body, inline, flat: inline && d.flat, input: d.input.clone(), step: d.step, steps: d.value.as_ref().is_some_and(has_steps), value: d.value.clone(), implicit: d.implicit.clone(), tuple: d.tuple.clone(), timed: d.timed, slot: Some(slot.unwrap_or(self.defs.len())) });
             if let Some(e) = &earlier {
                 let (was, now) = (sig_of(e), sig_of(&def));
                 if !was.same_shape(&now) {
@@ -166,7 +166,7 @@ impl Passes {
             }
             let slot = self.defs.len();
             let def = match found.iter().find(|d| d.name == h.name) {
-                Some(d) => Def { name: d.name.clone(), params: d.params.clone(), body: std::sync::Arc::new(Pipe::id()), inline: false, flat: false, input: d.input.clone(), step: d.step, steps: d.steps, value: d.value.clone(), implicit: d.implicit.clone(), timed: d.timed, slot: Some(slot) },
+                Some(d) => Def { name: d.name.clone(), params: d.params.clone(), body: std::sync::Arc::new(Pipe::id()), inline: false, flat: false, input: d.input.clone(), step: d.step, steps: d.steps, value: d.value.clone(), implicit: d.implicit.clone(), tuple: d.tuple.clone(), timed: d.timed, slot: Some(slot) },
                 None => match declared(h, slot) {
                     Some(d) => d,
                     None => continue,

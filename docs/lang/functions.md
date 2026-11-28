@@ -29,7 +29,7 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P   # 即 (def (NAME) P)�
 
 ## 2. 参数
 
-参数有六种，和内置函数的参数类型一样：
+参数有七种，和内置函数的参数类型一样：
 
 | 种类 | 类型 | 推出它的用法 | 调用时 |
 |---|---|---|---|
@@ -39,6 +39,7 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P   # 即 (def (NAME) P)�
 | 组参数 | `group` | 写在组变量位置（`(label R)`、`(main R)`、`(size (main R))`）；作函数值或函数的显式输入（`(p r)` 的 `r`）；写注解 `r:group` | 按值：调用处那个组变量的组；最后一个参数是输入时由这一步的组填入 |
 | 项参数 | `term` | 只能写注解 `t:term`，或是输入（上面第 1 节）；在函数体里像组参数一样单独写成一个值 | 调用处写一步（`(main r)`、`main`），取它给出的第一个元素；不能用在 `@inline` 函数里 |
 | 名字参数 | `name` | 写在名字位置（`(tag NAME p)`、`(origin NAME p)`、`(smaller NAME p)`、`(egglog LABEL)`、`(off NAME)`、`(on NAME)`） | 解析时代入 |
+| 元组参数 | `(num, group)`…… | 传给要元组的参数（《[元组](tuples.md)》）；写注解 | 在调用处对调用时的输入求一次值 |
 
 - **类型推断**：没写类型的参数只有一个类型，只从函数体推出（不看调用处，没有默认类型）。函数体里所有用法一起解：
   - 作为参数传给另一个函数时，就是那个参数的类型（`(best 1 p)` 的 `p` 是 `pipe`，`(filter c)` 的 `c` 是 `term->num`）；这种位置先定。
@@ -118,7 +119,7 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P   # 即 (def (NAME) P)�
 
 ## 7. 错误和警告
 
-解析时报错（《[检查与警告](errors.md)》有全部的检查）：参数名冲突、重复、用法矛盾、没用到、被赋值；未知的类型、属性；推不出参数的类型（`cannot infer the type of p in f: write p:TYPE`）；返回数的函数带 `@timed`；返回数的管线带 `@inline` 或写成 `let`；调用处参数的个数和种类不对（按个数报，附上签名）；返回数的函数写在步骤位置（`f gives a number, not a group`）、返回组的函数写在表达式里（`f gives a group, not a number`）或 `=` 左边（`f is a function and cannot be assigned`）；项上返回数的函数取到组（《[组、元素和管线](pipeline.md)》 第 2 节）；重新定义 `def` 时签名不同；读没绑定的组变量（每个 `def` 的函数体单独检查，组参数和输入算已绑定）。
+解析时报错（《[检查与警告](errors.md)》有全部的检查）：参数名冲突、重复、用法矛盾、没用到、被赋值；未知的类型、属性；推不出参数的类型（`cannot infer the type of p in f: write p:TYPE`）；带 `@timed` 的函数给出的不是它取的（返回数，或返回的元组不是最后一个参数的类型，《[元组](tuples.md)》 第 4 节）；返回数的管线带 `@inline` 或写成 `let`；调用处参数的个数和种类不对（按个数报，附上签名）；返回数的函数写在步骤位置（`f gives a number, not a group`）、返回组的函数写在表达式里（`f gives a group, not a number`）或 `=` 左边（`f is a function and cannot be assigned`）；项上返回数的函数取到组（《[组、元素和管线](pipeline.md)》 第 2 节）；重新定义 `def` 时签名不同；读没绑定的组变量（每个 `def` 的函数体单独检查，组参数和输入算已绑定）。
 
 只给警告：定义了却没用到的函数（`(def (f p n) ...) is never used`）；丢掉前一步的值的、不用输入的一步（《[组、元素和管线](pipeline.md)》 第 2 节）；以及《[检查与警告](errors.md)》对每条管线做的那些检查，对每个 `def` 的函数体也单独做。
 

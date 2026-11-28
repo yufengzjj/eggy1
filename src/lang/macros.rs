@@ -116,11 +116,27 @@ fn noted(p: &Pipe, s: &str, inline: bool) -> Pipe {
             let q = match x {
                 Slot::Local(_, Holds::Group) => noted_one(q, s, inline),
                 Slot::Local(_, Holds::Fn(t)) if t.is_step() => noted_one(q, s, inline),
+                Slot::Local(_, Holds::Tuple(_)) => noted(q, s, inline),
                 _ => noted_expr(q, s, inline),
             };
             Pipe::Bind(x.clone(), Arc::new(q))
         }
         Pipe::Expanded(m) => Pipe::Expanded(Box::new(Expanded { steps: noted_stages(&m.steps, s, inline), ..(**m).clone() })),
+        // A term that gives a tuple is noted inside, its value kept as the tuple.
+        Pipe::Tuple(ps) => Pipe::Tuple(
+            ps.iter()
+                .map(|(q, t)| {
+                    let q = match t {
+                        _ if t.is_expr() => noted_expr(q, s, inline),
+                        super::types::Ty::Group => noted_one(q, s, inline),
+                        _ => noted(q, s, inline),
+                    };
+                    (q, t.clone())
+                })
+                .collect(),
+        ),
+        Pipe::Index(q, i) => Pipe::Index(Arc::new(noted(q, s, inline)), *i),
+        Pipe::Unpack(x, q) => Pipe::Unpack(x.clone(), Arc::new(noted(q, s, inline))),
         Pipe::Num(_) | Pipe::Name(_) | Pipe::Text(_) | Pipe::Var(_) | Pipe::FnValue(_) => p.clone(),
     }
 }
