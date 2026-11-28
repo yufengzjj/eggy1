@@ -86,7 +86,8 @@ fn name_expr(n: &str) -> Result<Pipe, String> {
     } else if let Some(s) = get(n) {
         Err(format!("{n} gives a group, not a number: {s}; an expression reads variables and number functions"))
     } else {
-        Err(format!("unknown name {n} in an expression; known: {} and the variables", number_names().join(" ")))
+        let vars = super::vars::var_names();
+        Err(super::warn::unknown(format!("unknown name {n} in an expression"), n, number_names().chain(vars)))
     }
 }
 
@@ -115,6 +116,9 @@ pub(crate) struct Parser<'a> {
     pub(crate) pending: Option<Pipe>,
     /// Reading a top-level statement, whose last step may give a text.
     pub(crate) text_tail: bool,
+    /// The step read has an input: not at the top level of a program before a step gives a
+    /// value. A function that gives a number written alone is applied to it only then.
+    pub(crate) input: bool,
 }
 
 /// The local variables the top-level statements of a program bound so far, which the later
@@ -124,6 +128,8 @@ pub(crate) struct TopNames {
     groups: Vec<String>,
     locals: Vec<String>,
     fns: Vec<(String, Ty)>,
+    /// A statement gave a value, which the later ones take as their input.
+    pub(crate) value: bool,
 }
 
 pub(crate) fn seq_of(mut stages: Vec<Pipe>) -> Pipe {
@@ -143,7 +149,7 @@ pub(crate) fn number_seq(p: Pipe, e: Pipe) -> Pipe {
 
 impl<'a> Parser<'a> {
     pub(crate) fn new(toks: Vec<Tok>, defs: &'a Defs) -> Parser<'a> {
-        Parser { toks, at: 0, defs, used: Vec::new(), params: Vec::new(), groups: Vec::new(), fns: Vec::new(), locals: Vec::new(), after_bar: false, pending: None, text_tail: false }
+        Parser { toks, at: 0, defs, used: Vec::new(), params: Vec::new(), groups: Vec::new(), fns: Vec::new(), locals: Vec::new(), after_bar: false, pending: None, text_tail: false, input: true }
     }
 
     /// Whether `n` is a group value: a group parameter, or a group variable bound before in
@@ -348,7 +354,17 @@ impl<'a> Parser<'a> {
         }
         let ty = Ty::parse(&t).ok().filter(Ty::is_function).ok_or_else(|| format!("{n}:{t} = ...: a function variable takes a function type, as in term->num or term->term"))?;
         self.expect(Tok::Assign, &format!("= after {n}:{t}"))?;
-        let f = match ty.is_step() {
+        let outer = std::mem::replace(&mut self.input, true);
+        let f = self.fn_rhs(n, &t, &ty);
+        self.input = outer;
+        let f = f?;
+        self.no_assign()?;
+        self.bind_fn(n, f, ty)
+    }
+
+    /// The right side of `n:t = ...`, a function of type `ty`.
+    fn fn_rhs(&mut self, n: &str, t: &str, ty: &Ty) -> Result<Pipe, String> {
+        Ok(match ty.is_step() {
             true => {
                 self.no_bar(&format!("{n}:{t} ="))?;
                 let q = self.stage()?;
@@ -358,15 +374,13 @@ impl<'a> Parser<'a> {
                     self.use_param(&m.clone(), ty.clone())?;
                 }
                 let have = self.stage_ty(&q);
-                if !have.fits(&ty) {
+                if !have.fits(ty) {
                     return Err(format!("{n} holds {ty}; {} is {have}", stage(&q)));
                 }
                 q
             }
             false => self.or()?,
-        };
-        self.no_assign()?;
-        self.bind_fn(n, f, ty)
+        })
     }
 
     /// An error where `n` cannot be a new local variable: a parameter, or the name of a
@@ -454,7 +468,15 @@ impl<'a> Parser<'a> {
     }
 
     /// The stages of a pipeline whose first `stages` are read already.
-    pub(crate) fn stages_after(&mut self, mut stages: Vec<Pipe>) -> Result<(Vec<Pipe>, Option<Pipe>), String> {
+    pub(crate) fn stages_after(&mut self, stages: Vec<Pipe>) -> Result<(Vec<Pipe>, Option<Pipe>), String> {
+        let outer = self.input;
+        self.input |= stages.iter().any(starts_with_value);
+        let r = self.stages_after_on(stages);
+        self.input = outer;
+        r
+    }
+
+    fn stages_after_on(&mut self, mut stages: Vec<Pipe>) -> Result<(Vec<Pipe>, Option<Pipe>), String> {
         if !stages.is_empty() {
             if self.peek() != Some(&Tok::Bar) {
                 return Ok((stages, None));
@@ -492,7 +514,9 @@ impl<'a> Parser<'a> {
                 _ => false,
             };
             self.after_bar = !stages.is_empty();
-            match self.stage()? {
+            let p = self.stage()?;
+            self.input |= starts_with_value(&p);
+            match p {
                 Pipe::Seq(ps) if flat => stages.extend(ps),
                 p => stages.push(p),
             }
@@ -1046,11 +1070,20 @@ impl<'a> Parser<'a> {
     /// The arguments of a call of `s` after its name, as `call` reads them; `sig` adds the
     /// signature to an error in an expression argument.
     pub(crate) fn args(&mut self, s: &Sig, sig: bool) -> Result<Vec<Arg>, String> {
+        let outer = self.input;
+        let r = self.args_on(s, sig, outer);
+        self.input = outer;
+        r
+    }
+
+    /// `args` where the step has an input when `input`; the body of a function argument has one.
+    fn args_on(&mut self, s: &Sig, sig: bool, input: bool) -> Result<Vec<Arg>, String> {
         let f = s.name.as_str();
         let arity = || format!("{f} takes {}: {s}", s.arity());
         let pipes = s.params.iter().filter(|p| p.ty.is_step()).count();
         let mut args = Vec::new();
         for (i, p) in s.params.iter().enumerate() {
+            self.input = input || matches!(p.ty, Ty::Fn(..));
             let whole = pipes == 1 && i + 1 == s.params.len() && p.rep == Rep::One;
             let named = matches!(self.peek(), Some(Tok::Name(_)));
             let alone = !matches!(self.peek_at(1), Some(Tok::Bar));
@@ -1144,10 +1177,11 @@ impl<'a> Parser<'a> {
         if self.fn_var(n).is_some() {
             return Some(self.fn_read(n.to_string()));
         }
-        if let Some(b) = super::builtins::builtin(n).filter(|b| !b.sig.is_number()) {
-            return Some(Pipe::App(Fun::Builtin(b), Vec::new().into()));
+        if let Some(b) = super::builtins::builtin(n).filter(|b| !b.sig.is_op()) {
+            let f = Pipe::App(Fun::Builtin(b), Vec::new().into());
+            return Some(if b.sig.is_number() { Pipe::FnValue(Arc::new(f)) } else { f });
         }
-        let d = self.defs.get(n).filter(|d| d.def.as_ref().is_none_or(|d| d.value.is_none()))?;
+        let d = self.defs.get(n)?;
         // A `let` or an `@inline` function written out where it is used has no `Def`: one stands
         // for it here, which only shows.
         let def = d.def.clone().unwrap_or_else(|| {
@@ -1155,11 +1189,32 @@ impl<'a> Parser<'a> {
             Arc::new(Def { name: n.into(), params: d.params.clone(), body, inline: false, flat: d.flat, input: None, step: true, steps: false, value: None, implicit: None, timed: false, slot: None })
         });
         self.used.push(n.to_string());
-        Some(Call::bare(&def))
+        let call = Call::bare(&def);
+        Some(if def.value.is_some() || def.steps { Pipe::FnValue(Arc::new(call)) } else { call })
+    }
+
+    /// The signature of the function `n` names when it gives a number and lacks only its input
+    /// written alone: a built-in, or a `def` without parameters; `None` for another name.
+    fn input_only(&self, n: &str) -> Option<Sig> {
+        if self.param(n).is_some() || self.locals.iter().any(|l| l == n) || self.fn_var(n).is_some() {
+            return None;
+        }
+        if let Some(s) = get(n) {
+            return (s.is_number() && !s.is_op() && s.input.is_some() && !s.required()).then(|| s.clone());
+        }
+        (self.number_def(n) && self.defs[n].params.is_empty()).then(|| self.sig_named(n))
+    }
+
+    /// The error for the function `n` written alone where a number is wanted and the step has
+    /// no input.
+    fn no_input(&self, n: &str, s: &Sig) -> String {
+        let input = if s.input.as_ref().is_some_and(|i| i.ty == Ty::Group) { "t" } else { "(main t)" };
+        format!("{n} has no input here: the top level of the program starts with none; write its input, as in ({n} {input}), or start from a value, as in t | main | {n}; {s}")
     }
 
     /// An argument of type `any`: a string literal, a group value, a function value, an
-    /// expression, or else a name.
+    /// expression, or else a name. A function that gives a number and lacks only its input
+    /// is applied to the step's input where it has one, else it is a function value.
     fn any_arg(&mut self) -> Result<Pipe, String> {
         let Some(Tok::Str(_) | Tok::Name(_)) = self.peek() else { return self.arg() };
         let n = match self.next() {
@@ -1172,6 +1227,10 @@ impl<'a> Parser<'a> {
             return Ok(group(n));
         }
         if self.param(&n).is_none() && !self.locals.contains(&n) && n != "none" {
+            if self.input && self.input_only(&n).is_some() {
+                self.at -= 1;
+                return self.arg();
+            }
             if let Some(f) = self.function_value(&n) {
                 return Ok(f);
             }
@@ -1186,9 +1245,17 @@ impl<'a> Parser<'a> {
     /// The arguments of a call of the number function `s` after its name: names, and
     /// expressions up to `)`.
     fn number_call(&mut self, s: &'static Sig) -> Result<Pipe, String> {
+        let outer = self.input;
+        let r = self.number_call_on(s, outer);
+        self.input = outer;
+        r
+    }
+
+    fn number_call_on(&mut self, s: &'static Sig, input: bool) -> Result<Pipe, String> {
         let f = s.name.as_str();
         let mut args = Vec::new();
         for p in &s.params {
+            self.input = input || matches!(p.ty, Ty::Fn(..));
             args.push(match &p.ty {
                 _ if self.at_close() && p.rep == Rep::Opt => Arg::Absent,
                 _ if self.at_close() => return Err(format!("{f} takes {}: {s}", s.arity())),
@@ -1219,6 +1286,7 @@ impl<'a> Parser<'a> {
                 }
             });
         }
+        self.input = input;
         let e = construct(f, args).ok_or_else(|| unimplemented(s))?;
         if !self.at_close() {
             let input = s.input.as_ref().expect("a number function has an input");
@@ -1361,10 +1429,18 @@ impl<'a> Parser<'a> {
                         _ => Ok(Pipe::Var(Slot::Local(n, Holds::Fn(t)))),
                     };
                 }
+                if !self.input
+                    && let Some(s) = self.input_only(&n)
+                {
+                    return Err(self.no_input(&n, &s));
+                }
                 if self.number_def(&n) && self.defs[&n].params.is_empty() {
                     self.used.push(n.clone());
                     let def = self.defs[&n].def.clone().unwrap();
                     return Ok(Call::bare(&def));
+                }
+                if self.number_def(&n) {
+                    return Err(format!("{n} needs parentheses: ({n} ...); {}", self.sig_named(&n)));
                 }
                 if self.defs.get(&n).is_some_and(|d| d.run) {
                     return Err(format!("{n} gives a group, not a number: {}; an expression reads variables and number functions", self.sig_named(&n)));
@@ -1417,6 +1493,14 @@ impl<'a> Parser<'a> {
                         self.number_def_call(&k)?
                     }
                     _ if self.bar_inside() => self.number_pipe()?,
+                    // `(f)` is a call written out: on the step's input, at the top level the
+                    // empty group.
+                    _ if self.peek_at(1) == Some(&Tok::Close) => {
+                        let outer = std::mem::replace(&mut self.input, true);
+                        let e = self.or();
+                        self.input = outer;
+                        e?
+                    }
                     _ => self.or()?,
                 };
                 self.expect(Tok::Close, ")")?;
@@ -1442,7 +1526,7 @@ fn assignable(n: &str) -> Result<usize, String> {
     } else if let Some(s) = get(n) {
         format!("{n} is a function and cannot be assigned: {s}")
     } else {
-        format!("unknown variable {n}; known: {}", super::vars::var_names().join(" "))
+        super::warn::unknown(format!("unknown variable {n}"), n, super::vars::var_names())
     })
 }
 
@@ -1487,7 +1571,7 @@ fn bare(n: &str) -> Result<Pipe, String> {
         _ if n == "extern" => NO_EXTERN.into(),
         _ if MACROS.contains(&n) => format!("{n} needs parentheses: ({n} ...)"),
         _ if var_index(n).is_some() => format!("{n} is a variable, not a step: assign it with {n} = VALUE, or read it in an expression"),
-        _ => format!("unknown pass {n}; known: {}", step_names().join(" ")),
+        _ => super::warn::unknown(format!("unknown pass {n}"), n, step_names()),
     })
 }
 
@@ -1509,10 +1593,16 @@ pub(crate) fn hyphen_hint(e: String, s: &str) -> String {
 
 /// The assignment `name = val`, a `--passes` item `name=val`.
 pub fn parse_assign(name: &str, val: &str) -> Result<Pipe, String> {
+    parse_assign_on(name, val, true)
+}
+
+/// `parse_assign` where the step has an input only when `input`.
+pub(crate) fn parse_assign_on(name: &str, val: &str, input: bool) -> Result<Pipe, String> {
     let go = || {
         assignable(name)?;
         let defs = super::source::prelude();
         let mut p = Parser::new(lex(val)?, &defs);
+        p.input = input;
         let a = p.assign(name)?;
         p.end()?;
         Ok(a)
@@ -1529,12 +1619,14 @@ pub(crate) fn parse_statement(s: &str, toks: Option<Vec<Tok>>, defs: &Defs, top:
         p.groups = top.groups.clone();
         p.locals = top.locals.clone();
         p.fns = top.fns.clone();
+        p.input = top.value;
         let tops = p.statement()?;
         Ok((tops, p))
     };
     let (tops, p) = go().map_err(|e: String| hyphen_hint(e, s))?;
     used.extend(p.used);
-    *top = TopNames { groups: p.groups, locals: p.locals, fns: p.fns };
+    let value = top.value || tops.iter().any(|t| matches!(t.gives, Gives::Group) && starts_with_value(&t.pipe));
+    *top = TopNames { groups: p.groups, locals: p.locals, fns: p.fns, value };
     Ok(tops)
 }
 
@@ -1763,12 +1855,6 @@ mod tests {
         same("split_runs = split_runs/2 | rewrite", "split_runs = split_runs / 2 | rewrite");
         same("(if (size/2 > vars/3) id)", "(if (size / 2 > vars / 3) id)");
         assert!(lex("semi_shapes").unwrap() == [Tok::Name("semi_shapes".into())] && lex("a/b").unwrap().len() == 3, "names have no /");
-    }
-
-    #[test]
-    fn function_type_annotations() {
-        let def = |s: &str| parse_definition(s, &Defs::new(), &mut Vec::new());
-        assert_eq!(def("(def (f k:num) (if (size <= k) lowbits))").unwrap().params[0].ty, Ty::Num);
     }
 
     #[test]

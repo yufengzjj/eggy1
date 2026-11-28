@@ -1,0 +1,88 @@
+# A function written alone: where it lacks only its input and the step has one, applied to it; where it cannot be evaluated, a function value (print writes its signature).
+(import "default")
+(def (under k) (size <= k))
+(def (big k g:group) (size (main g)) > k)
+(def (f) rewrite | main | size)
+(def (h) size + 1)
+(print size under big f h)
+(parse "(x | y) - (x & y)") | main | (print size f h under big (f) (h) (under 9) (big 3))
+
+# expect stderr: (size t:term?) num (under k:num t:term) num (big k:num g:group) num (f g:group) num (h t:term) num
+# expect stderr: 7 3 8 (under k:num t:term) num (big k:num g:group) num 3 8 1 1
+# expect value: group [(Sub (Or (Var "x") (Var "y")) (And (Var "x") (Var "y")))]
+
+# ---
+# After a statement that gives a value, the next one has an input.
+(import "default")
+(def (h) size + 1)
+(parse "x + y") | main
+(print size h)
+
+# expect stderr: 3 4
+# expect value: group [(Add (Var "x") (Var "y"))]
+
+# ---
+# In a def body the step has an input.
+(import "default")
+(def (h) size + 1)
+(def (p) main | (print size h))
+(parse "x + y") | p
+
+# expect stderr: 3 4
+# expect value: group [(Add (Var "x") (Var "y"))]
+
+# ---
+# Where a function type is wanted, a function value: at the top level too.
+(import "default")
+(def (small) size <= 3)
+f:term->num = size
+s:term->num = small
+(print f s)
+(parse "(x | y) - (x & y)") | main | (union id rewrite) | (filter small) | (save a) | (filter size) | (save b) | (print a b)
+
+# expect stderr: f:term->num s:term->num
+# expect stderr: (x ^ y) (x ^ y)
+# expect value: group [(Xor (Var "x") (Var "y"))]
+
+# ---
+(import "default")
+(def (under k) (size <= k))
+(parse "x") | main | (if under id)
+
+# expect error: under needs parentheses: (under ...); (under k:num t:term) num
+
+# ---
+# Where only a number fits and there is no input: an error.
+(import "default")
+size + 1
+
+# expect error: size has no input here: the top level of the program starts with none; write its input, as in (size (main t)), or start from a value, as in t | main | size; (size t:term?) num
+
+# ---
+(import "default")
+(def (h) size + 1)
+h * 2
+
+# expect error: h has no input here: the top level of the program starts with none; write its input, as in (h (main t)), or start from a value, as in t | main | h; (h t:term) num
+
+# ---
+# A binding passes its input on: the steps after it have none either.
+(import "default")
+(def (h) size + 1)
+u = (parse "x") | (print size h)
+
+# expect stderr: (size t:term?) num (h t:term) num
+# expect value: group []
+
+# ---
+(import "default")
+(def (h) size + 1)
+(print "a") | (print (h + 1))
+
+# expect error: h has no input here: the top level of the program starts with none; write its input, as in (h (main t)), or start from a value, as in t | main | h; (h t:term) num
+
+# ---
+(import "default")
+(print (size + 1))
+
+# expect error: size has no input here: the top level of the program starts with none; write its input, as in (size (main t)), or start from a value, as in t | main | size; (size t:term?) num

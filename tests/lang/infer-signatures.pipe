@@ -104,3 +104,11 @@
 # expect stderr: (f p:term->term g:term) group
 # expect warning: f: number variable x is bound and never read
 # expect value: group []
+
+# ---
+(import "default")
+(def (h g) g | size)
+(print h)
+
+# expect stderr: (h g:term) num
+# expect value: group []

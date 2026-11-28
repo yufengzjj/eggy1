@@ -581,7 +581,7 @@ pub(crate) fn reads(p: &Pipe, names: &mut Vec<String>, params: &mut Vec<usize>) 
         Pipe::Seq(ps) => all(ps),
         Pipe::Expanded(m) => all(&m.steps),
         Pipe::Bind(_, q) | Pipe::Drop(q, _) => reads(q, names, params),
-        Pipe::Num(_) | Pipe::Text(_) | Pipe::Var(Slot::Global(_)) => {}
+        Pipe::Num(_) | Pipe::Text(_) | Pipe::Var(Slot::Global(_)) | Pipe::FnValue(_) => {}
     }
 }
 
@@ -850,8 +850,6 @@ mod tests {
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         let spec = "(def (pick pred) (save t) | (if ((pred t) > 5) rewrite)) (def (under k) (size <= k)) (def (each f:term->term g:group) g | f) (def (keep_if pred g:group) g | (filter pred)) prepass=main | f:term->num = (size <= 5) | g:term->term = (rewrite_top rewrite) | (each g) | (keep_if f) | (filter (under 5)) | (pick (size main))";
         let p = Passes::parse(spec).unwrap();
-        let sigs: Vec<String> = p.defs[p.default_defs..].iter().map(|d| crate::lang::defs::sig_of(d).decl()).collect();
-        assert_eq!(sigs[1], "(extern (under k:num t:term) num)");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p, "{p}");
     }
 

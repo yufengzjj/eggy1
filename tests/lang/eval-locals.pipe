@@ -27,8 +27,6 @@ sub | c7 | (save r) | (print "a closure passed on reads the local of the def it 
 # expect stderr: and a group variable's: ((x | y) - (x & y))
 # expect stderr: a def returning a function that reads its own local: (x ^ y)
 # expect stderr: a closure passed on reads the local of the def it is written in: (x ^ y)
-# expect warning: c5: group variable t is bound and never read
-# expect warning: c5: group variable t is bound again before its value is read
 # expect value: group [(Xor (Var "x") (Var "y"))]
 
 # ---

@@ -174,10 +174,7 @@ impl Uses {
             Pipe::Var(Slot::Local(r, Holds::Group)) => self.read(r),
             Pipe::Var(Slot::Local(r, Holds::Fn(_))) => self.read_as(r, FUNCTION),
             Pipe::Bind(Slot::Local(r, Holds::Fn(t)), p) => {
-                match &**p {
-                    Pipe::Seq(_) if !t.is_step() => self.expr(p),
-                    p => self.walk(p),
-                }
+                if t.is_step() { self.walk(p) } else { self.expr(p) }
                 self.bound_as(r, FUNCTION);
             }
             Pipe::Bind(Slot::Local(r, Holds::Num), e) => {

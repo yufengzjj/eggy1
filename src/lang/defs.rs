@@ -506,7 +506,10 @@ fn definition(s: &str, toks: Option<Vec<Tok>>, defs: &Defs, used: &mut Vec<Strin
         return Err(format!("{what}: a term parameter is for a def that runs, not @inline"));
     }
     let notes = Vec::new();
-    let params = params.into_iter().map(|u| Param { name: u.name, ty: u.ty.expect("solve gives every parameter its type"), rep: Rep::One }).collect();
+    let params: Vec<Param> = params.into_iter().map(|u| Param { name: u.name, ty: u.ty.expect("solve gives every parameter its type"), rep: Rep::One }).collect();
+    if kind == DefKind::Run {
+        super::flow::body_of(&params, input.as_deref(), implicit.as_ref(), value.as_ref(), &pipe).map_err(|e| format!("{name}: {e}"))?;
+    }
     used.extend(p.used);
     Ok(Definition { name, kind, params, pipe, flat, input, step, value, implicit, timed, notes })
 }
@@ -649,10 +652,7 @@ impl<'s> Subst<'s> {
         match self.names.iter().find(|(p, _)| *p == n) {
             None => Ok(n),
             Some((_, a)) if (self.open)(a) => Ok(a),
-            Some((_, a)) => host::switch(a).ok_or_else(|| {
-                let known = INNER.iter().chain(&host::FLAGS).copied().collect::<Vec<_>>().join(",");
-                format!("unknown {f} name {a} (the argument for {n}); known: {known}")
-            }),
+            Some((_, a)) => host::switch(a).ok_or_else(|| super::warn::unknown(format!("unknown {f} name {a} (the argument for {n})"), a, INNER.iter().chain(&host::FLAGS).copied())),
         }
     }
 
@@ -674,6 +674,7 @@ impl<'s> Subst<'s> {
             Pipe::Drop(q, e) => Pipe::Drop(Arc::new(self.pipe(q)?), *e),
             Pipe::Bind(Slot::Local(n, Holds::Group), q) => Pipe::Bind(Slot::Local(self.name(n), Holds::Group), Arc::new(self.pipe(q)?)),
             Pipe::Bind(x, q) => Pipe::Bind(x.clone(), Arc::new(self.pipe(q)?)),
+            Pipe::FnValue(q) => Pipe::FnValue(Arc::new(self.pipe(q)?)),
             Pipe::Num(_) | Pipe::Text(_) | Pipe::Var(_) => p.clone(),
         })
     }
@@ -716,6 +717,12 @@ mod tests {
         let Some((g, [tfunc])) = args[1].call() else { panic!("{:?}", args[1]) };
         assert_eq!((g.def.name.as_str(), show(tfunc).as_str()), ("g", "tfunc"));
         assert_eq!(show(&p.prepass()), "(if (f 2) (g tfunc))");
+    }
+
+    #[test]
+    fn a_definition_read_alone_checks_what_its_steps_take() {
+        let e = parse_definition("(def (f k:num) (if (size <= k) lowbits))", &Defs::new(), &mut Vec::new()).err().unwrap();
+        assert!(e.starts_with("f: size takes t:term? and gives num; its input here is a group"), "{e}");
     }
 
     #[test]

@@ -4,6 +4,6 @@ eggy1 --passes off=nosuchpass x
 2
 ==== stdout
 ==== stderr
-error: invalid value 'off=nosuchpass' for '--passes <PASSES>': unknown off name nosuchpass; known: lowbits,unshift,tfunc_whole,relate,tfunc,unify_operands,recombine,cut_products,shifted_xor,simplify_rebuilt,cluster_regions,simba,small_blocks,wide_blocks,poly_mba,poly_masked,rebuild_values,common_multiple,related_leaves,one_wide_term,semi_linear,drop_unused,clustered,peel,peel_clustered,semi_grouped,semi_peel_grouped,semi_shapes,semi_pairs,semi_peel_shapes,semi_split,semi_scaled,semi_bit_split,semi_short_consts
+error: invalid value 'off=nosuchpass' for '--passes <PASSES>': unknown off name nosuchpass
 
 For more information, try '--help'.

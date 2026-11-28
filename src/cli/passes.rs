@@ -132,7 +132,7 @@ pub fn translate(spec: &str) -> Result<(String, Vec<ScheduleEdit>), String> {
             .find_map(|op| item.split_once(op).map(|(k, v)| (k, *op, v)))
             .ok_or_else(|| format!("expected key=value: {item}"))?;
         let names = |known: &[&'static str]| -> Result<Vec<&'static str>, String> {
-            let unknown = |n: &str| slash_name(n).unwrap_or_else(|| format!("unknown {key} name {n}; known: {}", known.join(",")));
+            let unknown = |n: &str| slash_name(n).unwrap_or_else(|| crate::lang::warn::unknown(format!("unknown {key} name {n}"), n, known.iter().copied()));
             val.split(',').filter(|s| !s.is_empty()).map(|n| known.iter().find(|k| **k == n).copied().ok_or_else(|| unknown(n))).collect()
         };
         // `pre=a,b` sets the switches `pre_a`, `pre_b` to 1 and the other `pre_*` to 0.

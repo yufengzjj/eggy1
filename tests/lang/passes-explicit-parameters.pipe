@@ -114,4 +114,4 @@
 (def (big k g:group) (size (main g)) > k)
 (def (prepass_steps) t = (k + 1))
 
-# expect error: unknown name k in an expression; known: size vars depth mul bitconst arith_in_bit shift div (same ...) (any ...) (all ...) (opaque ...) minimal mixed (rebuilds ...) moved was_cut input tiny fits_split used_wide used_clustered few_rewrites replaceable abstracted no_leaves wide const_bitwise cofactor and the variables
+# expect error: unknown name k in an expression

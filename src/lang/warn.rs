@@ -51,16 +51,31 @@ impl Passes {
     }
 }
 
-/// Whether the new local variable `r` is close enough to the variable `g` to be a typo of it:
-/// an edit distance of 1 for names of 3 or 4 characters, 1 or 2 for longer ones.
+/// Whether the new local variable `r` is close enough to the variable `g` to be a typo of it.
 fn near(r: &str, g: &str) -> bool {
+    typo_distance(r, g).is_some()
+}
+
+/// The error `said` about the unknown name `n`, with `; did you mean X?` for the nearest of
+/// `known` it may be a typo of.
+pub fn unknown<'k>(said: String, n: &str, known: impl IntoIterator<Item = &'k str>) -> String {
+    let best = known.into_iter().filter_map(|g| typo_distance(n, g).map(|d| (d, g))).min_by_key(|(d, _)| *d);
+    match best {
+        Some((_, g)) => format!("{said}; did you mean {g}?"),
+        None => said,
+    }
+}
+
+/// The edit distance from `r` to `g` where it makes `r` a likely typo of `g`: 1 for names of 3
+/// or 4 characters, 1 or 2 for longer ones.
+fn typo_distance(r: &str, g: &str) -> Option<usize> {
     let most = match r.len() {
-        0..=2 => return false,
+        0..=2 => return None,
         3 | 4 => 1,
         _ => 2,
     };
     if r.contains('#') || r.len().abs_diff(g.len()) > most {
-        return false;
+        return None;
     }
     let (a, b): (Vec<char>, Vec<char>) = (r.chars().collect(), g.chars().collect());
     let mut row: Vec<usize> = (0..=b.len()).collect();
@@ -73,5 +88,5 @@ fn near(r: &str, g: &str) -> bool {
             prev = cur;
         }
     }
-    (1..=most).contains(&row[b.len()])
+    Some(row[b.len()]).filter(|d| (1..=most).contains(d))
 }

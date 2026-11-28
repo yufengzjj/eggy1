@@ -181,7 +181,6 @@ mod tests {
     use super::*;
     use crate::cli::passes::polish;
     use crate::lang::ast::{Expanded, show};
-    use crate::lang::defs::sig_of;
     use crate::lang::parser::parse;
     use crate::lang::vars::{NONE, ReadSet, VarKind, epoch_ns, in_scope, kind, swap_read, var_index, var_names};
     use crate::rust_vars::{DEADLINE, Limit, RESTARTS, RUST_VARS, is_off, limit, turn_off, turn_on, with_off};
@@ -525,8 +524,6 @@ times = extra + 1 # a new variable
     fn explicit_parameters() {
         let spec = "(def (f p:pipe g:group) g | p) (def (twice p g) (p (p g))) (def (big k g:group) (size (main g)) > k) prepass=(f rewrite) | (save t) | u = (twice (relate rewrite) t) | (if (big 3) (seq u))";
         let p = Passes::parse(spec).unwrap();
-        let sigs: Vec<String> = p.defs[p.default_defs..].iter().map(|d| sig_of(d).decl()).collect();
-        assert_eq!(sigs, ["(extern (f p:pipe g:group) group)", "(extern (twice p:pipe g:group) group)", "(extern (big k:num g:group) num)"]);
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
         assert!(p.to_string().contains("(def (big k g:group) (size (main g)) > k)"), "{p}");
@@ -536,8 +533,6 @@ times = extra + 1 # a new variable
     fn pipelines_that_give_a_number() {
         let spec = "(def (f) rewrite | main | size) (def (h g:group) g | lowbits | main | size > 3) (def @inline (k p:pipe g:group) g | p | (union id g)) prepass=split_runs = (rewrite | main | size) | (if ((t = rewrite | main | size) < f) (k (t | rewrite))) | (filter (h (lowbits | unshift)))";
         let p = Passes::parse(spec).unwrap();
-        let sigs: Vec<String> = p.defs[p.default_defs..].iter().map(|d| sig_of(d).decl()).collect();
-        assert_eq!(sigs, ["(extern (f g:group) num)", "(extern (h g:group) num)", "(extern (k p:pipe g:group) group)"]);
         let s = p.to_string();
         for part in ["(def (f) rewrite | main | size)", "(def (h g:group) g | lowbits | main | size > 3)", "(def @inline (k p:pipe g:group) g | p | (union id g))", "split_runs = (rewrite | main | size)", "(if ((t = rewrite | main | size) < f) (k t | rewrite))", "(filter (h (lowbits | unshift)))"] {
             assert!(s.contains(part), "{part}: {s}");

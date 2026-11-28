@@ -29,3 +29,17 @@
 
 # expect stderr: (f a:group p:pipe g:group) group
 # expect value: group []
+
+# ---
+(import "default")
+(def (f k:num) (if ((size main) <= k) lowbits))
+(print f)
+
+# expect stderr: (f k:num g:group) group
+# expect value: group []
+
+# ---
+(import "default")
+(def (f k:num) (if (size <= k) lowbits))
+
+# expect error: f: size takes t:term? and gives num; its input here is a group: write the element, as in (size main) or (size (index i r))

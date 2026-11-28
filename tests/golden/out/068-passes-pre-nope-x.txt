@@ -4,6 +4,6 @@ eggy1 --passes pre+=nope x
 2
 ==== stdout
 ==== stderr
-error: invalid value 'pre+=nope' for '--passes <PASSES>': unknown pre name nope; known: unified,no_wide,split_bits,halve_first,over_products,over_const_bitwise,over_shared_bitwise,halve_input,unclustered
+error: invalid value 'pre+=nope' for '--passes <PASSES>': unknown pre name nope
 
 For more information, try '--help'.

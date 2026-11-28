@@ -8,15 +8,21 @@ use super::ast::{Fun, Holds, Pipe, Slot, show_expr};
 use super::builtins::Builtin;
 use super::defs::Def;
 use super::infer::Infer;
-use super::types::{Kind, Ty};
+use super::types::{Kind, Param, Ty};
 
 /// Checks the body of `d` on its input: one term where the input is a term, else a group.
 pub(crate) fn body(d: &Def) -> Result<(), String> {
-    let cx = &mut Infer::of_def(d);
-    let input = if d.implicit == Some(Ty::Term) { Flow::One } else { Flow::Group };
-    match &d.value {
+    body_of(&d.params, d.input.as_deref(), d.implicit.as_ref(), d.value.as_ref(), &d.body)
+}
+
+/// `body` for a function with parameters `params`, the input parameter `input`, the implicit
+/// input `implicit`, and the expression `value` or else the steps `steps`.
+pub(crate) fn body_of(params: &[Param], input: Option<&str>, implicit: Option<&Ty>, value: Option<&Pipe>, steps: &Pipe) -> Result<(), String> {
+    let cx = &mut Infer::of_params(params, input, implicit);
+    let input = if implicit == Some(&Ty::Term) { Flow::One } else { Flow::Group };
+    match value {
         Some(v) => expr(cx, v, input),
-        None => step(cx, &d.body, input).map(|_| ()),
+        None => step(cx, steps, input).map(|_| ()),
     }
 }
 
@@ -120,7 +126,7 @@ pub(crate) fn step(cx: &mut Infer, p: &Pipe, input: Flow) -> Result<Flow, String
             step(cx, q, input)?;
             input
         }
-        Pipe::Num(_) | Pipe::Name(_) | Pipe::Text(_) => input,
+        Pipe::Num(_) | Pipe::Name(_) | Pipe::Text(_) | Pipe::FnValue(_) => input,
     })
 }
 

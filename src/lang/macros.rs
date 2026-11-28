@@ -43,8 +43,7 @@ impl<'a> Parser<'a> {
                 ns.push(n);
                 continue;
             }
-            let known = || INNER.iter().chain(&host::FLAGS).copied().collect::<Vec<_>>().join(",");
-            host::switch(&n).ok_or_else(|| format!("unknown {f} name {n}; known: {}", known()))?;
+            host::switch(&n).ok_or_else(|| super::warn::unknown(format!("unknown {f} name {n}"), &n, INNER.iter().chain(&host::FLAGS).copied()))?;
             ns.push(n);
         }
         if ns.is_empty() {
@@ -120,7 +119,7 @@ fn noted(p: &Pipe, s: &str, inline: bool) -> Pipe {
         }
         Pipe::Expanded(m) => Pipe::Expanded(Box::new(Expanded { steps: noted_stages(&m.steps, s, inline), ..(**m).clone() })),
         Pipe::Drop(q, e) => Pipe::Drop(Arc::new(if *e { noted_expr(q, s, inline) } else { noted_one(q, s, inline) }), *e),
-        Pipe::Num(_) | Pipe::Name(_) | Pipe::Text(_) | Pipe::Var(_) => p.clone(),
+        Pipe::Num(_) | Pipe::Name(_) | Pipe::Text(_) | Pipe::Var(_) | Pipe::FnValue(_) => p.clone(),
     }
 }
 

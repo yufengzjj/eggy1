@@ -131,6 +131,13 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P   # 即 (def (NAME) P)�
 - **部分应用**：少写了最后一个参数（输入）的调用就是函数值，类型是"输入 -> 返回"：`size` 是 `term->num`，`(rewrite_top rewrite)` 是 `term->term`，`rewrite`、`(best 1 a b)` 是 `pipe`，`(big 20)` 是 `group->num`，`(with_budget 8 rewrite)` 是 `pipe`。在步骤位置、表达式里这就是通常的写法（第 3 节的隐式输入）。
 - **写在函数类型位置的表达式或管线**：以隐式输入为参数的函数。`(filter (size <= 20))` 的条件对每个元素求值，`(keep_if (size <= 20))` 传进去的也是这样一个函数。
 - **函数参数**（第 2 节）和**函数变量**：函数变量是存函数值的局部变量（《[变量与作用域](variables.md)》 第 5 节），要写类型：`f:term->num = size`、`small:term->num = (size <= 20)`、`f:term->num = (under 20)`、`g:term->term = (relate rewrite)`（右边是表达式或一步，类型要接得上）。不写类型时右边的意思只由右边定：`f = size` 是数变量，`t = rewrite` 是组变量。同一个名字只能存一种（`f is a function variable, so it cannot name a group variable`、`t is a group variable, so it cannot hold a function value`）。
+- **单独写的函数名**（内置函数和 `def` 一样，解析时就定）：
+  1. 位置要函数类型时，是函数值（`(filter size)`、`f:term->num = size`，在程序顶层也是）。
+  2. 位置能接它的结果、这一步有输入、它又只少输入（别的参数都写了或没有）时，用在这一步的输入上：`(size main)`、`size + 1`、管线里的 `(print size)` 都求值。
+  3. 位置也能接函数值、但求不了值时（没有输入，如程序开头的 `(print size)`；或者还少别的参数，如少 `k` 的 `under`），是函数值；`print` 写它的签名（程序开头的 `(print size under)` 写 `(size t:term?) num (under k:num t:term) num`）。
+  4. 位置只能接结果、又求不了值时报错：程序开头的 `size + 1` 报 `size has no input here: the top level of the program starts with none; write its input, as in (size (main t)), ...`。
+
+  "有输入"是静态的：程序顶层开头没有；给出值的一步（组变量、`(parse ...)`、写出输入的调用）之后有，后面的语句也有；赋值把输入原样传下，所以 `u = (parse "x") | ...` 之后仍然没有；`def` 函数体和函数类型的参数里总有。`any`（`print` 的 `x:any...`）两样都接，由 2、3 定；它接数，不接算出来的组，所以给出组的函数（`rewrite`）写在那里总是函数值。写了括号的 `(moved)`、`(h)` 是调用，不算单独写：用在这一步的输入上，程序开头是空组（数值函数得 0）。函数变量写在 `print` 里时写它的名字和类型。
 - **返回函数的 `def`**：函数体是表达式而读了隐含的输入时（`(def (under k) size <= k)`），签名是 `(under k:num t:term) num`：输入只读一个项时是 `t:term`，读整组时是 `g:group`。写在要数的地方时取这一步的输入（一个项，`main | (if (under 9) p)`），得一个数；写在函数类型的位置时是 `term->num` 的函数值（`(filter (under 20))`、`(keep_if (under 20))`）。函数体不读隐含输入（`(def (f) keep + 1)`、`(def (big k g:group) (size (main g)) > k)`，后者的输入是 `g`）时照旧返回数。
 
 **调用**：`(pred t)` 或 `t | pred`（表达式里写在括号里，`((pred t) > 5)`、`(t | pred)`），和 `(p g)` 一样；单独写在要数的地方时用在这一步的输入上（`(filter (f < 5))`）。没写注解的参数被这样调用时推成 `group->num`。函数变量的值是闭包：绑定时抓下它读到的局部变量当时的值和调用的参数，在哪里用都一样，之后再给那些变量赋值也不影响它；`(def (f n) small:term->num = (size <= n) | (keep_if small))` 里的 `small` 在 `keep_if` 里面求值时读的仍是 `f` 的 `n`。函数参数传进去的是参数和写下它的运行（第 3 节）。`wins`、`moved`、`scope` 的缓存这些没有名字的状态，按它实际运行的位置算（第 3 节）。

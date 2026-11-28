@@ -1,0 +1,8 @@
+# A function value reads the group variables of its body where it is bound: no warning that they are unread.
+(import "default")
+num_type = u32
+(def (c) main | (save t) | small:term->num = (same (main t)) | t = rewrite | (union id rewrite) | (filter small) | (seq t))
+(parse "(x | y) - (x & y)") | c | (save r) | (print r)
+
+# expect stderr: (x ^ y)
+# expect value: group [(Xor (Var "x") (Var "y"))]

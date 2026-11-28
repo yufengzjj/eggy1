@@ -6,7 +6,7 @@ sub = (parse "(x | y) - (x & y)")
 (def (under k) (size <= k))
 (def (each f:term->term g:group) g | f)
 (def (pick pred) (save t) | (if ((pred t) > 5) rewrite))
-(print pick each keep_if)
+(print pick under each keep_if)
 (def (c1) main | (union id rewrite) | (keep_if (size <= 5)))
 sub | c1 | (save r) | (print "the condition is a function applied to each element:" r)
 (def (c2) main | small:term->num = (size <= 5) | (union id rewrite) | (filter small))
@@ -45,7 +45,7 @@ sub | c15 | (save r) | (print "a parameter called on a group is a function:" r)
 (def (c16) main | (pick (vars main)))
 sub | c16 | (save r) | (print "(pick (vars main)):" r)
 
-# expect stderr: (pick pred:group->num g:group) group (each f:term->term g:group) group (keep_if pred:term->num g:group) group
+# expect stderr: (pick pred:group->num g:group) group (under k:num t:term) num (each f:term->term g:group) group (keep_if pred:term->num g:group) group
 # expect stderr: the condition is a function applied to each element: (x ^ y)
 # expect stderr: a stored function value: (x ^ y)
 # expect stderr: a stored function applied to the input of the step: (x ^ y)

@@ -4,10 +4,9 @@
 //! each parameter gets one type, or the error of uses that disagree or of none that fixes it.
 
 use super::ast::{Pipe, show_stage};
-use super::defs::Def;
 use super::flow::{Flow, expr, step};
 use super::parser::Parser;
-use super::types::Ty;
+use super::types::{Param, Ty};
 
 /// A parameter of the function whose body is read, and the type the uses read so far give it.
 #[derive(Clone)]
@@ -103,14 +102,15 @@ impl Infer {
         Infer { vars: Vec::new(), owner: Vec::new(), params: Vec::new(), names: Vec::new(), values: Vec::new(), solving: false, exact: false }
     }
 
-    /// For checking the body of `d`.
-    pub(crate) fn of_def(d: &Def) -> Infer {
+    /// For checking the body of a function with parameters `params`, the input parameter
+    /// `input` and the implicit input `implicit`.
+    pub(crate) fn of_params(params: &[Param], input: Option<&str>, implicit: Option<&Ty>) -> Infer {
         let mut cx = Infer::none();
-        for p in &d.params {
+        for p in params {
             cx.add(&p.name, It::of(&p.ty), matches!(p.ty, Ty::Group | Ty::Term));
         }
-        if let Some(g) = &d.input {
-            cx.add(g, It::Ty(if d.implicit == Some(Ty::Term) { Ty::Term } else { Ty::Group }), true);
+        if let Some(g) = input {
+            cx.add(g, It::Ty(if implicit == Some(&Ty::Term) { Ty::Term } else { Ty::Group }), true);
         }
         cx
     }
@@ -330,16 +330,4 @@ pub(crate) fn solve(params: &mut [ParamUse], what: &str, name: &str, body: Optio
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::lang::defs::sig_of;
-    use crate::passes::Passes;
-
-    #[test]
-    fn an_input_that_goes_to_a_number_function_is_a_term() {
-        let p = Passes::parse("(def (h g) g | size)").unwrap();
-        assert_eq!(sig_of(p.defs.last().unwrap()).to_string(), "(h g:term) num");
-    }
 }

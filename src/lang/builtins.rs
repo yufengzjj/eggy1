@@ -184,18 +184,14 @@ pub fn index(name: &str) -> Option<usize> {
 /// The names that expand when parsed instead of naming functions or variables.
 pub const MACROS: [&str; 3] = ["let", "on", "off"];
 
-/// The functions a step can call, for error messages: by name, or as a call when it needs
-/// arguments.
-pub fn step_names() -> Vec<String> {
-    let steps = || all().iter().filter(|s| !s.is_number());
-    let bare = steps().filter(|s| !s.required()).map(|s| s.name.clone());
-    let calls = steps().filter(|s| !s.params.is_empty()).map(|s| format!("({} {})", s.name, s.params.iter().map(Param::to_string).collect::<Vec<_>>().join(" ")));
-    bare.chain(calls).chain(["(off NAME...)".into(), "(on NAME...)".into()]).collect()
+/// The names of the functions a step can call, and of `on` and `off`, for error messages.
+pub fn step_names() -> impl Iterator<Item = &'static str> {
+    all().iter().filter(|s| !s.is_number()).map(|s| s.name.as_str()).chain(["on", "off"])
 }
 
-/// The functions an expression can call, for error messages.
-pub fn number_names() -> Vec<String> {
-    all().iter().filter(|s| s.is_number() && !s.is_op()).map(|s| if s.required() { format!("({} ...)", s.name) } else { s.name.clone() }).collect()
+/// The names of the functions an expression can call, for error messages.
+pub fn number_names() -> impl Iterator<Item = &'static str> {
+    all().iter().filter(|s| s.is_number() && !s.is_op()).map(|s| s.name.as_str())
 }
 
 /// A call of `s` with placeholder arguments: `1`, `x`, `id`; optional ones left out.
@@ -533,6 +529,11 @@ fn print(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
             Pipe::Var(Slot::Local(n, Holds::Fn(t))) => format!("{n}:{t}"),
             Pipe::App(Fun::Builtin(b), _) if !b.sig.is_number() => b.sig.to_string(),
             Pipe::App(Fun::Def(c), _) if c.def.value.is_none() => super::defs::sig_of(&c.def).to_string(),
+            Pipe::FnValue(f) => match &**f {
+                Pipe::App(Fun::Def(c), _) => super::defs::sig_of(&c.def).to_string(),
+                Pipe::App(Fun::Builtin(b), _) => b.sig.to_string(),
+                f => unreachable!("a function value is a def or a built-in: {f:?}"),
+            },
             Pipe::Var(Slot::Local(g, Holds::Group)) => env.reg(g).iter().map(|c| env.infix(c)).collect::<Vec<_>>().join(", "),
             e => match env.value(e, &set) {
                 NONE => "none".into(),

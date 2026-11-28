@@ -47,6 +47,9 @@ pub enum Pipe {
     /// with all its arguments written): it runs, its value is dropped and the input passes on.
     /// The flag: it is an expression (a number or a text), not steps.
     Drop(std::sync::Arc<Pipe>, bool),
+    /// A function that gives a number, built-in or `def`, written alone in an `any` argument
+    /// (`print`) where it is not applied: it lacks other arguments, or the step has no input.
+    FnValue(std::sync::Arc<Pipe>),
 }
 
 /// A variable or parameter, resolved when parsed.
@@ -157,6 +160,7 @@ impl Pipe {
             Pipe::Var(Slot::Local(_, Holds::Fn(_))) => true,
             Pipe::App(Fun::Builtin(b), _) => !b.sig.is_number(),
             Pipe::App(Fun::Def(c), _) => c.def.value.is_none(),
+            Pipe::FnValue(_) => true,
             _ => false,
         }
     }
@@ -210,7 +214,7 @@ impl Pipe {
             Pipe::Bind(_, e) => e.each_in_expr(f),
             Pipe::Drop(q, false) => f(q),
             Pipe::Drop(q, true) => q.each_in_expr(f),
-            Pipe::Num(_) | Pipe::Name(_) | Pipe::Text(_) | Pipe::Var(_) => {}
+            Pipe::Num(_) | Pipe::Name(_) | Pipe::Text(_) | Pipe::Var(_) | Pipe::FnValue(_) => {}
         }
     }
 
@@ -399,6 +403,7 @@ pub fn show(p: &Pipe) -> String {
         Pipe::Seq(ps) => form("seq", &stages(ps)),
         Pipe::Expanded(m) if m.args.is_empty() => m.head.to_string(),
         Pipe::Expanded(m) => form(m.head, &m.args.iter().map(|a| if m.is_call() { stage(a) } else { show(a) }).collect::<Vec<_>>()),
+        Pipe::FnValue(q) => show(q),
         Pipe::Drop(q, _) => match &**q {
             // A call with its input written, as written: after `|` it drops its value.
             Pipe::Seq(ps) if matches!(&ps[..], [Pipe::Var(Slot::Local(_, Holds::Group)), Pipe::App(..)]) => {

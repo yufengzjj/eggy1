@@ -82,7 +82,7 @@ Rust 代码不按名字调用语言里的管线：一个内置函数要运行的
 | `(take_min R)` | 关上最新打开的 `R`：它的项比当前组的第一个元素严格更小时放到最前面（去重），否则原样返回 | 当前组为空时原样返回 |
 | `(label R)` | 只做统计：每个元素记 `stats::label`，与组变量 `R` 的第一个元素来源不同时记 `pre/来源/differs`、`pre/来源/gain`；`--trace` 时打印它们 | — |
 | `(assert C "MSG")` | 没有返回值（`(assert c:num msg:text)`）：对这一步的输入求一次 `C`，不是 0 时输入原样传下；是 0 时这次运行以错误 `MSG` 结束（运行时错误，和其他错误一样返回，不 panic）。不带 `@timed`，过了截止时刻照样检查 | — |
-| `(print X ...)` | 没有返回值（`(print x:any...)`）：把各个值用空格隔开、换行结尾写到 stderr，输入原样传下。每个值：表达式照 `num` 参数在这一步的输入上求值，写成数（`none` 写 `none`）；字符串原样；组变量写成各元素的中缀，用 `, ` 隔开（常数照最后输出的写法，按这次运行的数值类型）；单独写的函数名（内置函数、`def`、`let`，函数变量）写它的签名（`(rewrite t:term) term`，函数变量写 `f:term->num`）；其他名字照写。不带 `@timed`，过了截止时刻照样打印 | — |
+| `(print X ...)` | 没有返回值（`(print x:any...)`）：把各个值用空格隔开、换行结尾写到 stderr，输入原样传下。每个值：表达式照 `num` 参数在这一步的输入上求值，写成数（`none` 写 `none`）；字符串原样；组变量写成各元素的中缀，用 `, ` 隔开（常数照最后输出的写法，按这次运行的数值类型）；单独写的函数名照《[函数](../lang/functions.md)》 第 8 节的规则：给出数、只少输入、这一步又有输入时求值，写成数；否则（程序顶层开头没有输入、还少别的参数、给出组）是函数值，写它的签名（`(rewrite t:term) term`、`(size t:term?) num`，内置函数、`def`、`let` 一样；函数变量写 `f:term->num`）；其他名字照写。不带 `@timed`，过了截止时刻照样打印 | — |
 | `(egglog LABEL)`、`egglog` | 一轮 egglog：组里所有元素并入一个 e-graph，饱和，提取出一个项。统计计在 `egglog/LABEL` 下 | — |
 
 `tag`、`label`、`smaller`、`origin` 记的统计不影响结果；它们改的来源会影响结果（《[组、元素和管线](../lang/pipeline.md)》 第 1.2 节）。统计键里的名字就是语言里的名字（`polish_factor/run`、`final/polish_factor`、`pass/semi_shapes`），只有复合的键用 `/` 分隔各部分（`pre/NAME/made`、`NAME/won/ORIGIN`）。

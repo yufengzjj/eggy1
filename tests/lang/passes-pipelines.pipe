@@ -65,25 +65,25 @@ keep = 1
 (import "default")
 (def (prepass_steps) (if (nope >= 1) id))
 
-# expect error: unknown name nope in an expression; known: size vars depth mul bitconst arith_in_bit shift div (same ...) (any ...) (all ...) (opaque ...) minimal mixed (rebuilds ...) moved was_cut input tiny fits_split used_wide used_clustered few_rewrites replaceable abstracted no_leaves wide const_bitwise cofactor and the variables
+# expect error: unknown name nope in an expression
 
 # ---
 (import "default")
 (def (prepass_steps) (off nope))
 
-# expect error: unknown off name nope; known: lowbits,unshift,tfunc_whole,relate,tfunc,unify_operands,recombine,cut_products,shifted_xor,simplify_rebuilt,cluster_regions,simba,small_blocks,wide_blocks,poly_mba,poly_masked,rebuild_values,common_multiple,related_leaves,one_wide_term,semi_linear,drop_unused,clustered,peel,peel_clustered,semi_grouped,semi_peel_grouped,semi_shapes,semi_pairs,semi_peel_shapes,semi_split,semi_scaled,semi_bit_split,semi_short_consts,cut,rerun_input,prove_minimal,relate_parts
+# expect error: unknown off name nope
 
 # ---
 (import "default")
 (def (prepass_steps) (if (mul >= x) id))
 
-# expect error: unknown name x in an expression; known: size vars depth mul bitconst arith_in_bit shift div (same ...) (any ...) (all ...) (opaque ...) minimal mixed (rebuilds ...) moved was_cut input tiny fits_split used_wide used_clustered few_rewrites replaceable abstracted no_leaves wide const_bitwise cofactor and the variables
+# expect error: unknown name x in an expression
 
 # ---
 (import "default")
 (def (prepass_steps) (filter lt))
 
-# expect error: unknown name lt in an expression; known: size vars depth mul bitconst arith_in_bit shift div (same ...) (any ...) (all ...) (opaque ...) minimal mixed (rebuilds ...) moved was_cut input tiny fits_split used_wide used_clustered few_rewrites replaceable abstracted no_leaves wide const_bitwise cofactor and the variables
+# expect error: unknown name lt in an expression
 
 # ---
 (import "default")
@@ -120,13 +120,13 @@ keep = 1
 (let x id)
 (let y nope)
 
-# expect error: unknown pass nope; known: id none egglog take_minimal reprint settle within pre_done parse show lowbits unshift tfunc_whole tfunc unify_operands shifted_xor simplify_rebuilt drop_identities small_blocks wide_blocks rebuild_values common_multiple related_leaves one_wide_term polish_push_not polish_decompose polish_factor (seq p:pipe...) (union p:pipe...) (best k:num p:pipe...) (first p:pipe...) (fix n:num p:pipe) (if c:group->num a:pipe b:pipe?) (retry c:group->num a:pipe b:pipe) (smallest p:pipe) (scope p:pipe) (regions sub:pipe p:pipe) (again sub:pipe p:pipe) (tag n:name p:pipe) (origin n:name p:pipe) (smaller n:name p:pipe) (wins n:num p:pipe) (filter c:term->num) (save r:group) (label r:group) (clear r:name) (note r:name) (take_min r:name) (assert c:num msg:text) (print x:any...) (prepass p:pipe) (egglog label:name?) (polish p:pipe) (memo n:name p:pipe) (rewrite_top p:pipe) (cluster_regions sub:pipe) (cluster_top sub:pipe) (relate sub:pipe) (recombine sub:pipe) (cut_products sub:pipe) (finish sub:pipe) (halve sub:pipe) (over_const_bitwise sub:pipe) (over_shared_bitwise sub:pipe) (over_products sub:pipe) (split_bits sub:pipe) (rebuild sub:pipe) (simba p:pipe) (poly_mba sub:pipe sub_region:pipe) (drop_unused sub:pipe) (clustered sub:pipe) (peel sub_region:pipe) (peel_clustered sub_region:pipe) (semi_linear sub:pipe) (polish_join_constants sub:pipe) (polish_join_linear sub:pipe) (polish_over_const_bitwise sub:pipe) (polish_over_shared_bitwise sub:pipe) (polish_over_products sub:pipe) (polish_recombine sub:pipe) (polish_shift_cases sub:pipe) (index i:num) (off NAME...) (on NAME...)
+# expect error: unknown pass nope; did you mean note?
 
 # ---
 (import "default")
 (def (pipeline) undefined_name)
 
-# expect error: unknown pass undefined_name; known: id none egglog take_minimal reprint settle within pre_done parse show lowbits unshift tfunc_whole tfunc unify_operands shifted_xor simplify_rebuilt drop_identities small_blocks wide_blocks rebuild_values common_multiple related_leaves one_wide_term polish_push_not polish_decompose polish_factor (seq p:pipe...) (union p:pipe...) (best k:num p:pipe...) (first p:pipe...) (fix n:num p:pipe) (if c:group->num a:pipe b:pipe?) (retry c:group->num a:pipe b:pipe) (smallest p:pipe) (scope p:pipe) (regions sub:pipe p:pipe) (again sub:pipe p:pipe) (tag n:name p:pipe) (origin n:name p:pipe) (smaller n:name p:pipe) (wins n:num p:pipe) (filter c:term->num) (save r:group) (label r:group) (clear r:name) (note r:name) (take_min r:name) (assert c:num msg:text) (print x:any...) (prepass p:pipe) (egglog label:name?) (polish p:pipe) (memo n:name p:pipe) (rewrite_top p:pipe) (cluster_regions sub:pipe) (cluster_top sub:pipe) (relate sub:pipe) (recombine sub:pipe) (cut_products sub:pipe) (finish sub:pipe) (halve sub:pipe) (over_const_bitwise sub:pipe) (over_shared_bitwise sub:pipe) (over_products sub:pipe) (split_bits sub:pipe) (rebuild sub:pipe) (simba p:pipe) (poly_mba sub:pipe sub_region:pipe) (drop_unused sub:pipe) (clustered sub:pipe) (peel sub_region:pipe) (peel_clustered sub_region:pipe) (semi_linear sub:pipe) (polish_join_constants sub:pipe) (polish_join_linear sub:pipe) (polish_over_const_bitwise sub:pipe) (polish_over_shared_bitwise sub:pipe) (polish_over_products sub:pipe) (polish_recombine sub:pipe) (polish_shift_cases sub:pipe) (index i:num) (off NAME...) (on NAME...)
+# expect error: unknown pass undefined_name
 
 # ---
 (import "default")
@@ -150,7 +150,7 @@ keep = 1
 (import "default")
 (def (prepass_steps) main | (if (size-x > 1) id))
 
-# expect error: unknown name x in an expression; known: size vars depth mul bitconst arith_in_bit shift div (same ...) (any ...) (all ...) (opaque ...) minimal mixed (rebuilds ...) moved was_cut input tiny fits_split used_wide used_clustered few_rewrites replaceable abstracted no_leaves wide const_bitwise cofactor and the variables (size-x reads as size - x: names use _, not -)
+# expect error: unknown name x in an expression (size-x reads as size - x: names use _, not -)
 
 # ---
 (import "default")
@@ -184,7 +184,7 @@ keep = 1
 (import "default")
 (def (prepass_steps) (on nope))
 
-# expect error: unknown on name nope; known: lowbits,unshift,tfunc_whole,relate,tfunc,unify_operands,recombine,cut_products,shifted_xor,simplify_rebuilt,cluster_regions,simba,small_blocks,wide_blocks,poly_mba,poly_masked,rebuild_values,common_multiple,related_leaves,one_wide_term,semi_linear,drop_unused,clustered,peel,peel_clustered,semi_grouped,semi_peel_grouped,semi_shapes,semi_pairs,semi_peel_shapes,semi_split,semi_scaled,semi_bit_split,semi_short_consts,cut,rerun_input,prove_minimal,relate_parts
+# expect error: unknown on name nope
 
 # ---
 (import "default")
@@ -214,37 +214,37 @@ keep = 1
 (import "default")
 (def (pipeline) nope)
 
-# expect error: unknown pass nope; known: id none egglog take_minimal reprint settle within pre_done parse show lowbits unshift tfunc_whole tfunc unify_operands shifted_xor simplify_rebuilt drop_identities small_blocks wide_blocks rebuild_values common_multiple related_leaves one_wide_term polish_push_not polish_decompose polish_factor (seq p:pipe...) (union p:pipe...) (best k:num p:pipe...) (first p:pipe...) (fix n:num p:pipe) (if c:group->num a:pipe b:pipe?) (retry c:group->num a:pipe b:pipe) (smallest p:pipe) (scope p:pipe) (regions sub:pipe p:pipe) (again sub:pipe p:pipe) (tag n:name p:pipe) (origin n:name p:pipe) (smaller n:name p:pipe) (wins n:num p:pipe) (filter c:term->num) (save r:group) (label r:group) (clear r:name) (note r:name) (take_min r:name) (assert c:num msg:text) (print x:any...) (prepass p:pipe) (egglog label:name?) (polish p:pipe) (memo n:name p:pipe) (rewrite_top p:pipe) (cluster_regions sub:pipe) (cluster_top sub:pipe) (relate sub:pipe) (recombine sub:pipe) (cut_products sub:pipe) (finish sub:pipe) (halve sub:pipe) (over_const_bitwise sub:pipe) (over_shared_bitwise sub:pipe) (over_products sub:pipe) (split_bits sub:pipe) (rebuild sub:pipe) (simba p:pipe) (poly_mba sub:pipe sub_region:pipe) (drop_unused sub:pipe) (clustered sub:pipe) (peel sub_region:pipe) (peel_clustered sub_region:pipe) (semi_linear sub:pipe) (polish_join_constants sub:pipe) (polish_join_linear sub:pipe) (polish_over_const_bitwise sub:pipe) (polish_over_shared_bitwise sub:pipe) (polish_over_products sub:pipe) (polish_recombine sub:pipe) (polish_shift_cases sub:pipe) (index i:num) (off NAME...) (on NAME...)
+# expect error: unknown pass nope; did you mean note?
 
 # ---
 (import "default")
 (def (pipeline) (best x rewrite))
 
-# expect error: unknown name x in an expression; known: size vars depth mul bitconst arith_in_bit shift div (same ...) (any ...) (all ...) (opaque ...) minimal mixed (rebuilds ...) moved was_cut input tiny fits_split used_wide used_clustered few_rewrites replaceable abstracted no_leaves wide const_bitwise cofactor and the variables
+# expect error: unknown name x in an expression
 
 # ---
 (import "default")
 (def (pipeline) (fix 2 a b))
 
-# expect error: unknown pass a; known: id none egglog take_minimal reprint settle within pre_done parse show lowbits unshift tfunc_whole tfunc unify_operands shifted_xor simplify_rebuilt drop_identities small_blocks wide_blocks rebuild_values common_multiple related_leaves one_wide_term polish_push_not polish_decompose polish_factor (seq p:pipe...) (union p:pipe...) (best k:num p:pipe...) (first p:pipe...) (fix n:num p:pipe) (if c:group->num a:pipe b:pipe?) (retry c:group->num a:pipe b:pipe) (smallest p:pipe) (scope p:pipe) (regions sub:pipe p:pipe) (again sub:pipe p:pipe) (tag n:name p:pipe) (origin n:name p:pipe) (smaller n:name p:pipe) (wins n:num p:pipe) (filter c:term->num) (save r:group) (label r:group) (clear r:name) (note r:name) (take_min r:name) (assert c:num msg:text) (print x:any...) (prepass p:pipe) (egglog label:name?) (polish p:pipe) (memo n:name p:pipe) (rewrite_top p:pipe) (cluster_regions sub:pipe) (cluster_top sub:pipe) (relate sub:pipe) (recombine sub:pipe) (cut_products sub:pipe) (finish sub:pipe) (halve sub:pipe) (over_const_bitwise sub:pipe) (over_shared_bitwise sub:pipe) (over_products sub:pipe) (split_bits sub:pipe) (rebuild sub:pipe) (simba p:pipe) (poly_mba sub:pipe sub_region:pipe) (drop_unused sub:pipe) (clustered sub:pipe) (peel sub_region:pipe) (peel_clustered sub_region:pipe) (semi_linear sub:pipe) (polish_join_constants sub:pipe) (polish_join_linear sub:pipe) (polish_over_const_bitwise sub:pipe) (polish_over_shared_bitwise sub:pipe) (polish_over_products sub:pipe) (polish_recombine sub:pipe) (polish_shift_cases sub:pipe) (index i:num) (off NAME...) (on NAME...)
+# expect error: unknown pass a
 
 # ---
 (import "default")
 (def (pipeline) (loop rewrite))
 
-# expect error: unknown pass loop; known: id none egglog take_minimal reprint settle within pre_done parse show lowbits unshift tfunc_whole tfunc unify_operands shifted_xor simplify_rebuilt drop_identities small_blocks wide_blocks rebuild_values common_multiple related_leaves one_wide_term polish_push_not polish_decompose polish_factor (seq p:pipe...) (union p:pipe...) (best k:num p:pipe...) (first p:pipe...) (fix n:num p:pipe) (if c:group->num a:pipe b:pipe?) (retry c:group->num a:pipe b:pipe) (smallest p:pipe) (scope p:pipe) (regions sub:pipe p:pipe) (again sub:pipe p:pipe) (tag n:name p:pipe) (origin n:name p:pipe) (smaller n:name p:pipe) (wins n:num p:pipe) (filter c:term->num) (save r:group) (label r:group) (clear r:name) (note r:name) (take_min r:name) (assert c:num msg:text) (print x:any...) (prepass p:pipe) (egglog label:name?) (polish p:pipe) (memo n:name p:pipe) (rewrite_top p:pipe) (cluster_regions sub:pipe) (cluster_top sub:pipe) (relate sub:pipe) (recombine sub:pipe) (cut_products sub:pipe) (finish sub:pipe) (halve sub:pipe) (over_const_bitwise sub:pipe) (over_shared_bitwise sub:pipe) (over_products sub:pipe) (split_bits sub:pipe) (rebuild sub:pipe) (simba p:pipe) (poly_mba sub:pipe sub_region:pipe) (drop_unused sub:pipe) (clustered sub:pipe) (peel sub_region:pipe) (peel_clustered sub_region:pipe) (semi_linear sub:pipe) (polish_join_constants sub:pipe) (polish_join_linear sub:pipe) (polish_over_const_bitwise sub:pipe) (polish_over_shared_bitwise sub:pipe) (polish_over_products sub:pipe) (polish_recombine sub:pipe) (polish_shift_cases sub:pipe) (index i:num) (off NAME...) (on NAME...)
+# expect error: unknown pass loop
 
 # ---
 (import "default")
 (def (pipeline) (fix many id))
 
-# expect error: unknown name many in an expression; known: size vars depth mul bitconst arith_in_bit shift div (same ...) (any ...) (all ...) (opaque ...) minimal mixed (rebuilds ...) moved was_cut input tiny fits_split used_wide used_clustered few_rewrites replaceable abstracted no_leaves wide const_bitwise cofactor and the variables
+# expect error: unknown name many in an expression; did you mean any?
 
 # ---
 (import "default")
 (def (pipeline) (if nope id))
 
-# expect error: unknown name nope in an expression; known: size vars depth mul bitconst arith_in_bit shift div (same ...) (any ...) (all ...) (opaque ...) minimal mixed (rebuilds ...) moved was_cut input tiny fits_split used_wide used_clustered few_rewrites replaceable abstracted no_leaves wide const_bitwise cofactor and the variables
+# expect error: unknown name nope in an expression
 
 # ---
 (import "default")

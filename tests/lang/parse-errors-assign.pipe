@@ -50,13 +50,13 @@
 (import "default")
 (parse "x") | main | split_runs = on
 
-# expect error: unknown name on in an expression; known: size vars depth mul bitconst arith_in_bit shift div (same ...) (any ...) (all ...) (opaque ...) minimal mixed (rebuilds ...) moved was_cut input tiny fits_split used_wide used_clustered few_rewrites replaceable abstracted no_leaves wide const_bitwise cofactor and the variables
+# expect error: unknown name on in an expression
 
 # ---
 (import "default")
 (parse "x") | main | (if nope id)
 
-# expect error: unknown name nope in an expression; known: size vars depth mul bitconst arith_in_bit shift div (same ...) (any ...) (all ...) (opaque ...) minimal mixed (rebuilds ...) moved was_cut input tiny fits_split used_wide used_clustered few_rewrites replaceable abstracted no_leaves wide const_bitwise cofactor and the variables
+# expect error: unknown name nope in an expression
 
 # ---
 (import "default")
@@ -122,7 +122,7 @@
 (import "default")
 (parse "x") | main | split_runs = size-mul-x
 
-# expect error: unknown name x in an expression; known: size vars depth mul bitconst arith_in_bit shift div (same ...) (any ...) (all ...) (opaque ...) minimal mixed (rebuilds ...) moved was_cut input tiny fits_split used_wide used_clustered few_rewrites replaceable abstracted no_leaves wide const_bitwise cofactor and the variables (size-mul-x reads as size - mul - x: names use _, not -)
+# expect error: unknown name x in an expression (size-mul-x reads as size - mul - x: names use _, not -)
 
 # ---
 (import "default")
@@ -140,19 +140,19 @@
 (import "default")
 (parse "x") | main | (if (prove-minimal) id)
 
-# expect error: unknown name prove in an expression; known: size vars depth mul bitconst arith_in_bit shift div (same ...) (any ...) (all ...) (opaque ...) minimal mixed (rebuilds ...) moved was_cut input tiny fits_split used_wide used_clustered few_rewrites replaceable abstracted no_leaves wide const_bitwise cofactor and the variables (prove-minimal reads as prove - minimal: names use _, not -; write prove_minimal)
+# expect error: unknown name prove in an expression (prove-minimal reads as prove - minimal: names use _, not -; write prove_minimal)
 
 # ---
 (import "default")
 (parse "x") | main | t = u + 1
 
-# expect error: unknown name u in an expression; known: size vars depth mul bitconst arith_in_bit shift div (same ...) (any ...) (all ...) (opaque ...) minimal mixed (rebuilds ...) moved was_cut input tiny fits_split used_wide used_clustered few_rewrites replaceable abstracted no_leaves wide const_bitwise cofactor and the variables
+# expect error: unknown name u in an expression
 
 # ---
 (import "default")
 (parse "x") | main | t = (u)
 
-# expect error: unknown name u in an expression; known: size vars depth mul bitconst arith_in_bit shift div (same ...) (any ...) (all ...) (opaque ...) minimal mixed (rebuilds ...) moved was_cut input tiny fits_split used_wide used_clustered few_rewrites replaceable abstracted no_leaves wide const_bitwise cofactor and the variables
+# expect error: unknown name u in an expression
 
 # ---
 (import "default")
