@@ -6,6 +6,7 @@
 //! reverse.
 
 use crate::eval::{Op, Term as T, size};
+use crate::builtin_passes::Sub;
 use crate::linear_mba::{Kind, max_leaves, Ctx, build_sum, Prog, const_shift, kind, leaves, simba_memo};
 use crate::rust_vars::{Limit, limit};
 use std::collections::BTreeMap;
@@ -53,8 +54,12 @@ impl Lims {
     }
 }
 
-struct Expansion<'a> {
+struct Expansion<'a, 's, 'r> {
     w: &'a Ctx,
+    /// Rebuilds the leaves and the factors with a constant bitwise operation.
+    sub: &'a Sub<'s>,
+    /// Rebuilds the linear cofactors; `None` where nothing is built.
+    region: Option<&'a Sub<'r>>,
     leaves: Vec<T>,
     lim: Lims,
     built: std::cell::RefCell<crate::eval::FastMap<(Poly, bool), T>>,
@@ -67,13 +72,13 @@ struct Expansion<'a> {
     base: Vec<Conj>,
 }
 
-impl<'a> Expansion<'a> {
-    fn new(w: &'a Ctx, atoms: Vec<u64>) -> Self {
-        Expansion { w, lim: Lims::read(), leaves: Vec::new(), built: Default::default(), builds: Default::default(), linear: Default::default(), atoms, base: Vec::new() }
+impl<'a, 's, 'r> Expansion<'a, 's, 'r> {
+    fn new(w: &'a Ctx, atoms: Vec<u64>, sub: &'a Sub<'s>, region: Option<&'a Sub<'r>>) -> Self {
+        Expansion { w, sub, region, lim: Lims::read(), leaves: Vec::new(), built: Default::default(), builds: Default::default(), linear: Default::default(), atoms, base: Vec::new() }
     }
 
     fn leaf(&mut self, t: &T) -> Option<usize> {
-        let t = crate::linear_mba::sub(crate::linear_mba::sub_index("poly"), t, self.w);
+        let t = self.sub.term(t, self.w);
         self.push_leaf(t, None)
     }
 
@@ -218,7 +223,7 @@ impl<'a> Expansion<'a> {
             // rebuilt first, `(x + K) - (x | K)` is the single leaf `x & K`. Other factors
             // stay as they are: rebuilt, `~(y - 1)` becomes `-y`, a leaf unrelated to `y - 1`.
             Op::Mul => {
-                let f = |t: &T| if has_const_bit(t, self.w) { crate::linear_mba::sub(crate::linear_mba::sub_index("poly"), t, self.w) } else { t.clone() };
+                let f = |t: &T| if has_const_bit(t, self.w) { self.sub.term(t, self.w) } else { t.clone() };
                 let (x, y) = (self.poly(&f(&a[0]))?, self.poly(&f(&a[1]))?);
                 self.product(&x, &y)?
             }
@@ -341,7 +346,7 @@ impl<'a> Expansion<'a> {
             let terms: Vec<(u64, T)> = ms.iter().map(|&(c, m)| (c, self.conj_term(m))).collect();
             let t = build_sum(&terms, konst, self.w);
             konst = 0;
-            built.push(simba_memo(&t, self.w).unwrap_or(t));
+            built.push(simba_memo(&t, self.w, self.region.expect("an expansion that builds has a rebuild of cofactors")).unwrap_or(t));
         }
         built.into_iter().reduce(|a, b| T::Op(Op::Add, vec![a, b])).unwrap_or_else(|| build_sum(&[], konst, self.w))
     }
@@ -803,16 +808,17 @@ fn has_product(t: &T, w: &Ctx) -> bool {
 
 /// Number of monomials in the expansion of `t`, after the null polynomials are reduced
 /// if that leaves fewer.
-pub(crate) fn monomials(t: &T, w: &Ctx) -> Option<usize> {
-    let mut ctx = Expansion::new(w, Vec::new());
+pub(crate) fn monomials(t: &T, w: &Ctx, sub: &Sub) -> Option<usize> {
+    let mut ctx = Expansion::new(w, Vec::new(), sub, None);
     let p = ctx.poly(t)?;
     Some(p.len().min(ctx.reduce_null(&p).len()))
 }
 
 /// Rebuilt form of the polynomial region rooted at `t`, if it has a product of
 /// non-constant terms or is a linear region with more than `max_leaves` leaves,
-/// and the rebuilt form is smaller.
-pub(crate) fn simplify_poly(t: &T, w: &Ctx) -> Option<T> {
+/// and the rebuilt form is smaller; the leaves rebuilt by `sub`, the linear cofactors by
+/// `region`.
+pub(crate) fn simplify_poly(t: &T, w: &Ctx, sub: &Sub, region: &Sub) -> Option<T> {
     // A bitwise root would be its own leaf, and `leaf` rewrites leaves.
     let wide = kind(t, w) == Kind::Lin && {
         let mut lv = Vec::new();
@@ -823,7 +829,7 @@ pub(crate) fn simplify_poly(t: &T, w: &Ctx) -> Option<T> {
         return None;
     }
     use crate::stats;
-    let mut ctx = Expansion::new(w, Vec::new());
+    let mut ctx = Expansion::new(w, Vec::new(), sub, Some(region));
     let (p, q) = stats::time("poly_expand", || {
         let p = ctx.poly(t)?;
         let q = ctx.reduce_null(&p);
@@ -847,7 +853,7 @@ pub(crate) fn simplify_poly(t: &T, w: &Ctx) -> Option<T> {
     } else {
         r
     };
-    let r = match stats::try_pass("poly_masked", t, || masked_poly(t, p.len().min(q.len()), w)) {
+    let r = match stats::try_pass("poly_masked", t, || masked_poly(t, p.len().min(q.len()), w, sub, region)) {
         Some(m) if size(&m) < size(&r) => {
             stats::won_among("poly_masked", &[("poly_masked", size(&m)), ("poly_build", size(&r))], size(t), &m);
             m
@@ -859,7 +865,7 @@ pub(crate) fn simplify_poly(t: &T, w: &Ctx) -> Option<T> {
 
 /// `t` rebuilt with its bitwise terms with constants expanded per atom, so that products
 /// selecting bits cancel (`(a | 2)·(a & 2) + (a & ~2)·(~a & 2)` is `2a`, `a = q | t`).
-fn masked_poly(t: &T, monos: usize, w: &Ctx) -> Option<T> {
+fn masked_poly(t: &T, monos: usize, w: &Ctx, sub: &Sub, region: &Sub) -> Option<T> {
     // One product is enough in a small term; in large ones that is most regions of
     // semi-linear inputs, at several times the run time.
     let (any, both) = masked_products(t, w);
@@ -887,7 +893,7 @@ fn masked_poly(t: &T, monos: usize, w: &Ctx) -> Option<T> {
     if atoms.len() < 2 {
         return None;
     }
-    let mut ctx = Expansion::new(w, atoms);
+    let mut ctx = Expansion::new(w, atoms, sub, Some(region));
     let p = ctx.poly(t)?;
     if p.len() > limit(Limit::PolyMaxMaskedMonos).max(limit(Limit::PolyMaskedMonosRatio).saturating_mul(monos)) {
         return None;
@@ -928,7 +934,10 @@ fn collect_masks(t: &T, out: &mut Vec<u64>) {
 mod tests {
     use super::*;
     use crate::eval::{NumType, eval};
-    use crate::linear_mba::rewrite;
+
+    fn with_defaults<R>(f: impl FnOnce(&Sub, &Sub) -> R) -> R {
+        crate::rust_vars::in_default_run(|| crate::builtin_passes::with_fns(&["rewrite", "simba_steps"], |s| f(&s[0], &s[1])))
+    }
 
     struct Rng(u64);
     impl Rng {
@@ -975,14 +984,14 @@ mod tests {
 
     #[test]
     fn products_of_linear_mbas() {
-        crate::rust_vars::in_default_run(|| {
+        with_defaults(|rw, _| {
             let mut r = Rng(0x7f4a7c15_9e3779b9);
             for bits in [8u32, 64] {
                 let w = Ctx::new(bits);
                 let ty = NumType { bits, signed: false };
                 for _ in 0..300 {
                     let t = op(Op::Add, vec![op(Op::Mul, vec![linear(&mut r), linear(&mut r)]), linear(&mut r)]);
-                    let alt = rewrite(&t, &w);
+                    let alt = rw.term(&t, &w);
                     for _ in 0..32 {
                         let (x, y, z) = (r.next(), r.next(), r.next());
                         let env = |v: &str| match v {
@@ -993,7 +1002,7 @@ mod tests {
                         assert_eq!(eval(&t, ty, &env), eval(&alt, ty, &env), "w={bits}\n  {t:?}\n  {alt:?}");
                     }
                     let zero = op(Op::Sub, vec![t.clone(), swapped(&t)]);
-                    assert_eq!(rewrite(&zero, &w), T::Num(0), "w={bits}: {t:?}");
+                    assert_eq!(rw.term(&zero, &w), T::Num(0), "w={bits}: {t:?}");
                 }
             }
         })
@@ -1001,7 +1010,7 @@ mod tests {
 
     #[test]
     fn cubes_of_linear_mbas() {
-        crate::rust_vars::in_default_run(|| {
+        with_defaults(|rw, region| {
             let mut r = Rng(0x2545_f491_4f6c_dd1d);
             let mut factored = 0;
             for bits in [8u32, 64] {
@@ -1011,7 +1020,7 @@ mod tests {
                     let (a, b) = (linear(&mut r), linear(&mut r));
                     let c = if k % 2 == 0 { a.clone() } else { linear(&mut r) };
                     let t = op(Op::Mul, vec![op(Op::Mul, vec![a.clone(), b]), c]);
-                    let mut ctx = Expansion::new(&w, Vec::new());
+                    let mut ctx = Expansion::new(&w, Vec::new(), rw, Some(region));
                     let Some(p) = ctx.poly(&t) else { continue };
                     let built = ctx.build(&p, true);
                     factored += (size(&built) <= size(&t)) as u32;
@@ -1034,7 +1043,7 @@ mod tests {
     /// masked expansion, keep their value.
     #[test]
     fn masked_products_keep_value() {
-        crate::rust_vars::in_default_run(|| {
+        with_defaults(|rw, region| {
             let mut r = Rng(0x94d0_49bb_1331_11eb);
             let mut built = 0;
             for bits in [8u32, 64] {
@@ -1051,7 +1060,7 @@ mod tests {
                     let p1 = op(Op::Mul, vec![factor(&mut r), factor(&mut r)]);
                     let p2 = op(Op::Mul, vec![factor(&mut r), factor(&mut r)]);
                     let t = op(Op::Add, vec![p1, p2]);
-                    let Some(m) = masked_poly(&t, 0, &w) else { continue };
+                    let Some(m) = masked_poly(&t, 0, &w, rw, region) else { continue };
                     built += 1;
                     for _ in 0..32 {
                         let (x, y, z) = (r.next(), r.next(), r.next());

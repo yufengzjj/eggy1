@@ -5,13 +5,16 @@
 use crate::{linear_mba, minimal, stats};
 use crate::cand::Cand;
 use crate::eval::{Op, Term, parse, show, size};
-use crate::lang::ast::Pipe;
-use crate::lang::builtins::{Impl, name};
-use crate::lang::eval::{Env, Steps, fail, go, kept, past, scoped};
+use crate::lang::ast::{Fun, Holds, Pipe, Slot};
+use crate::lang::builtins::{Builtin, Impl, name};
+use crate::lang::eval::{Env, Lex, Steps, Value, fail, failed, go, kept, past, reads, scoped};
+use crate::lang::types::Ty;
 use crate::linear_mba::{CLUSTERED, Ctx, WIDE};
 use crate::passes::Passes;
 use crate::rust_vars::{Limit, limit, num_type};
 use std::cell::Cell;
+use std::rc::Rc;
+use std::sync::Arc;
 
 /// The Rust code of the built-in function `name` that the simplification implements: `IMPLS`,
 /// the passes over one term, or the polish passes (`polish_NAME`).
@@ -43,8 +46,7 @@ pub(crate) const IMPLS: &[(&str, Impl)] = &[
     ("egglog", Impl::Group(egglog)),
     ("take_minimal", Impl::Group(take_minimal)),
     ("polish", Impl::EachCand(polish_one)),
-    ("reprint", Impl::Main(reprint)),
-    ("pipeline", Impl::Group(pipeline)),
+    ("reprint", Impl::Main(|_, m, env| reprint(m, env))),
     ("settle", Impl::Group(settle)),
     ("parse", Impl::FromText(parse_text)),
     ("show", Impl::TermText(|c, _| crate::egglog_to_infix(c.term(), &|n| crate::norm_const(n, num_type())))),
@@ -59,10 +61,10 @@ pub(crate) const IMPLS: &[(&str, Impl)] = &[
     ("arith_in_bit", Impl::TermNum(|m, _| stats::shape(m.tree()).arith_in_bit as u64)),
     ("shift", Impl::TermNum(|m, _| stats::shape(m.tree()).shift as u64)),
     ("div", Impl::TermNum(|m, _| stats::shape(m.tree()).div as u64)),
-    ("opaque", Impl::TermNum(|m, env| (opaque(m.tree()) && size_of(&env.prepass_of(m.term()).0) > limit(Limit::TinySize)) as u64)),
+    ("opaque", Impl::Num(|a, set, env| set.first().is_some_and(|m| opaque(m.tree()) && size_of(&env.prepass_of(&a[0], m.term()).0) > limit(Limit::TinySize)) as u64)),
     ("minimal", Impl::GroupNum(|set, env| proved_minimal(set, env).is_some() as u64)),
     ("mixed", Impl::TermNum(|m, _| crate::mixed(m.tree()) as u64)),
-    ("rebuilds", Impl::TermNum(|m, env| (env.prepass_of(m.term()).0 != m.term()) as u64)),
+    ("rebuilds", Impl::Num(|a, set, env| set.first().is_some_and(|m| env.prepass_of(&a[0], m.term()).0 != m.term()) as u64)),
     ("tiny", Impl::TermNum(|m, _| (m.size() <= limit(Limit::TinySize)) as u64)),
     ("fits_split", Impl::TermNum(|m, _| (m.size() <= limit(Limit::SplitSize)) as u64)),
     ("used_wide", Impl::GroupNum(|set, _| set.iter().any(|c| c.used & WIDE != 0) as u64)),
@@ -93,8 +95,10 @@ impl<'a> Env<'a> {
         Env::with(p, w, signed, trace, input)
     }
 
-    fn prepass_of(&self, s: &str) -> (String, Vec<String>) {
-        linear_mba::simplify_linear_with(s, self.w, self.signed, self.trace, self.passes)
+    /// The pre-pass `p`, written in this run, on the egglog term `s`.
+    fn prepass_of(&self, p: &Pipe, s: &str) -> (String, Vec<String>) {
+        let f = Sub::new(p, Some(&self.lex.borrow()), self.passes);
+        prepass_run(&f, s, self.w, self.signed, self.trace)
     }
 
     /// `f` on the run of the innermost `scope`, or on a fresh one.
@@ -227,13 +231,13 @@ pub(crate) fn smaller(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
 }
 
 pub(crate) fn regions(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
-    let p = &args[0];
+    let (sub, p) = (Sub::of(&args[0], env), &args[1]);
     let w = env.ctx(|c| c.narrow(c.w));
     let mut out = Vec::with_capacity(set.len());
     for c in set {
         let outer = w.swap_used(0);
         let (mut err, mut won) = (None, None);
-        let r = linear_mba::on_region(c.tree(), &w, || {
+        let r = linear_mba::on_region(c.tree(), &w, &sub, || {
             let before = env.deferred.replace(Some(None));
             let rebuilt = go(p, vec![c.clone()], env);
             won = env.deferred.replace(before).flatten();
@@ -263,9 +267,10 @@ pub(crate) fn regions(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
 }
 
 pub(crate) fn again(args: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
-    let mut out = go(&args[0], set.clone(), env)?;
+    let sub = Sub::of(&args[0], env);
+    let mut out = go(&args[1], set.clone(), env)?;
     if let (Some(m), Some(t)) = (out.first_mut(), set.first()) {
-        if let Some(r) = env.ctx(|w| linear_mba::again(t.tree(), m.tree(), w)) {
+        if let Some(r) = env.ctx(|w| linear_mba::again(t.tree(), m.tree(), w, &sub)) {
             *m = Cand::of(r, m, 0, 0);
         }
     }
@@ -298,36 +303,260 @@ pub(crate) fn count_won(out: &[Cand], set: &[Cand], env: &Env) {
     }
 }
 
-/// `p` on the term `t`, on the run `w` (no new scope), for `linear_mba::rewrite`: its main
-/// candidate, or `t` when it gives none.
-pub(crate) fn run_term(p: &Pipe, t: &Term, w: &Ctx) -> Term {
-    run_on(p, t, w, false).map_or_else(|| t.clone(), Cand::into_tree)
+/// A function of the language that a pass runs on parts of its term: the argument of a
+/// parameter such as `sub` in `(relate sub:pipe t:term) term`, resolved where the pass is
+/// called.
+pub(crate) struct Sub<'a> {
+    /// Tells functions apart in memo keys: the definition run, or the term written; `None` for
+    /// one that reads variables of the run it is written in, whose results are not memoized.
+    pub(crate) id: Option<u64>,
+    passes: &'a Passes,
+    body: Body<'a>,
+    /// The run it is written in; `None` for the body of a function without parameters, which
+    /// is a run of its own.
+    lex: Option<Rc<Lex>>,
+    /// The function arguments of a `Body::Def` that is one pass over one term, made on first
+    /// use: they are the same at every call.
+    fns: std::cell::OnceCell<Box<Fns<'a>>>,
 }
 
-/// `run_term` for `linear_mba::simba`, `None` when `p` gives no candidate; the `State::used`
-/// bits of the candidate kept count for the run (`cofactor`: `Env::cofactor`).
-pub(crate) fn run_alt(p: &Pipe, t: &Term, w: &Ctx, cofactor: bool) -> Option<Term> {
-    let c = run_on(p, t, w, cofactor)?;
-    w.swap_used(w.swap_used(0) | c.used);
-    Some(c.into_tree())
+/// What a `Sub` runs.
+enum Body<'a> {
+    /// A function without parameters of `Sub::passes`.
+    Def(&'a crate::lang::defs::Def),
+    /// A term as written, and the function without parameters it is the body of, if any.
+    Term(Pipe, Option<Arc<crate::lang::defs::Def>>),
 }
 
-pub(crate) fn run_on(p: &Pipe, t: &Term, w: &Ctx, cofactor: bool) -> Option<Cand> {
+impl Body<'_> {
+    fn pipe(&self) -> &Pipe {
+        match self {
+            Body::Def(d) => &d.body,
+            Body::Term(p, _) => p,
+        }
+    }
+}
+
+impl<'a> Sub<'a> {
+    /// The function `arg` written in the run `lex`: a parameter's argument or a function
+    /// variable's closure, as written where they come from, and a function without
+    /// parameters by the definition a call runs.
+    pub(crate) fn new(arg: &Pipe, lex: Option<&Rc<Lex>>, passes: &'a Passes) -> Sub<'a> {
+        let (mut at, mut p, mut lex) = (arg as *const Pipe as u64, arg.clone(), lex.cloned());
+        loop {
+            (at, p, lex) = match &p {
+                Pipe::Var(Slot::Param(i, _)) => {
+                    let f = lex.as_ref().and_then(|l| l.frame.clone()).expect("a parameter outside the body of its function");
+                    (&f.args[*i] as *const Pipe as u64, f.args[*i].clone(), Some(f.caller.clone()))
+                }
+                Pipe::Var(Slot::Local(n, Holds::Fn(_))) => {
+                    let c = match lex.as_ref().and_then(|l| l.regs.borrow().get(n).cloned()) {
+                        Some(Value::Fn(c)) => c,
+                        _ => unreachable!("{n} holds no function value"),
+                    };
+                    (Arc::as_ptr(&c.body) as u64, (*c.body).clone(), Some(c.lex.clone()))
+                }
+                Pipe::App(Fun::Def(c), _) if c.def.late() => {
+                    let d = c.latest_def(&passes.defs);
+                    if !d.bare() {
+                        at ^= (Arc::as_ptr(d) as u64).rotate_left(32);
+                        break;
+                    }
+                    let id = Some(Arc::as_ptr(d) as u64);
+                    let body = match passes.defs.get(d.slot.unwrap_or(usize::MAX)).filter(|e| Arc::ptr_eq(e, d)) {
+                        Some(d) => Body::Def(d),
+                        None => Body::Term((*d.body).clone(), Some(d.clone())),
+                    };
+                    return Sub { id, passes, body, lex: None, fns: Default::default() };
+                }
+                _ => break,
+            };
+        }
+        let bare = lex.as_ref().is_none_or(|l| l.frame.is_none() && l.regs.borrow().is_empty());
+        let closed = || {
+            let (mut names, mut params) = (Vec::new(), Vec::new());
+            reads(&p, &mut names, &mut params);
+            names.is_empty() && params.is_empty()
+        };
+        let id = (bare || closed()).then_some(at);
+        Sub { id, passes, body: Body::Term(p, None), lex, fns: Default::default() }
+    }
+
+    /// `new` for an argument of a call in the run `env`.
+    pub(crate) fn of(arg: &Pipe, env: &Env<'a>) -> Sub<'a> {
+        Sub::new(arg, Some(&env.lex.borrow()), env.passes)
+    }
+
+    /// The candidates it gives for `set` in the run `env`; it reads the variables of the run
+    /// it is written in.
+    pub(crate) fn run_in(&self, set: Vec<Cand>, env: &Env) -> Steps {
+        crate::lang::eval::deeper(|| self.name(), || self.run_body(set, env))
+    }
+
+    fn run_body(&self, set: Vec<Cand>, env: &Env) -> Steps {
+        match &self.lex {
+            None => go(self.body.pipe(), set, env),
+            Some(l) => {
+                let outer = env.lex.replace(l.clone());
+                let out = go(self.body.pipe(), set, env);
+                env.lex.replace(outer);
+                out
+            }
+        }
+    }
+
+    /// The function's name, or the term written, for errors.
+    fn name(&self) -> String {
+        match &self.body {
+            Body::Def(d) => d.name.clone(),
+            Body::Term(_, Some(d)) => d.name.clone(),
+            Body::Term(p, None) => crate::lang::ast::show(p),
+        }
+    }
+
+    /// Its main result on the term `t` of the run `w` and the `State::used` bits of that
+    /// result: a pass over one term runs at once, without the counts of a step; anything else
+    /// as a run of its own (`cofactor`: `Env::cofactor`).
+    fn on(&self, t: &Term, w: &Ctx, cofactor: bool) -> Option<(Term, u8)> {
+        crate::lang::eval::deeper(|| self.name(), || Ok(self.on_once(t, w, cofactor))).unwrap_or_else(|e| {
+            fail(&e);
+            None
+        })
+    }
+
+    fn on_once(&self, t: &Term, w: &Ctx, cofactor: bool) -> Option<(Term, u8)> {
+        if let Pipe::App(Fun::Builtin(b), args) = self.body.pipe()
+            && matches!(b.imp, Impl::Each(_) | Impl::Polish(_))
+        {
+            if b.sig.switch && crate::rust_vars::is_off(b.name) {
+                return Some((t.clone(), 0));
+            }
+            let run = |fns: &Fns| match b.imp {
+                Impl::Each(f) => f(t, w, fns).unwrap_or_else(|| t.clone()),
+                Impl::Polish(f) => f(t, w, fns),
+                _ => unreachable!(),
+            };
+            let r = match &self.body {
+                &Body::Def(d) => match &*d.body {
+                    Pipe::App(Fun::Builtin(b), args) => run(self.fns.get_or_init(|| Box::new(Fns::new(b, args, None, self.passes)))),
+                    _ => unreachable!(),
+                },
+                Body::Term(..) => run(&Fns::new(b, args, self.lex.as_ref(), self.passes)),
+            };
+            return Some((r, 0));
+        }
+        let mut env = Env::with(self.passes, w.w, w.signed, false, "");
+        env.cofactor = cofactor;
+        env.ctxs.borrow_mut().push(w.narrow(w.w));
+        let input = Cand::of(t.clone(), &Cand::new("", "input"), 0, 0);
+        let out = scoped(|| self.run_body(vec![input], &env));
+        let c = out.inspect_err(fail).ok()?.into_iter().next()?;
+        let used = c.used;
+        Some((c.into_tree(), used))
+    }
+
+    /// Its main result on `t`, or `t` when it gives none.
+    pub(crate) fn term(&self, t: &Term, w: &Ctx) -> Term {
+        self.on(t, w, false).map_or_else(|| t.clone(), |(r, _)| r)
+    }
+
+    /// Its main result on `t`, `None` when it gives none; the `State::used` bits of that result
+    /// count for the run.
+    pub(crate) fn alt(&self, t: &Term, w: &Ctx) -> Option<Term> {
+        self.alt_as(t, w, false)
+    }
+
+    /// `alt` for a linear cofactor of `poly_mba` (`Env::cofactor`).
+    pub(crate) fn cofactor(&self, t: &Term, w: &Ctx) -> Option<Term> {
+        self.alt_as(t, w, true)
+    }
+
+    fn alt_as(&self, t: &Term, w: &Ctx, cofactor: bool) -> Option<Term> {
+        let (r, used) = self.on(t, w, cofactor)?;
+        w.swap_used(w.swap_used(0) | used);
+        Some(r)
+    }
+}
+
+/// The function arguments of a call of a pass over one term, and the name it is counted as:
+/// its name argument where its first parameter is a name (`memo`), else its own.
+pub(crate) struct Fns<'a> {
+    pub(crate) name: &'a str,
+    /// In order; no pass takes more than two (`poly_mba`).
+    subs: [Option<Sub<'a>>; 2],
+}
+
+impl<'a> Fns<'a> {
+    pub(crate) fn new(b: &Builtin, args: &'a [Pipe], lex: Option<&Rc<Lex>>, passes: &'a Passes) -> Fns<'a> {
+        let name = match (b.sig.params.first(), args.first()) {
+            (Some(p), Some(a)) if p.ty == Ty::Name => crate::lang::builtins::name(a),
+            _ => b.name,
+        };
+        let mut subs = [None, None];
+        let fns = args.iter().enumerate().filter(|(i, _)| b.sig.param(*i).ty.is_step());
+        for (s, (_, a)) in subs.iter_mut().zip(fns) {
+            *s = Some(Sub::new(a, lex, passes));
+        }
+        Fns { name, subs }
+    }
+
+    /// `new` for a call in the run `env`.
+    pub(crate) fn of(b: &Builtin, args: &'a [Pipe], env: &Env<'a>) -> Fns<'a> {
+        Fns::new(b, args, Some(&env.lex.borrow()), env.passes)
+    }
+
+    /// The function argument `i`, counted among the function parameters.
+    pub(crate) fn sub(&self, i: usize) -> &Sub<'a> {
+        self.subs[i].as_ref().expect("a function argument")
+    }
+}
+
+/// `f` given the functions `default.pipe` defines by `names`, as a pass is given them, in the
+/// run under way.
+#[cfg(test)]
+pub(crate) fn with_fns<R>(names: &[&str], f: impl FnOnce(&[Sub]) -> R) -> R {
     let passes = crate::passes::current();
-    let mut env = Env::with(&passes, w.w, w.signed, false, "");
-    env.cofactor = cofactor;
-    env.ctxs.borrow_mut().push(w.narrow(w.w));
-    let input = Cand::of(t.clone(), &Cand::new("", "input"), 0, 0);
-    let out = scoped(|| go(p, vec![input], &env));
-    out.inspect_err(fail).ok()?.into_iter().next()
+    let calls: Vec<Pipe> = names.iter().map(|n| crate::lang::defs::Call::bare(passes.defs.iter().find(|d| d.name == *n).unwrap())).collect();
+    let subs: Vec<Sub> = calls.iter().map(|c| Sub::new(c, None, &passes)).collect();
+    f(&subs)
 }
 
-/// `Passes::polish` on `c` alone, as a run of its own (its group variables, `smallest`, `wins`),
-/// when it makes it smaller.
-pub(crate) fn polish_one(c: &Cand, env: &Env) -> Option<Cand> {
+/// The polish `args[0]` on `c` alone, as a run of its own (its group variables, `smallest`,
+/// `wins`), when it makes it smaller.
+pub(crate) fn polish_one(args: &[Pipe], c: &Cand, env: &Env) -> Option<Cand> {
+    let f = Sub::of(&args[0], env);
     let run = Env::with(env.passes, env.w, env.signed, env.trace, c.term());
-    let out = scoped(|| go(&env.passes.polish, vec![c.clone()], &run));
+    let out = scoped(|| f.run_in(vec![c.clone()], &run));
     out.inspect_err(fail).ok()?.into_iter().next().filter(|r| r.size() < c.size())
+}
+
+/// The pre-pass `f` on the egglog term `egg` at width `w` (`signed` as in `Ctx`), as a run of
+/// its own: its main rebuild and the others to union with it, candidates to stderr when
+/// `trace` is set; `egg` itself when it gives none. The result for the last input is kept on
+/// this thread, since a round asks the conditions and the step for the same one.
+fn prepass_run(f: &Sub, egg: &str, w: u32, signed: Option<bool>, trace: bool) -> (String, Vec<String>) {
+    type Result = (String, Vec<String>);
+    type Last = Option<(String, u32, Option<bool>, bool, Passes, u64, Vec<u64>, Result)>;
+    thread_local! {
+        static LAST: std::cell::RefCell<Last> = const { std::cell::RefCell::new(None) };
+    }
+    // A variable bound where it is called (an assignment, `(off NAME)`) changes the result as the program does.
+    let vars = crate::lang::vars::key();
+    let hit = |(e, bits, s, t, q, id, v, _): &&(String, u32, Option<bool>, bool, Passes, u64, Vec<u64>, Result)| e == egg && *bits == w && *s == signed && *t == trace && f.id == Some(*id) && q == f.passes && *v == vars;
+    if let Some(r) = LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.7.clone())) {
+        return r;
+    }
+    let env = Env::with(f.passes, w, signed, trace, egg);
+    let out = scoped(|| f.run_in(vec![Cand::new(egg, "input")], &env)).and_then(|out| failed().map_or(Ok(out), Err));
+    let mut out = out.inspect_err(fail).unwrap_or_default().into_iter().map(|c| c.term().to_string());
+    let r = (out.next().unwrap_or_else(|| egg.to_string()), out.collect());
+    if failed().is_some() {
+        return r;
+    }
+    if let Some(id) = f.id {
+        LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, signed, trace, f.passes.clone(), id, vars, r.clone())));
+    }
+    r
 }
 
 fn pre(e: &str) -> String {
@@ -373,8 +602,8 @@ pub(crate) fn pre_done(_: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
         .collect())
 }
 
-pub(crate) fn prepass(main: &Cand, env: &Env) -> Steps {
-    let (alt, other) = env.prepass_of(main.term());
+pub(crate) fn prepass(args: &[Pipe], main: &Cand, env: &Env) -> Steps {
+    let (alt, other) = env.prepass_of(&args[0], main.term());
     Ok(std::iter::once(alt).chain(other).map(|e| Cand::new(&e, &pre(&e))).collect())
 }
 
@@ -395,13 +624,6 @@ pub(crate) fn take_minimal(_: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
 pub(crate) fn reprint(main: &Cand, _: &Env) -> Steps {
     let out = crate::egglog_to_infix(main.term(), &|n| crate::norm_const(n, num_type()));
     Ok(vec![Cand::new(&crate::infix_to_egglog(&out, true), &main.origin)])
-}
-
-/// `Passes::pipeline` on `set`, as a run of its own on its main candidate.
-pub(crate) fn pipeline(_: &[Pipe], set: Vec<Cand>, env: &Env) -> Steps {
-    let input = set.first().map_or_else(String::new, |c| c.term().to_string());
-    let run = Env::with(env.passes, env.w, env.signed, env.trace, &input);
-    scoped(|| go(&env.passes.pipeline, set, &run))
 }
 
 pub(crate) fn settle(_: &[Pipe], set: Vec<Cand>, _: &Env) -> Steps {

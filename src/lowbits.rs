@@ -580,18 +580,18 @@ fn low_factor(node: T, infos: &[Info], w: &Ctx) -> T {
 }
 
 /// `t` with the factor of each product beside a factor with `k` known trailing zeros
-/// shortened by `shorter_low`. Run on rebuilt terms: on the input, the cut factor no
-/// longer shares its constants with equal subterms elsewhere.
-pub(crate) fn cut_products(t: &T, w: &Ctx) -> T {
-    fn go(t: &T, w: &Ctx) -> (T, Info) {
+/// shortened by `shorter_low` (rebuilt by `sub`). Run on rebuilt terms: on the input, the
+/// cut factor no longer shares its constants with equal subterms elsewhere.
+pub(crate) fn cut_products(t: &T, w: &Ctx, sub: &crate::builtin_passes::Sub) -> T {
+    fn go(t: &T, w: &Ctx, sub: &crate::builtin_passes::Sub) -> (T, Info) {
         let T::Op(op, a) = t else { return (t.clone(), info(t, w)) };
-        let (mut args, infos): (Vec<T>, Vec<Info>) = a.iter().map(|x| go(x, w)).unzip();
+        let (mut args, infos): (Vec<T>, Vec<Info>) = a.iter().map(|x| go(x, w, sub)).unzip();
         let i = combine(*op, &infos, is_square(&T::Op(*op, args.clone())), w);
         if *op == Op::Mul && !args.iter().any(|x| matches!(x, T::Num(_))) {
             for j in 0..2 {
                 let k = infos[j].k0.trailing_ones().min(w.w);
                 if k > 0 && k < w.w {
-                    if let Some(q) = shorter_low(&args[1 - j], w.w - k, w) {
+                    if let Some(q) = shorter_low(&args[1 - j], w.w - k, w, sub) {
                         args[1 - j] = q;
                         break;
                     }
@@ -611,12 +611,13 @@ pub(crate) fn cut_products(t: &T, w: &Ctx) -> T {
         }
         (T::Op(*op, args), i)
     }
-    go(t, w).0
+    go(t, w, sub).0
 }
 
 /// `q` with every constant cut to its low `r` bits, when that drops an operand
-/// (`(x + z)*0x10000001` with `r = 24` is `x + z`) or a small `q` then rebuilds smaller.
-fn shorter_low(q: &T, r: u32, w: &Ctx) -> Option<T> {
+/// (`(x + z)*0x10000001` with `r = 24` is `x + z`) or a small `q` then rebuilds smaller by
+/// `sub` than `q` does.
+fn shorter_low(q: &T, r: u32, w: &Ctx, sub: &crate::builtin_passes::Sub) -> Option<T> {
     let cut = crate::linear_mba::low_consts(q, r);
     if cut == *q {
         return None;
@@ -628,9 +629,8 @@ fn shorter_low(q: &T, r: u32, w: &Ctx) -> Option<T> {
     if size(q) > limit(Limit::LowbitsMaxLowRebuild) {
         return None;
     }
-    let low = crate::linear_mba::sub_index("low_factor");
-    let rebuilt = crate::linear_mba::sub(low, &folded, w);
-    (size(&rebuilt) < size(q) && size(&rebuilt) < size(&crate::linear_mba::sub(low, q, w))).then_some(rebuilt)
+    let rebuilt = sub.term(&folded, w);
+    (size(&rebuilt) < size(q) && size(&rebuilt) < size(&sub.term(q, w))).then_some(rebuilt)
 }
 
 /// `t` without operations whose constant operand leaves the other unchanged (`a*1`, `a + 0`, `a & -1`, ...).

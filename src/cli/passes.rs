@@ -1,6 +1,6 @@
 //! The `--passes` spec: its items (`key=value`, `off=`, `pre=`, `polish=a,b`, `pipeline=P`,
-//! `sub_NAME=P`, `file=PATH`, definitions), written as the program source they stand for, and
-//! the `--passes` form of a program read back.
+//! `file=PATH`, definitions), written as the program source they stand for, and the
+//! `--passes` form of a program read back.
 
 use crate::lang::Program;
 use crate::lang::ast::{Pipe, Slot, pretty, show, show_assigned};
@@ -9,9 +9,13 @@ use crate::lang::lexer::{code_part, is_old_syntax, quoted, slash_name};
 use crate::lang::parser::{parse, parse_assign};
 use crate::lang::source::{is_name, top_assignment};
 use crate::lang::vars::{var, var_index, var_names};
-use crate::passes::{DEFAULT, Passes, RULESETS, STEPS, SUBS, Step, defined_builtin};
+use crate::passes::{DEFAULT, Passes, RULESETS, STEPS, Step};
 use crate::rust_vars::INNER;
 use std::fmt;
+
+/// The items `NAME=P` that define a function of `default.pipe` without parameters, `(def (DEF)
+/// P)`, by `NAME` and `DEF`.
+pub const PIPELINES: [(&str, &str); 5] = [("pipeline", "pipeline"), ("prepass", "prepass_steps"), ("polish", "polish_steps"), ("rewrite", "rewrite"), ("simba", "simba_steps")];
 
 /// A change of the egglog schedule a `schedule` item makes.
 pub type ScheduleEdit = Box<dyn Fn(&mut Vec<(Step, &'static str)>)>;
@@ -63,9 +67,8 @@ fn items(spec: &str) -> Vec<String> {
 }
 
 /// The program source the items of `spec` stand for, one item a line or form, and the changes
-/// its `schedule` items make. `pipeline`, `prepass`, `polish`, `rewrite`, `simba` and `sub_NAME`
-/// (`SUBS`) take a pipeline, `(def (NAME) P)`, and `polish` also a list of polish pass names
-/// (`polish`); `file=PATH` is `(import "PATH")`; `off`, `pre` and `schedule` take lists of
+/// its `schedule` items make. The names of `PIPELINES` take a pipeline, `(def (DEF) P)`, and
+/// `polish` also a list of polish pass names (`polish`); `file=PATH` is `(import "PATH")`; `off`, `pre` and `schedule` take lists of
 /// names separated by `,`, also as `key+=names` and `key-=names` (`pre` the switches `pre_NAME`
 /// by `NAME`, `schedule` the steps `run:`, `once:` or `sat:` and a ruleset); any other key is a
 /// variable that exists, assigned. Definitions and `NAME = VALUE` with spaces around `=` are
@@ -106,22 +109,23 @@ pub fn translate(spec: &str) -> Result<(String, Vec<ScheduleEdit>), String> {
             let names: Vec<&str> = val.split(',').filter(|s| !s.is_empty()).collect();
             let all_polish = names.iter().all(|n| crate::linear_mba::POLISH.iter().any(|(m, _)| m == n));
             match all_polish {
-                true => line(&format!("(def (polish) {})", polish(&names))),
+                true => line(&format!("(def (polish_steps) {})", polish(&names))),
                 false => {
                     read(val)?;
-                    line(&format!("(def (polish) {val})"));
+                    line(&format!("(def (polish_steps) {val})"));
                 }
             }
             continue;
         }
-        if let Some((name, val)) = item.split_once('=').filter(|(k, _)| defined_builtin(k) || k.starts_with("sub_")) {
-            if name.starts_with("sub_") && !defined_builtin(name) {
-                let names: Vec<&str> = SUBS.iter().map(|(n, _)| *n).collect();
-                return Err(format!("unknown {name}; known: {}", names.join(" ")));
+        if let Some((name, val)) = item.split_once('=') {
+            if let Some((_, def)) = PIPELINES.iter().find(|(n, _)| *n == name) {
+                read(val)?;
+                line(&format!("(def ({def}) {val})"));
+                continue;
             }
-            read(val)?;
-            line(&format!("(def ({name}) {val})"));
-            continue;
+            if name.starts_with("sub_") {
+                return Err(format!("{name}=P is no longer read: a pass takes the function it runs on parts of its term as an argument, as in (relate rewrite)"));
+            }
         }
         let (key, op, val) = ["+=", "-=", "="]
             .iter()
@@ -205,10 +209,16 @@ impl Passes {
 }
 
 /// The polish `polish=a,b,...` writes: the polish passes `names` in turn, each kept when
-/// smaller, repeated while one is, until `polish_wins` are, as the default in `default.pipe`.
+/// smaller, repeated while one is, until `polish_wins` are, as the default in `default.pipe`,
+/// with the functions it gives them.
 pub fn polish(names: &[&str]) -> String {
     let step = |n: &&str| {
-        let run = format!("polish_{n} | drop_identities");
+        let call = match *n {
+            "join_constants" | "join_linear" | "recombine" => format!("(polish_{n} rewrite)"),
+            "over_const_bitwise" | "over_shared_bitwise" | "over_products" | "shift_cases" => format!("(polish_{n} (rebuild rewrite))"),
+            _ => format!("polish_{n}"),
+        };
+        let run = format!("{call} | drop_identities");
         let run = if *n == "join_linear" { format!("(semi_leaves = 2 | {run})") } else { run };
         format!("(smaller polish_{n} {run})")
     };
@@ -259,12 +269,9 @@ impl fmt::Display for Passes {
                 write!(f, " {}", show_def(d))?;
             }
         }
-        for (name, p) in [("pipeline", &self.pipeline), ("prepass", &self.prepass), ("polish", &self.polish), ("rewrite", &self.rewrite), ("simba", &self.simba)] {
-            write!(f, "{sep}{name}={}", show(p))?;
-        }
-        for ((name, default), p) in SUBS.iter().zip(&self.subs) {
-            if Some(p) != crate::lang::builtins::resolve(default).as_ref() {
-                write!(f, "{sep}sub_{name}={}", show(p))?;
+        for (name, def) in PIPELINES {
+            if let Some(p) = self.body(def) {
+                write!(f, "{sep}{name}={}", show(p))?;
             }
         }
         Ok(())

@@ -1,24 +1,18 @@
-//! The checks of the pipelines a run may use (`Passes::check`): functions that need a
-//! `simplify` run, functions that reach themselves, group variables read before they are bound;
-//! and what a pipeline uses, which the warnings read too.
+//! The checks of the pipelines a run may use (`Passes::check`): group variables read before
+//! they are bound; and what a pipeline uses, which the warnings read too.
 
 use super::ast::{Fun, Holds, Pipe, Slot, show, show_stage, starts_with_value};
 use super::defs::{Call, expand};
-use super::host::{self, Passes, SUBS};
+use super::host::Passes;
 use super::run::Gives;
 use super::vars::{var, var_index};
 
 impl Passes {
-    /// Rejects pipelines that cannot run: an egglog round or `reprint` outside `pipeline`
-    /// (only a `simplify` run has them), also in a function they call, and a function that
-    /// reaches itself through other functions. The rebuilds of one term (`rewrite`, `simba`,
-    /// `sub_NAME`: one node `rewrite`, which any pass over one term may run) recurse on
-    /// subterms, and so may the functions they call that call them again.
+    /// Rejects pipelines that cannot run: a read of a group variable that nothing may have
+    /// bound.
     pub(crate) fn check(&self) -> Result<(), String> {
         self.check_top()?;
-        let mut reach: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-        let mut needs = std::collections::HashMap::new();
-        for (name, node, uses) in self.uses() {
+        for (name, uses) in self.uses() {
             if let Some(r) = &uses.unsaved {
                 let how = match uses.kind(r) {
                     GROUP => format!("{r} = ... or (save {r})"),
@@ -26,38 +20,6 @@ impl Passes {
                     _ => format!("{r} = ..."),
                 };
                 return Err(format!("{name} reads {} {r} before it is bound ({how})", uses.kind(r)));
-            }
-            if let Some((what, sig)) = uses.needs_run.first() {
-                match node.as_str() {
-                    "pipeline" => {}
-                    "prepass" | "polish" | "rewrite" => return Err(format!("{what} needs a simplify run and cannot be in {name}: {}", sig.decl())),
-                    _ => {
-                        needs.insert(node.clone(), (what.clone(), *sig));
-                    }
-                }
-            }
-            reach.entry(node).or_default().extend(uses.calls);
-        }
-        let reached = |start: &str| {
-            let (mut seen, mut todo) = (Vec::<String>::new(), reach.get(start).cloned().unwrap_or_default());
-            while let Some(n) = todo.pop() {
-                if !seen.contains(&n) {
-                    todo.extend(reach.get(&n).cloned().unwrap_or_default());
-                    seen.push(n);
-                }
-            }
-            seen
-        };
-        let inner = reached("rewrite");
-        let starts = ["pipeline", "prepass", "polish"].into_iter().chain(self.defs.iter().map(|d| d.name.as_str()));
-        for start in starts {
-            if reached(start).iter().any(|n| n == start) && !(self.defs.iter().any(|d| d.name == start) && inner.iter().any(|n| n == start)) {
-                return Err(format!("{start} reaches itself"));
-            }
-        }
-        for start in ["prepass", "polish", "rewrite"] {
-            if let Some((n, (what, sig))) = reached(start).iter().find_map(|n| needs.get(n).map(|w| (n, w))) {
-                return Err(format!("{what} needs a simplify run and cannot be in {n}, which {start} calls: {}", sig.decl()));
             }
         }
         Ok(())
@@ -95,18 +57,11 @@ impl Passes {
         Ok(())
     }
 
-    /// Each pipeline by name, with its node in `check` (`rewrite` for `simba` and
-    /// `sub_NAME`) and what it uses.
-    pub(crate) fn uses(&self) -> Vec<(String, String, Uses)> {
-        let main = [("pipeline", &self.pipeline), ("prepass", &self.prepass), ("polish", &self.polish), ("rewrite", &self.rewrite), ("simba", &self.simba)];
-        let builtin = main.into_iter().chain(SUBS.iter().map(|(n, _)| *n).zip(&self.subs)).map(|(name, p)| {
-            let node = if ["pipeline", "prepass", "polish"].contains(&name) { name } else { "rewrite" };
-            (name.to_string(), node.to_string(), p)
-        });
-        let plain = self.defs.iter().filter(|d| !d.has_names() && !d.inline).map(|d| (d.name.clone(), d.name.clone(), &*d.body));
-        let roots: Vec<(String, String, &Pipe)> = builtin.chain(plain).collect();
+    /// Each function's body by name, with what it uses.
+    pub(crate) fn uses(&self) -> Vec<(String, Uses)> {
+        let roots: Vec<(String, &Pipe)> = self.defs.iter().filter(|d| !d.has_names() && !d.inline).map(|d| (d.name.clone(), &*d.body)).collect();
         let mut called = Vec::new();
-        roots.iter().for_each(|(_, _, p)| instances(p, &mut called));
+        roots.iter().for_each(|(_, p)| instances(p, &self.defs, &mut called));
         let bound = |name: &str| self.defs.iter().find(|d| d.name == name).map_or_else(Vec::new, |d| d.bound());
         let of = |p: &Pipe, name: &str| {
             let mut uses = Uses::default();
@@ -119,27 +74,28 @@ impl Passes {
             }
             uses
         };
-        let mut out: Vec<(String, String, Uses)> = roots.iter().map(|(name, node, p)| (name.clone(), node.clone(), of(p, name))).collect();
-        out.extend(called.iter().map(|(name, _, body)| (name.clone(), name.clone(), of(body, name))));
+        let mut out: Vec<(String, Uses)> = roots.iter().map(|(name, p)| (name.clone(), of(p, name))).collect();
+        out.extend(called.iter().map(|(name, _, body)| (name.clone(), of(body, name))));
         out
     }
 }
 
 /// The calls in `p` of functions with name parameters, and those in the bodies they run, each
 /// once per function and name arguments: the function's name, the name arguments, the body.
-fn instances(p: &Pipe, out: &mut Vec<(String, Vec<String>, std::sync::Arc<Pipe>)>) {
-    p.each(&mut |q| instances(q, out));
+fn instances(p: &Pipe, defs: &[std::sync::Arc<super::defs::Def>], out: &mut Vec<(String, Vec<String>, std::sync::Arc<Pipe>)>) {
+    p.each(&mut |q| instances(q, defs, out));
     if let Some((c, _)) = p.call()
         && c.def.inline
     {
-        instances(&c.body, out);
-    } else if let Some((c, args)) = p.call()
+        instances(&c.body, defs, out);
+    } else if let Pipe::App(super::ast::Fun::Def(c), args) = p
         && c.def.has_names()
     {
+        let c = c.latest(args, defs);
         let names: Vec<String> = args.iter().filter_map(|a| if let Pipe::Name(n) = a { Some(n.clone()) } else { None }).collect();
         if !out.iter().any(|(n, ns, _)| *n == c.def.name && *ns == names) {
             out.push((c.def.name.clone(), names, c.body.clone()));
-            instances(&c.body, out);
+            instances(&c.body, defs, out);
         }
     }
 }
@@ -156,12 +112,6 @@ fn binds(p: &Pipe) -> bool {
 /// What a pipeline uses, for `Passes::check` and `Passes::warnings`.
 #[derive(Default)]
 pub(crate) struct Uses {
-    /// The passes in it that need a `simplify` run (`@simplify_only`), by the name they are
-    /// counted as.
-    pub(crate) needs_run: Vec<(String, &'static super::types::Sig)>,
-    /// The functions it runs: `prepass`, `polish`, `rewrite` (also for `simba` and
-    /// `sub_NAME`, which any pass over one term may run) and those `def` defines.
-    pub(crate) calls: Vec<String>,
     /// The group variables a `(save R)` or `R = p` may have bound by now, in run order; each
     /// pipeline has its own.
     pub(crate) saved: Vec<String>,
@@ -226,7 +176,6 @@ impl Uses {
             // A pipeline argument runs with the caller's group variables, at any point of the call
             // and any number of times.
             Pipe::App(Fun::Def(c), args) => {
-                self.calls.push(c.def.name.clone());
                 self.call_args(c, args);
             }
             Pipe::Var(Slot::Param(..)) => {}
@@ -270,15 +219,11 @@ impl Uses {
     }
 
     fn app(&mut self, b: &super::builtins::Builtin, args: &[Pipe]) {
-        if b.sig.simplify_only {
-            self.needs_run.push((host::step_name(b.name, args), b.sig));
-        }
         let name = |i: usize| match &args[i] {
             Pipe::Name(n) => n.as_str(),
             a => unreachable!("{a:?} is not a name"),
         };
         match b.name {
-            "prepass" | "polish" | "pipeline" => self.calls.push(b.name.into()),
             "show" | "parse" => args.iter().for_each(|a| self.walk(a)),
             "pre_done" => self.seen("t0"),
             "save" => self.bound(name(0)),
@@ -324,17 +269,25 @@ impl Uses {
             }),
             "scope" => self.walk(&args[0]),
             "tag" | "smaller" | "origin" => self.walk(&args[1]),
-            // Both rebuild with `Passes::rewrite`.
             "regions" => {
-                self.calls.push("rewrite".into());
                 self.repeated(&args[0]);
+                self.repeated(&args[1]);
             }
             "again" => {
-                self.calls.push("rewrite".into());
-                self.walk(&args[0]);
+                self.repeated(&args[0]);
+                self.walk(&args[1]);
             }
-            _ if b.over_term() => self.calls.push("rewrite".into()),
-            _ => {}
+            _ => self.functions(b, args),
+        }
+    }
+
+    /// The function arguments of a call of `b`, which may run any number of times.
+    fn functions(&mut self, b: &super::builtins::Builtin, args: &[Pipe]) {
+        for (i, a) in args.iter().enumerate() {
+            match b.sig.param(i) {
+                p if p.ty.is_step() => self.repeated(a),
+                _ => {}
+            }
         }
     }
 
@@ -420,11 +373,9 @@ impl Uses {
                     }
                     None => &args[..],
                 };
-                if ["opaque", "rebuilds"].contains(&b.name) {
-                    self.calls.push("prepass".into());
-                }
-                for a in args.iter() {
+                for (i, a) in args.iter().enumerate() {
                     match a {
+                        _ if b.sig.param(i).ty.is_step() => self.repeated(a),
                         Pipe::Name(r) => self.read(r),
                         a => self.expr(a),
                     }
@@ -440,7 +391,6 @@ impl Uses {
                 self.expr(e);
             }
             Pipe::App(Fun::Def(c), args) => {
-                self.calls.push(c.def.name.clone());
                 args.get(c.def.params.len()).iter().for_each(|p| self.walk(p));
                 self.call_args(c, args);
             }
@@ -493,7 +443,6 @@ fn needs_input(p: &Pipe) -> bool {
         Pipe::Bind(Slot::Local(_, Holds::Group), rhs) => needs_input(rhs),
         Pipe::Bind(..) => false,
         Pipe::App(Fun::Def(c), _) if !c.def.inline => !gives_value(p),
-        Pipe::App(Fun::Builtin(b), _) if b.name == "pipeline" => true,
         Pipe::App(Fun::Builtin(b), _) => b.timed && !gives_value(p),
         _ => false,
     }

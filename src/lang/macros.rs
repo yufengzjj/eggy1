@@ -90,12 +90,17 @@ fn noted_one(p: &Pipe, s: &str, inline: bool) -> Pipe {
 }
 
 /// `p` with `(note s)` after the steps inside it, also those of the pipelines inside its
-/// expressions.
+/// expressions; not inside the functions given to a pass, which runs them on its own.
 fn noted(p: &Pipe, s: &str, inline: bool) -> Pipe {
     match p {
         Pipe::App(f, args) => {
+            let given = |i: usize| match f {
+                Fun::Builtin(b) => b.sig.kind() != super::types::Kind::Group || b.sig.param(i).name.starts_with("sub"),
+                _ => false,
+            };
             let arg = |(i, a): (usize, &Pipe)| match f.param_ty(args, i) {
                 Some(t) if !t.is_step() => noted_expr(a, s, inline),
+                Some(_) if given(i) => a.clone(),
                 _ => noted_one(a, s, inline),
             };
             let args = args.iter().enumerate().map(arg).collect();
@@ -159,21 +164,23 @@ mod tests {
 
     #[test]
     fn smallest_notes_each_step_that_computes() {
-        let p = parse("(smallest rewrite | id | (save r) | (fix 2 tfunc) | (best 1 relate id (load r)) | (if mixed polish))").unwrap();
+        let p = parse("(smallest lowbits | id | (save r) | (fix 2 tfunc) | (best 1 unshift id (load r)) | (if mixed (polish id)))").unwrap();
         assert_eq!(
             expansion(&p),
-            "(clear s) | rewrite | (note s) | id | (save r) | (fix 2 tfunc | (note s)) | (best 1 (relate | (note s)) id (load r)) | (if mixed (polish | (note s))) | (take_min s)"
+            "(clear s) | lowbits | (note s) | id | (save r) | (fix 2 tfunc | (note s)) | (best 1 (unshift | (note s)) id (load r)) | (if mixed ((polish id) | (note s))) | (take_min s)"
         );
-        assert_eq!(show(&p), "(smallest rewrite | id | (save r) | (fix 2 tfunc) | (best 1 relate id (load r)) | (if mixed polish))", "shown as written");
+        assert_eq!(show(&p), "(smallest lowbits | id | (save r) | (fix 2 tfunc) | (best 1 unshift id (load r)) | (if mixed (polish id)))", "shown as written");
         assert_eq!(p, parse(&show(&p)).unwrap(), "compared as written");
-        let one = parse("(smallest (union prepass take_minimal))").unwrap();
-        assert_eq!(expansion(&one), "(clear s) | (union (prepass | (note s)) (take_minimal | (note s))) | (take_min s)");
+        let one = parse("(smallest (union (prepass id) take_minimal))").unwrap();
+        assert_eq!(expansion(&one), "(clear s) | (union ((prepass id) | (note s)) (take_minimal | (note s))) | (take_min s)");
         let Pipe::Expanded(m) = &one else { unreachable!() };
         assert!(!m.scoped, "a single step runs in the enclosing sequence, as it would without smallest");
-        let nested = parse("(smallest rewrite | (smallest tfunc | none) | relate)").unwrap();
+        let given = parse("(smallest (relate (lowbits | tfunc)) | (regions lowbits (best 1 tfunc unshift)))").unwrap();
+        assert_eq!(expansion(&given), "(clear s) | (relate lowbits | tfunc) | (note s) | (regions lowbits (best 1 (tfunc | (note s)) (unshift | (note s)))) | (take_min s)", "not in the functions given to a pass");
+        let nested = parse("(smallest lowbits | (smallest tfunc | none) | unshift)").unwrap();
         assert_eq!(
             expansion(&nested),
-            "(clear s) | rewrite | (note s) | (smallest tfunc | none) | relate | (note s) | (take_min s)",
+            "(clear s) | lowbits | (note s) | (smallest tfunc | none) | unshift | (note s) | (take_min s)",
             "shown as written inside"
         );
         let Pipe::Expanded(m) = &nested else { unreachable!() };
@@ -186,24 +193,25 @@ mod tests {
     #[test]
     fn smallest_notes_arguments_but_not_bodies_of_calls() {
         let passes = |spec: &str| Passes::parse(spec).unwrap_or_else(|e| panic!("{spec}: {e}"));
-        let p = passes("(def (f p) rewrite | p) prepass=(smallest (f tfunc) | relate)");
-        assert_eq!(expansion(&p.prepass), "(clear s) | (f tfunc | (note s)) | (note s) | relate | (note s) | (take_min s)");
-        let Pipe::Expanded(m) = &p.prepass else { unreachable!() };
+        let p = passes("(def (f p) rewrite | p) prepass=(smallest (f tfunc) | (relate rewrite))");
+        assert_eq!(expansion(&p.prepass()), "(clear s) | (f tfunc | (note s)) | (note s) | (relate rewrite) | (note s) | (take_min s)");
+        let Pipe::Expanded(m) = &p.prepass() else { unreachable!() };
         let Some((c, _)) = m.steps[1].call() else { unreachable!() };
         assert_eq!(show(&c.body), "rewrite | p", "the body of a def is a run of its own");
         let p = passes("(def @inline (g n p) (if (size > n) rewrite) | p) prepass=(smallest (g 1 tfunc))");
-        assert_eq!(expansion(&p.prepass), "(clear s) | (g 1 tfunc | (note s)) | (take_min s)");
-        let Pipe::Expanded(m) = &p.prepass else { unreachable!() };
+        assert_eq!(expansion(&p.prepass()), "(clear s) | (g 1 tfunc | (note s)) | (take_min s)");
+        let Pipe::Expanded(m) = &p.prepass() else { unreachable!() };
         let Some((c, _)) = m.steps[1].call() else { unreachable!() };
         let body = show(&c.body).replace(|c: char| c.is_ascii_digit(), "");
         assert_eq!(body, "(if (size > n) (rewrite | (note smallest#))) | p", "an @inline body is noted; its argument has its notes");
         let p = passes("(def (w p) (smallest p | rewrite)) prepass=(w tfunc)");
-        let Some((c, _)) = p.prepass.call() else { unreachable!() };
+        let pre = p.prepass();
+        let Some((c, _)) = pre.call() else { unreachable!() };
         assert_eq!(expansion(&c.body), "(clear s) | p | (note s) | rewrite | (note s) | (take_min s)", "in a def body a parameter gives what its argument returns");
         let p = passes("(let k rewrite | tfunc) prepass=(smallest id | k)");
-        assert_eq!(expansion(&p.prepass), "(clear s) | id | rewrite | (note s) | tfunc | (note s) | (take_min s)", "a let is in the text");
+        assert_eq!(expansion(&p.prepass()), "(clear s) | id | rewrite | (note s) | tfunc | (note s) | (take_min s)", "a let is in the text");
         let p = passes("(def @inline (h p) (smallest p | none)) prepass=(h rewrite)");
-        assert_eq!(expansion(&p.prepass), "(clear s) | rewrite | (note s) | none | (take_min s)", "an @inline argument put in place");
+        assert_eq!(expansion(&p.prepass()), "(clear s) | rewrite | (note s) | none | (take_min s)", "an @inline argument put in place");
         assert_eq!(p.to_string(), passes(&p.to_string()).to_string());
     }
 
@@ -217,15 +225,16 @@ mod tests {
         let Pipe::Expanded(m) = &on else { panic!("{on:?}") };
         assert_eq!(show(&Pipe::Seq(m.steps.clone())), "(seq cut = 1)");
         let p = Passes::parse("(def (try_without name p) (best 1 p ((off name) | p))) prepass=(try_without relate rewrite)").unwrap();
-        let Some((c, _)) = p.prepass.call() else { panic!() };
+        let pre = p.prepass();
+        let Some((c, _)) = pre.call() else { panic!() };
         let Pipe::App(_, best) = &*c.body else { panic!() };
         let Pipe::Seq(without) = &best[2] else { panic!() };
         let Pipe::Expanded(m) = &without[0] else { panic!() };
         assert_eq!((show(&without[0]).as_str(), show(&Pipe::Seq(m.steps.clone())).as_str()), ("(off relate)", "(seq relate = 0)"), "a name argument put in place expands");
-        let s = parse("(smallest rewrite | tfunc)").unwrap();
+        let s = parse("(smallest lowbits | tfunc)").unwrap();
         let Pipe::Expanded(m) = &s else { panic!() };
         assert_eq!(m.head, "smallest");
-        assert_eq!(show(&s), "(smallest rewrite | tfunc)");
+        assert_eq!(show(&s), "(smallest lowbits | tfunc)");
         assert_eq!(s, parse(&show(&s)).unwrap(), "compared as written");
     }
 }

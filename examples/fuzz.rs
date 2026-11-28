@@ -61,7 +61,7 @@ struct Args {
     /// `mutate` mutates, comma-separated.
     #[arg(long, default_value = "")]
     corpus: String,
-    /// Check only the pre-pass rebuilds (`(parse s) | prepass` and `polish`), without the rules.
+    /// Check only the pre-pass rebuilds (`(parse s) | (prepass prepass_steps)` and `polish`), without the rules.
     #[arg(long)]
     prepass: bool,
     /// Child mode: read the type and an egglog term from stdin, print one result line.
@@ -904,7 +904,7 @@ fn run_one() {
 
     if prepass_only {
         let (alt, other) = prepass(&egg, &ty_name);
-        let polished = run_default(&ty_name, &format!("(parse {}) | polish", quoted(&alt))).swap_remove(0);
+        let polished = run_default(&ty_name, &format!("(parse {}) | (polish polish_steps)", quoted(&alt))).swap_remove(0);
         let cands: Vec<(&str, &String)> = [("first", &alt), ("polished", &polished)].into_iter().chain(other.iter().map(|o| ("other", o))).collect();
         for (name, c) in &cands {
             let d = compare(&t, &eval::parse(c), ty);
@@ -956,7 +956,7 @@ num_type = {ty}
 /// The pre-pass of the default passes on the egglog term `egg`: the main rebuild, then the
 /// others unioned with it.
 fn prepass(egg: &str, ty: &str) -> (String, Vec<String>) {
-    let mut out = run_default(ty, &format!("(parse {}) | prepass", quoted(egg)));
+    let mut out = run_default(ty, &format!("(parse {}) | (prepass prepass_steps)", quoted(egg)));
     let main = out.remove(0);
     (main, out)
 }

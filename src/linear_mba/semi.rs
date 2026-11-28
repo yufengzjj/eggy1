@@ -12,7 +12,7 @@ use super::*;
 /// that leave no more groups and the smallest table values: in
 /// `((x ^ K) | C) + x` the bits of the bitwise term have tables 0, ±1, but the
 /// `+ x` makes them 0, 1, 2.
-pub(super) fn semi_linear(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
+pub(super) fn semi_linear(t: &T, lv: &[T], w: &Ctx, sub: &Sub) -> Option<T> {
     if lv.len() > w.semi_leaves() {
         return None;
     }
@@ -97,7 +97,7 @@ pub(super) fn semi_linear(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
     cands.extend(optional("semi_scaled", || scaled(&groups, lv, e0, w, limit)));
     from.push((cands.len(), "semi_scaled"));
     let limit = smallest(&cands);
-    cands.extend(optional("semi_bit_split", || bit_split(&groups, lv, arith, e0, w, limit)));
+    cands.extend(optional("semi_bit_split", || bit_split(&groups, lv, arith, e0, w, limit, sub)));
     from.push((cands.len(), "semi_bit_split"));
     // Masks that differ only in bits that cannot matter tie on size; keep the short one.
     let i = (0..cands.len()).min_by_key(|&i| (size(&cands[i]), const_bits(&cands[i])))?;
@@ -129,7 +129,7 @@ fn fill_slots(t: &T, lv: &[&T]) -> T {
 /// by their Boolean function `f`; `P` and `Q` take its projections onto `A` and `B`
 /// (`f(x & !onlyB)` and the rest for `^`), and bits with a constant `f` try each
 /// pair of constants that gives it.
-fn bit_split(groups: &[(Vec<u64>, u64)], lv: &[T], arith: bool, e0: u64, w: &Ctx, mut limit: usize) -> Vec<T> {
+fn bit_split(groups: &[(Vec<u64>, u64)], lv: &[T], arith: bool, e0: u64, w: &Ctx, mut limit: usize, sub: &Sub) -> Vec<T> {
     let n = lv.len();
     // Arithmetic leaves are left to `relate`, which needs the rebuilt region's shape.
     if !(4..=6).contains(&n) || arith {
@@ -319,7 +319,7 @@ fn bit_split(groups: &[(Vec<u64>, u64)], lv: &[T], arith: bool, e0: u64, w: &Ctx
             if low as usize + 1 >= limit || !w.take_budget(crate::rust_vars::BIT_SPLIT_BUDGET) {
                 return out;
             }
-            let t = T::Op(op, vec![sub(sub_index("bit_split"), &side(&ps, a), w), sub(sub_index("bit_split"), &side(&qs, b), w)]);
+            let t = T::Op(op, vec![sub.term(&side(&ps, a), w), sub.term(&side(&qs, b), w)]);
             limit = limit.min(size(&t));
             out.push(t);
         }

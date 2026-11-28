@@ -6,9 +6,9 @@
 //! with constant operands (`x & 0xff`) make the region semi-linear: each bit
 //! position then has its own bitwise function, see `semi_linear`.
 
+use crate::builtin_passes::{Fns, Sub};
 use crate::eval::{Op, Term as T, show, size};
 use crate::rust_vars::{Limit, limit};
-use crate::passes::Passes;
 use crate::stats;
 use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::Relaxed};
@@ -185,10 +185,11 @@ type RebuiltKey = (Vec<u64>, Vec<(usize, bool)>, u64, u32, u64);
 type GroupedKey = (Vec<(Vec<u64>, u64)>, Vec<T>, u64, u32, u64);
 type PairKey = (u32, Vec<(Vec<u64>, u64)>, u64, Vec<T>, usize, u64);
 
+/// The memos of results of functions given to a pass key them by `Sub::id` too.
 struct State {
-    simba_memo: Memo<(u32, T), Option<T>>,
-    rewritten: Memo<(u32, T), T>,
-    related: Memo<(u32, T), T>,
+    simba_memo: Memo<(u32, u64, T), Option<T>>,
+    rewritten: Memo<(u32, u64, T), T>,
+    related: Memo<(u32, u64, T), T>,
     rebuilt: std::sync::Mutex<crate::eval::FastMap<RebuiltKey, (Vec<(u64, T)>, u64)>>,
     grouped: std::sync::Mutex<crate::eval::FastMap<GroupedKey, T>>,
     low_values: crate::lowbits::ValuesMemo,
@@ -544,63 +545,51 @@ fn has_const_bitwise(t: &T, w: &Ctx) -> bool {
     }
 }
 
-/// Replace every linear or polynomial region (and, recursively, regions inside
-/// atoms) by its rebuilt form when that is smaller. Memoized per thread.
-pub(crate) fn rewrite(t: &T, w: &Ctx) -> T {
+/// `t` rebuilt by the function `p` (`f.sub(0)`), memoized in the run by `t`, `p` and what it
+/// read; counted as the pass `f.name`, each result computed taking one from the `rewrites`
+/// budget (`memo` in a call `(memo rewrite p)`).
+pub(crate) fn memo(t: &T, w: &Ctx, f: &Fns) -> T {
     if !matches!(t, T::Op(..)) {
         return t.clone();
     }
-    let key = (w.w, t.clone());
-    let f = || stats::try_pass("rewrite", t, || rewrite_uncached(t, w));
-    if let Some(r) = memo_get(&w.st.rewritten, &key, w, "rewrite", f) {
+    let (name, p) = (f.name, f.sub(0));
+    let run = || stats::try_pass(name, t, || p.term(t, w));
+    let Some(id) = p.id else {
+        return if w.take_budget(crate::rust_vars::REWRITES) { run() } else { t.clone() };
+    };
+    let key = (w.w, id, t.clone());
+    if let Some(r) = memo_get(&w.st.rewritten, &key, w, name, run) {
         return r;
     }
     if !w.take_budget(crate::rust_vars::REWRITES) {
         return t.clone();
     }
-    memo_compute(&w.st.rewritten, key, w, f)
-}
-
-/// `t` rebuilt by `Passes::subs` entry `i` (`crate::passes::SUBS`), for a pass that rebuilds
-/// a subterm.
-pub(crate) fn sub(i: usize, t: &T, w: &Ctx) -> T {
-    let p = crate::passes::current();
-    match &p.subs[i] {
-        crate::lang::ast::Pipe::App(crate::lang::ast::Fun::Builtin(b), _) if b.name == "rewrite" => rewrite(t, w),
-        crate::lang::ast::Pipe::App(crate::lang::ast::Fun::Builtin(b), _) if b.name == "rebuild" => rebuild_once(t, w),
-        pipe => crate::builtin_passes::run_term(pipe, t, w),
-    }
-}
-
-pub(crate) use crate::passes::sub_index;
-
-fn rewrite_uncached(t: &T, w: &Ctx) -> T {
-    crate::builtin_passes::run_term(&crate::passes::current().rewrite, t, w)
+    memo_compute(&w.st.rewritten, key, w, run)
 }
 
 /// `t` with its linear region rebuilt by `rebuild` and the atom leaves of that form
-/// rewritten, or, when `t` is not a region or `rebuild` finds no form, with its operands
-/// rewritten (`regions`).
-pub(crate) fn on_region(t: &T, w: &Ctx, rebuild: impl FnOnce() -> Option<T>) -> T {
+/// rebuilt by `sub`, or, when `t` is not a region or `rebuild` finds no form, with its
+/// operands rebuilt by `sub` (`regions`).
+pub(crate) fn on_region(t: &T, w: &Ctx, sub: &Sub, rebuild: impl FnOnce() -> Option<T>) -> T {
     let T::Op(op, args) = t else { return t.clone() };
     if kind(t, w) != Kind::Atom
         && let Some(r) = rebuild()
     {
-        return substitute_atoms(&r, w);
+        return substitute_atoms(&r, w, sub);
     }
-    T::Op(*op, args.iter().map(|a| rewrite(a, w)).collect())
+    T::Op(*op, args.iter().map(|a| sub.term(a, w)).collect())
 }
 
-/// `r`, a rebuild of `t`, rewritten again when that is smaller and `t` has an arithmetic
-/// leaf of a bitwise operation (`again`): once `9*(A & B) + ...` becomes
+/// `r`, a rebuild of `t`, rebuilt again by `sub` when that is smaller and `t` has an
+/// arithmetic leaf of a bitwise operation (`again`): once `9*(A & B) + ...` becomes
 /// `2*A - B` with `A = -(x ^ y)`, A's own linear form joins the enclosing region.
-pub(crate) fn again(t: &T, r: &T, w: &Ctx) -> Option<T> {
+pub(crate) fn again(t: &T, r: &T, w: &Ctx, sub: &Sub) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
     if r == t || !lv.iter().any(|l| kind(l, w) == Kind::Lin) {
         return None;
     }
-    Some(rewrite(r, w)).filter(|a| size(a) < size(r))
+    Some(sub.term(r, w)).filter(|a| size(a) < size(r))
 }
 
 /// The terms `(c, t)` and the constant of the sum `t`, scaled by `c`.
@@ -622,27 +611,28 @@ pub(crate) fn sum_terms(t: &T, c: u64, w: &Ctx, out: &mut Vec<(u64, T)>, konst: 
 }
 
 /// `t` with `recombine_products` applied to each linear region, innermost first, and the
-/// changed regions rewritten again (`11·L` then joins the rest of its region).
-fn recombine_regions(t: &T, w: &Ctx, in_lin: bool) -> T {
+/// changed regions rebuilt again by `sub` (`11·L` then joins the rest of its region).
+fn recombine_regions(t: &T, w: &Ctx, in_lin: bool, sub: &Sub) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     let lin = kind(t, w) == Kind::Lin;
-    let node = T::Op(*op, a.iter().map(|x| recombine_regions(x, w, lin)).collect());
+    let node = T::Op(*op, a.iter().map(|x| recombine_regions(x, w, lin, sub)).collect());
     if !lin || in_lin {
         return node;
     }
-    match recombine_products(&node, w) {
+    match recombine_products(&node, w, sub) {
         Some(s) => {
-            let again = sub(sub_index("recombine"), &s, w);
+            let again = sub.term(&s, w);
             if size(&again) < size(&s) { again } else { s }
         }
         None => node,
     }
 }
 
-/// The sum `t` with two products `c·P1·Q1 + c·P2·Q2` where `P1 = Q1 + P2 + Q2` written as
-/// `c·(Q1 + P2)·(Q1 + Q2)`, which expands to the same: the product identity
-/// `a·b = (a | b)·(a & b) + (a & ~b)·(~a & b)` with its factors rebuilt.
-fn recombine_products(t: &T, w: &Ctx) -> Option<T> {
+/// The sum `t` with two products `c·P1·Q1 + c·P2·Q2` where `P1 = Q1 + P2 + Q2` (`sub`
+/// gives 0 for the difference) written as `c·(Q1 + P2)·(Q1 + Q2)`, which expands to the same:
+/// the product identity `a·b = (a | b)·(a & b) + (a & ~b)·(~a & b)` with its factors rebuilt
+/// by `sub`.
+fn recombine_products(t: &T, w: &Ctx, rebuild: &Sub) -> Option<T> {
     if kind(t, w) != Kind::Lin {
         return None;
     }
@@ -669,11 +659,11 @@ fn recombine_products(t: &T, w: &Ctx) -> Option<T> {
                 let ways = [(&a, &b, &c, &d), (&b, &a, &c, &d), (&c, &d, &a, &b), (&d, &c, &a, &b)];
                 for (p1, q1, p2, q2) in ways {
                     let diff = sub(sub(sub(p1.clone(), q1.clone()), p2.clone()), q2.clone());
-                    if !maybe_zero(&diff, w) || rewrite(&diff, w) != T::Num(0) {
+                    if !maybe_zero(&diff, w) || rebuild.term(&diff, w) != T::Num(0) {
                         continue;
                     }
-                    let f1 = crate::linear_mba::sub(sub_index("recombine"), &add(q1.clone(), p2.clone()), w);
-                    let f2 = crate::linear_mba::sub(sub_index("recombine"), &add(q1.clone(), q2.clone()), w);
+                    let f1 = rebuild.term(&add(q1.clone(), p2.clone()), w);
+                    let f2 = rebuild.term(&add(q1.clone(), q2.clone()), w);
                     let coef = terms[i].0;
                     terms.remove(j);
                     terms[i] = match (f1, f2) {
@@ -730,11 +720,11 @@ fn region_terms(t: &T, w: &Ctx) -> (Vec<(u64, T)>, u64) {
 }
 
 /// `t` with `clustered` applied to each linear region of more than `max_leaves` leaves,
-/// innermost first.
-fn cluster_regions(t: &T, w: &Ctx, in_lin: bool) -> T {
+/// innermost first, its groups rebuilt by `sub`.
+fn cluster_regions(t: &T, w: &Ctx, in_lin: bool, sub: &Sub) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     let lin = kind(t, w) == Kind::Lin;
-    let node = T::Op(*op, a.iter().map(|x| cluster_regions(x, w, lin)).collect());
+    let node = T::Op(*op, a.iter().map(|x| cluster_regions(x, w, lin, sub)).collect());
     if !lin || in_lin {
         return node;
     }
@@ -743,7 +733,7 @@ fn cluster_regions(t: &T, w: &Ctx, in_lin: bool) -> T {
     if lv.len() <= max_leaves() {
         return node;
     }
-    match stats::pass("cluster_regions", &node, || clustered(&node, w)) {
+    match stats::pass("cluster_regions", &node, || clustered(&node, w, sub)) {
         Some(c) => {
             w.st.used.fetch_or(CLUSTERED, Relaxed);
             c
@@ -879,14 +869,14 @@ fn memo_compute<K: std::hash::Hash + Eq, V: Clone>(memo: &Memo<K, V>, key: K, w:
     v
 }
 
-/// Rewrite inside the atom leaves of a rebuilt region.
-fn substitute_atoms(t: &T, w: &Ctx) -> T {
+/// The atom leaves of a rebuilt region rebuilt by `sub`.
+fn substitute_atoms(t: &T, w: &Ctx, sub: &Sub) -> T {
     match t {
         T::Op(op, args) => {
             if kind(t, w) == Kind::Atom {
-                rewrite(t, w)
+                sub.term(t, w)
             } else {
-                T::Op(*op, args.iter().map(|a| substitute_atoms(a, w)).collect())
+                T::Op(*op, args.iter().map(|a| substitute_atoms(a, w, sub)).collect())
             }
         }
         _ => t.clone(),
@@ -897,50 +887,54 @@ fn substitute_atoms(t: &T, w: &Ctx) -> T {
 /// 3/4 the size of the first rebuild.
 pub(crate) const ABSTRACTED: [&str; 2] = ["over_const_bitwise", "over_shared_bitwise"];
 
-/// The rebuild `simplify_linear` applies to its input, without `relate`.
-pub(crate) fn rebuild_once(t: &T, w: &Ctx) -> T {
+/// The rebuild `simplify_linear` applies to its input, without `relate`, its regions
+/// rebuilt by `sub`.
+pub(crate) fn rebuild_once(t: &T, w: &Ctx, sub: &Sub) -> T {
     let t = unshift(&crate::lowbits::simplify(t, w), w);
-    crate::tfunc::replacement(&t, w).unwrap_or_else(|| crate::tfunc::simplify(&cluster_regions(&rewrite(&t, w), w, false), w))
+    crate::tfunc::replacement(&t, w).unwrap_or_else(|| crate::tfunc::simplify(&cluster_regions(&sub.term(&t, w), w, false, sub), w))
 }
 
-/// The passes over one term that `crate::lang::eval` runs by name: each gives an equivalent
-/// term, or `None` when it does not apply (see `ALTERNATIVES`).
-pub(crate) const TERM_PASSES: &[(&str, fn(&T, &Ctx) -> Option<T>)] = &[
-    ("lowbits", |t, w| Some(crate::lowbits::simplify(t, w))),
-    ("unshift", |t, w| Some(unshift(t, w))),
-    ("tfunc_whole", |t, w| crate::tfunc::replacement(t, w)),
-    ("rewrite", |t, w| Some(rewrite(t, w))),
-    ("rewrite_top", |t, w| Some(rewrite(t, w))),
-    ("cluster_regions", |t, w| Some(cluster_regions(t, w, false))),
-    ("cluster_top", |t, w| Some(cluster_regions(t, w, false))),
-    ("relate", |t, w| Some(relate(t, w))),
-    ("tfunc", |t, w| Some(crate::tfunc::simplify(t, w))),
-    ("unify_operands", |t, w| Some(unify_operands(t, w))),
-    ("recombine", |t, w| Some(recombine_regions(t, w, false))),
-    ("cut_products", |t, w| Some(crate::lowbits::cut_products(t, w))),
-    ("shifted_xor", |t, w| Some(crate::lowbits::shifted_xor(t, w))),
-    ("simplify_rebuilt", |t, w| Some(crate::lowbits::simplify_rebuilt(t, w))),
-    ("finish", |t, w| Some(finish(t, w))),
-    ("halve", |t, w| Some(halve(t, w))),
-    ("over_const_bitwise", |t, w| Some(over_const_bitwise(t, w))),
-    ("over_shared_bitwise", |t, w| Some(over_shared_bitwise(t, w))),
-    ("over_products", |t, w| Some(crate::lowbits::over_products(t, w, |x| sub(sub_index("over_products"), x, w)))),
-    ("split_bits", |t, w| Some(split_in(t, w, &|x| sub(sub_index("split_bits"), x, w)))),
-    ("drop_identities", |t, w| Some(drop_identities(t, w))),
-    ("rebuild", |t, w| Some(rebuild_once(t, w))),
-    ("simba", simba),
-    ("small_blocks", small_blocks),
-    ("wide_blocks", wide_blocks),
-    ("poly_mba", crate::poly_mba::simplify_poly),
-    ("drop_unused", drop_unused_pass),
-    ("clustered", clustered),
-    ("peel", peel),
-    ("peel_clustered", peel),
-    ("semi_linear", semi_linear_pass),
-    ("rebuild_values", rebuild_values_pass),
-    ("common_multiple", common_multiple_pass),
-    ("related_leaves", related_leaves_pass),
-    ("one_wide_term", one_wide_term_pass),
+/// The passes over one term that `crate::lang::eval` runs by name, given the function
+/// arguments of the call: each gives an equivalent term, or `None` when it does not apply
+/// (see `ALTERNATIVES`).
+pub(crate) type TermPass = fn(&T, &Ctx, &Fns<'_>) -> Option<T>;
+
+pub(crate) const TERM_PASSES: &[(&str, TermPass)] = &[
+    ("lowbits", |t, w, _| Some(crate::lowbits::simplify(t, w))),
+    ("unshift", |t, w, _| Some(unshift(t, w))),
+    ("tfunc_whole", |t, w, _| crate::tfunc::replacement(t, w)),
+    ("memo", |t, w, f| Some(memo(t, w, f))),
+    ("rewrite_top", |t, w, f| Some(f.sub(0).term(t, w))),
+    ("cluster_regions", |t, w, f| Some(cluster_regions(t, w, false, f.sub(0)))),
+    ("cluster_top", |t, w, f| Some(cluster_regions(t, w, false, f.sub(0)))),
+    ("relate", |t, w, f| Some(relate(t, w, f.sub(0)))),
+    ("tfunc", |t, w, _| Some(crate::tfunc::simplify(t, w))),
+    ("unify_operands", |t, w, _| Some(unify_operands(t, w))),
+    ("recombine", |t, w, f| Some(recombine_regions(t, w, false, f.sub(0)))),
+    ("cut_products", |t, w, f| Some(crate::lowbits::cut_products(t, w, f.sub(0)))),
+    ("shifted_xor", |t, w, _| Some(crate::lowbits::shifted_xor(t, w))),
+    ("simplify_rebuilt", |t, w, _| Some(crate::lowbits::simplify_rebuilt(t, w))),
+    ("finish", |t, w, f| Some(finish(t, w, f.sub(0)))),
+    ("halve", |t, w, f| Some(halve(t, w, f.sub(0)))),
+    ("over_const_bitwise", |t, w, f| Some(over_const_bitwise(t, w, f.sub(0)))),
+    ("over_shared_bitwise", |t, w, f| Some(over_shared_bitwise(t, w, f.sub(0)))),
+    ("over_products", |t, w, f| Some(crate::lowbits::over_products(t, w, |x| f.sub(0).term(x, w)))),
+    ("split_bits", |t, w, f| Some(split_in(t, w, &|x| f.sub(0).term(x, w)))),
+    ("drop_identities", |t, w, _| Some(drop_identities(t, w))),
+    ("rebuild", |t, w, f| Some(rebuild_once(t, w, f.sub(0)))),
+    ("simba", |t, w, f| f.sub(0).alt(t, w)),
+    ("small_blocks", |t, w, _| small_blocks(t, w)),
+    ("wide_blocks", |t, w, _| wide_blocks(t, w)),
+    ("poly_mba", |t, w, f| crate::poly_mba::simplify_poly(t, w, f.sub(0), f.sub(1))),
+    ("drop_unused", |t, w, f| drop_unused_pass(t, w, f.sub(0))),
+    ("clustered", |t, w, f| clustered(t, w, f.sub(0))),
+    ("peel", |t, w, f| peel(t, w, f.sub(0))),
+    ("peel_clustered", |t, w, f| peel(t, w, f.sub(0))),
+    ("semi_linear", |t, w, f| semi_linear_pass(t, w, f.sub(0))),
+    ("rebuild_values", |t, w, _| rebuild_values_pass(t, w)),
+    ("common_multiple", |t, w, _| common_multiple_pass(t, w)),
+    ("related_leaves", |t, w, _| related_leaves_pass(t, w)),
+    ("one_wide_term", |t, w, _| one_wide_term_pass(t, w)),
 ];
 
 /// Passes of `TERM_PASSES` that are alternatives: each runs on the candidate whole and gives
@@ -971,39 +965,13 @@ pub(crate) fn const_bitwise(t: &T, w: &Ctx) -> bool {
     has_const_bitwise(t, w)
 }
 
-/// The pre-pass of `p` on the egglog term `egg` (W-bit wrapping semantics, `signed` as in
-/// `Ctx`): its smallest rebuild, and the other rebuilds worth unioning; candidates to stderr
-/// when `trace` is set. Every linear and polynomial MBA region is rebuilt in a smaller form;
-/// `egg` comes back unchanged when nothing gets smaller.
-pub fn simplify_linear_with(egg: &str, w: u32, signed: Option<bool>, trace: bool, p: &Passes) -> (String, Vec<String>) {
-    type Result = (String, Vec<String>);
-    type Last = Option<(String, u32, Option<bool>, bool, Passes, Vec<u64>, Result)>;
-    thread_local! {
-        static LAST: std::cell::RefCell<Last> = const { std::cell::RefCell::new(None) };
-    }
-    // A variable bound where it is called (an assignment, `(off NAME)`) changes the result as `p` does.
-    let vars = crate::lang::vars::key();
-    let hit = |(e, bits, s, t, q, v, _): &&(String, u32, Option<bool>, bool, Passes, Vec<u64>, Result)| e == egg && *bits == w && *s == signed && *t == trace && q == p && *v == vars;
-    match LAST.with(|c| c.borrow().as_ref().filter(hit).map(|l| l.6.clone())) {
-        Some(r) => r,
-        None => {
-            let r = simplify_linear_uncached(egg, w, signed, trace, p);
-            if crate::lang::eval::failed().is_some() {
-                return r;
-            }
-            LAST.with(|c| *c.borrow_mut() = Some((egg.to_string(), w, signed, trace, p.clone(), vars, r.clone())));
-            r
-        }
-    }
-}
-
 /// Rewrites of a rebuilt candidate that would break subterms the rebuild relates if done
-/// earlier: recombined products, product factors with constants cut below trailing zeros,
-/// and `shifted_xor`.
-fn finish(t: &T, w: &Ctx) -> T {
+/// earlier: recombined products, product factors with constants cut below trailing zeros
+/// (both rebuilt by `sub`), and `shifted_xor`.
+fn finish(t: &T, w: &Ctx, sub: &Sub) -> T {
     // Products selected by a bit are left whole for `split_bits` in the next round (Hikari).
-    let t = if selectors(t, w).is_empty() { stats::pass("recombine", t, || recombine_regions(t, w, false)) } else { t.clone() };
-    let t = stats::pass("cut_products", &t, || crate::lowbits::cut_products(&t, w));
+    let t = if selectors(t, w).is_empty() { stats::pass("recombine", t, || recombine_regions(t, w, false, sub)) } else { t.clone() };
+    let t = stats::pass("cut_products", &t, || crate::lowbits::cut_products(&t, w, sub));
     let t = stats::pass("shifted_xor", &t, || crate::lowbits::shifted_xor(&t, w));
     // Rebuilds can leave bits known by evaluation only (`-(A & B) & 1` with `A & B` even).
     let low = stats::pass("simplify_rebuilt", &t, || crate::lowbits::simplify_rebuilt(&t, w));
@@ -1022,14 +990,4 @@ fn drop_identities(t: &T, w: &Ctx) -> T {
         (Op::Mul, [x, o]) | (Op::Mul, [o, x]) if is(o, 1) => x.clone(),
         _ => T::Op(*op, a),
     }
-}
-
-/// The pre-pass result and the forms to union with it: `Passes::prepass` on `egg`.
-fn simplify_linear_uncached(egg: &str, w: u32, signed: Option<bool>, trace: bool, p: &Passes) -> (String, Vec<String>) {
-    let env = crate::lang::eval::Env::prepass(p, w, signed, trace, egg);
-    let input = crate::cand::Cand::new(egg, "input");
-    let out = crate::lang::eval::run(&p.prepass, vec![input], &env).inspect_err(crate::lang::eval::fail).unwrap_or_default();
-    let mut out = out.into_iter().map(|c| c.term().to_string());
-    let main = out.next().unwrap_or_else(|| egg.to_string());
-    (main, out.collect())
 }

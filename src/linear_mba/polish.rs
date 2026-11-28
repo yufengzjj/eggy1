@@ -7,18 +7,18 @@ use super::*;
 /// where that is smaller: the rebuild of a
 /// whole region (or of its groups, `clustered`) keeps the constant apart, but
 /// `3·((r | 0x7fffffff) ^ u)` is `-3·u + (r & 2^31) + 0x7ffffffd`, one term only when
-/// rebuilt with its constant.
-fn join_constants(t: &T, w: &Ctx, in_lin: bool) -> T {
+/// rebuilt with its constant (by `sub`).
+fn join_constants(t: &T, w: &Ctx, in_lin: bool, sub: &Sub) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     let lin = kind(t, w) == Kind::Lin;
-    let node = T::Op(*op, a.iter().map(|x| join_constants(x, w, lin)).collect());
+    let node = T::Op(*op, a.iter().map(|x| join_constants(x, w, lin, sub)).collect());
     if !lin || in_lin {
         return node;
     }
-    join_constant(&node, w).unwrap_or(node)
+    join_constant(&node, w, sub).unwrap_or(node)
 }
 
-fn join_constant(t: &T, w: &Ctx) -> Option<T> {
+fn join_constant(t: &T, w: &Ctx, sub: &Sub) -> Option<T> {
     let (mut terms, mut konst) = region_terms(t, w);
     // Constants also hide in complemented terms: `c·~B` is `-c·B - c`.
     for (c, y) in terms.iter_mut() {
@@ -49,7 +49,7 @@ fn join_constant(t: &T, w: &Ctx) -> Option<T> {
     for set in sets {
         let g: Vec<(u64, T)> = set.iter().flat_map(|&i| groups[i].1.clone()).collect();
         let others: Vec<(u64, T)> = (0..n).filter(|j| !set.contains(j)).flat_map(|j| groups[j].1.clone()).collect();
-        let alt = T::Op(Op::Add, vec![build_sum(&others, 0, w), sub(sub_index("polish"), &build_sum(&g, konst, w), w)]);
+        let alt = T::Op(Op::Add, vec![build_sum(&others, 0, w), sub.term(&build_sum(&g, konst, w), w)]);
         if size(&alt) < size(&best) {
             best = alt;
         }
@@ -109,17 +109,17 @@ const MOVED_MULTIPLES: [i64; 7] = [0, 1, -1, 2, -2, 3, -3];
 /// the groups are rebuilt apart, and which group takes a shared leaf's linear part is not
 /// known (each ordered pair of groups is rebuilt for every shared leaf and multiple);
 /// `(s - (z & (y | s))) + z + (u ^ x ^ z)` is `((z & ~y) | s) + (u ^ x ^ z)`.
-fn join_linear(t: &T, w: &Ctx, in_lin: bool) -> T {
+fn join_linear(t: &T, w: &Ctx, in_lin: bool, sub: &Sub) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     let lin = kind(t, w) == Kind::Lin;
-    let node = T::Op(*op, a.iter().map(|x| join_linear(x, w, lin)).collect());
+    let node = T::Op(*op, a.iter().map(|x| join_linear(x, w, lin, sub)).collect());
     if !lin || in_lin {
         return node;
     }
-    move_linear(&node, w).unwrap_or(node)
+    move_linear(&node, w, sub).unwrap_or(node)
 }
 
-fn move_linear(t: &T, w: &Ctx) -> Option<T> {
+fn move_linear(t: &T, w: &Ctx, sub: &Sub) -> Option<T> {
     let (terms, konst) = region_terms(t, w);
     if terms.len() < 2 {
         return None;
@@ -131,14 +131,14 @@ fn move_linear(t: &T, w: &Ctx) -> Option<T> {
     }
     let mut best = t.clone();
     let mut near = Vec::new();
-    move_groups(&groups, konst, size(t), w, &mut best, Some(&mut near));
+    move_groups(&groups, konst, size(t), w, sub, &mut best, Some(&mut near));
     near.sort_by_key(|(_, _, alt)| size(alt));
     for (groups, konst, alt) in near.into_iter().take(limit(Limit::JoinLinearNearMoves)) {
-        move_groups(&groups, konst, size(t), w, &mut best, None);
+        move_groups(&groups, konst, size(t), w, sub, &mut best, None);
         let (terms, konst) = region_terms(&alt, w);
         let regrouped: Vec<Vec<(u64, T)>> = leaf_groups(terms, w).into_iter().map(|(_, g)| g).collect();
         if regrouped.len() <= max_groups {
-            move_groups(&regrouped, konst, size(t), w, &mut best, None);
+            move_groups(&regrouped, konst, size(t), w, sub, &mut best, None);
         }
     }
     (best != *t).then_some(best)
@@ -147,11 +147,11 @@ fn move_linear(t: &T, w: &Ctx) -> Option<T> {
 /// A region's leaf groups, its constant kept apart, and their sum.
 type Moved = (Vec<Vec<(u64, T)>>, u64, T);
 
-/// `best` replaced by each smaller move between `groups`; with `near`, the moves (not the
+/// `best` replaced by each smaller move between `groups`, rebuilt by `sub`; with `near`, the moves (not the
 /// plain rebuilds, `a = 0`) of at most `join_linear_near_slack` nodes more than `size0` are
 /// collected there with the moved groups kept apart: grouping their sum again by leaves
 /// can undo the move, or allow other moves.
-fn move_groups(groups: &[Vec<(u64, T)>], konst: u64, size0: usize, w: &Ctx, best: &mut T, mut near: Option<&mut Vec<Moved>>) {
+fn move_groups(groups: &[Vec<(u64, T)>], konst: u64, size0: usize, w: &Ctx, sub: &Sub, best: &mut T, mut near: Option<&mut Vec<Moved>>) {
     let n = groups.len();
     let (slack, near_groups) = (limit(Limit::JoinLinearNearSlack), limit(Limit::JoinLinearMaxNearGroups));
     let leaf_terms: Vec<Vec<T>> = groups
@@ -175,11 +175,11 @@ fn move_groups(groups: &[Vec<(u64, T)>], konst: u64, size0: usize, w: &Ctx, best
                         gi.push((a, v.clone()));
                         gj.push((a.wrapping_neg() & w.mask, v.clone()));
                     }
-                    let rj = sub(sub_index("polish"), &build_sum(&gj, 0, w), w);
+                    let rj = sub.term(&build_sum(&gj, 0, w), w);
                     let others: Vec<(u64, T)> = (0..n).filter(|&k| k != i && k != j).flat_map(|k| groups[k].clone()).collect();
                     for with_konst in [false, true] {
                         let (k_in, k_out) = if with_konst { (konst, 0) } else { (0, konst) };
-                        let ri = sub(sub_index("polish"), &build_sum(&gi, k_in, w), w);
+                        let ri = sub.term(&build_sum(&gi, k_in, w), w);
                         let mut all = others.clone();
                         all.extend([(1, ri.clone()), (1, rj.clone())]);
                         // A negative first term costs a `Neg`; later ones become `Sub`.
@@ -203,20 +203,20 @@ fn move_groups(groups: &[Vec<(u64, T)>], konst: u64, size0: usize, w: &Ctx, best
     }
 }
 
-/// `t` rebuilt by cases of a variable shift amount `s` of `a << s`, when smaller and equal
-/// to `t` in every case (the rebuild of their difference is 0). The candidates are the
+/// `t` rebuilt by `sub` by cases of a variable shift amount `s` of `a << s`, when smaller and
+/// equal to `t` in every case (the rebuild of their difference is 0). The candidates are the
 /// rebuild with each such shift a fresh `2^K·v` (`K` = 1, 2), checked for `s = k < K`; for
 /// `s = (b & (w-1))` or `~b`, also the rebuild of case `s = k` with `b` put back, checked
 /// for every `k`. Case `k` sets the low bits of each `b` there, so other uses of `b` see
 /// them: `(A | (~c & ((A << (c & 63)) & 1))) + y` is `A + y`.
-fn shift_cases(t: &T, w: &Ctx) -> T {
+fn shift_cases(t: &T, w: &Ctx, sub: &Sub) -> T {
     if size(t) > limit(Limit::ShiftCasesMaxSize) {
         return t.clone();
     }
-    shift_cases_in(t, w, limit(Limit::ShiftCasesDepth))
+    shift_cases_in(t, w, limit(Limit::ShiftCasesDepth), sub)
 }
 
-fn shift_cases_in(t: &T, w: &Ctx, depth: usize) -> T {
+fn shift_cases_in(t: &T, w: &Ctx, depth: usize, sub: &Sub) -> T {
     fn amounts(t: &T, out: &mut Vec<T>) {
         let T::Op(op, a) = t else { return };
         if *op == Op::Shl && !matches!(a[1], T::Num(_)) && !out.contains(&a[1]) {
@@ -235,8 +235,8 @@ fn shift_cases_in(t: &T, w: &Ctx, depth: usize) -> T {
         }
         T::Op(*op, a.iter().map(|x| wide(x, s, k, tag, fresh)).collect())
     }
-    let once = |x: &T| sub(sub_index("shift_cases"), x, w);
-    let rebuild = |x: &T| if depth > 1 { shift_cases_in(&once(x), w, depth - 1) } else { once(x) };
+    let once = |x: &T| sub.term(x, w);
+    let rebuild = |x: &T| if depth > 1 { shift_cases_in(&once(x), w, depth - 1, sub) } else { once(x) };
     let m = (w.w - 1) as i64;
     let tag = format!("%s{depth}_");
     let mut found = Vec::new();
@@ -263,7 +263,7 @@ fn shift_cases_in(t: &T, w: &Ctx, depth: usize) -> T {
             }
             None => crate::lowbits::replace(x, std::slice::from_ref(s), &[T::Num(k)]),
         };
-        let holds = |r: &T, k: i64| fold_consts(&rebuild_once(&T::Op(Op::Sub, vec![case(t, k), case(r, k)]), w), w) == T::Num(0);
+        let holds = |r: &T, k: i64| fold_consts(&once(&T::Op(Op::Sub, vec![case(t, k), case(r, k)])), w) == T::Num(0);
         let mut tried = Vec::new();
         let mut candidates: Vec<(T, i64)> = Vec::new();
         for k in 1..=2u32 {
@@ -275,7 +275,7 @@ fn shift_cases_in(t: &T, w: &Ctx, depth: usize) -> T {
         if var.is_some() {
             for k in [0, 1, m] {
                 let (v, e) = set(k);
-                let e2 = rebuild_once(&e, w);
+                let e2 = once(&e);
                 let r = crate::lowbits::replace(&rebuild(&case(t, k)), &[e, e2], &[v.clone(), v]);
                 candidates.push((r, m + 1));
             }
@@ -375,18 +375,19 @@ fn push_not(t: &T, w: &Ctx) -> T {
 }
 
 
-type Pass = (&'static str, fn(&T, &Ctx) -> T);
+type Pass = (&'static str, fn(&T, &Ctx, &Fns<'_>) -> T);
 
-/// The polish passes by name, in their default order.
+/// The polish passes by name, in their default order, given the function arguments of the
+/// call.
 pub(crate) const POLISH: [Pass; 10] = [
-    ("push_not", push_not),
-    ("join_constants", |t, w| join_constants(t, w, false)),
-    ("join_linear", |t, w| join_linear(t, w, false)),
-    ("over_const_bitwise", over_const_bitwise),
-    ("over_shared_bitwise", over_shared_bitwise),
-    ("over_products", |t, w| crate::lowbits::over_products(t, w, |a| sub(sub_index("over_products"), a, w))),
-    ("recombine", |t, w| if selectors(t, w).is_empty() { recombine_regions(t, w, false) } else { t.clone() }),
-    ("shift_cases", shift_cases),
-    ("decompose", |t, w| decompose_regions(t, w, false)),
-    ("factor", |t, w| factor_regions(t, w, false)),
+    ("push_not", |t, w, _| push_not(t, w)),
+    ("join_constants", |t, w, f| join_constants(t, w, false, f.sub(0))),
+    ("join_linear", |t, w, f| join_linear(t, w, false, f.sub(0))),
+    ("over_const_bitwise", |t, w, f| over_const_bitwise(t, w, f.sub(0))),
+    ("over_shared_bitwise", |t, w, f| over_shared_bitwise(t, w, f.sub(0))),
+    ("over_products", |t, w, f| crate::lowbits::over_products(t, w, |a| f.sub(0).term(a, w))),
+    ("recombine", |t, w, f| if selectors(t, w).is_empty() { recombine_regions(t, w, false, f.sub(0)) } else { t.clone() }),
+    ("shift_cases", |t, w, f| shift_cases(t, w, f.sub(0))),
+    ("decompose", |t, w, _| decompose_regions(t, w, false)),
+    ("factor", |t, w, _| factor_regions(t, w, false)),
 ];

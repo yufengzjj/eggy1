@@ -6,7 +6,7 @@
 use super::ast::{Fun, Holds, Pipe, Slot, show, show_expr, stage, starts_with_value};
 use super::builtins::{MACROS, get, number_names, resolve, step_names};
 use super::defs::{Call, Def, Defs, ParamUse, def_sig};
-use super::host::{FEATURES, defined_builtin};
+use super::host::FEATURES;
 use super::lexer::{NO_EXTERN, Tok, lex, name_char, name_start, show_tok};
 use super::macros::smallest;
 use super::types::{Kind, Param, Rep, Sig, Ty};
@@ -197,7 +197,7 @@ impl<'a> Parser<'a> {
 
     /// Whether `n` names no variable, function, definition or word of the language.
     fn unknown(&self, n: &str) -> bool {
-        !(self.defs.contains_key(n) || known_name(n) || resolve(n).is_some() || defined_builtin(n) || ["none", "true", "def", "extern"].contains(&n))
+        !(self.defs.contains_key(n) || known_name(n) || resolve(n).is_some() || ["none", "true", "def", "extern"].contains(&n))
     }
 
     /// Whether an expression is ahead, for the body of a function: a number, `!`, or a name
@@ -372,7 +372,7 @@ impl<'a> Parser<'a> {
         if self.defs.contains_key(n) {
             return Err(format!("{n} is defined by let or def @inline and cannot be assigned"));
         }
-        if known_name(n) || resolve(n).is_some() || defined_builtin(n) || ["none", "def", "extern"].contains(&n) {
+        if known_name(n) || resolve(n).is_some() || ["none", "def", "extern"].contains(&n) {
             return Err(assignable(n).err().unwrap_or_else(|| format!("{n} cannot be assigned")));
         }
         Ok(())
@@ -526,6 +526,8 @@ impl<'a> Parser<'a> {
                         self.at += 1;
                         self.switches(&n)?
                     }
+                    // `(relate = 0 | ...)` assigns the switch of a pass that takes arguments.
+                    Some(Tok::Name(_)) if self.peek_at(1) == Some(&Tok::Assign) => self.pipe()?,
                     Some(Tok::Name(n)) if self.defs.get(&n).is_some_and(|d| !d.params.is_empty() || d.run && args_follow(self)) => {
                         self.at += 1;
                         self.def_call(&n, after_bar)?
@@ -771,6 +773,7 @@ impl<'a> Parser<'a> {
     fn form_ahead(&self) -> bool {
         let args = matches!(self.peek_at(2), Some(Tok::Name(_) | Tok::Num(_) | Tok::Open | Tok::Not | Tok::Str(_)));
         match self.peek_at(1) {
+            Some(Tok::Name(_)) if self.peek_at(2) == Some(&Tok::Assign) => false,
             Some(Tok::Name(n)) => {
                 n == "on"
                     || n == "off"
@@ -851,7 +854,7 @@ impl<'a> Parser<'a> {
         }
         match self.param(n) {
             Some(i) => self.params[i].ty == Some(Ty::Group),
-            None => !(self.defs.contains_key(n) || known_name(n) || resolve(n).is_some() || defined_builtin(n) || ["none", "true", "def", "extern"].contains(&n.as_str())),
+            None => !(self.defs.contains_key(n) || known_name(n) || resolve(n).is_some() || ["none", "true", "def", "extern"].contains(&n.as_str())),
         }
     }
 
@@ -882,7 +885,7 @@ impl<'a> Parser<'a> {
         }
         if self.defs.contains_key(n) {
             return Err(format!("{n} is defined by let or def @inline and cannot be assigned"));
-        } else if known_name(n) || resolve(n).is_some() || defined_builtin(n) || ["none", "def", "extern"].contains(&n) {
+        } else if known_name(n) || resolve(n).is_some() || ["none", "def", "extern"].contains(&n) {
             return Err(assignable(n).err().unwrap_or_else(|| format!("{n} cannot be assigned")));
         }
         self.groups.push(n.to_string());
@@ -1072,7 +1075,7 @@ impl<'a> Parser<'a> {
         // for it here, which only shows.
         let def = d.def.clone().unwrap_or_else(|| {
             let body = Arc::new(d.pipe.clone());
-            Arc::new(Def { name: n.into(), params: d.params.clone(), body, inline: false, flat: d.flat, input: None, step: true, steps: false, value: None, implicit: None, timed: false })
+            Arc::new(Def { name: n.into(), params: d.params.clone(), body, inline: false, flat: d.flat, input: None, step: true, steps: false, value: None, implicit: None, timed: false, slot: None })
         });
         self.used.push(n.to_string());
         Some(Call::bare(&def))
@@ -1124,6 +1127,13 @@ impl<'a> Parser<'a> {
                     let e = self.or();
                     self.no_input = outer;
                     Arg::Num(e?)
+                }
+                t if t.is_step() => {
+                    self.no_bar(f)?;
+                    let outer = std::mem::take(&mut self.no_input);
+                    let q = self.stage();
+                    self.no_input = outer;
+                    Arg::Pipe(q?)
                 }
                 Ty::MaybeTerm => match self.group_input(true)? {
                     Some(x) => {
@@ -1389,7 +1399,7 @@ fn assignable(n: &str) -> Result<usize, String> {
 
 /// Whether a source file may define a variable named `n`: it names nothing yet.
 pub fn free_name(n: &str) -> bool {
-    !(known_name(n) || resolve(n).is_some() || defined_builtin(n) || FEATURES.contains(&n) || ["none", "true", "def", "extern"].contains(&n))
+    !(known_name(n) || resolve(n).is_some() || FEATURES.contains(&n) || ["none", "true", "def", "extern"].contains(&n))
 }
 
 pub(crate) fn known_name(n: &str) -> bool {
@@ -1471,9 +1481,10 @@ pub fn parse_assign(name: &str, val: &str) -> Result<Pipe, String> {
 
 /// The top-level statement `s` of a program: its steps, each with what it gives; `top` the
 /// local variables the statements before bound, to which it adds its own.
-pub(crate) fn parse_statement(s: &str, defs: &Defs, top: &mut TopNames, used: &mut Vec<String>) -> Result<Vec<Top>, String> {
+/// `toks`: `s` lexed, or `None` to lex it here.
+pub(crate) fn parse_statement(s: &str, toks: Option<Vec<Tok>>, defs: &Defs, top: &mut TopNames, used: &mut Vec<String>) -> Result<Vec<Top>, String> {
     let go = || {
-        let mut p = Parser::new(lex(s)?, defs);
+        let mut p = Parser::new(toks.map_or_else(|| lex(s), Ok)?, defs);
         p.groups = top.groups.clone();
         p.locals = top.locals.clone();
         p.fns = top.fns.clone();
@@ -1514,10 +1525,15 @@ mod tests {
     use crate::lang::lexer::is_old_syntax;
     use crate::passes::Passes;
 
+    /// `s` parsed with the names `default.pipe` defines (`rewrite`, `prepass_steps`, ...).
+    fn parse(s: &str) -> Result<Pipe, String> {
+        parse_with(s, &crate::passes::DEFAULT.1, &mut Vec::new())
+    }
+
     #[test]
     fn defaults_read_back() {
         let d = Passes::default();
-        for (name, p) in [("pipeline", &d.pipeline), ("prepass", &d.prepass), ("polish", &d.polish), ("rewrite", &d.rewrite), ("simba", &d.simba)] {
+        for (name, p) in [("pipeline", &d.pipeline()), ("prepass", &d.prepass()), ("polish", &d.polish()), ("rewrite", &d.rewrite()), ("simba", &d.simba())] {
             for s in [show(p), pretty(p)] {
                 assert_eq!(Passes::parse(&format!("{name}={s}")).unwrap(), d, "{s}");
             }
@@ -1534,7 +1550,7 @@ mod tests {
         assert_eq!(cond("((lowbits | size) > 3)"), op(">", vec![lowbits_size.clone(), Pipe::Num(3)]), "a pipeline that ends in a number is a sequence");
         let main_g = Pipe::Seq(vec![group("g".into()), Pipe::app("main", vec![])]);
         assert_eq!(parse("(save g) | (if (mixed (main g)) id)").unwrap(), Pipe::Seq(vec![Pipe::app("save", vec![Pipe::Name("g".into())]), Pipe::app("if", vec![Pipe::app("mixed", vec![main_g.clone()]), Pipe::id(), Pipe::id()])]), "the input written follows the arguments");
-        assert_eq!(cond("(minimal (rewrite))"), Pipe::app("minimal", vec![Pipe::app("rewrite", vec![])]));
+        assert_eq!(cond("(minimal (lowbits))"), Pipe::app("minimal", vec![Pipe::app("lowbits", vec![])]));
         for s in ["(if ((lowbits | size) > 3) id)", "(save g) | (if (mixed (main g)) id)", "(save g) | (if ((g | mixed) + (minimal g) + (size (index 1 g))) id)", "(if (rewrite | minimal) id)", "(save g) | (if (same (main g)) id)"] {
             assert_eq!(show(&parse(s).unwrap()), s, "{s}");
         }
@@ -1543,14 +1559,14 @@ mod tests {
     #[test]
     fn forms_and_conditions() {
         let same = |a: &str, b: &str| assert_eq!(parse(a).unwrap(), parse(b).unwrap(), "{a}");
-        same("lowbits | rewrite | polish", "(seq lowbits rewrite polish)");
+        same("lowbits | rewrite | tfunc", "(seq lowbits rewrite tfunc)");
         same("(if mixed rewrite)", "(if mixed rewrite id)");
-        same("(if (!minimal || tiny) (rewrite | polish))", "(if (!minimal || (tiny)) (seq rewrite polish) id)");
+        same("(if (!minimal || tiny) (rewrite | tfunc))", "(if (!minimal || (tiny)) (seq rewrite tfunc) id)");
         same("(filter (mul >= 4 && vars < 3))", "(filter ((mul >= 4) && (vars < 3)))");
         assert_eq!(parse("(off lowbits relate)").unwrap(), Expanded::switches(false, &["lowbits", "relate"]));
-        same("(fix restarts prepass | egglog)", "(fix restarts (prepass | egglog))");
+        same("(fix restarts (prepass prepass_steps) | egglog)", "(fix restarts ((prepass prepass_steps) | egglog))");
         same("# comment
-(best 2 rewrite (scope relate)) # more", "(best 2 rewrite (scope relate))");
+(best 2 rewrite (scope unshift)) # more", "(best 2 rewrite (scope unshift))");
         let p = parse("(filter (size > (size (main f)) * 3/4 || (same (main r))))").unwrap();
         let Pipe::App(_, f) = &p else { panic!("{p:?}") };
         let Some((Operator::Or, cs)) = op_of(&f[0]) else { panic!("{p:?}") };
@@ -1562,7 +1578,7 @@ mod tests {
             "(if !(minimal && tiny) id)",
             "(filter (any (mul >= 2)))",
             "(filter (all !tiny && size * 2 + 1 <= (size (main t)) - vars))",
-            "(fix (restarts - 1) prepass)",
+            "(fix (restarts - 1) (prepass prepass_steps))",
             "(best (keep + 1) id)",
             "(if (size < split_size) id)",
             "(wins (2 * 4) id)",
@@ -1583,7 +1599,9 @@ mod tests {
         for bad in [
             "nope",
             "(if mixed a | b)",
-            "(union rewrite | relate)",
+            "(union rewrite | unshift)",
+            "(relate)",
+            "relate",
             "(fix many id)",
             "(if nope id)",
             "(off nope)",
@@ -1619,9 +1637,9 @@ mod tests {
         assert_eq!(parse("split_runs = 4").unwrap(), assign("split_runs", Pipe::Num(4)));
         same("split_runs=4 | rewrite", "split_runs = 4 | rewrite");
         same("(split_runs=4)", "split_runs   =   4");
-        let p = parse("split_runs = vars * 2 + 1 | split_bits").unwrap();
+        let p = parse("split_runs = vars * 2 + 1 | (split_bits rewrite)").unwrap();
         let rhs = op("+", vec![op("*", vec![Pipe::app("vars", vec![]), Pipe::Num(2)]), Pipe::Num(1)]);
-        assert_eq!(p, Pipe::Seq(vec![assign("split_runs", rhs), parse("split_bits").unwrap()]));
+        assert_eq!(p, Pipe::Seq(vec![assign("split_runs", rhs), parse("(split_bits rewrite)").unwrap()]));
         assert_eq!(parse("rewrites = none").unwrap(), assign("rewrites", Pipe::Num(NONE)));
         assert_eq!(parse("relate = 0").unwrap(), assign("relate", Pipe::Num(0)));
         assert_eq!(parse("cut = 1").unwrap(), assign("cut", Pipe::Num(1)));
@@ -1632,7 +1650,7 @@ mod tests {
         same("semi_leaves = split_runs - 1 | rewrite", "semi_leaves = (split_runs - 1) | rewrite");
         for ok in [
             "split_runs = 4 | rewrite",
-            "split_runs = vars * 2 | split_bits",
+            "split_runs = vars * 2 | (split_bits rewrite)",
             "rewrites = none | relate = 0 | cut = 1 | time_limit = (size (main t)) * 10 | rewrite",
             "(if mixed semi_leaves = 2 (time_limit = none | rewrite))",
             "(best 1 (bit_split_budget = cand_bit_splits | rewrite) (time_limit = time_limit / 2 | rewrite))",
@@ -1696,7 +1714,7 @@ mod tests {
             }
         }
         for s in all().iter().filter(|s| s.is_text()) {
-            let tops = parse_statement(&format!("(parse \"x\") | {}", s.name), &Defs::new(), &mut TopNames::default(), &mut Vec::new()).unwrap();
+            let tops = parse_statement(&format!("(parse \"x\") | {}", s.name), None, &Defs::new(), &mut TopNames::default(), &mut Vec::new()).unwrap();
             assert!(matches!(&tops.last().unwrap().pipe, Pipe::App(Fun::Builtin(b), _) if b.name == s.name), "{}", s.decl());
         }
     }
@@ -1711,7 +1729,7 @@ mod tests {
         same("(tag t lowbits | rewrite)", "(tag t (lowbits | rewrite))");
         same("(if (size) id)", "(if size id)");
         same("(relate = 0 | rewrite)", "relate = 0 | rewrite");
-        same("(rewrite | relate)", "rewrite | relate");
+        same("(rewrite | unshift)", "rewrite | unshift");
         assert_eq!(parse("(if (size + 1) id)").unwrap(), Pipe::app("if", vec![op("+", vec![Pipe::app("size", vec![]), Pipe::Num(1)]), id(), id()]));
         assert_eq!(parse("(filter (size vars))").unwrap_err(), "size takes t:term?; vars is a group — write (main vars)");
         same("(filter (any mul > 1 && tiny))", "(filter (any (mul > 1 && tiny)))");
@@ -1753,9 +1771,10 @@ mod tests {
             ("(if poly/masked id)", "names cannot contain '/': write poly_masked"),
             ("extern", NO_EXTERN),
             ("(extern (x g:group) group)", NO_EXTERN),
-            ("rewrite = 1", "rewrite is a function and cannot be assigned: (rewrite t:term) term"),
+            ("rewrite = 1", "rewrite is a function and cannot be assigned: (rewrite g:group) group"),
+            ("relate", "relate needs parentheses: (relate ...); (relate sub:pipe t:term) term"),
             ("same = 1", "computed from the candidates"),
-            ("nope", "unknown pass nope; known: id none prepass"),
+            ("nope", "unknown pass nope; known: id none egglog"),
             ("(if nope id)", "unknown name nope in an expression; known: size vars"),
         ] {
             let e = parse(bad).unwrap_err();
@@ -1774,18 +1793,18 @@ mod tests {
     #[test]
     fn let_names_are_not_variables_or_functions() {
         let def = |s: &str| parse_definition(s, &Defs::new(), &mut Vec::new()).map(|d| d.name);
-        assert_eq!(def("(let g rewrite | relate)").unwrap(), "g");
-        assert_eq!(def("(def (g) rewrite | relate)").unwrap(), "g");
-        assert_eq!(def("(def @inline (g) rewrite | relate)").unwrap(), "g");
-        for name in ["split_runs", "relate_parts", "time_limit", "mixed", "mul", "size", "same", "none", "pipeline", "sub_cluster", "rewrite", "fix", "on", "def", "extern"] {
+        assert_eq!(def("(let g lowbits | unshift)").unwrap(), "g");
+        assert_eq!(def("(def (g) lowbits | unshift)").unwrap(), "g");
+        assert_eq!(def("(def @inline (g) lowbits | unshift)").unwrap(), "g");
+        for name in ["split_runs", "relate_parts", "time_limit", "mixed", "mul", "size", "same", "none", "prepass", "polish", "relate", "fix", "on", "def", "extern"] {
             assert!(def(&format!("(let {name} id)")).is_err(), "{name}");
             assert!(def(&format!("(def @inline ({name}) id)")).is_err(), "{name}");
         }
-        for name in ["split_runs", "mixed", "size", "none", "lowbits", "fix", "on", "def", "sub_nope", "id"] {
+        for name in ["split_runs", "mixed", "size", "none", "lowbits", "fix", "on", "def", "simba", "memo", "id"] {
             assert!(def(&format!("(def ({name}) id)")).is_err(), "{name}");
         }
-        for name in ["pipeline", "prepass", "polish", "rewrite", "simba", "sub_cluster"] {
-            assert_eq!(def(&format!("(def ({name}) id)")).unwrap(), name, "a defined function of the Rust code is replaced");
+        for name in ["pipeline", "rewrite", "prepass_steps", "sub_cluster"] {
+            assert_eq!(def(&format!("(def ({name}) id)")).unwrap(), name, "no name the Rust code knows");
         }
         for (bad, msg) in [("(def (f x) id)", "parameter x is never used"), ("(def @pure (f) id)", "unknown attribute @pure"), ("(def f id)", "expected (NAME)"), ("(def (f) id id)", "expected )")] {
             let e = def(bad).unwrap_err();
@@ -1796,13 +1815,13 @@ mod tests {
     #[test]
     fn function_type_annotations() {
         let def = |s: &str| parse_definition(s, &Defs::new(), &mut Vec::new());
-        assert!(def("(def (f p:group->group) p | rewrite)").unwrap().params[0].ty.is_pipe());
+        assert!(def("(def (f p:group->group) p | lowbits)").unwrap().params[0].ty.is_pipe());
         assert_eq!(def("(def (f p:group -> group) (best 1 p))").unwrap().params[0].ty, Ty::pipe());
-        assert_eq!(def("(def (f k:num) (if (size <= k) rewrite))").unwrap().params[0].ty, Ty::Num);
+        assert_eq!(def("(def (f k:num) (if (size <= k) lowbits))").unwrap().params[0].ty, Ty::Num);
         for (bad, msg) in [
             ("(def (f c:term->num->num) c)", "a function takes one input, term or group"),
             ("(def (f c:num->term) c)", "a function takes one input, term or group"),
-            ("(def @pipe (f c:term->num g) g | c | rewrite)", "c gives a number; rewrite takes candidates"),
+            ("(def @pipe (f c:term->num g) g | c | lowbits)", "c gives a number; lowbits takes candidates"),
             ("(def (f c:term->num) (best 1 c))", "parameter c:term->num is used where pipe is wanted"),
             ("(def (f c:term->term) (filter c))", "parameter c:term->term is used where term->num is wanted"),
             ("(def (f x:term) x)", "unknown type term of parameter x"),
@@ -1819,17 +1838,17 @@ mod tests {
     fn group_assignments() {
         let bind = |n: &str, p: &str| Pipe::Bind(Slot::Local(n.into(), Holds::Group), Arc::new(parse(p).unwrap()));
         assert_eq!(parse("t = (lowbits | unshift)").unwrap(), bind("t", "lowbits | unshift"));
-        assert_eq!(parse("t = rewrite | relate").unwrap(), Pipe::Seq(vec![bind("t", "rewrite"), parse("relate").unwrap()]));
+        assert_eq!(parse("t = rewrite | unshift").unwrap(), Pipe::Seq(vec![bind("t", "rewrite"), parse("unshift").unwrap()]));
         assert_eq!(parse("t = (load u)").unwrap(), bind("t", "(load u)"));
         assert_eq!(parse("t = u | rewrite").unwrap(), Pipe::Seq(vec![Pipe::Bind(Slot::Local("t".into(), Holds::Group), Arc::new(group("u".into()))), parse("rewrite").unwrap()]), "t = u binds u's group");
         assert_eq!(show(&parse("t = (load u)").unwrap()), "t = (load u)");
         assert_eq!(parse_definition("(def (f r:group) u = r | (load u))", &Defs::new(), &mut Vec::new()).unwrap().params[0].ty, Ty::Group);
-        assert_eq!(parse("t = relate").unwrap(), bind("t", "relate"), "relate after a group variable is the pass");
+        assert_eq!(parse("t = unshift").unwrap(), bind("t", "unshift"), "unshift after a group variable is the pass");
         assert_eq!(parse("t = (relate = 0 | rewrite)").unwrap(), bind("t", "relate = 0 | rewrite"));
         assert_eq!(parse("t = (best 1 id rewrite)").unwrap(), bind("t", "(best 1 id rewrite)"));
         assert!(matches!(parse("keep = keep + 1").unwrap(), Pipe::Bind(Slot::Global(_), _)), "a variable that holds a number takes an expression");
         assert!(matches!(parse("relate = (size > 3)").unwrap(), Pipe::Bind(Slot::Global(_), _)));
-        for s in ["t = (lowbits | unshift) | (load t)", "t = rewrite | relate", "(if mixed t = rewrite) | u = (v = t) | (filter (same (main u)))", "(seq t = (x = u))", "t = u | rewrite"] {
+        for s in ["t = (lowbits | unshift) | (load t)", "t = rewrite | unshift", "(if mixed t = rewrite) | u = (v = t) | (filter (same (main u)))", "(seq t = (x = u))", "t = u | rewrite"] {
             assert_eq!(show(&parse(s).unwrap()), s, "{s}");
             assert_eq!(parse(&show(&parse(s).unwrap())).unwrap(), parse(s).unwrap(), "{s}");
         }
@@ -1852,8 +1871,8 @@ mod tests {
             defs.insert(d.name, Named { pipe: d.pipe, flat: d.flat, run: false, params: Vec::new(), def: None });
             defs
         };
-        assert!(parse_with("g = id", &lets("(let g rewrite)"), &mut Vec::new()).unwrap_err().contains("defined by let"));
-        assert_eq!(parse_with("t = g", &lets("(let g rewrite | relate)"), &mut Vec::new()).unwrap(), bind("t", "rewrite | relate"));
+        assert!(parse_with("g = id", &lets("(let g lowbits)"), &mut Vec::new()).unwrap_err().contains("defined by let"));
+        assert_eq!(parse_with("t = g", &lets("(let g lowbits | unshift)"), &mut Vec::new()).unwrap(), bind("t", "lowbits | unshift"));
         let d = parse_definition("(def (f a p) p | (load a))", &Defs::new(), &mut Vec::new()).unwrap();
         assert_eq!(def_sig(&d.name, &d.params).to_string(), "(f a:group p:pipe g:group) group");
         let def_err = |s: &str| parse_definition(s, &Defs::new(), &mut Vec::new()).err().unwrap();
@@ -1866,7 +1885,7 @@ mod tests {
     fn nested_assignments_parse_once() {
         let (mut group, mut number) = ("rewrite".to_string(), "keep = 1".to_string());
         for i in 0..24 {
-            group = format!("t{i} = ({group} | relate)");
+            group = format!("t{i} = ({group} | unshift)");
             number = format!("keep = (relate = 0 | ({number}) | size) + 1");
         }
         let start = std::time::Instant::now();
@@ -1877,7 +1896,7 @@ mod tests {
         assert!(matches!(parse(&number).unwrap(), Pipe::Bind(Slot::Global(_), _)));
         assert!(matches!(parse(&group).unwrap(), Pipe::Bind(Slot::Local(_, Holds::Group), _)));
         assert!(start.elapsed() < std::time::Duration::from_secs(2), "{:?}", start.elapsed());
-        for (s, msg) in [("keep = ((lowbits | size) + 1)", ""), ("t = ((lowbits | unshift) | relate)", ""), ("t = ((lowbits | size) | relate)", "gives a number; relate takes candidates"), ("t = (u)", "unknown name u in an expression"), ("t = (time-limit 3)", "write time_limit = N")] {
+        for (s, msg) in [("keep = ((lowbits | size) + 1)", ""), ("t = ((lowbits | unshift) | tfunc)", ""), ("t = ((lowbits | size) | tfunc)", "gives a number; tfunc takes candidates"), ("t = (u)", "unknown name u in an expression"), ("t = (time-limit 3)", "write time_limit = N")] {
             match parse(s) {
                 Ok(_) => assert!(msg.is_empty(), "{s}"),
                 Err(e) => assert!(!msg.is_empty() && e.contains(msg), "{s}: {e}"),

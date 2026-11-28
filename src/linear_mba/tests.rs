@@ -2,6 +2,12 @@ use super::*;
 use crate::eval::{NumType, eval, parse};
 use std::collections::HashMap;
 
+/// `f` in a run of the default passes, given the functions `rewrite` and `simba_steps` of
+/// `default.pipe` as a pass is given them.
+fn with_defaults<R>(f: impl FnOnce(&Sub, &Sub) -> R) -> R {
+    crate::rust_vars::in_default_run(|| crate::builtin_passes::with_fns(&["rewrite", "simba_steps"], |s| f(&s[0], &s[1])))
+}
+
 fn full_eval(t: &T, w: &Ctx, env: &HashMap<String, u64>) -> u64 {
     let ty = NumType { bits: w.w, signed: false };
     eval(t, ty, &|v: &str| env[v]).expect("no division in generated terms")
@@ -82,7 +88,7 @@ fn shifted_term(r: &mut Rng, depth: u32) -> T {
 
 #[test]
 fn unshift_and_halve_preserve_value() {
-    crate::rust_vars::in_default_run(|| {
+    with_defaults(|rw, _| {
         let mut r = Rng(0x6a09e667f3bcc909);
         let (mut unshifted, mut halved) = (0, 0);
         for _ in 0..400 {
@@ -90,7 +96,7 @@ fn unshift_and_halve_preserve_value() {
             let t = shifted_term(&mut r, depth);
             for (bits, signed) in [(8, false), (8, true), (64, false), (64, true)] {
                 let (w, ty) = (Ctx::new(bits), NumType { bits, signed });
-                let (u, h) = (unshift(&t, &w), halve(&t, &w));
+                let (u, h) = (unshift(&t, &w), halve(&t, &w, rw));
                 unshifted += (u != t) as u32;
                 halved += (h != t) as u32;
                 let check = |x: u64, y: u64| {
@@ -125,7 +131,7 @@ fn mba_op(r: &mut Rng, a: &T, a_lin: &T, b: &T) -> T {
 
 #[test]
 fn relate_preserves_value() {
-    crate::rust_vars::in_default_run(|| {
+    with_defaults(|rw, _| {
         let mut r = Rng(0x3c6ef372fe94f82b);
         let op = |o: Op, x: Vec<T>| T::Op(o, x);
         let mut changed = 0;
@@ -145,8 +151,8 @@ fn relate_preserves_value() {
             let t = mba_op(&mut r, &l, &l_lin, &b);
             for (bits, signed) in [(8, false), (64, true)] {
                 let (wd, ty) = (Ctx::new(bits), NumType { bits, signed });
-                let base = rewrite(&t, &wd);
-                let alt = relate(&base, &wd);
+                let base = rw.term(&t, &wd);
+                let alt = relate(&base, &wd, rw);
                 changed += (alt != base) as u32;
                 fn check(t: &T, alt: &T, ty: NumType, env: &impl Fn(&str) -> u64) {
                     assert_eq!(eval(t, ty, env), eval(alt, ty, env), "{}\n{}", show(t), show(alt));
@@ -191,7 +197,7 @@ fn sum_size_matches_build_sum() {
 
 #[test]
 fn peel_preserves_value() {
-    crate::rust_vars::in_default_run(|| {
+    with_defaults(|_, region| {
         let op = |o: Op, a: Vec<T>| T::Op(o, a);
         let var = |s: &str| T::Var(s.into());
         let lv = [var("x"), var("y"), var("z"), var("u"), op(Op::Mul, vec![var("a"), var("b")]), op(Op::Add, vec![var("c"), var("x")]), var("v"), var("w")];
@@ -229,7 +235,7 @@ fn peel_preserves_value() {
                 f = op([Op::And, Op::Or, Op::Xor][(r.next() % 3) as usize], vec![l, f]);
             }
             let t = lin(&f);
-            let Some(p) = peel(&t, &w) else { continue };
+            let Some(p) = peel(&t, &w, region) else { continue };
             peeled += 1;
             for _ in 0..200 {
                 let env: HashMap<String, u64> = ["a", "b", "c", "x", "y", "z", "u", "v", "w"].iter().map(|s| (s.to_string(), r.next() & w.mask)).collect();
@@ -287,7 +293,7 @@ fn split_bits_and_wide_regions_preserve_value() {
 
 #[test]
 fn recombined_products_preserve_value() {
-    crate::rust_vars::in_default_run(|| {
+    with_defaults(|rw, _| {
         let mut r = Rng(0x1234_5678_9abc_def1);
         let mut changed = 0;
         for k in 0..300 {
@@ -304,7 +310,7 @@ fn recombined_products_preserve_value() {
                     op(Op::Mul, vec![op(Op::And, vec![a.clone(), not(&b)]), op(Op::And, vec![not(&a), b.clone()])]),
                 ],
             );
-            let Some(alt) = recombine_products(&t, &w) else { continue };
+            let Some(alt) = recombine_products(&t, &w, rw) else { continue };
             changed += 1;
             for _ in 0..64 {
                 let env: HashMap<String, u64> = ["x", "y", "z"].iter().map(|v| (v.to_string(), r.next())).collect();
@@ -317,7 +323,7 @@ fn recombined_products_preserve_value() {
 
 #[test]
 fn memoized_rewrites_do_not_depend_on_earlier_settings() {
-    crate::rust_vars::in_default_run(|| {
+    with_defaults(|rw, _| {
         let mut r = Rng(0x9e3779b97f4a7c15);
         let mut restricted_differs = 0;
         for w in [8u32, 32] {
@@ -328,16 +334,16 @@ fn memoized_rewrites_do_not_depend_on_earlier_settings() {
                 let narrow = crate::lang::vars::in_scope(|| {
                     crate::lang::vars::bind(crate::rust_vars::SEMI_LEAVES, 2);
                     crate::lang::vars::bind(crate::rust_vars::RELATE_LEAVES, 2);
-                    (rewrite(&t, &shared), relate(&t, &shared))
+                    (rw.term(&t, &shared), relate(&t, &shared, rw))
                 });
-                crate::rust_vars::with_off(&["semi_shapes", "rebuild_values", "common_multiple"], || (rewrite(&t, &shared), relate(&t, &shared)));
+                crate::rust_vars::with_off(&["semi_shapes", "rebuild_values", "common_multiple"], || (rw.term(&t, &shared), relate(&t, &shared, rw)));
                 crate::lang::vars::in_scope(|| {
                     crate::lang::vars::bind(crate::rust_vars::REWRITES, 2);
-                    rewrite(&t, &shared)
+                    rw.term(&t, &shared)
                 });
-                let again = (rewrite(&t, &shared), relate(&t, &shared));
+                let again = (rw.term(&t, &shared), relate(&t, &shared, rw));
                 let fresh = Ctx::new(w);
-                let alone = (rewrite(&t, &fresh), relate(&t, &fresh));
+                let alone = (rw.term(&t, &fresh), relate(&t, &fresh, rw));
                 assert_eq!(again, alone, "w={w} {}", show(&t));
                 restricted_differs += (narrow != alone) as usize;
             }
@@ -348,7 +354,7 @@ fn memoized_rewrites_do_not_depend_on_earlier_settings() {
 
 #[test]
 fn rewrite_preserves_value() {
-    crate::rust_vars::in_default_run(|| {
+    with_defaults(|rw, _| {
         let mut r = Rng(0x2545f4914f6cdd1d);
         let mut changed = 0;
         for w in [8u32, 16, 32, 64] {
@@ -356,7 +362,7 @@ fn rewrite_preserves_value() {
             for _ in 0..3000 {
                 let depth = 1 + (r.next() % 4) as u32;
                 let t = random_term(&mut r, depth);
-                let alt = rewrite(&t, &wd);
+                let alt = rw.term(&t, &wd);
                 if alt != t {
                     changed += 1;
                 }
@@ -483,7 +489,7 @@ fn bool_expr_matches_table() {
 
 /// The main candidate of the pre-pass of the default passes on the egglog term `egg` in `u8`.
 fn prepass_u8(egg: &str) -> String {
-    let code = format!("(import \"default\")\nnum_type = u8\n(parse {}) | prepass", crate::lang::lexer::quoted(egg));
+    let code = format!("(import \"default\")\nnum_type = u8\n(parse {}) | (prepass prepass_steps)", crate::lang::lexer::quoted(egg));
     match crate::lang::run::value(&code) {
         Ok(Some(crate::lang::Value::Group(g))) => g[0].term().to_string(),
         r => panic!("{code}: {}", r.err().unwrap_or_default()),

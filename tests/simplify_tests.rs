@@ -1568,7 +1568,7 @@ fn extract_restart() {
     let seed = infix_to_egglog(&result, true);
     let round = format!("(import \"default\")
 iter_limit = 2
-(parse {}) | (union id prepass) | egglog", eggy1::lang::lexer::quoted(&seed));
+(parse {}) | (union id (prepass prepass_steps)) | egglog", eggy1::lang::lexer::quoted(&seed));
     let again = match eggy1::lang::run(&round, &[]).unwrap().value {
         Some(eggy1::lang::Value::Group(g)) => g[0].term().to_string(),
         _ => panic!("{round} gives no candidates"),

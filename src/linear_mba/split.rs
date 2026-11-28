@@ -133,10 +133,10 @@ pub(crate) fn low_consts(t: &T, r: u32) -> T {
 /// written as `2^k·(a op b) + (c op d)`, for the largest such `k`: a bitwise
 /// operation only sees the bits of `a` that `2^k·a` keeps, so the rebuild can
 /// treat `x - ((2·x) | ~(2·K)) - K - 1` as the semi-linear `x - 2·(x | ~K) - K - 2`,
-/// which is `x ^ K`.
-pub(super) fn halve(t: &T, w: &Ctx) -> T {
+/// which is `x ^ K`. The operands are rebuilt by `sub`.
+pub(super) fn halve(t: &T, w: &Ctx, sub: &Sub) -> T {
     let T::Op(op, a) = t else { return t.clone() };
-    let a: Vec<T> = a.iter().map(|x| halve(x, w)).collect();
+    let a: Vec<T> = a.iter().map(|x| halve(x, w, sub)).collect();
     let node = T::Op(*op, a);
     let T::Op(_, a) = &node else { unreachable!() };
     if !matches!(op, Op::And | Op::Or | Op::Xor) || a.iter().all(|x| matches!(x, T::Num(_))) {
@@ -152,7 +152,7 @@ pub(super) fn halve(t: &T, w: &Ctx) -> T {
     let Some((k, (T::Op(op, a), c))) = best else { return node };
     // Only the low `w - k` bits of the operands matter, so their constants are cut
     // to that width, once the rebuild has merged them: `(2^63 + 1)·y` becomes `y`.
-    let inner = T::Op(op, a.iter().map(|x| low_consts(&sub(sub_index("halve"), x, w), w.w - k)).collect());
+    let inner = T::Op(op, a.iter().map(|x| low_consts(&sub.term(x, w), w.w - k)).collect());
     let scaled = T::Op(Op::Mul, vec![T::Num(w.signed(1 << k)), inner]);
     if c == 0 { scaled } else { T::Op(Op::Add, vec![scaled, T::Num(c as i64)]) }
 }
@@ -285,22 +285,22 @@ pub(super) fn split_bits(t: T, depth: usize, budget: &std::cell::Cell<usize>, w:
     t
 }
 
-/// `rebuild_once` with each bitwise operation of a term and a constant (`y ^ 0xdeadbeef`)
-/// first replaced by a fresh variable: a region whose constants all sit in such subterms
-/// becomes linear, `(z & (u ^ ((K & p) ^ ~w))) + 2·(z & p & ~(u ^ w) & K)` is
+/// `sub` (`rebuild_once`) with each bitwise operation of a term and a constant (`y ^
+/// 0xdeadbeef`) first replaced by a fresh variable: a region whose constants all sit in such
+/// subterms becomes linear, `(z & (u ^ ((K & p) ^ ~w))) + 2·(z & p & ~(u ^ w) & K)` is
 /// `(z & ~(u ^ w)) + (z & p & K)`.
-pub(super) fn over_const_bitwise(t: &T, w: &Ctx) -> T {
-    over_subterms(t, w, &|x| match x {
+pub(super) fn over_const_bitwise(t: &T, w: &Ctx, sub: &Sub) -> T {
+    over_subterms(t, w, sub, &|x| match x {
         T::Op(Op::And | Op::Or | Op::Xor, a) => a.iter().any(|y| matches!(y, T::Num(_))) && !a.iter().all(|y| matches!(y, T::Num(_))),
         _ => false,
     })
 }
 
-/// `rebuild_once` with each bitwise subterm of at least 3 nodes that occurs more than once
-/// first replaced by a fresh variable: the region then has fewer leaves, and a table over
-/// few leaves rebuilds exactly, `6·(t & u & A & B) - 3·(A ^ (t & ~(B & u)))` is
+/// `sub` (`rebuild_once`) with each bitwise subterm of at least 3 nodes that occurs more
+/// than once first replaced by a fresh variable: the region then has fewer leaves, and a
+/// table over few leaves rebuilds exactly, `6·(t & u & A & B) - 3·(A ^ (t & ~(B & u)))` is
 /// `3·((t & u & B) - (t ^ A))` with `A = y ^ (u + w)`, `B = y ^ w`.
-pub(super) fn over_shared_bitwise(t: &T, w: &Ctx) -> T {
+pub(super) fn over_shared_bitwise(t: &T, w: &Ctx, sub: &Sub) -> T {
     fn count(t: &T, seen: &mut crate::eval::FastMap<T, usize>) {
         let T::Op(op, a) = t else { return };
         if matches!(op, Op::And | Op::Or | Op::Xor) && size(t) >= 3 {
@@ -314,13 +314,13 @@ pub(super) fn over_shared_bitwise(t: &T, w: &Ctx) -> T {
     }
     let mut seen = crate::eval::FastMap::default();
     count(t, &mut seen);
-    over_subterms(t, w, &|x| seen.get(x).is_some_and(|&n| n > 1))
+    over_subterms(t, w, sub, &|x| seen.get(x).is_some_and(|&n| n > 1))
 }
 
-/// `rebuild_once` with the outermost subterms that `pick` selects replaced by fresh
-/// variables, which are put back after; kept when smaller. The identity found holds for
-/// every value of the variables, so for the subterms too.
-fn over_subterms(t: &T, w: &Ctx, pick: &dyn Fn(&T) -> bool) -> T {
+/// `sub` with the outermost subterms that `pick` selects replaced by fresh variables, which
+/// are put back after; kept when smaller. The identity found holds for every value of the
+/// variables, so for the subterms too.
+fn over_subterms(t: &T, w: &Ctx, sub: &Sub, pick: &dyn Fn(&T) -> bool) -> T {
     fn go(t: &T, pick: &dyn Fn(&T) -> bool, found: &mut Vec<T>) -> T {
         if pick(t) {
             let i = found.iter().position(|f| f == t).unwrap_or_else(|| {
@@ -337,7 +337,7 @@ fn over_subterms(t: &T, w: &Ctx, pick: &dyn Fn(&T) -> bool) -> T {
     if found.is_empty() {
         return t.clone();
     }
-    let r = sub(sub_index("over_bitwise"), &a, w);
+    let r = sub.term(&a, w);
     if r == a {
         return t.clone();
     }

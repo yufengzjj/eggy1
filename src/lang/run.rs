@@ -111,10 +111,10 @@ pub(crate) fn within<R>(p: &Passes, f: impl FnOnce() -> R) -> R {
     execute_then(p, &[], f).unwrap_or_else(|e| panic!("{e}")).1
 }
 
-/// `p.prepass` on `input` at width `w` (`signed` as in `linear_mba::Ctx`), after the program `p`.
+/// `p.prepass()` on `input` at width `w` (`signed` as in `linear_mba::Ctx`), after the program `p`.
 #[cfg(test)]
 pub(crate) fn prepass_of(p: &Passes, input: host::Cand, w: u32, signed: Option<bool>) -> Result<Vec<host::Cand>, host::Error> {
-    within(p, || super::eval::run(&p.prepass, vec![input.clone()], &Env::with(p, w, signed, false, input.term())))
+    within(p, || super::eval::run(&p.prepass(), vec![input.clone()], &Env::with(p, w, signed, false, input.term())))
 }
 
 /// The value the program `source` gives.
@@ -172,10 +172,10 @@ mod tests {
         let r = execute_then(&passes(&format!("{lib}trace = 0\nnum_type = u16")), &[("num_type", "u8"), ("restarts", "5")], || (host::num_type(), get(crate::rust_vars::RESTARTS))).unwrap().1;
         assert_eq!(r, ("u16", 5), "the caller's globals come first, a definition as none keeps them");
         for (bad, msg) in [
-            ("rewrite", "rewrite has no candidates to work on at the top level"),
+            ("lowbits", "lowbits has no candidates to work on at the top level"),
             ("(import \"default\")\nsimplify", "simplify has no candidates"),
             ("(import \"default\")\nt = (parse \"x\")\nsimplify", "simplify has no candidates"),
-            ("t = (rewrite | relate)", "has no candidates"),
+            ("t = (lowbits | unshift)", "has no candidates"),
             ("show", "show has no candidate"),
             ("(load t)", "the program reads group variable t before it is bound"),
             ("num_type = u7", "num_type takes a numeric type"),
@@ -184,6 +184,37 @@ mod tests {
         ] {
             let e = value(bad).err().unwrap_or_else(|| panic!("{bad} runs"));
             assert!(e.contains(msg), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn recursion_and_late_binding() {
+        let run = |lines: &[&str]| text(&format!("(import \"default\")\n{}", lines.join("\n")));
+        let parity = ["(def (even n:num) (if (n > 0) (odd (n - 1)) (parse \"e\")))", "(def (odd n:num) (if (n > 0) (even (n - 1)) (parse \"o\")))"];
+        assert_eq!(run(&[&parity[..], &["(parse \"x\") | (even 3) | show"]].concat()), "o", "a call before the definition, and recursion through another function");
+        assert_eq!(run(&[&parity[..], &["(parse \"x\") | (even 400) | show"]].concat()), "e");
+        let late = ["(def (g) (h 1) | (filter (big 0)))", "(def (h n) (fix n id))", "(def (big k) size > k)", "(parse \"x + y\") | g | show"];
+        assert_eq!(run(&late), "(x + y)", "the signature of a function defined later comes from its definition");
+        let again = ["(def (f n:num) (fix n (parse \"a\")))", "(def (g) (f 1))", "(def (f k:num) (fix k (parse \"b\")))", "(parse \"x\") | g | show"];
+        assert_eq!(run(&again), "b", "a call runs the last definition, also one read before it");
+        let after = ["(def (f) (fix 1 (parse \"a\")))", "(def (g) f)", "(parse \"x\") | g | show", "(def (f) (fix 1 (parse \"b\")))"];
+        assert_eq!(run(&after), "b", "the program runs after it is read whole");
+        let named = ["(def (f s:name) (off s) | (parse \"a\"))", "(def (g) (f relate))", "(def (f t:name) (on t) | (parse \"b\"))", "(parse \"x\") | g | show"];
+        assert_eq!(run(&named), "b", "with its name arguments in place");
+        let e = value("(def (f) (f 1))").err().unwrap();
+        assert!(e.contains("f takes no arguments"), "{e}");
+        let e = value("(def (f n) (fix n (f n)))").err().unwrap();
+        assert!(e.contains("f is called before its definition"), "{e}");
+        let deep = format!("recursion deeper than {} calls in f", super::super::eval::MAX_DEPTH);
+        for bad in [
+            ["(def (f) f)", "(parse \"x\") | f"],
+            ["(def (app p) p)\n(def (f) (app f))", "(parse \"x\") | f"],
+            ["(def (f) (memo loop f))", "(parse \"x + y\") | f"],
+            ["(def (f) (regions f f))", "(parse \"x + y\") | f"],
+            ["(def (f n:num) (f (n + 1)) | id)", "(parse \"x\") | (f 0)"],
+        ] {
+            let e = value(&format!("(import \"default\")\n{}", bad.join("\n"))).err().unwrap_or_else(|| panic!("{bad:?} runs"));
+            assert!(e.contains(&deep), "{bad:?}: {e}");
         }
     }
 

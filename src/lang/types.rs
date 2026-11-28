@@ -215,8 +215,6 @@ pub struct Sig {
     pub pipe: bool,
     /// `@timed`: a call past the time limit is skipped, giving its input.
     pub timed: bool,
-    /// `@simplify_only`: only in `pipeline`.
-    pub simplify_only: bool,
     /// `@uncounted` (with `@timed`): its skip makes no cut and no `time_limit/skipped`.
     pub uncounted: bool,
     /// `@switch`: a pass with a switch of its name (`rust_vars::INNER`), on until turned off.
@@ -226,6 +224,13 @@ pub struct Sig {
 }
 
 impl Sig {
+    /// Whether a call written for `self` fits `o`: the same parameter and input types and
+    /// result, the names aside.
+    pub fn same_shape(&self, o: &Sig) -> bool {
+        let shape = |p: &Param| (p.ty.clone(), p.rep);
+        self.params.iter().map(shape).eq(o.params.iter().map(shape)) && self.input.as_ref().map(shape) == o.input.as_ref().map(shape) && self.result == o.result
+    }
+
     pub fn kind(&self) -> Kind {
         self.input.as_ref().map_or(Kind::Op, |i| Kind::of(&i.ty, &self.result).unwrap())
     }
@@ -295,9 +300,6 @@ impl Sig {
         }
         if self.timed {
             attrs += "@timed ";
-        }
-        if self.simplify_only {
-            attrs += "@simplify_only ";
         }
         if self.uncounted {
             attrs += "@uncounted ";

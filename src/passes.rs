@@ -1,7 +1,7 @@
-//! The pass pipeline of `simplify`: the egglog schedule of a round, the five pipelines of
-//! `Passes` (`pipeline`, `prepass`, `polish`, `rewrite`, `simba`) and the rebuilds of subterms.
-//! `Passes::default()` is the tuned pipeline of `default.pipe`; `--passes` changes it with a spec
-//! such as `pre-=halve_input polish=push_not,factor extra=0`.
+//! The program a simplification runs: the egglog schedule of a round, the top-level steps and
+//! the functions of `default.pipe` and the source after it. `Passes::default()` is the library
+//! `default.pipe`; `--passes` changes it with a spec such as `pre-=halve_input
+//! polish=push_not,factor extra=0`.
 
 use crate::lang::ast::Pipe;
 use crate::lang::defs::{Def, Defs};
@@ -9,57 +9,6 @@ use crate::lang::run::Top;
 use crate::lang::source::Program;
 use crate::lang::vars::{get, var};
 use crate::rust_vars::{BAN_LENGTH, FLAG0, INNER, ITER_LIMIT, MATCH_LIMIT, RUST_VARS, is_extern_switch};
-
-/// The rebuilds of subterms that passes inside a rebuild make (`Passes::subs`), by name, and
-/// their default pipelines: `rewrite` (the memoized `Passes::rewrite`) or `rebuild` (the
-/// rebuild of `simplify_linear` without `relate`, `linear_mba::rebuild_once`).
-pub const SUBS: [(&str, &str); 13] = [
-    // Each group of a clustered region, and each term of a group that did not shrink.
-    ("cluster", "rewrite"),
-    // A region with arithmetic leaves related, the shrunk region whole, complemented leaves.
-    ("relate", "rewrite"),
-    // The sides of a `bit_split`.
-    ("bit_split", "rewrite"),
-    // The halved operands of `halve`.
-    ("halve", "rewrite"),
-    // A region with its unused leaves set to 0.
-    ("drop_unused", "rewrite"),
-    // The factors of recombined products and the region they changed.
-    ("recombine", "rewrite"),
-    // The joined groups of `join_constants` and `join_linear`.
-    ("polish", "rewrite"),
-    // A product factor with its constants cut below the other's trailing zeros.
-    ("low_factor", "rewrite"),
-    // The leaves `poly_mba` expands over and its factors with a constant bitwise operation.
-    ("poly", "rewrite"),
-    // The cases of `over_products`.
-    ("over_products", "rebuild"),
-    // The cases of `split_bits`.
-    ("split_bits", "rebuild"),
-    // The terms of `over_const_bitwise` and `over_shared_bitwise`.
-    ("over_bitwise", "rebuild"),
-    // The cases of `shift_cases`.
-    ("shift_cases", "rebuild"),
-];
-
-/// The position of `name` in `SUBS`.
-pub const fn sub_index(name: &str) -> usize {
-    let mut i = 0;
-    while i < SUBS.len() {
-        let (a, b) = (SUBS[i].0.as_bytes(), name.as_bytes());
-        if a.len() == b.len() {
-            let mut j = 0;
-            while j < a.len() && a[j] == b[j] {
-                j += 1;
-            }
-            if j == a.len() {
-                return i;
-            }
-        }
-        i += 1;
-    }
-    panic!("not a SUBS name")
-}
 
 /// The rulesets of `make_egg`.
 pub const RULESETS: [&str; 6] = ["default-ruleset", "canonicalization", "constant-folding", "analysis", "identity-zero-element", "simplify"];
@@ -86,23 +35,9 @@ pub struct Passes {
     pub program: Vec<Top>,
     pub defaults: usize,
     pub shown_from: usize,
-    /// The passes the `pipeline` step runs.
-    pub pipeline: Pipe,
-    /// The pre-pass on one term: its first candidate is the main rebuild, the others are
-    /// unioned with it.
-    pub prepass: Pipe,
-    /// The final polish, on each candidate alone; a candidate is replaced by its first result
-    /// when smaller.
-    pub polish: Pipe,
-    /// The rebuild of one term, memoized by `linear_mba::rewrite` and used by the
-    /// passes inside it for subterms.
-    pub rewrite: Pipe,
-    /// The rebuild of one linear region, the `simba` pass.
-    pub simba: Pipe,
-    /// The rebuilds of subterms, in the order of `SUBS`.
-    pub subs: Vec<Pipe>,
-    /// The functions `(def (NAME) body)` defines, in order; each may call those before it.
-    /// The first `default_defs` come from `default.pipe`.
+    /// The functions `(def ...)` defines, in order (`Def::slot`); a later definition of a
+    /// function without parameters takes the place of the earlier one. The first
+    /// `default_defs` come from `default.pipe`.
     pub defs: Vec<std::sync::Arc<Def>>,
     pub default_defs: usize,
     /// The variables the source files define (`NAME = VALUE` items), in order; the first
@@ -135,10 +70,9 @@ impl Default for Passes {
 }
 
 impl Passes {
-    /// The passes of a program with no items: its pipelines are `id`.
+    /// The passes of a program with no items.
     pub(crate) fn base() -> Passes {
         use Step::*;
-        let id = Pipe::id();
         Passes {
             schedule: vec![
                 (Run, "default-ruleset"),
@@ -151,12 +85,6 @@ impl Passes {
             program: Vec::new(),
             defaults: 0,
             shown_from: 0,
-            pipeline: id.clone(),
-            prepass: id.clone(),
-            polish: id.clone(),
-            rewrite: id.clone(),
-            simba: id,
-            subs: SUBS.iter().map(|(_, d)| crate::lang::builtins::resolve(d).unwrap()).collect(),
             defs: Vec::new(),
             default_defs: 0,
             globals: Vec::new(),
@@ -197,32 +125,35 @@ impl Passes {
         out
     }
 
-    /// `(def (name) body)` for a defined function of the Rust code: `pipeline`, `prepass`,
-    /// `polish`, `rewrite`, `simba` or `sub_NAME`.
-    pub(crate) fn define(&mut self, name: &str, body: Pipe) -> Result<(), String> {
-        let slot = match name {
-            "pipeline" => &mut self.pipeline,
-            "prepass" => &mut self.prepass,
-            "polish" => &mut self.polish,
-            "rewrite" => &mut self.rewrite,
-            "simba" => &mut self.simba,
-            _ => {
-                let sub = name.strip_prefix("sub_").unwrap_or(name);
-                let names: Vec<&str> = SUBS.iter().map(|(n, _)| *n).collect();
-                let i = names.iter().position(|n| *n == sub).ok_or_else(|| format!("unknown sub_{sub}; known: {}", names.join(" ")))?;
-                &mut self.subs[i]
-            }
-        };
-        *slot = body;
-        Ok(())
+    /// The body of the function `name`.
+    pub fn body(&self, name: &str) -> Option<&Pipe> {
+        self.defs.iter().find(|d| d.name == name).map(|d| &*d.body)
     }
 }
 
-/// Whether `name` is a function the Rust code defines and calls, which `(def (NAME) p)`
-/// (written also `NAME=p`) replaces: `pipeline`, `prepass`, `polish`, `rewrite`, `simba`,
-/// `sub_NAME`.
-pub fn defined_builtin(name: &str) -> bool {
-    ["pipeline", "prepass", "polish", "rewrite", "simba"].contains(&name) || name.strip_prefix("sub_").is_some_and(|n| crate::passes::SUBS.iter().any(|(s, _)| *s == n))
+/// The bodies of the functions `default.pipe` defines without parameters, by the names of their
+/// `--passes` items (`cli::passes::PIPELINES`).
+#[cfg(test)]
+impl Passes {
+    fn named(&self, item: &str) -> &Pipe {
+        let (_, def) = crate::cli::passes::PIPELINES.iter().find(|(n, _)| *n == item).unwrap();
+        self.body(def).unwrap_or_else(|| panic!("no {def}"))
+    }
+    pub(crate) fn pipeline(&self) -> Pipe {
+        self.named("pipeline").clone()
+    }
+    pub(crate) fn prepass(&self) -> Pipe {
+        self.named("prepass").clone()
+    }
+    pub(crate) fn polish(&self) -> Pipe {
+        self.named("polish").clone()
+    }
+    pub(crate) fn rewrite(&self) -> Pipe {
+        self.named("rewrite").clone()
+    }
+    pub(crate) fn simba(&self) -> Pipe {
+        self.named("simba").clone()
+    }
 }
 
 thread_local! {
@@ -417,7 +348,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("many.pipe");
         let mut text: String = (0..300).map(|i| format!("many_g{i} = {i}\n")).collect();
-        text.push_str("(def (prepass) (fix (many_g299 - many_g298) rewrite) | (if many_g150 lowbits))\n");
+        text.push_str("(def (prepass_steps) (fix (many_g299 - many_g298) rewrite) | (if many_g150 lowbits))\n");
         std::fs::write(&f, text).unwrap();
         let p = Passes::parse(&format!("file={}", f.display())).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
@@ -432,8 +363,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("memo.pipe");
         std::fs::write(&f, "pick = 0
-(def (rewrite) (if pick (again (best 1 (regions (best 1 simba small_blocks wide_blocks)) poly_mba)) id))
-(def (prepass) (scope pick = 0 | rewrite | pick = 1 | rewrite))
+(def (rewrite) (memo rewrite (if pick (again rewrite (best 1 (regions rewrite (best 1 (simba simba_steps) small_blocks wide_blocks)) (poly_mba rewrite simba_steps))) id)))
+(def (prepass_steps) (scope pick = 0 | rewrite | pick = 1 | rewrite))
 ").unwrap();
         let p = Passes::parse(&format!("file={}", f.display())).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
@@ -471,11 +402,11 @@ mod tests {
             let p = Passes::parse(spec).unwrap();
             crate::lang::run::prepass_of(&p, t(), 8, None).unwrap()[0].term().to_string()
         };
-        let plain = run("prepass=(scope (best 1 id poly_mba))");
+        let plain = run("prepass=(scope (best 1 id (poly_mba rewrite simba_steps)))");
         assert_eq!(plain, format!("(Mul {y} {y})"));
-        assert_eq!(run("prepass=(scope poly_max_monos = 0 | (best 1 id poly_mba))"), input, "no product is multiplied out");
-        assert_eq!(run("prepass=(scope (poly_max_monos = 0 | id) | (best 1 id poly_mba))"), plain, "the assignment ends with its sequence");
-        assert_eq!(run("prepass=(scope (poly_max_monos = 0 | (best 1 id poly_mba)) | (best 1 id poly_mba))"), plain, "the memo keeps the scopes apart");
+        assert_eq!(run("prepass=(scope poly_max_monos = 0 | (best 1 id (poly_mba rewrite simba_steps)))"), input, "no product is multiplied out");
+        assert_eq!(run("prepass=(scope (poly_max_monos = 0 | id) | (best 1 id (poly_mba rewrite simba_steps)))"), plain, "the assignment ends with its sequence");
+        assert_eq!(run("prepass=(scope (poly_max_monos = 0 | (best 1 id (poly_mba rewrite simba_steps))) | (best 1 id (poly_mba rewrite simba_steps)))"), plain, "the memo keeps the scopes apart");
     }
 
     #[test]
@@ -488,11 +419,11 @@ mod tests {
             crate::eval::size(&crate::eval::parse(r[0].term()))
         };
         let before = crate::eval::size(&crate::eval::parse(&input));
-        let plain = run("prepass=(scope polish_join_linear)");
+        let plain = run("prepass=(scope (polish_join_linear rewrite))");
         assert!(plain < before, "a move makes it smaller");
-        assert_eq!(run("prepass=(scope join_linear_max_groups = 0 | polish_join_linear)"), before, "no region is moved in");
-        assert_eq!(run("prepass=(scope (join_linear_max_groups = 0 | id) | polish_join_linear)"), plain, "the assignment ends with its sequence");
-        assert_eq!(run("prepass=(scope (join_linear_max_groups = 0 | polish_join_linear) | polish_join_linear)"), plain, "the memo keeps the scopes apart");
+        assert_eq!(run("prepass=(scope join_linear_max_groups = 0 | (polish_join_linear rewrite))"), before, "no region is moved in");
+        assert_eq!(run("prepass=(scope (join_linear_max_groups = 0 | id) | (polish_join_linear rewrite))"), plain, "the assignment ends with its sequence");
+        assert_eq!(run("prepass=(scope (join_linear_max_groups = 0 | (polish_join_linear rewrite)) | (polish_join_linear rewrite))"), plain, "the memo keeps the scopes apart");
     }
 
     #[test]
@@ -542,27 +473,27 @@ mod tests {
         let p = Passes::parse("pre-=halve_input,unified;polish=factor,push_not,factor extra=0 keep=3 prove_minimal=0").unwrap();
         assert!(after_entry(&p, "pre_unified") == 0 && after_entry(&p, "pre_halve_input") == 0 && after_entry(&p, "pre_no_wide") == 1);
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
-        assert_eq!(p.polish, parse_default(&polish(&["factor", "push_not", "factor"])));
+        assert_eq!(p.polish(), parse_default(&polish(&["factor", "push_not", "factor"])));
         let p = Passes::parse("pre=no_wide,unified pre+=halve_input pre-=unified").unwrap();
         let on: Vec<&str> = var_names().into_iter().filter_map(|n| n.strip_prefix("pre_")).filter(|n| after_entry(&p, &format!("pre_{n}")) == 1).collect();
         assert_eq!(on, ["no_wide", "halve_input"], "pre= turns the others off, pre+= and pre-= one each");
         assert!(p.to_string().contains(" pre_unified=1 pre_no_wide=1 pre_split_bits=0"), "{p}");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("pre=done").is_err(), "pre_done is a function, not a switch");
-        for (old, new) in [("sub/cluster=rebuild", "sub_cluster"), ("off=semi/bit_split", "semi_bit_split"), ("semi/peel_shapes=1", "semi_peel_shapes"), ("semi/peel_shapes = 1", "semi_peel_shapes"), ("polish=polish/factor", "polish_factor")] {
+        for (old, new) in [("off=semi/bit_split", "semi_bit_split"), ("semi/peel_shapes=1", "semi_peel_shapes"), ("semi/peel_shapes = 1", "semi_peel_shapes"), ("polish=polish/factor", "polish_factor")] {
             let e = Passes::parse(old).unwrap_err();
             assert!(e.contains(&format!("names cannot contain '/': write {new}")), "{old}: {e}");
         }
-        assert_eq!(parse(&Passes::default().polish.to_string()).unwrap(), Passes::default().polish);
-        let p = Passes::parse("rewrite=(regions (best 1 simba poly_mba))").unwrap();
-        assert_eq!(p.rewrite.to_string(), "(regions (best 1 simba poly_mba))");
-        assert_eq!(parse(&Passes::default().simba.to_string()).unwrap(), Passes::default().simba);
-        let p = Passes::parse("sub_cluster=(regions simba) sub_split_bits=rewrite").unwrap();
-        assert_eq!(p.subs[sub_index("cluster")].to_string(), "(regions simba)");
-        assert!(p.to_string().contains(" sub_cluster=(regions simba) sub_split_bits=rewrite"));
+        assert_eq!(parse_default(&Passes::default().polish().to_string()), Passes::default().polish());
+        let p = Passes::parse("rewrite=(memo rewrite (regions rewrite (best 1 (simba simba_steps) (poly_mba rewrite simba_steps))))").unwrap();
+        assert_eq!(p.rewrite().to_string(), "(memo rewrite (regions rewrite (best 1 (simba simba_steps) (poly_mba rewrite simba_steps))))");
+        assert_eq!(parse_default(&Passes::default().simba().to_string()), Passes::default().simba());
+        let p = Passes::parse("(def (by_parts) rewrite | tfunc) simba=(best 1 (clustered by_parts) (semi_linear rewrite))").unwrap();
+        assert!(p.to_string().contains(" simba=(best 1 (clustered by_parts) (semi_linear rewrite))"), "{p}");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
-        assert!(Passes::parse("sub_nope=rewrite").is_err());
-        assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
+        for old in ["sub_cluster=(regions simba)", "sub_split_bits=rewrite", "sub_nope=rewrite"] {
+            assert!(Passes::parse(old).unwrap_err().contains("no longer read"), "{old}");
+        }
         assert!(Passes::parse("polish+=factor").is_err() && Passes::parse("polish=nope").is_err());
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("pre+=nope").is_err() && Passes::parse("keep+=1").is_err());
@@ -577,7 +508,7 @@ mod tests {
         });
         assert!(!is_off("poly_mba"));
         let p = Passes::parse("prepass=(if (mul < 1 && size >= 10 || vars >= 3) (off lowbits)) | lowbits").unwrap();
-        assert_eq!(p.prepass.to_string(), "(if (mul < 1 && size >= 10 || vars >= 3) (off lowbits)) | lowbits");
+        assert_eq!(p.prepass().to_string(), "(if (mul < 1 && size >= 10 || vars >= 3) (off lowbits)) | lowbits");
         assert!(Passes::parse("prepass=(if (nope >= 1) id)").is_err() && Passes::parse("prepass=(off nope)").is_err() && Passes::parse("prepass=(if (mul >= x) id)").is_err());
         let e = Passes::parse("prepass=seq(lowbits,rewrite)").unwrap_err();
         assert!(e.contains("no longer read"), "{e}");
@@ -594,33 +525,33 @@ mod tests {
         let got = crate::lang::run::within(&p, || (limit(Limit::SplitRuns), limit(Limit::PolyBuilds), limit(Limit::SplitDepth)));
         assert_eq!(got, (4, 64, 2));
         assert_eq!(limit(Limit::SplitRuns), usize::MAX);
-        let p = Passes::parse("keep=1 pipeline=lowbits | (best 2 rewrite ((off relate tfunc) | rebuild)) | (fix 3 egglog) | polish_factor extra=0").unwrap();
-        assert_eq!(p.pipeline.to_string(), "lowbits | (best 2 rewrite ((off relate tfunc) | rebuild)) | (fix 3 egglog) | polish_factor");
+        let p = Passes::parse("keep=1 pipeline=lowbits | (best 2 rewrite ((off relate tfunc) | (rebuild rewrite))) | (fix 3 egglog) | polish_factor extra=0").unwrap();
+        assert_eq!(p.pipeline().to_string(), "lowbits | (best 2 rewrite ((off relate tfunc) | (rebuild rewrite))) | (fix 3 egglog) | polish_factor");
         assert_eq!((after_entry(&p, "keep"), after_entry(&p, "extra")), (1, 0));
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
-        let p = Passes::parse("pipeline=(smallest (fix restarts (retry (mixed && !minimal) prepass (egglog later))) | (if !input (tag t polish) id))").unwrap();
-        assert_eq!(p.pipeline.to_string(), "(smallest (fix restarts (retry (mixed && !minimal) prepass (egglog later))) | (if !input (tag t polish)))");
+        let p = Passes::parse("pipeline=(smallest (fix restarts (retry (mixed && !minimal) (prepass prepass_steps) (egglog later))) | (if !input (tag t (polish polish_steps)) id))").unwrap();
+        assert_eq!(p.pipeline().to_string(), "(smallest (fix restarts (retry (mixed && !minimal) (prepass prepass_steps) (egglog later))) | (if !input (tag t (polish polish_steps))))");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
-        assert_eq!(parse(&Passes::default().pipeline.to_string()).unwrap(), Passes::default().pipeline);
-        assert_eq!(Passes::parse(&format!("prepass={}", Passes::default().prepass)).unwrap().prepass, Passes::default().prepass);
+        assert_eq!(parse_default(&Passes::default().pipeline().to_string()), Passes::default().pipeline());
+        assert_eq!(Passes::parse(&format!("prepass={}", Passes::default().prepass())).unwrap().prepass(), Passes::default().prepass());
         let d = Passes::default();
         assert_eq!(Passes::parse(&d.to_string()).unwrap(), d);
         assert_eq!(Passes::parse(&format!("{d:#}")).unwrap(), d);
-        let p = Passes::parse("extra=0 prepass=lowbits | (if mixed rewrite) # a comment\n| polish keep=3;pipeline=(fix 2 prepass | egglog)").unwrap();
+        let p = Passes::parse("extra=0 prepass=lowbits | (if mixed rewrite) # a comment\n| (polish polish_steps) keep=3;pipeline=(fix 2 (prepass prepass_steps) | egglog)").unwrap();
         assert_eq!((after_entry(&p, "extra"), after_entry(&p, "keep")), (0, 3));
-        assert_eq!(p.prepass, parse("(seq lowbits (if mixed rewrite id) polish)").unwrap());
-        assert_eq!(p.pipeline, parse("(fix 2 (seq prepass egglog))").unwrap());
+        assert_eq!(p.prepass(), parse_default("(seq lowbits (if mixed rewrite id) (polish polish_steps))"));
+        assert_eq!(p.pipeline(), parse_default("(fix 2 (seq (prepass prepass_steps) egglog))"));
         assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
         let p = Passes::parse("prepass=(scope (save t) | (rewrites = unified_rewrites | semi_leaves = 2 | rewrite) | (filter (size < (size (main t)) || size <= (size (main t)) * 3 / 4 && !tiny)) | (cand pre_halve_input halve_input (load t)))").unwrap();
-        assert_eq!(p.prepass.to_string(), "(scope (save t) | (rewrites = unified_rewrites | semi_leaves = 2 | rewrite) | (filter (size < (size (main t)) || size <= (size (main t)) * 3 / 4 && !tiny)) | (cand pre_halve_input halve_input (load t)))");
+        assert_eq!(p.prepass().to_string(), "(scope (save t) | (rewrites = unified_rewrites | semi_leaves = 2 | rewrite) | (filter (size < (size (main t)) || size <= (size (main t)) * 3 / 4 && !tiny)) | (cand pre_halve_input halve_input (load t)))");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         for bad in ["prepass=(filter lt)", "prepass=(filter (size <=))", "prepass=(rewrites = x | id)", "prepass=(save)", "prepass=(scope id id)"] {
             assert!(Passes::parse(bad).is_err(), "{bad}");
         }
         assert_eq!(Passes::default().check(), Ok(()));
-        assert_eq!(Passes::default().polish, parse_default(&polish(&crate::linear_mba::POLISH.map(|(n, _)| n))));
-        let p = Passes::parse("(let twice (fix 2 rewrite)) rewrite=twice | (best 1 twice simba) pipeline=(fix 1 first_round) | polish").unwrap();
-        assert_eq!(p.rewrite, parse("(fix 2 rewrite) | (best 1 (fix 2 rewrite) simba)").unwrap());
+        assert_eq!(Passes::default().polish(), parse_default(&polish(&crate::linear_mba::POLISH.map(|(n, _)| n))));
+        let p = Passes::parse("(let twice (fix 2 rewrite)) prepass=twice | (best 1 twice (simba simba_steps)) pipeline=(fix 1 first_round) | (polish polish_steps)").unwrap();
+        assert_eq!(p.prepass(), parse_default("(fix 2 rewrite) | (best 1 (fix 2 rewrite) (simba simba_steps))"));
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         for bad in ["(let rewrite id)", "(let x id) (let y nope)", "(let x id) extra", "pipeline=undefined_name", "file=no/such/file.pipe"] {
             assert!(Passes::parse(bad).is_err(), "{bad}");
@@ -632,21 +563,21 @@ mod tests {
 (let r2 rewrite | rewrite)
 extra = 1
 times = extra + 1 # a new variable
-(def (prepass)
+(def (prepass_steps)
   lowbits | r2 | (fix times rewrite))
 ").unwrap();
         let (p, notes) = Passes::parse_noting(&format!("file={} keep=3", f.display())).unwrap();
         assert!(notes.is_empty(), "{notes:?}");
         assert_eq!((after_entry(&p, "extra"), after_entry(&p, "keep"), after_entry(&p, "times")), (1, 3, 2));
-        assert_eq!(show(&p.prepass), "lowbits | rewrite | rewrite | (fix times rewrite)");
+        assert_eq!(show(&p.prepass()), "lowbits | rewrite | rewrite | (fix times rewrite)");
         assert!(p.to_string().contains(" extra=1 times = extra + 1 keep=3 "), "{p}");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("times=1").is_err(), "a variable of one parse is unknown in another");
         let bad = [
             ("off=relate\n", "off names a function or a definition"),
             ("lowbits | rewrite\n", "lowbits has no candidates to work on at the top level"),
-            ("prepass = lowbits\n", "a source file defines it as (def (prepass) ...)"),
-            ("(def (prepass)\n  lowbits\n", "unclosed form"),
+            ("prepass_steps = lowbits\n", "a source file defines it as (def (prepass_steps) ...)"),
+            ("(def (prepass_steps)\n  lowbits\n", "unclosed form"),
             ("(extern (x g:group) group)\n", "only read from src/builtins.pipe"),
         ];
         for (text, msg) in bad {
@@ -658,14 +589,10 @@ times = extra + 1 # a new variable
         let (_, notes) = Passes::parse_noting(&format!("file={}", f.display())).unwrap();
         assert_eq!(notes, ["unused_one is defined and never read", "kep is defined and never read"]);
         std::fs::remove_dir_all(&dir).unwrap();
-        assert!(Passes::parse("rewrite=(fix (restarts - 1) rewrite)").is_ok(), "restarts is a variable");
-        for bad in ["prepass=egglog", "simba=reprint", "sub_cluster=(egglog first)", "prepass=lowbits | prepass", "polish=polish", "rewrite=(again polish)", "prepass=(if rebuilds id)"] {
-            let e = Passes::parse(bad).unwrap_err();
-            assert!(e.contains("simplify run") || e.contains("reaches itself"), "{bad}: {e}");
+        assert!(Passes::parse("prepass=(fix (restarts - 1) rewrite)").is_ok(), "restarts is a variable");
+        for ok in ["prepass=lowbits | prepass_steps", "polish=(polish polish_steps)", "rewrite=(again rewrite rewrite)", "simba=(simba simba_steps)", "pipeline=(fix restarts (prepass prepass_steps) | egglog | (polish polish_steps))", "prepass=(egglog x)", "simba=reprint", "polish=(if mixed reprint)", "rewrite=(memo rewrite (regions rewrite (relate rewrite)))", "simba=(peel simba_steps)"] {
+            assert!(Passes::parse(ok).is_ok(), "{ok}: {:?}", Passes::parse(ok).err());
         }
-        assert!(Passes::parse("pipeline=(fix restarts prepass | egglog | polish)").is_ok());
-        assert!(Passes::parse("prepass=(egglog x)").unwrap_err().contains("(extern @pipe @timed @simplify_only (egglog label:name? g:group) group)"));
-        assert!(Passes::parse("polish=(if mixed reprint)").unwrap_err().contains("reprint needs a simplify run and cannot be in polish"));
         for bad in ["(extern (x g:group) group)", "keep=1 (extern (x g:group) group)", "pipeline=extern"] {
             assert!(Passes::parse(bad).unwrap_err().contains(NO_EXTERN), "{bad}");
         }
@@ -697,9 +624,9 @@ times = extra + 1 # a new variable
         for ok in ["prepass=(save t) | (if mixed (save t)) | (load t)", "prepass=(save t) | (cand pre_unified unified (save t)) | (load t)", "prepass=(fix 3 (save t) | rewrite) | (load t)", "prepass=(save t) | (filter (size < (size (main t)))) | (save t) | (load t)", "prepass=(save t) | (first rewrite (save t)) | (load t)", "prepass=(if mixed (save t) (save t)) | (load t)"] {
             assert_eq!(Passes::parse_noting(ok).unwrap().1, Vec::<String>::new(), "{ok}");
         }
-        let p = Passes::parse("prepass=rewrite | time_limit = 500 | relate | time_limit = size-1 * 2 | tfunc | time_limit = none | lowbits").unwrap();
-        assert_eq!(p.prepass.to_string(), "rewrite | time_limit = 500 | relate | time_limit = size - 1 * 2 | tfunc | time_limit = none | lowbits");
-        assert_eq!(p, Passes::parse(&p.prepass.to_string().replace("rewrite |", "prepass=rewrite |")).unwrap());
+        let p = Passes::parse("prepass=rewrite | time_limit = 500 | (relate rewrite) | time_limit = size-1 * 2 | tfunc | time_limit = none | lowbits").unwrap();
+        assert_eq!(p.prepass().to_string(), "rewrite | time_limit = 500 | (relate rewrite) | time_limit = size - 1 * 2 | tfunc | time_limit = none | lowbits");
+        assert_eq!(p, Passes::parse(&p.prepass().to_string().replace("rewrite |", "prepass=rewrite |")).unwrap());
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         for old in ["prepass=(time-limit 500) | rewrite", "prepass=time-limit", "prepass=(time-limit)", "time-limit=500"] {
             let e = Passes::parse(old).unwrap_err();
@@ -712,12 +639,12 @@ times = extra + 1 # a new variable
         }
         let (_, w) = Passes::parse_noting("prepass=rewrite | time_limit = 100").unwrap();
         assert!(w.len() == 1 && w[0].contains("time_limit = 100 ends its sequence"), "{w:?}");
-        assert_eq!(Passes::parse_noting("prepass=rewrite | (if mixed time_limit = 100) | relate").unwrap().1, Vec::<String>::new());
-        let flat = Passes::parse("(let g relate | tfunc) (let h (relate | tfunc)) prepass=lowbits | g | finish rewrite=lowbits | h | finish").unwrap();
-        assert_eq!(flat.prepass.to_string(), "lowbits | relate | tfunc | finish");
-        assert_eq!(flat.rewrite.to_string(), "lowbits | (relate | tfunc) | finish");
+        assert_eq!(Passes::parse_noting("prepass=rewrite | (if mixed time_limit = 100) | (relate rewrite)").unwrap().1, Vec::<String>::new());
+        let flat = Passes::parse("(let g (relate rewrite) | tfunc) (let h ((relate rewrite) | tfunc)) prepass=lowbits | g | (finish rewrite) rewrite=lowbits | h | (finish rewrite)").unwrap();
+        assert_eq!(flat.prepass().to_string(), "lowbits | (relate rewrite) | tfunc | (finish rewrite)");
+        assert_eq!(flat.rewrite().to_string(), "lowbits | ((relate rewrite) | tfunc) | (finish rewrite)");
         let p = Passes::parse("prepass=(off relate tfunc) | (on relate cut) | rewrite time_limit=500").unwrap();
-        assert_eq!(p.prepass.to_string(), "(off relate tfunc) | (on relate cut) | rewrite");
+        assert_eq!(p.prepass().to_string(), "(off relate tfunc) | (on relate cut) | rewrite");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(Passes::parse("prepass=(on nope)").is_err() && Passes::parse("prepass=(on)").is_err() && Passes::parse("prepass=on/relate").is_err());
         let (_, w) = Passes::parse_noting("prepass=rewrite | (scope (rewrites = 8 | (off relate))) | (off cut) | lowbits").unwrap();
@@ -736,12 +663,12 @@ times = extra + 1 # a new variable
     #[test]
     fn assignment_items_and_warnings() {
         let p = Passes::parse("prepass=lowbits | split_runs=4 | rewrite").unwrap();
-        assert_eq!(p.prepass.to_string(), "lowbits | split_runs = 4 | rewrite");
+        assert_eq!(p.prepass().to_string(), "lowbits | split_runs = 4 | rewrite");
         assert_eq!(p.program, Passes::default().program, "an assignment after | stays in the pipeline");
         let p = Passes::parse("prepass=lowbits split_runs=4").unwrap();
-        assert_eq!((p.prepass.to_string().as_str(), after_entry(&p, "split_runs")), ("lowbits", 4));
+        assert_eq!((p.prepass().to_string().as_str(), after_entry(&p, "split_runs")), ("lowbits", 4));
         let p = Passes::parse("prepass=lowbits | split_runs = vars * 2 | rewrite extra=0").unwrap();
-        assert_eq!((p.prepass.to_string().as_str(), after_entry(&p, "extra")), ("lowbits | split_runs = vars * 2 | rewrite", 0));
+        assert_eq!((p.prepass().to_string().as_str(), after_entry(&p, "extra")), ("lowbits | split_runs = vars * 2 | rewrite", 0));
         let p = Passes::parse("time_limit=2000 cand_bit_splits=3").unwrap();
         assert_eq!(after_entry(&p, "cand_bit_splits"), 3);
         assert!(p.to_string().contains(" time_limit=2000 cand_bit_splits=3 "), "{p}");
@@ -758,9 +685,9 @@ times = extra + 1 # a new variable
             assert_eq!(warn(ok), Vec::<String>::new(), "{ok}");
         }
         let w = warn("prepass=kep = 3 | rewrite");
-        assert_eq!(w, ["prepass: number variable kep is bound and never read", "prepass: number variable kep is a new local variable; did you mean keep?"]);
+        assert_eq!(w, ["prepass_steps: number variable kep is bound and never read", "prepass_steps: number variable kep is a new local variable; did you mean keep?"]);
         let w = warn("prepass=(save rewrits) | rewrite | (load rewrits)");
-        assert_eq!(w, ["prepass: group variable rewrits is a new local variable; did you mean rewrites?"], "a distance of 1 or 2 past 4 letters");
+        assert_eq!(w, ["prepass_steps: group variable rewrits is a new local variable; did you mean rewrites?"], "a distance of 1 or 2 past 4 letters");
         for ok in ["prepass=(save r) | (load r)", "prepass=(save tt) | (load tt)", "prepass=(save mux) | (load mux)", "prepass=(save before) | (load before)"] {
             assert_eq!(warn(ok), Vec::<String>::new(), "{ok}");
         }
@@ -775,37 +702,35 @@ times = extra + 1 # a new variable
     #[test]
     fn def_items() {
         let d = Passes::default();
-        for name in ["pipeline", "prepass", "polish", "rewrite", "simba", "sub_cluster"] {
-            let short = Passes::parse(&format!("{name}=lowbits | rewrite")).unwrap();
-            assert_eq!(Passes::parse(&format!("(def ({name}) lowbits | rewrite)")).unwrap(), short, "{name}");
+        for (name, def) in crate::cli::passes::PIPELINES {
+            let short = Passes::parse(&format!("{name}=lowbits | tfunc")).unwrap();
+            assert_eq!(Passes::parse(&format!("(def ({def}) lowbits | tfunc)")).unwrap(), short, "{name}");
             assert_ne!(short, d);
         }
-        assert_eq!(Passes::parse("polish=factor,push_not").unwrap().polish, parse_default(&polish(&["factor", "push_not"])));
-        let p = Passes::parse("(def (twice) rewrite | rewrite) (def (more) twice | relate) prepass=lowbits | more | twice").unwrap();
+        assert_eq!(Passes::parse("polish=factor,push_not").unwrap().polish(), parse_default(&polish(&["factor", "push_not"])));
+        let p = Passes::parse("(def (twice) rewrite | rewrite) (def (more) twice | (relate rewrite)) prepass=lowbits | more | twice").unwrap();
         assert_eq!(p.defs.len(), p.default_defs + 2);
-        assert_eq!(p.prepass.to_string(), "lowbits | more | twice");
-        assert_eq!(p.defs[p.default_defs + 1].body.to_string(), "twice | relate");
-        assert!(p.to_string().contains(" (def (twice) rewrite | rewrite) (def (more) twice | relate) pipeline="), "{p}");
+        assert_eq!(p.prepass().to_string(), "lowbits | more | twice");
+        assert_eq!(p.defs[p.default_defs + 1].body.to_string(), "twice | (relate rewrite)");
+        assert!(p.to_string().contains(" (def (twice) rewrite | rewrite) (def (more) twice | (relate rewrite)) pipeline="), "{p}");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert!(format!("{p:#}").contains("\n# (twice g:group) group\n(def (twice) rewrite | rewrite)\n"));
         assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
-        assert_eq!(Passes::parse("(def @inline (g) relate | tfunc) prepass=lowbits | g").unwrap(), Passes::parse("(let g relate | tfunc) prepass=lowbits | g").unwrap());
+        assert_eq!(Passes::parse("(def @inline (g) (relate rewrite) | tfunc) prepass=lowbits | g").unwrap(), Passes::parse("(let g (relate rewrite) | tfunc) prepass=lowbits | g").unwrap());
         for (bad, msg) in [
-            ("(def (f) id) (def (f) id)", "already a function"),
+            ("(def (f) id) (def (f n:num) (fix n id))", "f is defined before as (f g:group) group; a later definition replaces it only with the same signature, not (f n:num g:group) group"),
+            ("(def (f) id) (def (f) size + 1)", "size gives a number, not candidates"),
             ("(def (f) id) (let f id)", "already a function"),
             ("(def (f) id) (def @inline (f) id)", "already a function"),
             ("(let f id) (def (f) id)", "already defined by let"),
             ("(def (gates) id)", "already defined by let"),
             ("(def (lowbits) id)", "the name of a pass"),
             ("(def (split_runs) id)", "the name of a variable"),
-            ("(def @inline (prepass) id)", "replaced only by (def (prepass) p)"),
-            ("(let polish id)", "replaced only by"),
-            ("(def (sub_nope) id)", "unknown sub_NAME"),
-            ("(def (f) prepass) (def (g) f) prepass=lowbits | g", "prepass reaches itself"),
-            ("(def (f) polish) (def (g) (if mixed f)) polish=g", "polish reaches itself"),
-            ("(def (f) egglog) (def (g) f) prepass=g", "egglog needs a simplify run and cannot be in f, which prepass calls"),
+            ("(def @inline (prepass_steps) id)", "already a function"),
+            ("(def (prepass_steps n:num) id)", "replaces it only with the same signature"),
+            ("(let polish id)", "the name of a pass"),
             ("(def (f) (load t))", "f reads group variable t before it is bound"),
-            ("(def (f) (save t)) prepass=f | (load t)", "prepass reads group variable t"),
+            ("(def (f) (save t)) prepass=f | (load t)", "prepass_steps reads group variable t"),
             ("(def (f) id) prepass=(f 1)", "f takes no arguments: (f g:group) group"),
             ("(def (f) id) prepass=(if f id)", "f gives candidates, not a number"),
             ("(def (f) id) prepass=f = 1", "f is a function and cannot be assigned"),
@@ -813,11 +738,11 @@ times = extra + 1 # a new variable
             let e = Passes::parse(bad).unwrap_err();
             assert!(e.contains(msg), "{bad}: {e}");
         }
-        for ok in ["(def (f) egglog) pipeline=f | polish", "(def (f) rewrite | relate) sub_cluster=f", "(def @inline (g) id) (def @inline (g) rewrite) prepass=g", "(def (f) (save t) | (load t)) prepass=(save t) | f | (load t)"] {
+        for ok in ["(def (f) id) (def (f) rewrite) prepass=f", "(def (f) prepass_steps) (def (g) f) prepass=lowbits | g", "(def (f) polish_steps) (def (g) (if mixed f)) polish=g", "(def (f) egglog) pipeline=f | (polish polish_steps)", "(def (f) egglog) (def (g) f) prepass=g", "(def (f) rewrite | (relate rewrite)) simba=(clustered f)", "(def @inline (g) id) (def @inline (g) rewrite) prepass=g", "(def (f) (save t) | (load t)) prepass=(save t) | f | (load t)"] {
             assert!(Passes::parse(ok).is_ok(), "{ok}");
         }
         let warn = |s: &str| Passes::parse_noting(s).unwrap().1;
-        let w = warn("(def (f) rewrite) (def @inline (g) rewrite) (def (h) relate) prepass=h");
+        let w = warn("(def (f) rewrite) (def @inline (g) rewrite) (def (h) (relate rewrite)) prepass=h");
         assert!(w.len() == 2 && w[0].contains("(def (f) ...) is never used") && w[1].contains("(def @inline (g) ...) is never used"), "{w:?}");
         let w = warn("(def (f) (save t) | rewrite) prepass=f");
         assert!(w.len() == 1 && w[0].contains("f: group variable t is bound and never read"), "{w:?}");
@@ -825,7 +750,7 @@ times = extra + 1 # a new variable
 
     #[test]
     fn explicit_parameters() {
-        let spec = "(def @pipe (f p g) g | p) (def (twice p g) (p (p g))) (def @pipe (big k g) (size (main g)) > k) prepass=(f rewrite) | (save t) | u = (twice relate t) | (if (big 3) (load u))";
+        let spec = "(def @pipe (f p g) g | p) (def (twice p g) (p (p g))) (def @pipe (big k g) (size (main g)) > k) prepass=(f rewrite) | (save t) | u = (twice (relate rewrite) t) | (if (big 3) (load u))";
         let p = Passes::parse(spec).unwrap();
         let sigs: Vec<String> = p.defs[p.default_defs..].iter().map(|d| sig_of(d).decl()).collect();
         assert_eq!(sigs, ["(extern @pipe (f p:pipe g:group) group)", "(extern (twice p:pipe g:group) group)", "(extern @pipe (big k:num g:group) num)"]);
@@ -848,8 +773,8 @@ times = extra + 1 # a new variable
             ("(def (f x:bogus) id)", "unknown type bogus"),
             ("(def (f p:pipe) (fix p id))", "parameter p is used as a pipeline and as an expression"),
             ("(def (twice p g) (p (p g))) prepass=id | (twice rewrite t)", "twice is not @pipe"),
-            ("(def @pipe (f p g) g | p) (def (h a:group) (f id a)) prepass=(h u)", "prepass reads group variable u before it is bound"),
-            ("(def @pipe (f p g) g | p) prepass=(f id u)", "prepass reads group variable u before it is bound"),
+            ("(def @pipe (f p g) g | p) (def (h a:group) (f id a)) prepass=(h u)", "prepass_steps reads group variable u before it is bound"),
+            ("(def @pipe (f p g) g | p) prepass=(f id u)", "prepass_steps reads group variable u before it is bound"),
             ("(def @pipe (f p g) g | p) prepass=(f id 1)", "f takes a pipeline"),
             ("(def @pipe (big k g) (size (main g)) > k) prepass=t = (big 3) | (load t)", "t is a number variable, so it cannot name a group variable"),
             ("(def @pipe (big k g) (size (main g)) > k) prepass=t = (k + 1)", "unknown name k"),
@@ -871,7 +796,7 @@ times = extra + 1 # a new variable
         }
         assert_eq!(Passes::parse(&s).unwrap(), p);
         assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
-        for ok in ["prepass=(fix (rewrite | size) id)", "prepass=(if ((rewrite | size) < size) id)", "prepass=(if (any (rewrite | size) < 3) id)", "prepass=(if ((size (main (rewrite))) < (mixed (main (lowbits | unshift)))) id)", "polish=keep = (prepass | size) | id"] {
+        for ok in ["prepass=(fix (rewrite | size) id)", "prepass=(if ((rewrite | size) < size) id)", "prepass=(if (any (rewrite | size) < 3) id)", "prepass=(if ((size (main (rewrite))) < (mixed (main (lowbits | unshift)))) id)", "polish=keep = ((prepass prepass_steps) | size) | id"] {
             assert!(Passes::parse(ok).is_ok(), "{ok}: {:?}", Passes::parse(ok).err());
         }
         for (bad, msg) in [
@@ -892,7 +817,7 @@ times = extra + 1 # a new variable
         }
         let warn = |s: &str| Passes::parse_noting(s).unwrap().1;
         let w = warn("prepass=(save t) | rewrite | t");
-        assert!(w.len() == 1 && w[0].contains("prepass: t drops its input"), "{w:?}");
+        assert!(w.len() == 1 && w[0].contains("prepass_steps: t drops its input"), "{w:?}");
         assert!(warn("prepass=(save t) | rewrite | (load t)").is_empty(), "(load t) gives no warning");
         assert!(warn("(def @inline @pipe (k g) g | rewrite) prepass=rewrite | k").is_empty(), "nor the input of an @inline call");
         let w = warn("(def (f r) t = r | (load t)) (def (h r) r) prepass=(f rewrite) | (h id)");
@@ -908,8 +833,8 @@ times = extra + 1 # a new variable
         let p = Passes::parse(spec).unwrap();
         let sigs: Vec<String> = p.defs[p.default_defs..].iter().map(|d| sig_of(d).to_string()).collect();
         assert_eq!(sigs, ["(try_without name:name p:pipe g:group) group", "(hold r:group p:pipe g:group) group"]);
-        assert_eq!(p.prepass.to_string(), "(try_without relate rewrite) | (save t) | (hold t lowbits | rewrite)");
-        let Pipe::Seq(steps) = &p.prepass else { panic!() };
+        assert_eq!(p.prepass().to_string(), "(try_without relate rewrite) | (save t) | (hold t lowbits | rewrite)");
+        let Pipe::Seq(steps) = &p.prepass() else { panic!() };
         let Some((c, _)) = steps[0].call() else { panic!() };
         assert_eq!(c.body.to_string(), "(best 1 p ((off relate) | p))", "a call has its name arguments in place");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
@@ -919,9 +844,10 @@ times = extra + 1 # a new variable
 "), "{p:#}");
         assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
         let inline = Passes::parse("(def @inline (g r p) p | (load r)) prepass=(save t) | (g t rewrite) | (save u) | (g u (if (size > 1) id))").unwrap();
-        assert_eq!(inline.prepass.to_string(), "(save t) | rewrite | (load t) | (save u) | (if (size > 1) id) | (load u)", "an @inline body flat in the sequence");
+        assert_eq!(inline.prepass().to_string(), "(save t) | rewrite | (load t) | (save u) | (if (size > 1) id) | (load u)", "an @inline body flat in the sequence");
         let nested = Passes::parse("(def (g n q) (off n) | q) (def (h m p) (g m (p | (save x))) | (load x)) prepass=(h tfunc rewrite)").unwrap();
-        let Some((h, _)) = nested.prepass.call() else { panic!() };
+        let pre = nested.prepass();
+        let Some((h, _)) = pre.call() else { panic!() };
         let Pipe::Seq(body) = &*h.body else { panic!() };
         let Some((g, _)) = body[0].call() else { panic!() };
         assert_eq!(g.body.to_string(), "(off tfunc) | q", "a name argument passed on is put in place in the inner call too");
@@ -944,9 +870,9 @@ times = extra + 1 # a new variable
             ("(def (f r n) (load r) | (fix n id)) prepass=(f 3 3)", "expected a group variable after f, found 3"),
             ("(def (f n) (fix n id)) prepass=(f relate = 1)", "an assignment is a step"),
             ("(def (f n) (fix n id)) prepass=(f (load t))", "f takes an expression"),
-            ("(def (f n) (fix n id)) prepass=(f ((size (main t)) + 1))", "prepass reads group variable t before it is bound"),
-            ("(def @inline (f n) (load t) | (fix n id)) prepass=(f 1)", "prepass reads group variable t before it is bound"),
-            ("(def (k r) (load r)) (def @inline (i n) (k t) | (fix n id)) prepass=(i 1)", "prepass reads group variable t before it is bound"),
+            ("(def (f n) (fix n id)) prepass=(f ((size (main t)) + 1))", "prepass_steps reads group variable t before it is bound"),
+            ("(def @inline (f n) (load t) | (fix n id)) prepass=(f 1)", "prepass_steps reads group variable t before it is bound"),
+            ("(def (k r) (load r)) (def @inline (i n) (k t) | (fix n id)) prepass=(i 1)", "prepass_steps reads group variable t before it is bound"),
             ("(def (f p) p | (load p))", "parameter p is used as a pipeline and as a group variable"),
             ("(def (f r) (load r) | (tag r id))", "parameter r is used as a group variable and as a name"),
             ("(def (f p q) p)", "def (f p q): parameter q is never used in the body"),
@@ -956,7 +882,7 @@ times = extra + 1 # a new variable
             ("(def (f gates) id)", "the name of a variable, function or definition"),
             ("(def (f p p) p)", "parameter p is written twice"),
             ("(def (f f) id)", "parameter f is written twice"),
-            ("(def (prepass p) p)", "takes no parameters"),
+            ("(def (prepass_steps p) p)", "replaces it only with the same signature, not (prepass_steps p:pipe g:group) group"),
             ("(def (f p) (p id))", "parameter p takes a group value: (p g)"),
             ("(def (f p) p) prepass=f", "f needs parentheses: (f ...); (f p:pipe g:group) group"),
             ("(def (f p) p) prepass=(f)", "f takes a pipeline: (f p:pipe g:group) group"),
@@ -966,16 +892,11 @@ times = extra + 1 # a new variable
             ("(def (f n p) (off n) | p) prepass=(f nope id)", "unknown off name nope (the argument for n)"),
             ("(def (f p) p) prepass=(if f id)", "f gives candidates, not a number: (f p:pipe g:group) group"),
             ("(def (f p) p) prepass=f = 1", "f is a function and cannot be assigned: (f p:pipe g:group) group"),
-            ("(def (f r) (load r)) prepass=(f t)", "prepass reads group variable t before it is bound"),
-            ("(def (f a b) (load a) | (load b)) prepass=(save t) | (f t u)", "prepass reads group variable u before it is bound"),
+            ("(def (f r) (load r)) prepass=(f t)", "prepass_steps reads group variable t before it is bound"),
+            ("(def (f a b) (load a) | (load b)) prepass=(save t) | (f t u)", "prepass_steps reads group variable u before it is bound"),
             ("(def (f a) (save a))", "parameter a cannot be assigned"),
             ("(def (f a) a = rewrite)", "parameter a cannot be assigned"),
-            ("(def (f p) id | p) prepass=(f (load t))", "prepass reads group variable t before it is bound"),
-            ("(def (g p) p) prepass=(g prepass)", "prepass reaches itself"),
-            ("(def (g p) p | polish) polish=(g id)", "polish reaches itself"),
-            ("(def (g p) p) (def (h q) (g q)) prepass=(h (if mixed prepass))", "prepass reaches itself"),
-            ("(def (g p) p) prepass=(g egglog)", "egglog needs a simplify run and cannot be in prepass"),
-            ("(def @inline (g p) p) prepass=(g egglog)", "egglog needs a simplify run and cannot be in prepass"),
+            ("(def (f p) id | p) prepass=(f (load t))", "prepass_steps reads group variable t before it is bound"),
         ] {
             let e = Passes::parse(bad).unwrap_err();
             assert!(e.contains(msg), "{bad}: {e}");
@@ -988,9 +909,9 @@ times = extra + 1 # a new variable
         let w = warn("(def (f p n) (fix n p)) prepass=id");
         assert!(w.len() == 1 && w[0].contains("(def (f p n) ...) is never used"), "{w:?}");
         let w = warn("(def @inline (f n) (save s) | (fix n id)) prepass=(f 2) | rewrite");
-        assert!(w.len() == 1 && w[0].contains("prepass: group variable s is bound and never read"), "an @inline body is checked where it is called: {w:?}");
+        assert!(w.len() == 1 && w[0].contains("prepass_steps: group variable s is bound and never read"), "an @inline body is checked where it is called: {w:?}");
         let w = warn("(def @inline (f n) split_runs = n) prepass=rewrite | (f 2)");
-        assert!(w.len() == 1 && w[0].contains("prepass: split_runs = n ends its sequence"), "{w:?}");
+        assert!(w.len() == 1 && w[0].contains("prepass_steps: split_runs = n ends its sequence"), "{w:?}");
     }
 
     #[test]
@@ -1001,11 +922,11 @@ times = extra + 1 # a new variable
         assert_eq!(sigs[0], "(with_budget n:num p:pipe g:group) group");
         assert_eq!(sigs[3], "(f n:num g:group) group");
         assert_eq!(sigs[4], "(lim n:num p:pipe g:group) group", "an @inline function with a numeric parameter is a function too");
-        assert_eq!(p.prepass.to_string(), "(f 3) | (lim none id) | (lim2 (size - 1) (with_budget 8 rewrite))");
+        assert_eq!(p.prepass().to_string(), "(f 3) | (lim none id) | (lim2 (size - 1) (with_budget 8 rewrite))");
         assert!(p.to_string().contains(" (def @inline (lim n p) split_runs = n | p) (def @inline (lim2 n p) (split_runs = n | p)) "), "{p}");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         assert_eq!(Passes::parse(&format!("{p:#}")).unwrap(), p);
-        let plain = Passes::parse("(def @inline (g p) p | relate) prepass=(g rewrite)").unwrap();
+        let plain = Passes::parse("(def @inline (g p) p | (relate rewrite)) prepass=(g rewrite)").unwrap();
         assert!(plain.defs.len() == plain.default_defs, "an @inline function without a numeric parameter is expanded");
     }
 }

@@ -3,7 +3,7 @@
 
 use super::ast::{Expanded, Fun, Holds, Pipe, Slot, WIDTH, piped, pretty_at, show, show_expr, starts_with_value};
 use super::builtins::{MACROS, get, resolve};
-use super::host::{self, INNER, defined_builtin};
+use super::host::{self, INNER};
 use super::lexer::{Tok, lex};
 use super::macros::smallest;
 use super::parser::{Arg, Parser, explicit, group, hyphen_hint, not_pipe, number_seq, seq_of};
@@ -39,9 +39,22 @@ pub struct Def {
     pub implicit: Option<super::types::Ty>,
     /// `@timed`: a call past the time limit is skipped and gives its input.
     pub timed: bool,
+    /// The position in `Passes::defs`, which a later definition of the name takes over; a call
+    /// of one that is not `inline` runs the definition there when it runs.
+    pub slot: Option<usize>,
 }
 
 impl Def {
+    /// Whether a call runs the definition at `slot` when it runs, not the one it was read with.
+    pub fn late(&self) -> bool {
+        self.slot.is_some() && !self.inline
+    }
+
+    /// Whether a run of its body alone is a call: no parameters, no input, candidates.
+    pub fn bare(&self) -> bool {
+        self.params.is_empty() && self.input.is_none() && self.value.is_none()
+    }
+
     /// Whether a parameter is a name, which a call puts in place in its own copy of the body;
     /// a group parameter too in an `inline` one, which shares the caller's group variables.
     pub fn has_names(&self) -> bool {
@@ -66,14 +79,36 @@ pub struct Call {
 }
 
 /// The body is made from the function and the arguments (an `@inline` one with an input
-/// binds it under a name of its own for each call); the `App` compares the arguments.
+/// binds it under a name of its own for each call); the `App` compares the arguments. A late
+/// call runs the definition at its place.
 impl PartialEq for Call {
     fn eq(&self, o: &Call) -> bool {
-        self.def == o.def
+        match self.def.late() && o.def.late() {
+            true => self.def.slot == o.def.slot && self.def.name == o.def.name,
+            false => self.def == o.def,
+        }
     }
 }
 
 impl Call {
+    /// The call as the definition at its place in `defs` makes it, `args` its arguments.
+    pub fn latest(self: &Arc<Call>, args: &[Pipe], defs: &[Arc<Def>]) -> Arc<Call> {
+        let d = self.latest_def(defs);
+        if Arc::ptr_eq(d, &self.def) {
+            return self.clone();
+        }
+        let body = instance(d, args, &|_| false).unwrap_or_else(|e| unreachable!("a definition with the same signature takes the same names: {e}"));
+        Arc::new(Call { def: d.clone(), body })
+    }
+
+    /// The definition the call runs: the one at its place in `defs`.
+    pub fn latest_def<'d>(&'d self, defs: &'d [Arc<Def>]) -> &'d Arc<Def> {
+        match self.def.slot.filter(|_| !self.def.inline).and_then(|i| defs.get(i)) {
+            Some(d) if d.name == self.def.name => d,
+            _ => &self.def,
+        }
+    }
+
     /// The call of `def` without arguments.
     pub fn bare(def: &std::sync::Arc<Def>) -> Pipe {
         Pipe::App(Fun::Def(std::sync::Arc::new(Call { def: def.clone(), body: def.body.clone() })), Vec::new().into())
@@ -262,20 +297,36 @@ pub fn sig_of(d: &Def) -> Sig {
 
 /// Parses a definition item: `(let NAME p)`, `(def @inline (NAME) p)`, which `NAME` then
 /// stands for where it is used, or `(def (NAME) p)`, a function called as a run of its own;
-/// the names of `defs` it uses are added to `used`.
+/// the names of `defs` it uses are added to `used`. A `def` may define a function `defs` has
+/// again; the caller checks the signatures agree.
 pub fn parse_definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition, String> {
-    definition(s, defs, used).map_err(|e| hyphen_hint(e, s))
+    parse_definition_lexed(s, None, defs, used)
 }
 
-fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition, String> {
-    let mut p = Parser::new(lex(s)?, defs);
+/// `parse_definition` of `s` lexed as `toks`, or lexed here when `None`.
+pub(crate) fn parse_definition_lexed(s: &str, toks: Option<Vec<Tok>>, defs: &Defs, used: &mut Vec<String>) -> Result<Definition, String> {
+    definition(s, toks, defs, used).map_err(|e| hyphen_hint(e, s))
+}
+
+/// The head of a definition item: how it defines its name, the name, the parameters and the
+/// types written for them, `@pipe`, `@timed`.
+pub(crate) struct Head {
+    pub(crate) kind: DefKind,
+    pub(crate) name: String,
+    params: Vec<String>,
+    types: Vec<Option<Ty>>,
+    piped: bool,
+    timed: bool,
+}
+
+fn head(p: &mut Parser, s: &str) -> Result<Head, String> {
     p.expect(Tok::Open, "(let or (def")?;
     let head = p.name("let or def")?;
     let mut params: Vec<String> = Vec::new();
     let mut types: Vec<Option<Ty>> = Vec::new();
     let mut piped = false;
     let mut timed = false;
-    let (mut kind, name) = match head.as_str() {
+    let (kind, name) = match head.as_str() {
         "let" => (DefKind::Let, p.name("a name after let")?),
         "def" => {
             let mut kind = DefKind::Run;
@@ -315,6 +366,31 @@ fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition
         }
         _ => return Err(format!("expected (let NAME pipeline) or (def (NAME) pipeline): {s}")),
     };
+    Ok(Head { kind, name, params, types, piped, timed })
+}
+
+/// The head of the definition item `item` lexed as `toks`, when it is one.
+pub(crate) fn head_of(toks: &[Tok], item: &str) -> Option<Head> {
+    // `head` reads no further than the first `)`.
+    let end = toks.iter().position(|t| *t == Tok::Close).map_or(toks.len(), |i| i + 1);
+    head(&mut Parser::new(toks[..end].to_vec(), &Defs::new()), item).ok()
+}
+
+/// The function a `(def ...)` item declares by its head alone, at `slot`, for the calls read
+/// before its body: one that gives candidates, as a step. `None` for a `let`, an `@inline`
+/// one and one with a parameter without a type.
+pub(crate) fn declared(h: &Head, slot: usize) -> Option<Def> {
+    if h.kind != DefKind::Run || h.types.iter().any(Option::is_none) || h.piped && h.types.last() != Some(&Some(Ty::Group)) {
+        return None;
+    }
+    let mut params: Vec<Param> = h.params.iter().zip(&h.types).map(|(n, t)| Param { name: n.clone(), ty: t.clone().unwrap(), rep: Rep::One }).collect();
+    let input = h.piped.then(|| params.pop().unwrap().name);
+    Some(Def { name: h.name.clone(), params, body: Arc::new(Pipe::id()), inline: false, flat: false, input, step: true, steps: false, value: None, implicit: None, timed: h.timed, slot: Some(slot) })
+}
+
+fn definition(s: &str, toks: Option<Vec<Tok>>, defs: &Defs, used: &mut Vec<String>) -> Result<Definition, String> {
+    let mut p = Parser::new(toks.map_or_else(|| lex(s), Ok)?, defs);
+    let Head { mut kind, name, params, mut types, piped, timed } = head(&mut p, s)?;
     let head: String = std::iter::once(name.as_str()).chain(params.iter().map(String::as_str)).collect::<Vec<_>>().join(" ");
     let what = match kind {
         DefKind::Let => format!("let {name}"),
@@ -327,33 +403,19 @@ fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition
         return Err(format!("{what}: the last parameter of an @pipe function is its input, a group"));
     }
     let function = get(&name);
-    let replaces = kind == DefKind::Run && defined_builtin(&name);
-    if defined_builtin(&name) && !replaces {
-        return Err(format!("{what}: {name} is a function the Rust code calls, replaced only by (def ({name}) p) or {name}=p"));
-    }
-    if !replaces && (function.is_some_and(|s| !s.is_number()) || resolve(&name).is_some() || MACROS.contains(&name.as_str()) || name == "extern" || name == "def") {
+    if function.is_some_and(|s| !s.is_number()) || resolve(&name).is_some() || MACROS.contains(&name.as_str()) || name == "extern" || name == "def" {
         return Err(format!("{what}: the name of a pass, form or macro"));
     }
-    if !replaces && (var_index(&name).is_some() || function.is_some() || name == "none") {
+    if var_index(&name).is_some() || function.is_some() || name == "none" {
         return Err(format!("{what}: the name of a variable or function"));
     }
-    if kind == DefKind::Run && name.starts_with("sub_") && !replaces {
-        let names: Vec<&str> = host::SUBS.iter().map(|(n, _)| *n).collect();
-        return Err(format!("{what}: unknown sub_NAME; known: {}", names.join(" ")));
-    }
     match defs.get(&name) {
-        Some(d) if d.run => return Err(format!("{what}: {name} is already a function (def ({name}) ...)")),
-        Some(_) if kind == DefKind::Run => return Err(format!("{what}: {name} is already defined by let or def @inline")),
+        Some(d) if d.run && kind != DefKind::Run => return Err(format!("{what}: {name} is already a function (def ({name}) ...), which only a def defines again")),
+        Some(d) if !d.run && kind == DefKind::Run => return Err(format!("{what}: {name} is already defined by let or def @inline")),
         _ => {}
     }
-    if replaces && timed {
-        return Err(format!("{what}: {name} is called by the Rust code, which decides how the time limit stops it, so it takes no @timed"));
-    }
-    if replaces && !params.is_empty() {
-        return Err(format!("{what}: {name} is called by the Rust code and takes no parameters"));
-    }
     for (i, n) in params.iter().enumerate() {
-        let taken = var_index(n).is_some() || get(n).is_some() || MACROS.contains(&n.as_str()) || resolve(n).is_some() || defined_builtin(n) || defs.contains_key(n);
+        let taken = var_index(n).is_some() || get(n).is_some() || MACROS.contains(&n.as_str()) || resolve(n).is_some() || defs.contains_key(n);
         if taken || ["none", "def", "let", "extern"].contains(&n.as_str()) {
             return Err(format!("{what}: parameter {n} is the name of a variable, function or definition"));
         }
@@ -366,7 +428,10 @@ fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition
         *types.last_mut().unwrap() = Some(Ty::Group);
     }
     p.params = params.into_iter().zip(types).map(|(name, ty)| ParamUse { name, annotated: ty.is_some(), ty, uses: 0, loose: 0 }).collect();
-    let mut value = match kind != DefKind::Let && !replaces && p.expr_ahead() {
+    // A definition of a function that gives candidates again reads a pipeline of them.
+    let candidates = defs.get(&name).and_then(|d| d.def.as_ref()).is_some_and(|d| d.value.is_none());
+    let start = p.at;
+    let mut value = match kind != DefKind::Let && !candidates && p.expr_ahead() {
         true => {
             p.no_input = piped;
             let e = p.or()?;
@@ -376,10 +441,15 @@ fn definition(s: &str, defs: &Defs, used: &mut Vec<String>) -> Result<Definition
         }
         false => None,
     };
+    if value.is_some() && p.peek() == Some(&Tok::Bar) {
+        // Read again as a pipeline, whose error names the number before `|`.
+        p.at = start;
+        p.pipe()?;
+    }
     let implicit = value.as_ref().filter(|_| !piped).and_then(|e| p.input_ty(e));
     let (mut pipe, flat, tail) = match value {
         Some(_) => (Pipe::id(), false, None),
-        None if replaces => (p.pipe()?, false, None),
+        None if candidates => (p.pipe()?, false, None),
         None => {
             let (stages, tail) = p.stages_of_pipe()?;
             let flat = kind != DefKind::Run && stages.len() > 1;
@@ -435,7 +505,6 @@ pub fn def_sig(name: &str, params: &[Param]) -> Sig {
         result: Ty::Group,
         pipe: true,
         timed: false,
-        simplify_only: false,
         uncounted: false,
         switch: false,
         doc: String::new(),
@@ -622,32 +691,32 @@ mod tests {
     #[test]
     fn a_def_call_is_an_application() {
         let p = Passes::parse("(def (f n:num) n + 1) (def (g p) p | rewrite) prepass=(if (f 2) (g tfunc))").unwrap();
-        let Pipe::App(Fun::Builtin(b), args) = &p.prepass else { panic!("{:?}", p.prepass) };
+        let Pipe::App(Fun::Builtin(b), args) = &p.prepass() else { panic!("{:?}", p.prepass()) };
         assert_eq!(b.name, "if");
         let Some((f, [two])) = args[0].call() else { panic!("{:?}", args[0]) };
         assert_eq!((f.def.name.as_str(), two), ("f", &Pipe::Num(2)));
         let Some((g, [tfunc])) = args[1].call() else { panic!("{:?}", args[1]) };
         assert_eq!((g.def.name.as_str(), show(tfunc).as_str()), ("g", "tfunc"));
-        assert_eq!(show(&p.prepass), "(if (f 2) (g tfunc))");
+        assert_eq!(show(&p.prepass()), "(if (f 2) (g tfunc))");
     }
 
     #[test]
     fn let_is_def_inline() {
         let mut defs = Defs::new();
-        for item in ["(let a relate | tfunc)", "(let b (relate | tfunc))"] {
+        for item in ["(let a unshift | tfunc)", "(let b (unshift | tfunc))"] {
             let d = parse_definition(item, &defs, &mut Vec::new()).unwrap();
             defs.insert(d.name, Named { pipe: d.pipe, flat: d.flat, run: false, params: d.params, def: None });
         }
         let mut inline = Defs::new();
-        for item in ["(def @inline (a) relate | tfunc)", "(def @inline (b) (relate | tfunc))"] {
+        for item in ["(def @inline (a) unshift | tfunc)", "(def @inline (b) (unshift | tfunc))"] {
             let d = parse_definition(item, &inline, &mut Vec::new()).unwrap();
             assert_eq!(d.kind, DefKind::Inline);
             inline.insert(d.name, Named { pipe: d.pipe, flat: d.flat, run: false, params: d.params, def: None });
         }
-        for p in ["lowbits | a | b | finish", "(best 1 a b)"] {
+        for p in ["lowbits | a | b | shifted_xor", "(best 1 a b)"] {
             let read = |defs: &Defs| parse_with(p, defs, &mut Vec::new()).unwrap();
             assert_eq!(read(&defs), read(&inline), "{p}");
         }
-        assert_eq!(show(&parse_with("lowbits | a | b", &inline, &mut Vec::new()).unwrap()), "lowbits | relate | tfunc | (relate | tfunc)");
+        assert_eq!(show(&parse_with("lowbits | a | b", &inline, &mut Vec::new()).unwrap()), "lowbits | unshift | tfunc | (unshift | tfunc)");
     }
 }

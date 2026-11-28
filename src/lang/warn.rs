@@ -13,7 +13,7 @@ impl Passes {
     pub fn warnings(&self) -> Vec<String> {
         let mut out = Vec::new();
         let globals = var_names();
-        for (name, _, uses) in self.uses() {
+        for (name, uses) in self.uses() {
             let mut unread: Vec<&String> = uses.saved.iter().filter(|r| !uses.reads.contains(r)).collect();
             unread.dedup();
             out.extend(unread.into_iter().map(|r| format!("{name}: {} {r} is bound and never read", uses.kind(r))));
@@ -45,8 +45,6 @@ impl Passes {
             return Vec::new();
         }
         let mut text: Vec<String> = self.program.iter().map(|t| if let Pipe::Bind(Slot::Global(_), v) = &t.pipe { show(v) } else { show(&t.pipe) }).collect();
-        let main = [&self.pipeline, &self.prepass, &self.polish, &self.rewrite, &self.simba];
-        text.extend(main.into_iter().chain(&self.subs).map(show));
         text.extend(self.defs.iter().map(|d| show_def(d)));
         let words: std::collections::HashSet<&str> = text.iter().flat_map(|t| t.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))).collect();
         defined.into_iter().map(|i| var(i).name).filter(|n| !words.contains(n)).collect()

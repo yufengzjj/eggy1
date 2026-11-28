@@ -90,49 +90,51 @@ fn conj_measure(vals: &[u64], n: usize, w: &Ctx) -> (u32, usize) {
 }
 
 /// `t` with each region also rebuilt after an arithmetic leaf `L` of a bitwise
-/// operation is replaced by a placeholder `v` and `μ·(v - L)` added, which
-/// `rewrite` then expands, so products and constant masks cancel too, unlike in
+/// operation is replaced by a placeholder `v` and `μ·(v - L)` added, which `sub`
+/// (`rewrite`) then expands, so products and constant masks cancel too, unlike in
 /// `related_leaves`: with `L = y*z - (z ^ y)`, `(z ^ y) - B + 2*(L | B) - y*z` is
-/// `L ^ B`. Other leaves equal to `L` or `~L` become `v` or `~v`.
-pub(super) fn relate(t: &T, w: &Ctx) -> T {
+/// `L ^ B`. Other leaves equal to `L` or `~L` (`sub` gives 0 for the difference) become `v`
+/// or `~v`.
+pub(super) fn relate(t: &T, w: &Ctx, sub: &Sub) -> T {
     if !matches!(t, T::Op(..)) {
         return t.clone();
     }
-    let key = (w.w, t.clone());
-    let f = || relate_uncached(t, w);
+    let f = || relate_uncached(t, w, sub);
+    let Some(id) = sub.id else { return f() };
+    let key = (w.w, id, t.clone());
     if let Some(r) = memo_get(&w.st.related, &key, w, "relate", f) {
         return r;
     }
     memo_compute(&w.st.related, key, w, f)
 }
 
-fn relate_uncached(t: &T, w: &Ctx) -> T {
+fn relate_uncached(t: &T, w: &Ctx, sub: &Sub) -> T {
     let T::Op(op, a) = t else { return t.clone() };
     if kind(t, w) == Kind::Atom {
-        return T::Op(*op, a.iter().map(|x| relate(x, w)).collect());
+        return T::Op(*op, a.iter().map(|x| relate(x, w, sub)).collect());
     }
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
-    let inner: Vec<T> = lv.iter().map(|l| relate(l, w)).collect();
+    let inner: Vec<T> = lv.iter().map(|l| relate(l, w, sub)).collect();
     let t = crate::lowbits::replace(t, &lv, &inner);
-    relate_region(&t, w).filter(|r| size(r) < size(&t)).unwrap_or(t)
+    relate_region(&t, w, sub).filter(|r| size(r) < size(&t)).unwrap_or(t)
 }
 
-pub(super) fn relate_region(t: &T, w: &Ctx) -> Option<T> {
+pub(super) fn relate_region(t: &T, w: &Ctx, sub: &Sub) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
     if lv.len() > w.relate_leaves() {
         let parts = crate::rust_vars::is_on("relate_parts");
-        return relate_abstracted(t, w).or_else(|| if parts { relate_parts(t, &lv, w) } else { None });
+        return relate_abstracted(t, w, sub).or_else(|| if parts { relate_parts(t, &lv, w, sub) } else { None });
     }
-    relate_complemented(t, &lv, w)
+    relate_complemented(t, &lv, w, sub)
 }
 
 /// `relate_in` on the region `t` (`lv` its leaves), and with its leaves `complemented` when
 /// that gives a smaller result.
-fn relate_complemented(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
-    let plain = relate_in(t, w);
-    match complemented(t, lv, w).and_then(|c| relate_in(&c, w)) {
+fn relate_complemented(t: &T, lv: &[T], w: &Ctx, sub: &Sub) -> Option<T> {
+    let plain = relate_in(t, w, sub);
+    match complemented(t, lv, w, sub).and_then(|c| relate_in(&c, w, sub)) {
         Some(r) if plain.as_ref().is_none_or(|p| size(&r) < size(p)) => Some(r),
         _ => plain,
     }
@@ -163,7 +165,7 @@ fn bit_operands(t: &T, w: &Ctx, out: &mut Vec<T>) {
 /// `L` of a bitwise operation, the terms whose leaves are all among the leaves of the terms
 /// that contain `L` and the leaves of the arithmetic leaves there (`L` included) as linear
 /// MBAs. Each part rewritten smaller replaces its terms in the region.
-fn relate_parts(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
+fn relate_parts(t: &T, lv: &[T], w: &Ctx, sub: &Sub) -> Option<T> {
     let (mut terms, mut konst) = region_terms(t, w);
     let leaves_of = |x: &T| {
         let mut l = Vec::new();
@@ -211,7 +213,7 @@ fn relate_parts(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
         if plv.len() > w.relate_leaves() {
             continue;
         }
-        let Some(r) = relate_complemented(&abstracted, &plv, w).map(|r| crate::lowbits::replace(&r, &to, &from)).filter(|r| size(r) < size(&sum)) else { continue };
+        let Some(r) = relate_complemented(&abstracted, &plv, w, sub).map(|r| crate::lowbits::replace(&r, &to, &from)).filter(|r| size(r) < size(&sum)) else { continue };
         let (rt, rk) = region_terms(&r, w);
         terms = terms.into_iter().enumerate().filter(|(i, _)| !part.contains(i)).map(|(_, x)| x).collect();
         for (c, x) in rt {
@@ -253,7 +255,7 @@ fn beside(t: &T, l: &T, w: &Ctx, in_bitwise: bool, out: &mut Vec<T>) {
 /// `relate_region` on the region `t` with its bitwise subterms over leaves used nowhere else
 /// in it replaced by placeholders, as `p ^ q` in `(p ^ q) + ... - b - (~(e + b) & y) - e`,
 /// when that leaves few enough leaves.
-fn relate_abstracted(t: &T, w: &Ctx) -> Option<T> {
+fn relate_abstracted(t: &T, w: &Ctx, sub: &Sub) -> Option<T> {
     fn private(t: &T, root: &T, w: &Ctx, in_bitwise: bool, from: &mut Vec<T>) {
         let T::Op(op, a) = t else { return };
         let k = kind(t, w);
@@ -283,13 +285,13 @@ fn relate_abstracted(t: &T, w: &Ctx) -> Option<T> {
     if lv.len() > w.relate_leaves() {
         return None;
     }
-    Some(crate::lowbits::replace(&relate_complemented(&s, &lv, w)?, &to, &from))
+    Some(crate::lowbits::replace(&relate_complemented(&s, &lv, w, sub)?, &to, &from))
 }
 
 /// The region `t` with each arithmetic leaf `L'` of two or more leaves that is `-1` at 0
 /// written as `~L`, `L = -L' - 1` rebuilt, when that is smaller: `c + ~b` as `~(b - c)`, so
 /// the leaf `L` meets its terms written out in the region (`+ b - c`) as `~` leaves do.
-fn complemented(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
+fn complemented(t: &T, lv: &[T], w: &Ctx, sub: &Sub) -> Option<T> {
     let (mut from, mut to) = (Vec::new(), Vec::new());
     for l in lv.iter().filter(|l| matches!(l, T::Op(..)) && kind(l, w) == Kind::Lin) {
         let mut own = Vec::new();
@@ -297,7 +299,7 @@ fn complemented(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
         if own.len() < 2 || Prog::new(l, &own, w).at(0, w) != w.mask {
             continue;
         }
-        let c = sub(sub_index("relate"), &T::Op(Op::Sub, vec![T::Op(Op::Neg, vec![l.clone()]), T::Num(1)]), w);
+        let c = sub.term(&T::Op(Op::Sub, vec![T::Op(Op::Neg, vec![l.clone()]), T::Num(1)]), w);
         if size(&c) < size(l) {
             from.push(l.clone());
             to.push(T::Op(Op::Not, vec![c]));
@@ -306,7 +308,7 @@ fn complemented(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
     (!from.is_empty()).then(|| crate::lowbits::replace(t, &from, &to))
 }
 
-fn relate_in(t: &T, w: &Ctx) -> Option<T> {
+fn relate_in(t: &T, w: &Ctx, sub: &Sub) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
     let mut operands = Vec::new();
@@ -330,7 +332,7 @@ fn relate_in(t: &T, w: &Ctx) -> Option<T> {
         return None;
     }
     let op = |o: Op, a: Vec<T>| T::Op(o, a);
-    let zero = |e: T| maybe_zero(&e, w) && rewrite(&e, w) == T::Num(0);
+    let zero = |e: T| maybe_zero(&e, w) && sub.term(&e, w) == T::Num(0);
     // `same[k]`: the other leaves equal to `lv[arith[k]]` (false) or to its complement (true).
     let same: Vec<Vec<(usize, bool)>> = arith
         .iter()
@@ -441,7 +443,7 @@ fn relate_in(t: &T, w: &Ctx) -> Option<T> {
     let wide_percent = limit(Limit::RelateWideMaxPercent);
     let base_used = semi_used(t);
     let base_count = base_used.as_ref().map_or(lv.len(), |u| u.len());
-    let base_monos = if semi { None } else { crate::poly_mba::monomials(t, w) };
+    let base_monos = if semi { None } else { crate::poly_mba::monomials(t, w, sub) };
     // Terms count where `μ·L` cancels terms of a wide region, as in `L + (~L & B)` with `L`
     // written out there (no leaf goes, but the rebuild is smaller), and in any region where
     // the leaf terms left join bitwise terms.
@@ -471,7 +473,7 @@ fn relate_in(t: &T, w: &Ctx) -> Option<T> {
         let by_used = semi_used(&s).filter(|u| u.len() < base_count || (u.len() == base_count && swapped(u))).map(|u| u.len());
         let by_monos = match base_monos {
             _ if semi => None,
-            Some(b) => crate::poly_mba::monomials(&s, w).filter(|&u| u <= b),
+            Some(b) => crate::poly_mba::monomials(&s, w, sub).filter(|&u| u <= b),
             None => (!wide).then_some(0),
         };
         let by_terms = base_terms.map(|_| region_terms(&s, w).0.len()).filter(|&n| base_terms.is_some_and(|b| n < b)).or_else(|| Some(merged_terms(&s, w)).filter(|&n| n < base_merged));
@@ -490,8 +492,8 @@ fn relate_in(t: &T, w: &Ctx) -> Option<T> {
     for (_, _, by_terms, combo, s) in tried.into_iter().filter(lowest) {
         let mut slv = Vec::new();
         leaves(&s, w, &mut slv);
-        let dropped = if wide && slv.len() > max_leaves() { drop_leaves(&s, &slv, w) } else { None };
-        let r = dropped.unwrap_or_else(|| sub(sub_index("relate"), &s, w));
+        let dropped = if wide && slv.len() > max_leaves() { drop_leaves(&s, &slv, w, sub) } else { None };
+        let r = dropped.unwrap_or_else(|| sub.term(&s, w));
         let back: Vec<T> = combo.iter().map(|&(k, _)| lv[arith[k]].clone()).collect();
         let used: Vec<T> = combo.iter().map(|&(k, _)| ph[k].clone()).collect();
         let r = crate::lowbits::replace(&r, &used, &back);
@@ -502,7 +504,7 @@ fn relate_in(t: &T, w: &Ctx) -> Option<T> {
         let (fewer, r) = if rlv.len() < lv.len() {
             (true, r)
         } else if wide && opaque(&rlv) < opaque(&lv) {
-            let again = sub(sub_index("relate"), &r, w);
+            let again = sub.term(&r, w);
             (size(&again) < size(t), again)
         } else {
             (false, r)

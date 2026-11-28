@@ -7,7 +7,7 @@
 
 use super::ast::{Fun, Holds, Pipe, Slot};
 use super::builtins::{Builtin, Impl, Operator};
-use super::host::{self, Cand, Ctx, Error, Passes, Won, skipped, term_pass};
+use super::host::{self, Cand, Ctx, Error, Fns, Passes, Won, skipped, term_pass};
 use super::types::Ty;
 use super::vars::NONE;
 use std::cell::{Cell, RefCell};
@@ -164,13 +164,15 @@ impl<'a> Env<'a> {
     /// The function `f` written in the run `lex` applied to `input`: a number where `number`,
     /// else candidates. Every function value and pipeline argument is applied through it.
     fn apply_in(&self, f: &Pipe, lex: Rc<Lex>, input: In, number: bool) -> Result<Value, Error> {
-        let outer = self.lex.replace(lex);
-        let out = match number {
-            true => Ok(Value::Num(self.value(f, input.slice()))),
-            false => go(f, input.vec(), self).map(Value::Group),
-        };
-        self.lex.replace(outer);
-        out
+        deeper(|| super::ast::show(f), || {
+            let outer = self.lex.replace(lex);
+            let out = match number {
+                true => Ok(Value::Num(self.value(f, input.slice()))),
+                false => go(f, input.vec(), self).map(Value::Group),
+            };
+            self.lex.replace(outer);
+            out
+        })
     }
 
     /// The argument of parameter `i` of the call whose body runs, applied to `input` in the
@@ -239,20 +241,27 @@ impl<'a> Env<'a> {
                 self.value(e, &set)
             }
             Pipe::App(Fun::Def(c), args) => {
+                let c = &c.latest(args, &self.passes.defs);
                 let input = args.get(c.def.params.len()).map(|p| self.group_of(p, set));
                 let set = input.as_deref().unwrap_or(set);
-                if c.def.steps {
-                    let run = self.call_env(c, args, set);
-                    return scoped(|| run.value(c.def.value.as_ref().unwrap(), set));
-                }
-                let caller = self.lex.borrow().clone();
-                let frame = Frame { call: c.clone(), args: args.clone(), caller: caller.clone(), values: arg_values(c, args, set, self) };
-                let lex = Lex { input: caller.input.clone(), regs: Default::default(), notes: caller.notes.clone(), frame: Some(frame) };
-                bind_args(c, args, &lex, set, &caller);
-                let outer = self.lex.replace(Rc::new(lex));
-                let v = self.value(c.def.value.as_ref().expect("a function whose body is an expression"), set);
-                self.lex.replace(outer);
-                v
+                let v = deeper(|| c.def.name.clone(), || {
+                    if c.def.steps {
+                        let run = self.call_env(c, args, set);
+                        return Ok(scoped(|| run.value(c.def.value.as_ref().unwrap(), set)));
+                    }
+                    let caller = self.lex.borrow().clone();
+                    let frame = Frame { call: c.clone(), args: args.clone(), caller: caller.clone(), values: arg_values(c, args, set, self) };
+                    let lex = Lex { input: caller.input.clone(), regs: Default::default(), notes: caller.notes.clone(), frame: Some(frame) };
+                    bind_args(c, args, &lex, set, &caller);
+                    let outer = self.lex.replace(Rc::new(lex));
+                    let v = self.value(c.def.value.as_ref().expect("a function whose body is an expression"), set);
+                    self.lex.replace(outer);
+                    Ok(v)
+                });
+                v.unwrap_or_else(|e| {
+                    fail(&e);
+                    0
+                })
             }
             e => unreachable!("{e:?} gives no number"),
         }
@@ -276,16 +285,22 @@ impl<'a> Env<'a> {
 
     /// The run of a call of `c` on `set`, with its own group variables and the call's arguments.
     fn call_env(&self, c: &std::sync::Arc<super::defs::Call>, args: &std::sync::Arc<[Pipe]>, set: &[Cand]) -> Env<'a> {
-        let input = set.first().map_or_else(String::new, |c| c.term().to_string());
-        let mut run = Env::with(self.passes, self.w, self.signed, self.trace, &input);
-        run.cofactor = self.cofactor;
+        let run = self.run_env(set);
         if !args.is_empty() || c.def.input.is_some() {
             let caller = self.lex.borrow().clone();
             let frame = Frame { call: c.clone(), args: args.clone(), caller: caller.clone(), values: arg_values(c, args, set, self) };
-            let lex = Lex::new(&input, Some(frame));
+            let lex = Lex::new(&run.lex.borrow().input, Some(frame));
             bind_args(c, args, &lex, set, &caller);
-            run.lex = RefCell::new(lex);
+            run.lex.replace(lex);
         }
+        run
+    }
+
+    /// The run of a call on `set` without arguments.
+    fn run_env(&self, set: &[Cand]) -> Env<'a> {
+        let input = set.first().map_or_else(String::new, |c| c.term().to_string());
+        let mut run = Env::with(self.passes, self.w, self.signed, self.trace, &input);
+        run.cofactor = self.cofactor;
         if let Some(c) = self.ctxs.borrow().last() {
             run.ctxs.borrow_mut().push(c.narrow(c.w));
         }
@@ -366,6 +381,37 @@ fn assign_time_limit(ms: u64) {
     super::vars::bind(host::DEADLINE, at);
 }
 
+/// The deepest nesting of calls (of `def`s, function values and the functions a pass runs) a
+/// program may reach; past it the run ends with an error. Programs nest calls about as deep as
+/// the terms they rebuild (128 at most over the deep, Tigress and LLVM data).
+pub const MAX_DEPTH: u32 = 2000;
+
+/// The stack a call needs left, else it continues on a new one of `STACK_SEGMENT` bytes: more
+/// than the work between two nested calls takes (an egglog run, a pass), which ran on 1 MB
+/// stacks (a Windows main thread) before.
+const RED_ZONE: usize = 1 << 20;
+const STACK_SEGMENT: usize = 8 << 20;
+
+thread_local! {
+    static DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// `f` one call deeper, the call one of `name`; past `MAX_DEPTH` the error that ends the run.
+pub(crate) fn deeper<R>(name: impl FnOnce() -> String, f: impl FnOnce() -> Result<R, Error>) -> Result<R, Error> {
+    struct Up;
+    impl Drop for Up {
+        fn drop(&mut self) {
+            DEPTH.with(|d| d.set(d.get() - 1));
+        }
+    }
+    if DEPTH.with(|d| d.replace(d.get() + 1)) >= MAX_DEPTH {
+        DEPTH.with(|d| d.set(d.get() - 1));
+        return Err(Error::BackendError(format!("recursion deeper than {MAX_DEPTH} calls in {}", name())));
+    }
+    let _up = Up;
+    stacker::maybe_grow(RED_ZONE, STACK_SEGMENT, f)
+}
+
 /// Whether `p` calls a `@timed` function (a built-in, `def` or macro), which past the time
 /// limit is skipped and gives its input.
 pub(crate) fn timed(p: &Pipe) -> bool {
@@ -378,10 +424,11 @@ pub(crate) fn timed(p: &Pipe) -> bool {
 }
 
 /// Whether `p` is a step that computes candidates: a call of a `@timed` built-in function
-/// that is not `@uncounted` and takes no pipeline, or of a `def` that is not `inline`.
+/// that is not `@uncounted` and is no combinator of pipelines (a pass given functions is not
+/// one), or of a `def` that is not `inline`.
 pub(crate) fn computes(p: &Pipe) -> bool {
     match p {
-        Pipe::App(Fun::Builtin(b), _) => b.timed && !b.uncounted && !b.sig.params.iter().any(|q| q.ty.is_step()),
+        Pipe::App(Fun::Builtin(b), _) => b.timed && !b.uncounted && (b.sig.kind() != super::types::Kind::Group || !b.sig.params.iter().any(|q| q.ty.is_step())),
         Pipe::App(Fun::Def(c), _) => !c.def.inline,
         _ => false,
     }
@@ -392,7 +439,11 @@ pub(crate) fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Steps {
     if let Some(e) = failed() {
         return Err(e);
     }
-    if timed(p) && past(0.0) {
+    let late = match p {
+        Pipe::App(Fun::Def(c), _) if c.def.late() => Some(c.latest_def(&env.passes.defs)),
+        _ => None,
+    };
+    if late.map_or_else(|| timed(p), |d| d.timed) && past(0.0) {
         if !uncounted(p) {
             skipped(env);
         }
@@ -405,7 +456,7 @@ pub(crate) fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Steps {
             let steps = || m.steps.iter().try_fold(set, |s, p| go(p, s, env));
             if m.scoped { scoped(steps) } else { steps() }
         }
-        Pipe::App(Fun::Def(c), args) if c.def.inline => {
+        Pipe::App(Fun::Def(c), args) if c.def.inline => deeper(|| c.def.name.clone(), || {
             let caller = env.lex.borrow().clone();
             let values = arg_values(c, args, &set, env);
             let frame = Frame { call: c.clone(), args: args.clone(), caller: caller.clone(), values };
@@ -417,10 +468,19 @@ pub(crate) fn go(p: &Pipe, set: Vec<Cand>, env: &Env) -> Steps {
             };
             env.lex.replace(outer);
             out
-        }
+        }),
         Pipe::App(Fun::Def(c), args) => {
-            let run = env.call_env(c, args, &set);
-            scoped(|| go(&c.body, set, &run))
+            let d = late.unwrap_or(&c.def);
+            deeper(|| d.name.clone(), || {
+                // Without arguments or input a call has no frame, and its body is the definition's.
+                if args.is_empty() && d.input.is_none() {
+                    let run = env.run_env(&set);
+                    return scoped(|| go(&d.body, set, &run));
+                }
+                let c = c.latest(args, &env.passes.defs);
+                let run = env.call_env(&c, args, &set);
+                scoped(|| go(&c.body, set, &run))
+            })
         }
         Pipe::Var(Slot::Param(i, _)) => env.apply_param(*i, In::Own(set), false).map(Value::group),
         Pipe::Var(Slot::Local(n, Holds::Fn(_))) => env.apply_var(n, In::Own(set), false).map(Value::group),
@@ -474,7 +534,7 @@ fn capture(body: &std::sync::Arc<Pipe>, lex: &Lex) -> Closure {
 
 /// The names `p` may read as variables, and the parameters it reads, by position; inside the
 /// body of an `@inline` call too, which shares the run.
-fn reads(p: &Pipe, names: &mut Vec<String>, params: &mut Vec<usize>) {
+pub(crate) fn reads(p: &Pipe, names: &mut Vec<String>, params: &mut Vec<usize>) {
     let mut all = |ps: &[Pipe]| ps.iter().for_each(|q| reads(q, names, params));
     match p {
         Pipe::Name(n) | Pipe::Var(Slot::Local(n, _)) => names.push(n.clone()),
@@ -508,15 +568,24 @@ fn apply(b: &Builtin, args: &[Pipe], input: In, env: &Env) -> Result<Value, Erro
     };
     Ok(Value::Group(match b.imp {
         Impl::Group(f) => f(args, set, env)?,
-        Impl::Each(f) => dedup(term_pass(b.name, f, None, &set, env)),
-        Impl::Alt(f, bit) => dedup(term_pass(b.name, f, Some(bit), &set, env)),
-        Impl::Polish(f) => dedup(term_pass(b.name, |t, w| Some(f(t, w)), None, &set, env)),
+        Impl::Each(f) => {
+            let fns = Fns::of(b, args, env);
+            dedup(term_pass(fns.name, |t, w| f(t, w, &fns), None, &set, env))
+        }
+        Impl::Alt(f, bit) => {
+            let fns = Fns::of(b, args, env);
+            dedup(term_pass(fns.name, |t, w| f(t, w, &fns), Some(bit), &set, env))
+        }
+        Impl::Polish(f) => {
+            let fns = Fns::of(b, args, env);
+            dedup(term_pass(fns.name, |t, w| Some(f(t, w, &fns)), None, &set, env))
+        }
         Impl::Main(f) => match set.first() {
-            Some(main) => kept(f(main, env)?, &set),
+            Some(main) => kept(f(args, main, env)?, &set),
             None => set,
         },
         Impl::EachCand(_) if set.is_empty() => set,
-        Impl::EachCand(f) => kept(set.iter().map(|c| f(c, env).unwrap_or_else(|| c.clone())).collect(), &set),
+        Impl::EachCand(f) => kept(set.iter().map(|c| f(args, c, env).unwrap_or_else(|| c.clone())).collect(), &set),
         _ => unreachable!("{} is not a step", b.name),
     }))
 }
@@ -566,6 +635,11 @@ mod tests {
     use crate::lang::builtins::PRINTED;
     use crate::rust_vars::{Limit, limit};
 
+    /// `s` parsed with the names `default.pipe` defines.
+    fn parse_default(s: &str) -> Pipe {
+        crate::lang::parser::parse_with(s, &crate::passes::DEFAULT.1, &mut Vec::new()).unwrap()
+    }
+
     #[test]
     fn assert_and_print() {
         let run_on = |spec: &str, input: &str, w: u32, signed: Option<bool>| {
@@ -582,7 +656,7 @@ mod tests {
         assert_eq!(run("prepass=time_limit = 0 | (assert 0 \"past the limit too\")").0, Err("past the limit too".into()));
         let (r, lines) = run_on("prepass=(save t) | (print \"size\" size none max_leaves (size * 2) t rewrite some_name) | (print t)", x3, 8, Some(false));
         assert_eq!(r, Ok(vec![x3.to_string()]), "print passes the candidates on");
-        assert_eq!(lines, ["size 3 none 6 6 (x + 0xfd) (rewrite t:term) term some_name", "(x + 0xfd)"]);
+        assert_eq!(lines, ["size 3 none 6 6 (x + 0xfd) (rewrite g:group) group some_name", "(x + 0xfd)"]);
         assert_eq!(run_on("num_type=i8 prepass=(save t) | (print t)", x3, 8, Some(true)).1, ["(x - 3)"], "constants as the type num_type prints them");
         let two = "(Add (And (Var \"x\") (Var \"y\")) (Or (Var \"x\") (Var \"y\")))";
         assert_eq!(run_on("prepass=(union id rewrite) | (save u) | (print u)", two, 64, None).1, ["((x & y) + (x | y)), (x + y)"]);
@@ -594,14 +668,14 @@ mod tests {
         }
         assert_eq!(Passes::parse_noting("prepass=(save t) | (print t) | (assert (size (main t)) \"m\")").unwrap().1, Vec::<String>::new(), "print and assert read their group variables");
         let p = Passes::parse("prepass=(print \"a \\\"b\\\" c\" 1) | (assert 1 \"x;y z\")").unwrap();
-        assert_eq!(crate::lang::ast::show(&p.prepass), "(print \"a \\\"b\\\" c\" 1) | (assert 1 \"x;y z\")");
+        assert_eq!(crate::lang::ast::show(&p.prepass()), "(print \"a \\\"b\\\" c\" 1) | (assert 1 \"x;y z\")");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p, "strings are written back as read");
         let (_, lines) = run("(let l rewrite | lowbits) (def @inline (k p) p | rewrite) prepass=(print fix l k rewrite)");
-        assert_eq!(lines, ["(fix n:num p:pipe g:group) group (l g:group) group (k p:pipe g:group) group (rewrite t:term) term"], "a function value prints as its signature");
+        assert_eq!(lines, ["(fix n:num p:pipe g:group) group (l g:group) group (k p:pipe g:group) group (rewrite g:group) group"], "a function value prints as its signature");
         let p = Passes::parse("prepass=f:term->num = size | (print f rewrite)").unwrap();
-        let Pipe::Seq(steps) = &p.prepass else { panic!() };
+        let Pipe::Seq(steps) = &p.prepass() else { panic!() };
         let Pipe::App(_, args) = &steps[1] else { panic!() };
-        assert!(matches!(&args[0], Pipe::Var(Slot::Local(n, Holds::Fn(_))) if n == "f") && matches!(&args[1], Pipe::App(Fun::Builtin(b), a) if b.name == "rewrite" && a.is_empty()));
+        assert!(matches!(&args[0], Pipe::Var(Slot::Local(n, Holds::Fn(_))) if n == "f") && matches!(&args[1], Pipe::App(Fun::Def(c), a) if c.def.name == "rewrite" && a.is_empty()));
     }
 
     #[test]
@@ -667,7 +741,7 @@ mod tests {
     fn off_ends_with_its_sequence() {
         let passes = Passes::default();
         let env = Env::prepass(&passes, 32, None, false, "(Var \"x\")");
-        let step = |p: &str| go(&crate::lang::parser::parse(p).unwrap(), vec![Cand::new("(Var \"x\")", "input")], &env).unwrap();
+        let step = |p: &str| go(&parse_default(p), vec![Cand::new("(Var \"x\")", "input")], &env).unwrap();
         crate::rust_vars::in_default_run(|| {
             step("((off relate) | id)");
             assert!(!crate::rust_vars::is_off("relate"), "a group ends its off");
@@ -685,7 +759,7 @@ mod tests {
     fn on_and_off_switches() {
         let passes = Passes::default();
         let env = Env::prepass(&passes, 32, None, false, "(Var \"x\")");
-        let step = |p: &str| go(&crate::lang::parser::parse(p).unwrap(), vec![Cand::new("(Var \"x\")", "input")], &env).unwrap();
+        let step = |p: &str| go(&parse_default(p), vec![Cand::new("(Var \"x\")", "input")], &env).unwrap();
         use crate::rust_vars::{is_off, is_on};
         crate::rust_vars::in_default_run(|| {
             step("(off relate tfunc)");
@@ -712,7 +786,7 @@ mod tests {
         use crate::rust_vars::{BIT_SPLIT_BUDGET, REWRITES, is_off, is_on};
         let passes = Passes::default();
         let env = Env::prepass(&passes, 32, None, false, "(Sub (Var \"x\") (Var \"y\"))");
-        let step = |p: &str| go(&crate::lang::parser::parse(p).unwrap(), vec![Cand::new("(Sub (Var \"x\") (Var \"y\"))", "input")], &env).unwrap();
+        let step = |p: &str| go(&parse_default(p), vec![Cand::new("(Sub (Var \"x\") (Var \"y\"))", "input")], &env).unwrap();
         crate::rust_vars::in_default_run(|| {
             step("split_runs = vars * 3");
             assert_eq!(limit(Limit::SplitRuns), 6, "the right side is evaluated on the candidates");
@@ -742,7 +816,7 @@ mod tests {
             let p = Passes::parse(&format!("prepass={spec}")).unwrap();
             let env = Env::prepass(&p, 32, None, false, x);
             PRINTED.with(|l| l.borrow_mut().clear());
-            let out = crate::lang::run::within(&p, || go(&p.prepass, vec![Cand::new(x, "input")], &env).unwrap());
+            let out = crate::lang::run::within(&p, || go(&p.prepass(), vec![Cand::new(x, "input")], &env).unwrap());
             (out.iter().map(|c| c.origin.clone()).collect::<Vec<_>>(), PRINTED.with(|l| l.take()))
         };
         assert_eq!(run("(cand pre_unified unified (print bit_split_budget) | rewrite)"), (vec!["unified".to_string()], vec!["8".to_string()]), "origin n, bit_split_budget = cand_bit_splits inside");
@@ -764,16 +838,16 @@ mod tests {
             let p = Passes::parse(spec).unwrap();
             let env = Env::prepass(&p, 32, None, false, x);
             PRINTED.with(|l| l.borrow_mut().clear());
-            crate::lang::run::within(&p, || go(&p.prepass, vec![Cand::new(x, "input")], &env).unwrap());
+            crate::lang::run::within(&p, || go(&p.prepass(), vec![Cand::new(x, "input")], &env).unwrap());
             PRINTED.with(|l| l.take())
         };
         let defs = "(def (f) (print 1)) (def @timed (g) (print 2)) (def @inline @timed (h) (print 3)) (def @inline @timed (k n) (print n))";
         assert_eq!(run(&format!("{defs} prepass=f | g | h | (k 4)")), ["1", "2", "3", "4"]);
         assert_eq!(run(&format!("{defs} prepass=time_limit = 0 | f | g | h | (k 4)")), ["1"]);
-        for (bad, msg) in [("(def @timed (n) size + 1)", "@timed is for a function that gives candidates"), ("(def @timed (prepass) id)", "takes no @timed")] {
-            let e = Passes::parse(bad).unwrap_err();
-            assert!(e.contains(msg), "{bad}: {e}");
-        }
+        let e = Passes::parse("(def @timed (n) size + 1)").unwrap_err();
+        assert!(e.contains("@timed is for a function that gives candidates"), "{e}");
+        let p = Passes::parse("(def @timed (prepass_steps) id)").unwrap();
+        assert!(p.defs.iter().any(|d| d.name == "prepass_steps" && d.timed), "a function of default.pipe defined again may be @timed");
     }
 
     #[test]
@@ -784,7 +858,7 @@ mod tests {
         let x = "(Sub (Var \"x\") (Var \"y\"))";
         let env = Env::prepass(&passes, 32, None, false, x);
         let input = || Cand::new(x, "input");
-        let step = |p: &str| go(&crate::lang::parser::parse(p).unwrap(), vec![input()], &env).unwrap();
+        let step = |p: &str| go(&parse_default(p), vec![input()], &env).unwrap();
         let extra = var_index("extra").unwrap();
         crate::lang::run::within(&passes, || {
             assert_eq!((get(KEEP), get(extra), get(RESTARTS)), (2, 2, NONE), "a run without -m leaves restarts none");
@@ -829,7 +903,7 @@ mod tests {
     fn a_limit_cuts_the_run_only_with_cut_on() {
         let passes = Passes::default();
         let env = Env::prepass(&passes, 32, None, false, "(Var \"x\")");
-        let step = |p: &str| go(&crate::lang::parser::parse(p).unwrap(), vec![Cand::new("(Var \"x\")", "input")], &env).unwrap();
+        let step = |p: &str| go(&parse_default(p), vec![Cand::new("(Var \"x\")", "input")], &env).unwrap();
         for on in [false, true] {
             start();
             crate::rust_vars::in_default_run(|| {
@@ -869,7 +943,7 @@ mod tests {
     fn retry_keeps_a_when_b_gives_none() {
         let passes = Passes::default();
         let env = Env::prepass(&passes, 32, None, false, SUB);
-        let step = |p: &str| terms(&go(&crate::lang::parser::parse(p).unwrap(), vec![Cand::new(SUB, "input")], &env).unwrap());
+        let step = |p: &str| terms(&go(&parse_default(p), vec![Cand::new(SUB, "input")], &env).unwrap());
         crate::rust_vars::in_default_run(|| {
             assert_eq!(step("(retry 1 rewrite none)"), [XOR]);
             assert_eq!(step("(retry 1 id rewrite)"), [XOR], "b no larger is taken");
@@ -882,10 +956,10 @@ mod tests {
     fn polish_is_a_run_of_its_own() {
         let passes = Passes::parse("polish=rewrite | (save p) | none").unwrap();
         let env = Env::prepass(&passes, 32, None, false, SUB);
-        let step = |p: &str| terms(&go(&crate::lang::parser::parse(p).unwrap(), vec![Cand::new(SUB, "input")], &env).unwrap());
+        let step = |p: &str| terms(&go(&parse_default(p), vec![Cand::new(SUB, "input")], &env).unwrap());
         crate::rust_vars::in_default_run(|| {
-            assert_eq!(step("(save p) | polish | (load p)"), [SUB], "polish has its own registers");
-            assert_eq!(step("(smallest polish)"), [SUB], "an outer smallest sees no candidate made inside polish");
+            assert_eq!(step("(save p) | (polish polish_steps) | (load p)"), [SUB], "polish has its own registers");
+            assert_eq!(step("(smallest (polish polish_steps))"), [SUB], "an outer smallest sees no candidate made inside polish");
             assert_eq!(step("(smallest rewrite | none | (load p))"), [XOR, SUB], "it sees those of the passes of its own run");
         });
     }
@@ -920,7 +994,7 @@ mod tests {
     fn prepass_of(spec: &str) -> Vec<Cand> {
         let passes = Passes::parse(spec).unwrap_or_else(|e| panic!("{spec}: {e}"));
         let env = Env::prepass(&passes, 32, None, false, SUB);
-        crate::rust_vars::in_default_run(|| go(&passes.prepass, vec![Cand::new(SUB, "input")], &env).unwrap())
+        crate::rust_vars::in_default_run(|| go(&passes.prepass(), vec![Cand::new(SUB, "input")], &env).unwrap())
     }
 
     #[test]
@@ -967,7 +1041,7 @@ mod tests {
         assert_eq!(step("(def @inline (i m p) p | (filter (m == 1))) (def (f n) (i 1 (filter (n == 7)))) prepass=(f size)"), [SUB], "an argument of an @inline call reads the frame it is written in");
         let passes = Passes::parse("(def (f n) max_leaves = n | check_limits | rewrite) prepass=(f 8)").unwrap();
         let env = Env::prepass(&passes, 32, None, false, SUB);
-        let e = crate::rust_vars::in_default_run(|| run(&passes.prepass, vec![Cand::new(SUB, "input")], &env)).unwrap_err();
+        let e = crate::rust_vars::in_default_run(|| run(&passes.prepass(), vec![Cand::new(SUB, "input")], &env)).unwrap_err();
         assert!(e.to_string().contains("max_leaves is at most 6"), "{e}");
     }
 
@@ -977,14 +1051,14 @@ mod tests {
         let both = "(union id rewrite)";
         assert_eq!(step("prepass=n = (size - 5) | (fix n rewrite)"), [XOR], "a number local read by fix");
         assert_eq!(step("prepass=n = (size * 2) | (if (n > 20) rewrite)"), [SUB], "and by a condition, evaluated once where it is bound");
-        assert_eq!(step("prepass=n = size | rewrite | (if (n > size) relate none)"), [XOR], "n keeps the size of the input");
+        assert_eq!(step("prepass=n = size | rewrite | (if (n > size) (relate rewrite) none)"), [XOR], "n keeps the size of the input");
         assert_eq!(step(&format!("prepass=n = 5 | small:term->num = (size <= n) | n = 0 | {both} | (filter small)")), [XOR], "a closure captures the value the local has when it is bound");
         assert_eq!(step(&format!("prepass=(save t) | small:term->num = (same (main t)) | t = rewrite | {both} | (filter small)")), [SUB], "and a group variable's");
         assert_eq!(step(&format!("(def (under2 k:num) n = (k + 1) | size <= n) prepass={both} | (filter (under2 4))")), [XOR], "a def returning a function that reads its own local");
         let keep_if = "(def @pipe (keep_if pred g) g | (filter pred))";
         assert_eq!(step(&format!("{keep_if} (def (mk k:num) n = (k + 1) | f:term->num = (size <= n) | {both} | (keep_if f)) prepass=(mk 4)")), [XOR], "a closure passed on reads the local of the def it is written in");
         let p = Passes::parse("prepass=n = (size * 2) | f:term->num = (size <= n) | (fix n (filter f))").unwrap();
-        assert_eq!(p.prepass.to_string(), "n = size * 2 | f:term->num = size <= n | (fix n (filter f))");
+        assert_eq!(p.prepass().to_string(), "n = size * 2 | f:term->num = size <= n | (fix n (filter f))");
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p);
         let w = Passes::parse_noting("prepass=n = 3 | f:term->num = size | rewrite").unwrap().1;
         assert!(w.iter().any(|w| w.contains("number variable n is bound and never read")) && w.iter().any(|w| w.contains("function variable f is bound and never read")), "{w:?}");
@@ -1010,8 +1084,8 @@ mod tests {
         assert_eq!(step(&format!("{keep_if} (def (f n) small:term->num = (size <= n) | {both} | (keep_if small)) prepass=(f 5)")), [XOR], "a closure reads the frame of the def it is written in");
         assert_eq!(step(&format!("{keep_if} (def (f n) small:term->num = (size <= n) | {both} | (keep_if small)) prepass=(f 9)")), [SUB, XOR]);
         let each = "(def @pipe (each f:term->term g) g | f)";
-        assert_eq!(step(&format!("{each} prepass=(each rewrite)")), [XOR], "a built-in without its input is a function value");
-        assert_eq!(step("prepass=f:term->term = rewrite | f"), [XOR], "and can be stored");
+        assert_eq!(step(&format!("{each} prepass=(each (rewrite_top rewrite))")), [XOR], "a built-in without its input is a function value");
+        assert_eq!(step("prepass=f:term->term = (rewrite_top rewrite) | f"), [XOR], "and can be stored");
         assert_eq!(step("(def (with_budget n p) rewrites = n | p) (def @pipe (app p g) g | p) prepass=(app (with_budget 0 rewrite)) | (app (with_budget 8 rewrite))"), [XOR], "a def without its last argument");
         let big = "(def @pipe (big k g) (size (main g)) > k)";
         assert_eq!(step(&format!("{big} {keep_if} prepass={both} | (keep_if (big 5))")), [SUB], "group->num where term->num is wanted: on each candidate alone");
@@ -1021,14 +1095,14 @@ mod tests {
         let pick = "(def (pick pred) (save t) | (if ((pred t) > 5) rewrite))";
         assert_eq!(step(&format!("{pick} prepass=(pick size)")), [XOR], "a parameter called on a group is a function");
         assert_eq!(step(&format!("{pick} prepass=(pick vars)")), [SUB]);
-        let spec = format!("{pick} {under} {each} {keep_if} prepass=f:term->num = (size <= 5) | g:term->term = rewrite | (each g) | (keep_if f) | (filter (under 5)) | (pick size)");
+        let spec = format!("{pick} {under} {each} {keep_if} prepass=f:term->num = (size <= 5) | g:term->term = (rewrite_top rewrite) | (each g) | (keep_if f) | (filter (under 5)) | (pick size)");
         let p = Passes::parse(&spec).unwrap();
         let sigs: Vec<String> = p.defs[p.default_defs..].iter().map(|d| crate::lang::defs::sig_of(d).decl()).collect();
         assert_eq!(sigs, ["(extern @pipe (pick pred:group->num g:group) group)", "(extern @pipe (under k:num t:term) num)", "(extern @pipe (each f:term->term g:group) group)", "(extern @pipe (keep_if pred:term->num g:group) group)"]);
         assert_eq!(Passes::parse(&p.to_string()).unwrap(), p, "{p}");
         for (bad, msg) in [
             (format!("{each} prepass=(each (best 1 rewrite))"), "each takes f:term->term: (each f:term->term g:group) group; (best 1 rewrite) is pipe"),
-            (format!("{keep_if} prepass=f:term->term = rewrite | (keep_if f)"), "keep_if takes pred:term->num: (keep_if pred:term->num g:group) group; f is term->term"),
+            (format!("{keep_if} prepass=f:term->term = (rewrite_top rewrite) | (keep_if f)"), "keep_if takes pred:term->num: (keep_if pred:term->num g:group) group; f is term->term"),
             (format!("prepass=f:term->num = size | {both} | f"), "| f gives a number, not candidates"),
             (format!("prepass=f:term->num = size | (best 1 f)"), "f gives a number, not candidates: it holds term->num"),
             ("prepass=f:term->term = (best 1 rewrite)".into(), "f holds term->term; (best 1 rewrite) is pipe"),
@@ -1153,7 +1227,7 @@ mod tests {
     fn wins_zero_runs_nothing() {
         let passes = Passes::default();
         let env = Env::prepass(&passes, 32, None, false, SUB);
-        let step = |p: &str| terms(&go(&crate::lang::parser::parse(p).unwrap(), vec![Cand::new(SUB, "input")], &env).unwrap());
+        let step = |p: &str| terms(&go(&parse_default(p), vec![Cand::new(SUB, "input")], &env).unwrap());
         crate::rust_vars::in_default_run(|| {
             assert_eq!(step("(wins 0 (smaller s rewrite))"), [SUB]);
             assert_eq!(step("(wins 0 none)"), [SUB]);
@@ -1194,7 +1268,7 @@ mod tests {
             assert_eq!(v("2 && 5", &x), 1);
             assert_eq!(v("0 || 7", &x), 1);
             assert_eq!(v("vars * (mixed || 1)", &x), 2);
-            let step = |p: &str, set: &[Cand]| go(&crate::lang::parser::parse(p).unwrap(), set.to_vec(), &env).unwrap().len();
+            let step = |p: &str, set: &[Cand]| go(&parse_default(p), set.to_vec(), &env).unwrap().len();
             assert_eq!(step("(if mul none)", &mul), 0, "a number holds where it is not 0");
             assert_eq!(step("(if mul none)", &x), 1);
             assert_eq!(step("(fix (mul < 1) rewrite) | (filter (size == 5))", &x), 0, "a comparison counts as 1");
@@ -1240,7 +1314,7 @@ mod tests {
         let x = "(Sub (Or (Var \"x\") (Var \"y\")) (And (Var \"x\") (Var \"y\")))";
         let env = Env::prepass(&passes, 32, None, false, x);
         let step = |p: &str, set: Vec<Cand>| -> Vec<String> {
-            go(&crate::lang::parser::parse(p).unwrap(), set, &env).unwrap().iter().map(|c| c.term().to_string()).collect()
+            go(&parse_default(p), set, &env).unwrap().iter().map(|c| c.term().to_string()).collect()
         };
         let input = || vec![Cand::new(x, "input")];
         crate::rust_vars::in_default_run(|| {

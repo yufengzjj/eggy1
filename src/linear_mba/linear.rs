@@ -2,20 +2,16 @@
 
 use super::*;
 
-/// `simba` memoized per thread, for the linear cofactors `poly_mba` rebuilds: the same
+/// The linear cofactor `t` of `poly_mba` rebuilt by `region`, memoized in the run: the same
 /// ones come back across its factoring choices and across regions.
-pub(crate) fn simba_memo(t: &T, w: &Ctx) -> Option<T> {
-    let key = (w.w, t.clone());
-    let f = || crate::builtin_passes::run_alt(&crate::passes::current().simba, t, w, true);
+pub(crate) fn simba_memo(t: &T, w: &Ctx, region: &Sub) -> Option<T> {
+    let f = || region.cofactor(t, w);
+    let Some(id) = region.id else { return f() };
+    let key = (w.w, id, t.clone());
     if let Some(r) = memo_get(&w.st.simba_memo, &key, w, "simba", f) {
         return r;
     }
     memo_compute(&w.st.simba_memo, key, w, f)
-}
-
-/// Smallest rebuilt form of the linear region `t` (`Passes::simba`).
-pub(super) fn simba(t: &T, w: &Ctx) -> Option<T> {
-    crate::builtin_passes::run_alt(&crate::passes::current().simba, t, w, false)
 }
 
 /// The leaves of the linear region `t` and, when asked for, its values on {0,1}^n, kept
@@ -63,11 +59,11 @@ fn region_values(t: &T, w: &Ctx) -> (std::rc::Rc<Vec<T>>, std::rc::Rc<Vec<u64>>)
 }
 
 /// The methods of `simba` on the region `t`, as passes (`TERM_PASSES`).
-pub(super) fn drop_unused_pass(t: &T, w: &Ctx) -> Option<T> {
-    drop_unused(t, &region_leaves(t, w), w)
+pub(super) fn drop_unused_pass(t: &T, w: &Ctx, sub: &Sub) -> Option<T> {
+    drop_unused(t, &region_leaves(t, w), w, sub)
 }
-pub(super) fn semi_linear_pass(t: &T, w: &Ctx) -> Option<T> {
-    semi_linear(t, &region_leaves(t, w), w)
+pub(super) fn semi_linear_pass(t: &T, w: &Ctx, sub: &Sub) -> Option<T> {
+    semi_linear(t, &region_leaves(t, w), w, sub)
 }
 pub(super) fn rebuild_values_pass(t: &T, w: &Ctx) -> Option<T> {
     let (lv, vals) = region_values(t, w);

@@ -79,11 +79,11 @@ pub enum Fun {
 
 impl Fun {
     /// The type of the parameter argument `i` of `args` is for; `None` for the input written
-    /// after the arguments of a function that gives a number.
+    /// after the arguments of a function that gives a number, or as the only one (`parse`).
     pub fn param_ty(&self, args: &[Pipe], i: usize) -> Option<&super::types::Ty> {
         match self {
             Fun::Builtin(b) if b.input_at(args) == Some(i) => None,
-            Fun::Builtin(b) | Fun::Op(_, b) => Some(&b.sig.param(i).ty),
+            Fun::Builtin(b) | Fun::Op(_, b) => b.sig.params.get(i).or(b.sig.params.last()).map(|p| &p.ty),
             Fun::Def(c) => c.def.params.get(i).map(|p| &p.ty),
         }
     }

@@ -3,17 +3,18 @@
 use super::*;
 
 /// A region with more than `max_leaves` leaves, rewritten with the leaves its values on
-/// {0,1}^n do not depend on set to 0, as in opaque predicates over many variables.
-pub(super) fn drop_unused(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
+/// {0,1}^n do not depend on set to 0, as in opaque predicates over many variables, then
+/// rebuilt by `sub`.
+pub(super) fn drop_unused(t: &T, lv: &[T], w: &Ctx, sub: &Sub) -> Option<T> {
     if has_const_bitwise(t, w) {
         return None;
     }
-    drop_leaves(t, lv, w)
+    drop_leaves(t, lv, w, sub)
 }
 
 /// `drop_unused` for any region; with constant masks only where `relate` has cancelled leaves,
 /// since elsewhere the rebuilds of the operands do better.
-pub(super) fn drop_leaves(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
+pub(super) fn drop_leaves(t: &T, lv: &[T], w: &Ctx, sub: &Sub) -> Option<T> {
     let n = lv.len();
     let (e0, used) = used_leaves(t, lv, w)?;
     let unused: Vec<T> = (0..n).filter(|&i| !used[i]).map(|i| lv[i].clone()).collect();
@@ -36,7 +37,7 @@ pub(super) fn drop_leaves(t: &T, lv: &[T], w: &Ctx) -> Option<T> {
     if z == *t {
         return None;
     }
-    Some(sub(sub_index("drop_unused"), &z, w)).filter(|r| size(r) < size(t))
+    Some(sub.term(&z, w)).filter(|r| size(r) < size(t))
 }
 
 /// `e(0)` and the leaves the region's value depends on, from its values on {0,1}^n,
@@ -105,8 +106,9 @@ fn bit_tables(t: &T, lv: &[T], w: &Ctx) -> Option<(u64, Vec<usize>, Vec<Vec<u64>
 /// A region with more than `max_leaves` leaves whose value is a bitwise function of its
 /// leaves, with one leaf `v` that is not arithmetic peeled off: `v | r`, `~v & r` or `v ^ r`
 /// with `r` the region at `v = 0`, or `v & r`, `~v | r` with `r` at `v = -1`; `r` is
-/// rebuilt by `simba`, which peels again until few enough leaves are left.
-pub(super) fn peel(t: &T, w: &Ctx) -> Option<T> {
+/// rebuilt by `region` (the rebuild of `simba`), which peels again until few enough leaves
+/// are left.
+pub(super) fn peel(t: &T, w: &Ctx, region: &Sub) -> Option<T> {
     let mut lv = Vec::new();
     leaves(t, w, &mut lv);
     let n = lv.len();
@@ -177,7 +179,7 @@ pub(super) fn peel(t: &T, w: &Ctx) -> Option<T> {
         }
         let rest = put(t, &lv, &lv[i], how.2);
         w.st.peel_depth.fetch_add(1, Relaxed);
-        let rest = simba(&rest, w).unwrap_or(rest);
+        let rest = region.alt(&rest, w).unwrap_or(rest);
         w.st.peel_depth.fetch_sub(1, Relaxed);
         let v = if how.1 { not(lv[i].clone()) } else { lv[i].clone() };
         return Some(T::Op(how.0, vec![v, rest])).filter(|r| size(r) < size(t));
@@ -856,10 +858,10 @@ fn fill_placeholders(t: &T, ph: &[T], lv: &[T]) -> T {
 
 /// A region with more than `max_leaves` leaves rebuilt in parts: its terms grouped by the
 /// leaves they use, a group whose leaves are a subset of another's joining the smallest
-/// such, and each group of at most `max_leaves` leaves rewritten on its own, which is
+/// such, and each group of at most `max_leaves` leaves rebuilt by `sub` on its own, which is
 /// exact since the parts add up to the region. Splits such as `7·(a & 0xffff) +
 /// 7·(a & -0x10000)` and constants spread over the region then come together.
-pub(super) fn clustered(t: &T, w: &Ctx) -> Option<T> {
+pub(super) fn clustered(t: &T, w: &Ctx, sub: &Sub) -> Option<T> {
     // Rewriting a group can reach regions whose groups lead back to new forms of the
     // enclosing ones.
     if used_off() & CLUSTERED != 0 {
@@ -874,12 +876,12 @@ pub(super) fn clustered(t: &T, w: &Ctx) -> Option<T> {
         return None;
     }
     w.st.clustering.lock().unwrap().push((h, t.clone()));
-    let r = clustered_in(t, w);
+    let r = clustered_in(t, w, sub);
     w.st.clustering.lock().unwrap().pop();
     r
 }
 
-fn clustered_in(t: &T, w: &Ctx) -> Option<T> {
+fn clustered_in(t: &T, w: &Ctx, sub: &Sub) -> Option<T> {
     // Regions with product terms are left to `poly_mba`, which expands them across terms.
     let (terms, konst) = region_terms(t, w);
     if terms.iter().any(|(_, l)| matches!(l, T::Op(Op::Mul, a) if !matches!(a[0], T::Num(_)) && !matches!(a[1], T::Num(_)))) {
@@ -896,11 +898,11 @@ fn clustered_in(t: &T, w: &Ctx) -> Option<T> {
     let most = max_leaves();
     for (key, g) in &groups {
         let sum = build_sum(g, 0, w);
-        let r = if key.len() <= most && g.len() > 1 { sub(sub_index("cluster"), &sum, w) } else { sum.clone() };
+        let r = if key.len() <= most && g.len() > 1 { sub.term(&sum, w) } else { sum.clone() };
         if size(&r) < size(&sum) {
             parts.push((1, r));
         } else {
-            parts.extend(g.iter().map(|(c, x)| (*c, sub(sub_index("cluster"), x, w))));
+            parts.extend(g.iter().map(|(c, x)| (*c, sub.term(x, w))));
         }
     }
     let (mut whole, mut k0) = (Vec::new(), konst);

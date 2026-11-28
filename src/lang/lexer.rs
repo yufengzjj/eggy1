@@ -2,7 +2,6 @@
 //! literals, comments and parentheses.
 
 use super::builtins::get;
-use super::host::defined_builtin;
 use super::parser::known_name;
 use super::types::Ty;
 use super::vars::NONE;
@@ -44,8 +43,14 @@ pub fn slash_name(w: &str) -> Option<String> {
         return Some(format!("write {w} as ({h} {r})"));
     }
     let joined = w.replace('/', "_");
-    let known = known_name(&joined) || defined_builtin(&joined) || joined.starts_with("sub_");
+    let known = known_name(&joined);
     known.then(|| format!("names cannot contain '/': write {joined}"))
+}
+
+/// Whether `lex` may read `s` by the names known when it runs: where a name is followed by
+/// `/` and a name (`slash_name`).
+pub(crate) fn may_join_names(s: &str) -> bool {
+    s.as_bytes().windows(3).any(|w| name_char(w[0] as char) && w[1] == b'/' && name_start(w[2] as char))
 }
 
 pub(crate) fn lex(s: &str) -> Result<Vec<Tok>, String> {

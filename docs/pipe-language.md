@@ -34,7 +34,7 @@ trace = 1               # 只在 --trace 时
 (parse "EXPR") | simplify | time_limit = none | (if was_cut (print "time limit reached: ...")) | show
 ```
 
-`eggy1` 打印程序给出的文本。bench 的子进程、测试写同样的程序（没有截断提示那两步）；`fuzz --prepass` 写 `(parse "EXPR") | prepass`。
+`eggy1` 打印程序给出的文本。bench 的子进程、测试写同样的程序（没有截断提示那两步）；`fuzz --prepass` 写 `(parse "EXPR") | (prepass prepass_steps)`。
 
 `--show-passes` 先打印一行注释 `# The program: <上面的程序，EXPR 照写>`，再打印 `--passes` 写法的全部设置（从 `--passes` 的项开始），所以它的输出可以原样传给 `--passes`。`--show-builtins` 按调用方式列出全部内置函数的签名和说明（第 4.3 节），最后列出 `def` 的签名：`default.pipe` 的（`cand`、`simplify`）一组，`--passes` 里有 `def` 时再一组。
 
@@ -44,20 +44,19 @@ trace = 1               # 只在 --trace 时
 - `(show t)`：候选的中缀，常数照 `num_type` 的打印方式（和 eggy1 的输出一样）；没有候选时是空文本。给出文本的步骤只能是顶层语句的最后一步（`... | show`、`(show (main t))`），或者 `parse` 的输入。
 - **`num_type`** 是全局变量，值是类型名 `i64 u64 i32 u32 i16 u16 i8 u8` 之一（`num_type = u32`，右边只收类型名和 `none`），`none` 读作 `i64`。`parse`、`show`、`print`、`egglog`、`reprint`、最小性证明和各 pass 都按它（顶层每一步按当时的值定位宽）；egglog 程序按类型在第一次用到时生成。
 
-### 1.1 Rust 代码调用的函数
+### 1.1 交给 pass 的函数
 
-下面几个函数由 Rust 代码调用（`pipeline` 由步骤 `pipeline` 调用），函数体是管线，写在 `default.pipe` 里。`(def (NAME) P)` 可以替换它们的函数体（第 6 节），`prepass=P` 这样的项是它的简写。它们各有固定的调用方式：
+Rust 代码不按名字调用语言里的管线：一个内置函数要运行的管线是它的**函数参数**（类型 `pipe`），调用处写出传哪个，例如 `(relate rewrite)`、`(prepass prepass_steps)`、`(simba simba_steps)`。参数名以 `sub` 开头的（`sub`、`sub_region`）是 pass 用来重建输入的**部分**（子项，或由子项重建出的形式）的函数；其余（`p`）作用在整个输入上。`default.pipe` 定义了这几个不带参数的函数，`--passes` 的 `NAME=P` 项是重新定义它们的简写（第 12 节）：
 
-| 函数 | 调用方式 | 谁调用 | 说明 |
+| 函数 | 简写 | 谁用 | 说明 |
 |---|---|---|---|
-| `pipeline` | 整组 | 步骤 `pipeline`（`simplify` 调用） | 整个化简：预处理、egglog 各轮、polish、从打印结果再跑一遍 |
-| `prepass` | 对主候选调用，结果替换整组 | 步骤 `prepass`；函数 `opaque`、`rebuilds`；Rust 的 `simplify_linear_with` | 预处理：造出几个重建候选，按大小排好 |
-| `polish` | 对每个候选单独调用，变小才替换 | 步骤 `polish`；Rust 的 `pipe::polish` | 局部改写，只在变小时保留 |
-| `rewrite` | 单项（第 9.2 节） | 步骤 `rewrite`；单项函数内部、`regions`、`again` | 带缓存的重建 |
-| `simba` | alternative（第 9.3 节） | 步骤 `simba`；`poly_mba` 的线性余因子 | 线性区域的各种重建方法 |
-| `sub_NAME` | 单项 | 只在单项函数内部，重建子项时 | 第 11 节 |
+| `pipeline` | `pipeline=P` | `simplify` | 整个化简：预处理、egglog 各轮、polish、从打印结果再跑一遍 |
+| `prepass_steps` | `prepass=P` | `(prepass prepass_steps)`、`(opaque prepass_steps)`、`(rebuilds prepass_steps)` | 预处理：造出几个重建候选，按大小排好 |
+| `polish_steps` | `polish=P` | `(polish polish_steps)` | 局部改写，只在变小时保留 |
+| `rewrite` | `rewrite=P` | 预处理的步骤，和几乎每个 pass 的 `sub` 参数 | 一个项的重建：`(memo rewrite ...)`，带缓存（第 9.2 节） |
+| `simba_steps` | `simba=P` | `(simba simba_steps)`、`poly_mba` 的线性余因子、`peel` 剩下的部分 | 线性区域的各种重建方法（第 9.3 节） |
 
-调用它们和调用 `def` 定义的函数一样是一次**运行**（第 6.4 节）；`polish` 对每个候选是一次单独的运行。
+调用它们和调用别的 `def` 一样是一次**运行**（第 6.4 节）；`prepass` 也是一次单独的运行（带 `trace`，输入是那个项），`polish` 对每个候选是一次单独的运行。pass 在 Rust 里调用一个函数参数时，它也是一次单独的运行；参数是单项内置函数的调用时（`(rebuild rewrite)`、函数体只是 `(memo ...)` 的 `rewrite`），直接运行它，不像一个步骤那样计入统计。
 
 ## 2. 数据模型
 
@@ -184,9 +183,9 @@ x = e | rest    ≡  在 x = e 之下运行 rest          （绑定）
 - 作参数时，`num` 是调用时对输入求一次值的表达式（`best` 的个数、`fix` 和 `wins` 的次数）；`term->num` 是对每个候选单独求值的条件（`filter`、`any`、`all`）；`group->num` 是对一组候选求值的条件（`if` 对输入，`retry` 对 `a` 的结果）。这两种函数类型的参数也写成表达式，就是以隐式输入为参数的函数（第 6.3 节的隐式输入），所以写法和 `num` 参数一样。内置函数的参数只用 `pipe`、`term->num`、`group->num` 这几种函数类型，其他函数类型的参数还不支持。
 - 最后一个参数是**输入**（`term` 或 `group`），写在管线里时由 `|` 填入，不写；也可以显式写出（第 6.3 节）。返回类型写在最后。
 - 声明前紧挨着的一行注释是它的说明。
-- 属性：`@pipe`：输入可以由 `|` 填入，所以能写成步骤（`a | (f x)` 即 `(f x a)`）；运算符以外的内置函数都带它。`@timed`：过了截止时刻调用被跳过、原样返回输入（第 5.3 节），不带它的函数照常执行；`@simplify_only`：只能出现在 `pipeline` 里（`egglog`、`reprint`），因为只有 `simplify` 的运行才有 e-graph；`@uncounted`：只和 `@timed` 一起写，这次跳过不把运行记为截断，也不计入 `time_limit/skipped`（`note`）；`@switch`：单项 pass，有一个同名的开关变量（第 10.1 节）。
+- 属性：`@pipe`：输入可以由 `|` 填入，所以能写成步骤（`a | (f x)` 即 `(f x a)`）；运算符以外的内置函数都带它。`@timed`：过了截止时刻调用被跳过、原样返回输入（第 5.3 节），不带它的函数照常执行；`@uncounted`：只和 `@timed` 一起写，这次跳过不把运行记为截断，也不计入 `time_limit/skipped`（`note`）；`@switch`：单项 pass，有一个同名的开关变量（第 10.1 节）。
 - **运算符**：第 7.2 节的 `+ - * / < <= > >= == != && || !` 也是内置函数，名字是这些符号的声明就是运算符：`(extern (+ a:num b:num) num)`、`(extern (! a:num) num)`。运算符没有输入，参数全部写出，不带属性，只在表达式里照第 7.2 节写成中缀（`!` 写在前面），不能按名字调用（`(+ 1 2)` 报错）。`&&`、`||` 声明成 `(extern (&& a:num b:group->num...) num)`：第一个操作数是数，后面的是以输入为参数的函数，由运算符决定调不调用——从左到右求值，结果一旦确定（`&&` 遇到 0、`||` 遇到非 0）就不再求后面的（短路）；其余运算符每个操作数都求值。
-- `extern` 只能写在 `builtins.pipe` 里，写在 `--passes` 或管线里报错。宏 `let`、`on`、`off` 和赋值不是函数，没有声明（宏 `smallest` 有声明，参数照它读）；第 1.1 节的 `pipeline`、`sub_NAME` 不能在步骤里调用，也没有声明。
+- `extern` 只能写在 `builtins.pipe` 里，写在 `--passes` 或管线里报错。宏 `let`、`on`、`off` 和赋值不是函数，没有声明（宏 `smallest` 有声明，参数照它读）。
 
 调用方式由输入和返回类型决定，第 9 节的四种由此得出：
 
@@ -302,7 +301,7 @@ t = (lowbits | unshift) | rewrite | (filter (size < (size (main t))))   # rewrit
 (def @inline @pipe (NAME PARAM ... g) BODY)
 (def @timed (NAME PARAM ...) BODY)             # 过了截止时刻整个跳过（第 5.3 节）
 (let NAME P)                                   # 即 (def @inline (NAME) P)
-pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub_NAME=P   # 即 (def (NAME) P)
+pipeline=P、prepass=P、polish=P、rewrite=P、simba=P   # 即 (def (NAME) P)，NAME 见第 1.1 节
 ```
 
 - `def`、`let` 和 `NAME=P` 一样是 `--passes` 的一项，也是源文件（`default.pipe`、`file=PATH`）的顶层项（第 12.3 节），不是管线里的步骤；之后的项里能用它定义的名字。属性写在 `(NAME ...)` 前，顺序随意；别的属性报 `unknown attribute`。
@@ -313,7 +312,7 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub_NAME=P   # 即 (de
 - **`@pipe`**：最后一个参数是输入，类型必须是 `group`（不写也是）；写在管线里时由 `|` 填入（`a | (f x)` 就是 `(f x a)`，`a | f` 就是 `(f a)`），也可以写全。函数体必须以值开头（`g | ...`）或是表达式，否则报 `the body of an @pipe function starts with a value`。
 - **简写**：不带 `@pipe`、函数体是不以值开头的管线时，输入是隐含的：`(def (NAME P ...) BODY)` 就是 `(def @pipe (NAME P ... g) g | BODY)`。`default.pipe` 里的定义、`prepass=P` 这样的项、`let` 都是这种。
 - 不带 `@pipe`、函数体以值开头时，最后一个参数只是普通参数，函数只能写全参数调用，调用是一个值，不能写在 `|` 后面（第 6.3 节）：`(def (twice p g) (p (p g)))` 的签名是 `(twice p:pipe g:group) group`。
-- 函数体里的名字在读到定义时解析，所以函数只能调用在它之前定义的函数（`let`、`def`）；第 1.1 节的那几个函数在运行时取当前的定义。重新定义 `gates` 这样的 `let` 名，不会改变已经读好的 `prepass`。
+- 函数体里的名字在读到定义时解析。`let` 和 `@inline` 函数只能用在定义之后，用的是那时的定义（重新定义 `gates` 这样的 `let` 名，不会改变已经读好的 `prepass_steps`）。`def`（不带 `@inline`）在定义之前也能调用，调用在运行时取这个名字最后的定义（第 6.6 节）：`default.pipe` 里 `rewrite` 和 `simba_steps` 互相调用。
 - `--show-passes` 和 `Display` 把 `def` 写在各条管线之前，每个前一行注释是它的签名（`# (twice g:group) group`），照写下的样子打印（组参数带 `:group`，这样读回来不变）。`let` 和没有数值参数、不带 `@pipe` 和 `@timed` 的 `@inline` 函数已在使用处展开，不再写出；其他 `@inline` 函数照 `def` 打印（`(def @inline (lim n p) split_runs = n | p)`）。`--show-builtins` 在最后单列 `def` 的签名，`src/default.pipe` 的（`cand`）和 `--passes` 的各一组。`def` 调用里唯一的、也是最后一个的管线参数照内置函数的写法打印，不加括号（以组值开头时加，否则读成输入）。
 
 ### 6.2 参数
@@ -396,14 +395,14 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub_NAME=P   # 即 (de
 
 ### 6.6 名字和递归
 
-- 函数名和变量、函数（内置的和已定义的 `def`）、宏、`let` 名不能重复（报 `the name of a pass, form or macro`、`the name of a variable or function`、`already a function`）。`let` 和 `def @inline` 可以重新定义已有的 `let` 名，之后的项用新的定义；`def` 不能重新定义 `let` 名（`already defined by let or def @inline`）。
-- 第 1.1 节的 `pipeline`、`prepass`、`polish`、`rewrite`、`simba`、`sub_NAME` 只能被 `(def (NAME) P)` 或 `NAME=P` 替换：不带参数，不带 `@inline`；`sub_NAME` 的 `NAME` 要是第 11 节的名字之一。
-- **不允许递归**：函数不能经过别的函数回到自己。函数只能调用在它之前定义的函数，调用处的管线参数也只能写已经定义的名字，所以 `def` 之间成不了环；能成环的只有经过运行时取定义的 `prepass`、`polish`，管线参数里的调用算在调用处（`(def (g p) p) prepass=(g prepass)` 报 `prepass reaches itself`）。`rewrite`、`simba`、`sub_NAME` 这一组内部本来就递归（在子项上），这是允许的；被这一组调用、又调用回这一组的 `def` 也算在组里。
-- `egglog`、`reprint` 写在 `def` 里时，只有 `pipeline` 可以（经过别的函数）调用这个 `def`。
+- 函数名和变量、函数（内置的和已定义的 `def`）、宏、`let` 名不能重复（报 `the name of a pass, form or macro`、`the name of a variable or function`）。`let` 和 `def @inline` 可以重新定义已有的 `let` 名，之后的项用新的定义，已经展开的地方不变；`def` 不能重新定义 `let` 名（`already defined by let or def @inline`），`let` 和 `def @inline` 不能重新定义 `def` 名（`already a function (def (f) ...), which only a def defines again`）。
+- **`def` 名是全局的，调用时才取定义**：程序先整个读完、检查，再执行；`def` 的调用在运行时取这个名字**最后的**定义。后面的 `def` 重新定义同一个名字时（同一个或之后的源文本、`import` 的文件、`--passes` 的项），替换它的所有调用，也包括在它之前读好的调用（别的函数的函数体、`default.pipe` 里的、传给 pass 的函数参数）。新的定义要和原来的签名相同：参数的个数和类型、输入、返回类型（参数名和 `@timed` 可以不同），否则报两个签名（`f is defined before as (f g:group) group; a later definition replaces it only with the same signature, not (f n:num g:group) group`）。原来的函数给出候选时，新的函数体按候选的管线读（以数结束报 `gives a number, not candidates`）。第 1.1 节的 `pipeline`、`prepass_steps`、`polish_steps`、`rewrite`、`simba_steps` 就这样被替换。
+- **先调用后定义**：同一个源文本里，前面的项和函数自己的函数体可以调用后面才定义的 `def`。调用按定义的签名读：先按定义的头读整个源文本（参数都写了类型的，当作给出候选的函数），某个定义推出的签名和头给的不同，或因为头不够（有参数没写类型）读不下去时，用第一遍得到的签名再读一遍。两遍都读不下去时（参数没写类型的函数调用自己；互相调用的返回数的函数，头只能当作给出候选的函数）报错并说明（`f is called before its definition, where a call reads it by its head: ...`）。
+- **递归**：任何 `def` 都可以调用自己，直接、经过别的函数或经过函数参数（`rewrite` 经过 `(again rewrite p)`、`(regions rewrite p)`、`(poly_mba rewrite simba_steps)` 回到自己，`simba_steps` 经过 `peel` 回到自己）。解析时不检查会不会停；运行时嵌套的调用（`def` 的调用、函数值的调用、pass 运行它的函数参数）多于 2000 层时，运行以错误 `recursion deeper than 2000 calls in f` 结束，`f` 是超出的那一层调用的函数（函数值写出它的项），所以 `prepass=lowbits | prepass_steps`、`rewrite=(again rewrite rewrite)` 在运行时报错。正常的程序嵌套的层数和它重建的项的深度相当（deep、Tigress、LLVM 数据上最多 128 层）。剩下的栈不到 1 MB 时，调用在新分配的 8 MB 栈段上继续，所以到 2000 层也不会栈溢出（Windows 主线程的栈只有 1 MB）。
 
 ### 6.7 错误和警告
 
-解析时报错（第 13 节有全部的检查）：参数名冲突、重复、用法矛盾、没用到、被赋值；未知的类型、属性；`@pipe` 的最后一个参数不是组、函数体不以值开头也不是表达式；返回数的函数或 Rust 调用的函数（`prepass` 等）带 `@timed`；返回数的管线带 `@inline` 或写成 `let`；函数体顶层的函数没写输入；调用处参数的个数和种类不对（报错附上签名）；不带 `@pipe` 的函数写在 `|` 后面；返回数的函数写在步骤位置（`f gives a number, not candidates`）、返回候选的函数写在表达式里（`f gives candidates, not a number`）或 `=` 左边（`f is a function and cannot be assigned`）；递归；读没绑定的组变量（每个 `def` 的函数体单独检查，组参数和输入算已绑定）。
+解析时报错（第 13 节有全部的检查）：参数名冲突、重复、用法矛盾、没用到、被赋值；未知的类型、属性；`@pipe` 的最后一个参数不是组、函数体不以值开头也不是表达式；返回数的函数带 `@timed`；返回数的管线带 `@inline` 或写成 `let`；函数体顶层的函数没写输入；调用处参数的个数和种类不对（报错附上签名）；不带 `@pipe` 的函数写在 `|` 后面；返回数的函数写在步骤位置（`f gives a number, not candidates`）、返回候选的函数写在表达式里（`f gives candidates, not a number`）或 `=` 左边（`f is a function and cannot be assigned`）；重新定义 `def` 时签名不同；读没绑定的组变量（每个 `def` 的函数体单独检查，组参数和输入算已绑定）。
 
 只给警告：定义了却没用到的函数（`(def (f p n) ...) is never used`）；没写类型的参数只用在管线和组都合适的位置；组值写在 `|` 后面；以及第 13 节对每条管线做的那些检查，对每个 `def` 的函数体也单独做。
 
@@ -413,9 +412,9 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub_NAME=P   # 即 (de
 
 **函数值从哪里来**：
 
-- **部分应用**：带 `@pipe` 的函数少写了输入就是函数值，类型是"输入 -> 返回"：`size` 是 `term->num`，`rewrite` 是 `term->term`，`(best 1 a b)` 是 `pipe`，`(big 20)` 是 `group->num`，`(with_budget 8 rewrite)` 是 `pipe`。在步骤位置、表达式里这就是通常的写法（第 6.3 节的隐式输入）。
+- **部分应用**：带 `@pipe` 的函数少写了输入就是函数值，类型是"输入 -> 返回"：`size` 是 `term->num`，`(rewrite_top rewrite)` 是 `term->term`，`rewrite`、`(best 1 a b)` 是 `pipe`，`(big 20)` 是 `group->num`，`(with_budget 8 rewrite)` 是 `pipe`。在步骤位置、表达式里这就是通常的写法（第 6.3 节的隐式输入）。
 - **写在函数类型位置的表达式或管线**：以隐式输入为参数的函数。`(filter (size <= 20))` 的条件对每个候选求值，`(keep_if (size <= 20))` 传进去的也是这样一个函数。
-- **函数参数**（第 6.2 节）和**函数变量**：函数变量是存函数值的局部变量（第 5.5 节），要写类型：`f:term->num = size`、`small:term->num = (size <= 20)`、`f:term->num = (under 20)`、`g:term->term = relate`（右边是表达式或一步，类型要接得上）。不写类型时右边的意思只由右边定：`f = size` 是数变量，`t = rewrite` 是组变量。同一个名字只能存一种（`f is a function variable, so it cannot name a group variable`、`t is a group variable, so it cannot hold a function value`）。
+- **函数参数**（第 6.2 节）和**函数变量**：函数变量是存函数值的局部变量（第 5.5 节），要写类型：`f:term->num = size`、`small:term->num = (size <= 20)`、`f:term->num = (under 20)`、`g:term->term = (relate rewrite)`（右边是表达式或一步，类型要接得上）。不写类型时右边的意思只由右边定：`f = size` 是数变量，`t = rewrite` 是组变量。同一个名字只能存一种（`f is a function variable, so it cannot name a group variable`、`t is a group variable, so it cannot hold a function value`）。
 - **返回函数的 `def`**：不带 `@pipe` 的函数，函数体是表达式而读了隐含的输入时（`(def (under k) size <= k)`），签名是 `(under k:num t:term) num`：输入只读主候选时是 `t:term`，读整组时是 `g:group`。写在要数的地方时取这一步的输入，得一个数（`(if (under 9) p)`）；写在函数类型的位置时是 `term->num` 的函数值（`(filter (under 20))`、`(keep_if (under 20))`）。函数体不读输入（`(def (f) keep + 1)`、`(def @pipe (big k g) (size (main g)) > k)`）时照旧返回数，意思不变。
 
 **调用**：`(pred t)` 或 `t | pred`（表达式里写在括号里，`((pred t) > 5)`、`(t | pred)`），和 `(p g)` 一样；单独写在要数的地方时用在这一步的输入上（`(filter (f < 5))`）。没写注解的参数被这样调用时推成 `group->num`。函数变量的值是闭包：绑定时抓下它读到的局部变量当时的值和调用的参数，在哪里用都一样，之后再给那些变量赋值也不影响它；`(def (f n) small:term->num = (size <= n) | (keep_if small))` 里的 `small` 在 `keep_if` 里面求值时读的仍是 `f` 的 `n`。函数参数传进去的是参数和写下它的运行（第 6.3 节）。`wins`、`moved`、`scope` 的缓存这些没有名字的状态，按它实际运行的位置算（第 6.3 节）。
@@ -443,10 +442,10 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P、sub_NAME=P   # 即 (de
 prepass=(union id rewrite) | (keep_if (size <= 20))
 
 (def (under k) size <= k)                        # 读隐含输入：(under k:num t:term) num
-prepass=(union id rewrite) | (filter (under 20)) | (if (under 9) relate)
+prepass=(union id rewrite) | (filter (under 20)) | (if (under 9) (relate rewrite))
 
 (def @pipe (each f:term->term g) g | f)
-prepass=(each rewrite) | f:term->num = (size <= 20) | (filter f) | g:term->term = relate | (each g)
+prepass=(each (rewrite_top rewrite)) | f:term->num = (size <= 20) | (filter f) | g:term->term = (relate rewrite) | (each g)
 
 (def (pick pred) (save t) | (if ((pred t) > 5) rewrite))   # pred 推成 group->num
 prepass=(pick size)                                       # size 是 term->num：取 t 的主候选
@@ -466,8 +465,8 @@ prepass=(small_only 20)                                   # small 在 keep_if �
 
 ```
 (def (twice) rewrite | rewrite)
-(def @inline (lb) lowbits | relate)
-prepass=lb | twice | finish                  # 即 lowbits | relate | twice | finish
+(def @inline (lb) lowbits | (relate rewrite))
+prepass=lb | twice | (finish rewrite)        # 即 lowbits | (relate rewrite) | twice | (finish rewrite)
 
 (def (try_without name p) (best 1 p ((off name) | p)))
 prepass=(try_without relate rewrite)         # 即 (best 1 rewrite ((off relate) | rewrite))，在 try_without 的运行里
@@ -481,15 +480,15 @@ prepass=(save t) | (f ((load t) | rewrite))  # 参数里的 (load t) 读调用�
 (def (with_budget n p) rewrites = n | p)
 (def (if_small k p) (if (size <= k) p))
 (def (f n) (if_small (n * 2) (rewrite | (filter (size <= n)))))
-prepass=(f (size / 2)) | (with_budget 8 relate)   # n 是调用时输入大小的一半；filter 在 if_small 里运行，读 f 的 n
+prepass=(f (size / 2)) | (with_budget 8 (relate rewrite))   # n 是调用时输入大小的一半；filter 在 if_small 里运行，读 f 的 n
 
 (def @inline (lim n p) split_runs = n | p)
-prepass=(lim (size - 1) rewrite) | relate    # split_runs 的赋值作用到序列末尾，relate 也读到
+prepass=(lim (size - 1) rewrite) | (relate rewrite)    # split_runs 的赋值作用到序列末尾，relate 也读到
 
 (def @pipe (f p g) g | p)
 (def (twice p g) (p (p g)))                  # 不带 @pipe：只能写全参数调用
 (def @pipe (big k g) (size (main g)) > k)    # (big k:num g:group) num
-prepass=(f rewrite) | (save t) | u = (twice relate t) | (if (big 3) (load u))
+prepass=(f rewrite) | (save t) | u = (twice (relate rewrite) t) | (if (big 3) (load u))
 
 (def (size_after) rewrite | size)            # 以数结束的管线：(size_after g:group) num
 (def @pipe (h g) g | lowbits | size > 3)
@@ -529,12 +528,12 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 
 | 名字 | 为 1 时 |
 |---|---|
-| `opaque` | 有移位、除法或 `mulhi`，且它的重建大于 `tiny_size` 个节点（会运行 `prepass`） |
-| `rebuilds` | 预处理会改变它（会运行 `prepass`） |
+| `(opaque p)` | 有移位、除法或 `mulhi`，且预处理 `p` 的重建大于 `tiny_size` 个节点（会运行 `(prepass p)`） |
+| `(rebuilds p)` | 预处理 `p` 会改变它（会运行 `(prepass p)`） |
 | `minimal` | 某个候选被证明最小：没有更小的项与它相等（`prove_minimal` 开着时才证明） |
 | `mixed` | 位运算下直接有算术或常数 |
 | `moved` | 上一个 `fix` 停在次数上，主候选还在变 |
-| `input` | 它就是本次运行的输入：`pipeline` 里是 `simplify` 的输入，`prepass` 里是预处理的那个项，`polish` 里是那个候选；`rewrite`、`simba`、`sub_NAME` 里总是 0 |
+| `input` | 它就是本次运行的输入：`pipeline` 里是 `simplify` 的输入，`prepass` 里是预处理的那个项，`polish` 里是那个候选；pass 在子项上运行的函数（`rewrite`、`simba_steps`……）里总是 0 |
 | `tiny` | 至多 `tiny_size` 个节点 |
 | `fits_split` | 至多 `split_size` 个节点 |
 | `used_wide`、`used_clustered` | 有一个候选的 `used` 里有这一位（看整组） |
@@ -546,7 +545,7 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 | `const_bitwise` | 有与常数的位运算 |
 | `cofactor` | 本次运行在重建 `poly_mba` 的线性余因子 |
 
-性质之中，`opaque`、`rebuilds` 要跑一次 `prepass`，比较贵；其余只看项本身或候选的附带信息。
+性质之中，`opaque`、`rebuilds` 要跑一次预处理，比较贵；其余只看项本身或候选的附带信息。
 
 **带参数的函数**：
 - `(size (main R))`：组变量 `R` 主候选的大小；`R` 为空或没绑定时得 0（`main` 给出 `none`，`size` 对 `none` 得 0）。`(size (index I R))` 是第 `I` 个（从 0 起）候选的大小。
@@ -584,8 +583,8 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 | `(tag NAME p)` | 运行 `p`，记时间 `NAME/run`；主候选变了时记 `NAME/won/来源`，来源改为 `NAME` | — |
 | `(origin NAME p)` | 运行 `p`，结果的来源都改为 `NAME`，记时间 `pre/NAME/made` | — |
 | `(scope p)` | `p` 里对同一个项的各 pass 共用一个运行上下文（缓存）；是作用域 | — |
-| `(regions p)` | 对每个候选：如果它是一个线性区域，叶子先用 `rewrite` 重建，整体用 `p` 的主候选；否则对它的操作数用 `rewrite` | — |
-| `(again p)` | 运行 `p`；主候选在"位运算的算术叶子"处有变化时，对它再做一次 `rewrite`，变小才保留 | — |
+| `(regions sub p)` | 对每个候选：如果它是一个线性区域，整体用 `p` 的主候选、其中的原子叶子用 `sub` 重建；否则对它的操作数用 `sub` | — |
+| `(again sub p)` | 运行 `p`；主候选在"位运算的算术叶子"处有变化时，对它再做一次 `sub`，变小才保留 | — |
 | `(save R)`、`(load R)` | 第 5.5 节：`(save R)` 即 `R = id`；`load` 一个没绑定的组变量给出空组，可以反复读 | — |
 | `(clear R)` | 打开一个空的记录寄存器 `R`（第 5.5 节），原样返回 | — |
 | `(note R)` | 当前组里第一个最小的候选比最新打开的 `R` 里的严格更小（或 `R` 是空的）时记进去，原样返回；过了截止时刻和其他计算的步骤一样跳过，但不算截断（`@uncounted`） | 空组、没有打开的 `R` 时什么也不记 |
@@ -605,9 +604,9 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 
 `(cand pre_unified unified p)` 是一个预处理候选：开关 `pre_unified` 为 0 时给出空组，否则在 `bit_split_budget = cand_bit_splits` 下运行 `p`（括号里的序列是作用域，预算到此为止），来源都改为 `unified`，记 `pre/unified/made`。开关作为数值参数显式写出，因为语言里不能由名字参数 `n` 拼出变量名 `pre_n`；没有开关的候选写 `(cand 1 first p)`。
 
-## 9. 不带参数的候选组函数（pass）
+## 9. 候选组函数（pass）
 
-这些函数习惯上叫 pass。按调用方式分四种：整组、单项、alternative、polish（第 4.3 节，由签名决定）。
+这些函数习惯上叫 pass。按调用方式分四种：整组、单项、alternative、polish（第 4.3 节，由签名决定）。参数是它要运行的函数（第 1.1 节）：`sub` 用来重建输入的部分，默认传 `rewrite`（`over_*`、`split_bits`、`shift_cases` 传 `(rebuild rewrite)`）；不带参数的写成名字。
 
 ### 9.1 整组
 
@@ -617,8 +616,8 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 |---|---|
 | `id` | 原样返回 |
 | `none` | 给出空组 |
-| `prepass` | 对主候选运行 `prepass` 管线，用它的结果替换整组：第一个是主重建，其后是要一起并入 e-graph 的 |
-| `polish` | 对每个候选单独运行 `polish` 管线（每次是一次单独的运行），结果的主候选变小时替换 |
+| `(prepass p)` | 对主候选运行预处理 `p`（一次单独的运行），用它的结果替换整组：第一个是主重建，其后是要一起并入 e-graph 的，来源是 `pre/来源`；同一个线程上最近一次的结果留着（`opaque`、`rebuilds` 和随后的这一步常对同一个项问） |
+| `(polish p)` | 对每个候选单独运行 `p`（每次是一次单独的运行），结果的主候选变小时替换 |
 | `take_minimal` | 第一个被证明最小的候选（`minimal`）；没有就原样返回 |
 | `reprint` | 主候选打印成中缀再读回，只留这一个 |
 | `within` | 当前的 `rewrites` 用完时给出空组，否则原样返回 |
@@ -634,22 +633,22 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 | `unshift` | 把 `c·(a >> s)` 等写成掩码形式，使区域成为半线性的 |
 | `tfunc_whole` | 整个项换成更小的 T-函数形式（≤ `tfunc_max_vars` 个变量）；不适用时没有结果 |
 | `tfunc` | 对子项做同样的替换 |
-| `rewrite` | 运行 `rewrite` 管线（带缓存） |
-| `rewrite_top` | 同 `rewrite`，统计分开计 |
-| `cluster_regions`、`cluster_top` | 对结果的每个区域做 `clustered` 式的分组重建；`cluster_top` 只是统计名不同 |
-| `relate` | 把位运算的算术叶子换成占位变量，加上它们之间的零关系再重建 |
+| `(memo n p)` | 在 `p` 上运行这个项，结果按项、`p`（哪个定义或哪处写的函数，第 1.1 节）和读到的变量缓存在 `scope` 里，每算一个新结果用掉一次 `rewrites`；统计计在 `pass/n` 下（`rewrite` 的函数体是 `(memo rewrite ...)`） |
+| `(rewrite_top p)` | 运行 `p`，统计计在 `rewrite_top` 下 |
+| `(cluster_regions sub)`、`(cluster_top sub)` | 对结果的每个区域做 `clustered` 式的分组重建；`cluster_top` 只是统计名不同 |
+| `(relate sub)` | 把位运算的算术叶子换成占位变量，加上它们之间的零关系再用 `sub` 重建（相等的证明也用 `sub`：差重建成 0）；结果按项和 `sub` 缓存 |
 | `unify_operands` | 统一位运算操作数的写法，让更多叶子能共享 |
-| `recombine` | 把 `c·P1·Q1 + c·P2·Q2` 合回一个乘积（还原 `a·b` 的拆分） |
-| `cut_products` | 按另一个因子的尾零截断乘积因子里的常数 |
+| `(recombine sub)` | 把 `c·P1·Q1 + c·P2·Q2` 合回一个乘积（还原 `a·b` 的拆分），证明和因子的重建用 `sub` |
+| `(cut_products sub)` | 按另一个因子的尾零截断乘积因子里的常数，截断后的因子用 `sub` 重建比较 |
 | `shifted_xor` | `2^k·(a ^ K) + c` 写成 `(2^k·a) ^ (2^k·K + c)` |
 | `simplify_rebuilt` | 只用于重建结果的 `lowbits` 部分（截断乘数等） |
-| `finish` | 重建候选的收尾：`recombine`、`cut_products`、`shifted_xor`，再 `lowbits` |
-| `halve` | `2^k·a + c` 形式的操作数拆半：`2^k·(a op b) + (c op d)` |
-| `over_const_bitwise`、`over_shared_bitwise` | 把与常数的位运算、或共享的位运算子项抽象成变量重建，再代回 |
-| `over_products` | 把乘积抽象成变量重建，再代回 |
-| `split_bits` | 按单个变量位分情况重建，还原 Hikari/OLLVM 式的选择 |
+| `(finish sub)` | 重建候选的收尾：`recombine`、`cut_products`（都用 `sub`）、`shifted_xor`，再 `lowbits` |
+| `(halve sub)` | `2^k·a + c` 形式的操作数拆半：`2^k·(a op b) + (c op d)`，操作数用 `sub` 重建 |
+| `(over_const_bitwise sub)`、`(over_shared_bitwise sub)` | 把与常数的位运算、或共享的位运算子项抽象成变量，用 `sub` 重建，再代回 |
+| `(over_products sub)` | 把乘积抽象成变量，用 `sub` 重建，再代回 |
+| `(split_bits sub)` | 按单个变量位分情况用 `sub` 重建，还原 Hikari/OLLVM 式的选择 |
 | `drop_identities` | 去掉加 0、乘 1 |
-| `rebuild` | 不带 `relate` 的一次重建（`lowbits`、`unshift`、`rewrite`、`cluster_regions`、`tfunc`） |
+| `(rebuild sub)` | 不带 `relate` 的一次重建：`lowbits`、`unshift`、`sub`、用 `sub` 的 `cluster_regions`、`tfunc` |
 
 ### 9.3 Alternative
 
@@ -657,14 +656,14 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 
 | pass | 含义 |
 |---|---|
-| `simba` | 运行 `simba` 管线 |
+| `(simba p)` | 在线性区域上运行 `p`（默认 `simba_steps`） |
 | `small_blocks` | 按合取基里的块（≤ 3 个叶子）逐块重建 |
 | `wide_blocks` | 宽区域的分块重建；被保留时置 `used` 的 wide 位 |
-| `poly_mba` | 多项式 MBA 的展开、约化和因式分解 |
-| `drop_unused` | 把值不依赖的叶子置 0 后重建 |
-| `clustered` | 按用到的叶子把项分组，各组分别重建；被保留时置 `used` 的 clustered 位 |
-| `peel`、`peel_clustered` | 剥掉一个项再重建其余部分 |
-| `semi_linear` | 带常数掩码区域的逐位重建 |
+| `(poly_mba sub sub_region)` | 多项式 MBA 的展开（叶子和带常数位运算的因子用 `sub` 重建）、约化和因式分解，线性余因子用 `sub_region` 重建（按项和 `sub_region` 缓存） |
+| `(drop_unused sub)` | 把值不依赖的叶子置 0 后用 `sub` 重建 |
+| `(clustered sub)` | 按用到的叶子把项分组，各组用 `sub` 分别重建；被保留时置 `used` 的 clustered 位 |
+| `(peel sub_region)`、`(peel_clustered sub_region)` | 剥掉一个项，其余部分用 `sub_region` 重建 |
+| `(semi_linear sub)` | 带常数掩码区域的逐位重建，`bit_split` 的两边用 `sub` 重建 |
 | `rebuild_values` | 按区域在 {0,1}^n 上的取值重建 |
 | `common_multiple` | 提出系数相近的公倍数 `c·(v_1 + ... + v_k)` |
 | `related_leaves` | 加上叶子间零关系的小倍数后重建 |
@@ -672,7 +671,7 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 
 ### 9.4 Polish
 
-写作 `polish_NAME`，单项函数，用在 `polish` 函数里：`push_not`、`join_constants`、`join_linear`、`over_const_bitwise`、`over_shared_bitwise`、`over_products`、`recombine`、`shift_cases`、`decompose`、`factor`。`--passes` 的 `polish=a,b,...` 是这些名字的简写（第 12 节）。
+写作 `polish_NAME`，单项函数，用在 `polish_steps` 函数里：`push_not`、`join_constants`、`join_linear`、`over_const_bitwise`、`over_shared_bitwise`、`over_products`、`recombine`、`shift_cases`、`decompose`、`factor`。`join_constants`、`join_linear`、`recombine` 带 `sub`（默认 `rewrite`），`over_*`、`shift_cases` 带 `sub`（默认 `(rebuild rewrite)`，`shift_cases` 也用它证明各情况相等）。`--passes` 的 `polish=a,b,...` 是这些名字的简写（第 12 节）。
 
 ## 10. 变量
 
@@ -847,25 +846,15 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 `wide_blocks_cache_size` 和 `memo_contexts` 一样只决定缓存留多少，不记入读过的变量；`wide_blocks` 的缓存键里有全部限值的哈希。带自由常数的位运算式按大小逐层建表，进程内共用；表里的式子与 `shapes_max_size` 无关，只是最大那一层的式子不当操作数，不存它们的真值表列表，所以值小时少建几层，值大时补上那一层的列表再接着建。
 `tfunc` 的查找表进程内共用，按位宽、变量数和 `tfunc_max_vars`、`tfunc_max_size`、`tfunc_points` 分开建，所以不同作用域里的不同值各建一份，正常运行只建默认那一份；没用到的求值点上变量都是 0，值和第 0 个点相同，不改变查表的结果。`tfunc_max_carries`、`tfunc_max_states`、`tfunc_max_factor` 也决定 `lowbits` 在上下文里的证明，每次 `lowbits` 调用读一次。
 
-## 11. `sub_NAME`
+## 11. 重建子项的函数
 
-单项 pass 重建子项时调用的管线，默认是 `rewrite`（带缓存）或 `rebuild`（直接一次重建）。
+pass 重建子项（或由子项得到的形式）时运行它的 `sub` 参数（第 1.1 节），`default.pipe` 里写出传哪个：
 
-| 名字 | 默认 | 用于 |
-|---|---|---|
-| `sub_cluster` | `rewrite` | `clustered` 的每一组，以及没变小的组里的每一项 |
-| `sub_relate` | `rewrite` | `relate` 处理过的区域、缩小后的整个区域、取反的叶子 |
-| `sub_bit_split` | `rewrite` | `bit_split` 的两边 |
-| `sub_halve` | `rewrite` | `halve` 拆出来的操作数 |
-| `sub_drop_unused` | `rewrite` | 置 0 了无用叶子的区域 |
-| `sub_recombine` | `rewrite` | 合回的乘积的因子和改动过的区域 |
-| `sub_polish` | `rewrite` | `join_constants`、`join_linear` 合并后的组 |
-| `sub_low_factor` | `rewrite` | 按另一因子尾零截断了常数的乘积因子 |
-| `sub_poly` | `rewrite` | `poly_mba` 展开所用的叶子，以及含与常数位运算的因子 |
-| `sub_over_products` | `rebuild` | `over_products` 的各种情况 |
-| `sub_split_bits` | `rebuild` | `split_bits` 的各种情况 |
-| `sub_over_bitwise` | `rebuild` | `over_const_bitwise`、`over_shared_bitwise` 的项 |
-| `sub_shift_cases` | `rebuild` | `shift_cases` 的各种情况 |
+| 传 `rewrite` | 传 `(rebuild rewrite)` |
+|---|---|
+| `clustered`、`cluster_regions` 的每一组；`relate`；`semi_linear` 里 `bit_split` 的两边；`halve` 的操作数；`drop_unused`；`recombine`、`finish`、`cut_products`；`poly_mba` 的叶子；`regions`、`again`；`polish_join_constants`、`polish_join_linear`、`polish_recombine` | `over_products`、`split_bits`、`over_const_bitwise`、`over_shared_bitwise`（预处理和 polish 的）、`polish_shift_cases` |
+
+换掉某处的函数就在那个调用里写别的：`(def (by_parts) rewrite | tfunc) simba=... (clustered by_parts) ...`。命令行没有 `sub_NAME=P` 这样的项（报 `no longer read`）。
 
 ## 12. `--passes` 和命令行
 
@@ -884,7 +873,7 @@ prepass=(if ((t = rewrite | size) < size_after) (k rewrite t)) | (filter (h (low
 | `NAME=VALUE` | 程序的一项赋值 `NAME = VALUE`，`NAME` 必须是已有的全局变量（写错名字报 `unknown variable`）。值同管线里的写法，可以是表达式。项里的空格只在后一段不像新的一项（不以 `KEY=` 开头）时才接在这一项里：`keep=keep + 1` 是一项（`Display` 就这样写），`keep=keep +1` 也是；要稳妥就不写空格 |
 | `NAME = VALUE` | `=` 两边有空格：源文件的写法（第 12.3 节），`NAME` 还不是全局变量时定义它。`--show-passes` 用它写出 `file=PATH` 定义的变量 |
 | `off=a,b`、`off+=a`、`off-=a` | 也是赋值：`off+=a` 是 `a = 0`，`off-=a` 是 `a = 1`，`off=a,b` 是把内部 pass 都设成 1 再关 `a`、`b` |
-| `pipeline=P`、`prepass=P`、`polish=P`、`rewrite=P`、`simba=P`、`sub_NAME=P` | 替换这条管线的定义：`(def (NAME) P)` 的简写 |
+| `pipeline=P`、`prepass=P`、`polish=P`、`rewrite=P`、`simba=P` | 重新定义 `default.pipe` 的这个函数：`(def (pipeline) P)`、`(def (prepass_steps) P)`、`(def (polish_steps) P)`、`(def (rewrite) P)`、`(def (simba_steps) P)` 的简写（第 1.1 节）；`rewrite=P` 不带缓存，要缓存写 `rewrite=(memo rewrite P)` |
 | `polish=a,b,...` | 全是 polish pass 名时：依次尝试这些 `polish_NAME`，变小才保留，有一个变小就重来，至多保留 `polish_wins` 次 |
 | `(let NAME P)` | 定义名字（第 6.1 节）。`default.pipe` 定义的名字（`first_round`、`later`、`gates`、`rebuild_main`……）也能用 |
 | `(def [@inline] [@pipe] (NAME PARAM ...) P)` | 定义函数（第 6 节） |
@@ -911,20 +900,20 @@ cut = 0
 max_leaves = 6
 semi_leaves = max_leaves
 rewrites = none
-(let later prepass | (if minimal take_minimal (egglog later)))
+(let later (prepass prepass_steps) | (if minimal take_minimal (egglog later)))
 (def (pipeline)
   cut = 1
   | ...)
 ```
 
-变量名不能和函数、宏、`let`/`def` 名、特征名同名；`prepass = P` 这样给 Rust 调用的函数赋值报错，提示写 `(def (prepass) P)`。`--passes` 的简写对应的完整形式：
+变量名不能和函数、宏、`let`/`def` 名、特征名同名；`prepass_steps = P` 这样给不带参数的函数赋值报错，提示写 `(def (prepass_steps) P)`。`--passes` 的简写对应的完整形式：
 
 | 简写 | 完整形式 |
 |---|---|
 | `NAME=VALUE` | 赋值 `NAME = VALUE`（只能给已有的全局变量） |
 | `file=PATH` | `(import "PATH")` |
-| `pipeline=P`、`prepass=P`……、`sub_NAME=P` | `(def (pipeline) P)` 等 |
-| `polish=a,b` | `(def (polish) ...)`，函数体同 `default.pipe` 的写法 |
+| `pipeline=P`、`prepass=P`…… | `(def (pipeline) P)`、`(def (prepass_steps) P)` 等（第 1.1 节） |
+| `polish=a,b` | `(def (polish_steps) ...)`，函数体同 `default.pipe` 的写法 |
 | `off=a,b` | `(on <全部内部 pass>) \| (off a b)` |
 | `off+=a`、`off-=a` | `(off a)`、`(on a)` |
 | `pre=a,b` | 按定义的顺序给每个 `pre_NAME` 赋值：`pre_a = 1`、`pre_b = 1`，其余 `= 0` |
@@ -938,14 +927,13 @@ rewrites = none
 
 - 顶层：还没有值时写了计算候选的步骤（第 1.0 节）；读了顶层还没有绑定的组变量（`the program reads group variable t before it is bound`）；`import` 写在顶层以外、找不到文件、成环。
 
-- 名字：未知的变量、函数、`on`/`off` 名、`sub_NAME`、规则集，报错并列出已知的名字。名字里的 `-` 读作减号，没法单独报错；解析出错时，如果写了 `a-b` 这样的词，错误后面加上"`a-b` 读作 `a - b`，名字用 `_`"，`a_b` 是已知名字时提示写 `a_b`。
+- 名字：未知的变量、函数、`on`/`off` 名、规则集，报错并列出已知的名字。名字里的 `-` 读作减号，没法单独报错；解析出错时，如果写了 `a-b` 这样的词，错误后面加上"`a-b` 读作 `a - b`，名字用 `_`"，`a_b` 是已知名字时提示写 `a_b`。
 - 类型，照签名（第 4.3 节；`def` 的签名见第 6.5 节）检查，报错时附上签名：步骤位置写了数值函数或变量（`mixed gives a number, not candidates: (mixed t:term?) num`），表达式里写了候选组函数（`egglog gives candidates, not a number`）；参数的个数、种类（表达式、管线、组变量、名字）不对（`retry takes an expression and two pipelines: (retry c:group->num a:pipe b:pipe g:group) group`）；没有参数的函数写了参数；给出数的步骤接在 `|` 前面；以数结束的管线写在要候选的地方，或括号里的管线写在要数的地方却不以数结束；不带 `@pipe` 的函数写在 `|` 后面；函数体顶层的函数没写输入。
 - 赋值（第 5.6 节）：给函数、参数赋值；开关赋 `none`（开关只收数，0 是关）；右边的类型和左边不合（存数的变量给了候选，组变量给了数，报错写出两边）；组变量和存数的变量同名（`(save keep)`、`keep = rewrite`）。条件里写了 `=`（`(if (size = 3) ...)`）报 "an assignment is a step; compare with =="。
-- 定义（第 6 节）：`let`、`def` 名和变量、函数、宏同名，`def` 重新定义已有的 `let`、`def` 名，`let` 重新定义 `def` 名；第 1.1 节的函数带参数或 `@inline`，未知的 `sub_NAME`；未知的属性、类型；`def` 的参数和已有的名字同名或重复、用法矛盾、没用到；`@pipe` 函数的最后一个参数不是组、函数体不以值开头也不是表达式；返回数的管线带 `@inline` 或写成 `let`。`(off NAME)` 的名字参数在调用处检查是不是开关。
+- 定义（第 6 节）：`let`、`def` 名和变量、函数、宏同名，`def` 重新定义 `let` 名或签名不同的 `def`，`let`、`def @inline` 重新定义 `def` 名（第 6.6 节）；未知的属性、类型；`def` 的参数和已有的名字同名或重复、用法矛盾、没用到；`@pipe` 函数的最后一个参数不是组、函数体不以值开头也不是表达式；返回数的管线带 `@inline` 或写成 `let`。`(off NAME)` 的名字参数在调用处检查是不是开关。
 - `extern` 写在 `src/builtins.pipe` 以外。
 - 旧写法报错并提示新写法：`(with KEY=VALUE ... p)`（提示 `(KEY = VALUE | ... | p)`，它的 `bit_splits` 是 `bit_split_budget`）、`(time-limit N)`（提示 `time_limit = N`、`time_limit = none`）、条件名 `true`（提示 `1`，只在有候选时为真的写 `(any 1)`）、单名写法 `save/t`、`off/NAME`、`egglog/LABEL`、`seq(a,b)` 语法，以及带 `/` 的旧名字（`polish/factor`、`sub/cluster`、`semi/bit_split`、`poly/masked`，提示 `names cannot contain '/': write polish_factor`；管线里、`--passes` 的项名和 `off=`、`pre=` 的名字表里、源文件的赋值行里都查）。`with` 外面的 `KEY=VALUE` 就是赋值 `KEY = VALUE`，不报错。
-- 签名带 `@simplify_only` 的函数（`egglog`、`reprint`）只能出现在 `pipeline` 里：只有 `simplify` 的运行才有 e-graph。写在 `def` 里时，只有 `pipeline` 可以（经过别的函数）调用这个 `def`。
-- 函数不能经过别的函数回到自己（第 6.6 节）。调用关系：`prepass` pass 和函数 `opaque`、`rebuilds` 调用 `prepass`；`polish` pass 调用 `polish`；单项 pass、`regions`、`again` 调用 `rewrite`、`simba`、`sub_NAME` 这一组；写出 `def` 名就调用它，调用处的管线参数里的调用算在调用处。
+- 递归不检查：运行时嵌套多于 2000 层调用时报 `recursion deeper than 2000 calls in f`（第 6.6 节）。
 - 组变量的读（`load`、`label`、`main`、`index`、组值）前面必须有可能先执行的、绑定它的 `(save R)` 或 `R = p`（`R = p` 先算右边，所以 `t = (load t)`、`t = t` 报错；`t = u` 是读 `u`）。每个 `def` 的函数体单独检查（它有自己的组变量，组参数和输入算已绑定），有名字参数的按每种调用代入后的样子检查；`let`、`@inline` 按展开后的样子在调用处检查。管线参数读写调用处的组变量，在调用处检查，当作可能运行多次的体。按执行顺序算：`if` 的两支都算，`retry` 的条件在 `a` 之后，`best` 的个数在各支之后；`fix`、`wins`、`regions` 的体会重复执行，体里任何地方的绑定对整个体都算。这条检查找的是写错名字和顺序，不保证运行时一定有值。
 
 以下只给警告：`eggy1` 和 `bench` 的父进程打印到 stderr，`bench --one` 子进程不打印。
@@ -956,7 +944,7 @@ rewrites = none
 
 以下几条对每条管线和每个 `def` 的函数体单独检查：
 
-- 新的局部变量名和某个全局变量只差一两个字母（3、4 个字母的名字差 1 个，更长的差 1 或 2 个；编辑距离）：`prepass: number variable kep is a new local variable; did you mean keep?`，和"绑定了却从不读"的警告一起给出，用来发现写错的全局变量名。
+- 新的局部变量名和某个全局变量只差一两个字母（3、4 个字母的名字差 1 个，更长的差 1 或 2 个；编辑距离）：`prepass_steps: number variable kep is a new local variable; did you mean keep?`，和"绑定了却从不读"的警告一起给出，用来发现写错的全局变量名。
 - 绑定了却从不读的组变量；同一层又绑定了一次、中间没读的死存储（写在 `if`（`cand`）、`first` 的后几支、`retry` 的 `b` 或循环体里的绑定不和外面的比较，所以 `(save t) | (if c (save t))` 这种先存默认值再覆盖的写法不算）。
 - 赋值（包括 `(on NAME)`、`(off NAME)`）是所在序列（或整条管线）的最后一步：什么也影响不到。
 - 同一条序列里同一个变量连赋两次，中间只有赋值，也没有读它。
@@ -983,10 +971,10 @@ rewrites = none
 t = (lowbits | unshift) | rewrite | (filter (size < (size (main t))))
 
 # 给一段步骤限时，到期后跳过它们，接着运行后面的
-lowbits | time_limit = 500 | relate | tfunc | time_limit = none | finish
+lowbits | time_limit = 500 | (relate rewrite) | tfunc | time_limit = none | (finish rewrite)
 
 # 只在这一段里改限值，值按输入算
-(split_runs = vars * 2 | split_bits) | rewrite
+(split_runs = vars * 2 | (split_bits (rebuild rewrite))) | rewrite
 
 # 局部改写：每步只在变小时采用，至多采用 8 次
 (scope rewrites = polish_rewrites
