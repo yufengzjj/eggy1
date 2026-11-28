@@ -1,0 +1,43 @@
+# A failing assert ends the run with its message, also past the time limit; malformed print and assert calls.
+(import "default")
+x3 = (parse "x + 253")
+x3 | main | (assert (size > 3) "not \"big\" \\ (#)") | rewrite
+
+# expect error: not "big" \ (#)
+
+# ---
+(import "default")
+x3 = (parse "x + 253")
+x3 | main | time_limit = 0 | (assert 0 "past the limit too")
+
+# expect error: past the limit too
+
+# ---
+(import "default")
+(parse "x") | main | (assert 1)
+
+# expect error: assert takes msg:text: (assert c:num msg:text); found )
+
+# ---
+(import "default")
+(parse "x") | main | (assert 1 x)
+
+# expect error: assert takes msg:text: (assert c:num msg:text); found x
+
+# ---
+(import "default")
+(parse "x") | main | (print)
+
+# expect error: print takes 1 or more arguments: (print x:any...)
+
+# ---
+(import "default")
+(parse "x") | main | (print "a)
+
+# expect error: unclosed string: "a)
+
+# ---
+(import "default")
+(parse "x") | main | (print "a\n")
+
+# expect error: unknown escape \n in a string: only \" and \\ are read

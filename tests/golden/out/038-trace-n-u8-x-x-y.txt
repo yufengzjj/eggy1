@@ -1,0 +1,12 @@
+==== command
+eggy1 --trace -n u8 "x - (x & y)"
+==== exit
+0
+==== stdout
+
+(x & ~y)
+==== stderr
+prepass: candidates: first 4
+prepass: input 5 chosen first 4
+prepass: candidates: first 4
+prepass: input 4 chosen first 4

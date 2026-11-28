@@ -1,0 +1,47 @@
+# Number functions on a group: the errors name the element to write.
+(import "default")
+(parse "x") | (if ((lowbits | size) > 3) id)
+
+# expect error: size takes t:term? and gives num; its input here is a group: write the element, as in (size main) or (size (index i r))
+
+# ---
+(import "default")
+(parse "x") | (if (opaque id) id)
+
+# expect error: opaque takes t:term? and gives num; its input here is a group: write the element, as in (opaque id main) or (opaque id (index i r))
+
+# ---
+(import "default")
+(parse "x") | rewrite | size | lowbits
+
+# expect error: size gives num; lowbits takes t:term
+
+# ---
+(import "default")
+(parse "x") | (save g) | (if (g | mixed) id)
+
+# expect error: mixed takes t:term? and gives num; its input here is a group: write the element, as in (mixed main) or (mixed (index i r))
+
+# ---
+(import "default")
+(parse "x") | (if mixed id)
+
+# expect error: mixed takes t:term? and gives num; its input here is a group: write the element, as in (mixed main) or (mixed (index i r))
+
+# ---
+(import "default")
+(parse "x") | (fix size id)
+
+# expect error: size takes t:term? and gives num; its input here is a group: write the element, as in (size main) or (size (index i r))
+
+# ---
+(import "default")
+(parse "x") | (filter (any size))
+
+# expect value: group [(Var "x")]
+
+# ---
+(import "default")
+(parse "x") | (if (size + 1) id)
+
+# expect error: size takes t:term? and gives num; its input here is a group: write the element, as in (size main) or (size (index i r))

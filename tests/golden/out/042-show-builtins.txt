@@ -1,0 +1,284 @@
+==== command
+eggy1 --show-builtins
+==== exit
+0
+==== stdout
+# The built-in functions (src/builtins.pipe), by how they are called.
+
+# --- on the whole group (group -> group)
+# Each pipeline in turn on the group of the one before; a scope (also written a | b).
+(extern (seq p:pipe... g:group) group)
+# Every pipeline on the same input, their groups joined in order, repeats dropped.
+(extern @timed (union p:pipe... g:group) group)
+# Every pipeline on the same input, then the k smallest of their elements, at least 1.
+(extern @timed (best k:num p:pipe... g:group) group)
+# The first result that is not empty and differs from the input, else the input.
+(extern @timed (first p:pipe... g:group) group)
+# p repeated at most n times while the first element changes.
+(extern @timed (fix n:num p:pipe g:group) group)
+# a where c holds for the input, else b (id when left out).
+(extern @timed (if c:group->num a:pipe b:pipe? g:group) group)
+# a, and where c holds for its result, b on the same input, taken when no larger.
+(extern @timed (retry c:group->num a:pipe b:pipe g:group) group)
+# p, with the first strictly smaller term a step inside gave put first.
+(extern @timed (smallest p:pipe g:group) group)
+# p on one shared context of memos; a scope.
+(extern @timed (scope p:pipe g:group) group)
+# Each element that is a linear region rebuilt by p with its atom leaves rebuilt by sub, else its operands rebuilt by sub.
+(extern @timed (regions sub:pipe p:pipe g:group) group)
+# p, then sub on its first element where it changed an arithmetic leaf of a bitwise operation, kept when smaller.
+(extern @timed (again sub:pipe p:pipe g:group) group)
+# p timed as n/run; a changed first element is counted in n/won and gets origin n.
+(extern @timed (tag n:name p:pipe g:group) group)
+# p with origin n on every element, timed as pre/n/made (a pre-pass term, cand).
+(extern @timed (origin n:name p:pipe g:group) group)
+# p taken only when its first element is smaller than the input's, with origin n.
+(extern @timed (smaller n:name p:pipe g:group) group)
+# p repeated while a smaller inside takes a result, until n are taken.
+(extern @timed (wins n:num p:pipe g:group) group)
+# The elements c holds for, each taken alone.
+(extern (filter c:term->num g:group) group)
+# Binds the group variable r to the group (r = id).
+(extern (save r:group g:group) group)
+# Counts the elements for stats against the first element of the group variable r.
+(extern (label r:group g:group) group)
+# Opens the note register r, empty; note registers are not group variables.
+(extern (clear r:name g:group) group)
+# Keeps the first smallest element in the newest open r when strictly smaller than the one there.
+(extern @timed @uncounted (note r:name g:group) group)
+# Closes the newest open r: the input, with its term put first when strictly smaller than the first element.
+(extern (take_min r:name g:group) group)
+# The group unchanged.
+(extern (id g:group) group)
+# The empty group.
+(extern (none g:group) group)
+# One egglog round on all elements unioned: its extraction, timed as egglog/label.
+(extern @timed (egglog label:name? g:group) group)
+# The first element proved minimal, else the input.
+(extern @timed (take_minimal g:group) group)
+# The end of a simplification: counts final/ORIGIN of the first element, the gains of the forms in it, and time/cut.
+(extern (settle g:group) group)
+# The empty group once the rewrites budget is used up, else the input.
+(extern (within g:group) group)
+# The end of the pre-pass: counts the elements kept and gives them origins pre/NAME.
+(extern (pre_done g:group) group)
+
+# --- on each element (term -> term)
+# The polish p on the term, as a run of its own, kept when smaller.
+(extern @timed (polish p:pipe t:term) term)
+# Known-bits reasoning: bitwise operations on known bits as additions, low bits cut.
+(extern @switch @timed (lowbits t:term) term)
+# Shifts written as masks, so regions become semi-linear.
+(extern @switch @timed (unshift t:term) term)
+# The whole term replaced by a smaller T-function form.
+(extern @switch @timed (tfunc_whole t:term) term)
+# p on the term, memoized in the scope by the term, p and the variables read, each result computed taking one from the rewrites budget; counted as n.
+(extern @timed (memo n:name p:pipe t:term) term)
+# p, counted as rewrite_top.
+(extern @timed (rewrite_top p:pipe t:term) term)
+# Each region of the term rebuilt in clusters of the leaves its terms use, each cluster by sub.
+(extern @switch @timed (cluster_regions sub:pipe t:term) term)
+# cluster_regions, counted apart.
+(extern @timed (cluster_top sub:pipe t:term) term)
+# Arithmetic leaves of bitwise operations replaced by placeholders and related to the region, rebuilt by sub.
+(extern @switch @timed (relate sub:pipe t:term) term)
+# Subterms replaced by smaller T-function forms.
+(extern @switch @timed (tfunc t:term) term)
+# Operands of bitwise operations written alike, so regions share more leaves.
+(extern @switch @timed (unify_operands t:term) term)
+# Sums of two products joined back into one product, proved and rebuilt by sub.
+(extern @switch @timed (recombine sub:pipe t:term) term)
+# Constants of product factors cut below the other factor's trailing zeros, the cut factors rebuilt by sub.
+(extern @switch @timed (cut_products sub:pipe t:term) term)
+# 2^k*(a ^ K) + c written as (2^k*a) ^ (2^k*K + c).
+(extern @switch @timed (shifted_xor t:term) term)
+# The lowbits steps for rebuilt terms only, such as cut multipliers.
+(extern @switch @timed (simplify_rebuilt t:term) term)
+# The end of a pre-pass rebuild: recombine and cut_products with sub, shifted_xor, then lowbits.
+(extern @timed (finish sub:pipe t:term) term)
+# Operands 2^k*a + c of bitwise operations split into high and low parts, rebuilt by sub.
+(extern @timed (halve sub:pipe t:term) term)
+# Bitwise operations with constants abstracted to variables, rebuilt by sub and put back.
+(extern @timed (over_const_bitwise sub:pipe t:term) term)
+# Shared bitwise subterms abstracted to variables, rebuilt by sub and put back.
+(extern @timed (over_shared_bitwise sub:pipe t:term) term)
+# Products abstracted to variables, rebuilt by sub and put back.
+(extern @timed (over_products sub:pipe t:term) term)
+# Rebuilds by sub by cases on one bit of a variable, undoing selections.
+(extern @timed (split_bits sub:pipe t:term) term)
+# Additions of 0 and multiplications by 1 dropped.
+(extern @timed (drop_identities t:term) term)
+# One rebuild without relate: lowbits, unshift, sub, cluster_regions with sub, tfunc.
+(extern @timed (rebuild sub:pipe t:term) term)
+# Complements pushed inward.
+(extern @timed (polish_push_not t:term) term)
+# Pairs of leaves rebuilt together with the constants by sub.
+(extern @timed (polish_join_constants sub:pipe t:term) term)
+# Leaves moved between linear groups, rebuilt by sub.
+(extern @timed (polish_join_linear sub:pipe t:term) term)
+# over_const_bitwise as a polish pass.
+(extern @timed (polish_over_const_bitwise sub:pipe t:term) term)
+# over_shared_bitwise as a polish pass.
+(extern @timed (polish_over_shared_bitwise sub:pipe t:term) term)
+# over_products as a polish pass.
+(extern @timed (polish_over_products sub:pipe t:term) term)
+# recombine, skipped where a product selects by one bit.
+(extern @timed (polish_recombine sub:pipe t:term) term)
+# Rebuilds by sub by cases on variable shift amounts, also proving the cases equal.
+(extern @timed (polish_shift_cases sub:pipe t:term) term)
+# Bitwise parts written as g(A) op h(B).
+(extern @timed (polish_decompose t:term) term)
+# Terms of one coefficient summed under it.
+(extern @timed (polish_factor t:term) term)
+
+# --- alternatives, on each element, none when no form is found (term -> term?)
+# p on a linear region.
+(extern @switch @timed (simba p:pipe t:term) term?)
+# One bitwise term per block of at most 3 leaves of the conjunction basis.
+(extern @switch @timed (small_blocks t:term) term?)
+# Block rebuild of a wide region.
+(extern @switch @timed (wide_blocks t:term) term?)
+# Polynomial MBA: expanded over leaves rebuilt by sub, reduced and factored, its linear cofactors rebuilt by sub_region.
+(extern @switch @timed (poly_mba sub:pipe sub_region:pipe t:term) term?)
+# The leaves the values do not depend on set to 0, then rebuilt by sub.
+(extern @switch @timed (drop_unused sub:pipe t:term) term?)
+# Terms grouped by the leaves they use, each group rebuilt by sub.
+(extern @switch @timed (clustered sub:pipe t:term) term?)
+# One term peeled off and the rest rebuilt by sub_region.
+(extern @switch @timed (peel sub_region:pipe t:term) term?)
+# peel on the clustered form.
+(extern @switch @timed (peel_clustered sub_region:pipe t:term) term?)
+# Bit-by-bit rebuild of a region with constant masks, the sides of a bit split rebuilt by sub.
+(extern @switch @timed (semi_linear sub:pipe t:term) term?)
+# Rebuild from the region's values on {0,1}^n.
+(extern @switch @timed (rebuild_values t:term) term?)
+# A common multiple c*(v_1 + ... + v_k) of close coefficients pulled out.
+(extern @switch @timed (common_multiple t:term) term?)
+# Small multiples of zero relations between leaves added, then rebuilt.
+(extern @switch @timed (related_leaves t:term) term?)
+# The whole region as one bitwise term.
+(extern @switch @timed (one_wide_term t:term) term?)
+
+# --- on each element, the result groups joined (term -> group)
+# The pre-pass p of the term, as a run of its own: the main rebuild, then those to union with it, by their sources.
+(extern @timed (prepass p:pipe t:term) group)
+# The term printed as infix and read back.
+(extern @timed (reprint t:term) group)
+
+# --- numbers of one term (term -> num)
+# The node count; (size (main r)) of the first element of the group variable r.
+(extern (size t:term?) num)
+# The number of variables.
+(extern (vars t:term?) num)
+# The depth of the tree.
+(extern (depth t:term?) num)
+# The number of products.
+(extern (mul t:term?) num)
+# The number of bitwise operations with a constant operand.
+(extern (bitconst t:term?) num)
+# The number of arithmetic operations under a bitwise one.
+(extern (arith_in_bit t:term?) num)
+# The number of shifts.
+(extern (shift t:term?) num)
+# The number of divisions.
+(extern (div t:term?) num)
+# 1 when the term is r, as in (same (main r) main); 0 when r is none.
+(extern (same r:term? t:term) num)
+# A shift, division or mulhi, and a rebuild by the pre-pass p larger than tiny_size.
+(extern (opaque p:pipe t:term?) num)
+# Arithmetic or a constant directly under a bitwise operation.
+(extern (mixed t:term?) num)
+# The pre-pass p changes it.
+(extern (rebuilds p:pipe t:term?) num)
+# It is the input of the run.
+(extern (input t:term?) num)
+# At most tiny_size nodes.
+(extern (tiny t:term?) num)
+# At most split_size nodes.
+(extern (fits_split t:term?) num)
+# The passes that made it made at most unclustered_after uncached rewrite calls.
+(extern (few_rewrites t:term?) num)
+# The whole term has a smaller T-function form.
+(extern (replaceable t:term?) num)
+# It comes from a rebuild with abstracted subterms.
+(extern (abstracted t:term?) num)
+# It is a linear region without leaves.
+(extern (no_leaves t:term?) num)
+# It is a linear region of more than max_leaves leaves.
+(extern (wide t:term?) num)
+# It has a bitwise operation with a constant operand.
+(extern (const_bitwise t:term?) num)
+
+# --- numbers of the whole group (group -> num)
+# 1 when c holds for some element alone.
+(extern (any c:term->num g:group) num)
+# 1 when the group is not empty and c holds for each element alone.
+(extern (all c:term->num g:group) num)
+# Some element is proved minimal (with prove_minimal on).
+(extern (minimal g:group) num)
+# The last fix stopped at its count with the first element still changing.
+(extern (moved g:group) num)
+# A step of the program was skipped past the time limit with the switch cut on.
+(extern (was_cut g:group) num)
+# wide_blocks gave a kept form in the passes that made some element.
+(extern (used_wide g:group) num)
+# clustered gave a kept form in the passes that made some element.
+(extern (used_clustered g:group) num)
+# The run rebuilds a linear cofactor of poly_mba.
+(extern (cofactor g:group) num)
+
+# --- one element of the group, or none (group -> term?)
+# The element at position i, from 0; none past the last or for i none.
+(extern (index i:num g:group) term?)
+
+# --- a group read from a text (text -> group)
+# The expression s, infix or an egglog term, read in the type num_type: a group of one term.
+(extern (parse s:text) group)
+
+# --- texts of one term (term -> text)
+# The term as infix, its constants written as the type num_type prints them; empty for none.
+(extern (show t:term?) text)
+
+# --- operators, written between their operands (! before its one)
+# a plus b.
+(extern (+ a:num b:num) num)
+# a minus b, at least 0.
+(extern (- a:num b:num) num)
+# a times b.
+(extern (* a:num b:num) num)
+# a divided by b, rounded down.
+(extern (/ a:num b:num) num)
+# 1 when a is less than b.
+(extern (< a:num b:num) num)
+# 1 when a is at most b.
+(extern (<= a:num b:num) num)
+# 1 when a is greater than b.
+(extern (> a:num b:num) num)
+# 1 when a is at least b.
+(extern (>= a:num b:num) num)
+# 1 when a equals b.
+(extern (== a:num b:num) num)
+# 1 when a differs from b.
+(extern (!= a:num b:num) num)
+# 1 when a and each b are not 0; each b is evaluated only while all before are not 0.
+(extern (&& a:num b:group->num...) num)
+# 1 when a or some b is not 0; each b is evaluated only while all before are 0.
+(extern (|| a:num b:group->num...) num)
+# 1 when a is 0.
+(extern (! a:num) num)
+
+# --- no result: run for what they do, the input passing on
+# Nothing when c is not 0; else the run ends with the error msg.
+(extern (assert c:num msg:text))
+# The values x written to stderr, separated by spaces.
+(extern (print x:any...))
+
+# --- defined by def in src/default.pipe
+(prepass_steps g:group) group
+(polish_steps g:group) group
+(rewrite g:group) group
+(simba_steps g:group) group
+(cand enabled:num n:name p:pipe g:group) group
+(pipeline g:group) group
+(simplify g:group) group
+==== stderr

@@ -1,0 +1,8 @@
+==== command
+eggy1 -n i16 "(x + 1) * 2 - 2"
+==== exit
+0
+==== stdout
+
+(2 * x)
+==== stderr

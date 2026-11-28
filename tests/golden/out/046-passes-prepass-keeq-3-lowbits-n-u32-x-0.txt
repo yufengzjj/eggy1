@@ -1,0 +1,10 @@
+==== command
+eggy1 --passes "prepass=keeq = 3 | lowbits" -n u32 "x + 0"
+==== exit
+0
+==== stdout
+
+x
+==== stderr
+--passes: warning: prepass_steps: number variable keeq is bound and never read
+--passes: warning: prepass_steps: number variable keeq is a new local variable; did you mean keep?

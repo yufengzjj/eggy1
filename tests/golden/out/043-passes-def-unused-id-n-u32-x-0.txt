@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes "(def (unused) id)" -n u32 "x + 0"
+==== exit
+0
+==== stdout
+
+x
+==== stderr
+--passes: warning: (def (unused) ...) is never used: it runs only where a later item calls it

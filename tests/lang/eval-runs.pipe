@@ -1,0 +1,44 @@
+# polish and a def are runs of their own: own group variables and assignments, an outer smallest sees only what they give; @inline shares the caller's.
+(import "default")
+num_type = u32
+(def (polish_steps) rewrite | (save p) | none)
+sub = (parse "(x | y) - (x & y)")
+sub | main | (save p) | (polish polish_steps) | (seq p) | (save r) | (print "polish has its own group variables:" r)
+sub | main | (smallest (polish polish_steps)) | (save r) | (print "an outer smallest sees no element made inside polish:" r)
+sub | main | (save q) | (smallest rewrite | none | (seq q)) | (save r) | (print "it sees those of the passes of its own run:" r)
+
+# expect stderr: polish has its own group variables: ((x | y) - (x & y))
+# expect stderr: an outer smallest sees no element made inside polish: ((x | y) - (x & y))
+# expect stderr: it sees those of the passes of its own run: (x ^ y), ((x | y) - (x & y))
+# expect warning: polish_steps: group variable p is bound and never read
+# expect value: group [(Xor (Var "x") (Var "y")), (Sub (Or (Var "x") (Var "y")) (And (Var "x") (Var "y")))]
+
+# ---
+(import "default")
+num_type = u32
+(def (f) rewrite | (save p) | split_runs = 3 | (if (split_runs == 3) (seq p) none))
+(def (h) rewrite | none)
+(def (k) (if (split_runs == 5) id none))
+(def @inline (g) rewrite | (save p) | split_runs = 3)
+(def @inline (h2) rewrite | none)
+sub = (parse "(x | y) - (x & y)")
+sub | f | (save r) | (print "a def runs on the group, with its own assignments and group variables:" r)
+sub | (save p) | f | (seq p) | (save r) | (print "a def has its own group variables:" r)
+(sub | f | (if (split_runs == 3) (save s1)) | (seq s1)) | (save r) | (print "an assignment in a def ends with its run:" r)
+(sub | split_runs = 5 | k) | (save r) | (print "a def reads the caller's bindings:" r)
+sub | (save s2) | (smallest h | (seq s2)) | (save r) | (print "an outer smallest sees no element made inside a def:" r)
+sub | (save s3) | (smallest f | none | (seq s3)) | (save r) | (print "it sees what the call gives:" r)
+sub | (save p) | g | (seq p) | (save r) | (print "an @inline def shares the caller's group variables:" r)
+(sub | g | (if (split_runs == 3) (save s4)) | (seq s4)) | (save r) | (print "and its sequence: the assignment reaches the steps after it:" r)
+sub | (save s5) | (smallest h2 | (seq s5)) | (save r) | (print "and its smallest:" r)
+
+# expect stderr: a def runs on the group, with its own assignments and group variables: (x ^ y)
+# expect stderr: a def has its own group variables: ((x | y) - (x & y))
+# expect stderr: an assignment in a def ends with its run: 
+# expect stderr: a def reads the caller's bindings: ((x | y) - (x & y))
+# expect stderr: an outer smallest sees no element made inside a def: ((x | y) - (x & y))
+# expect stderr: it sees what the call gives: (x ^ y), ((x | y) - (x & y))
+# expect stderr: an @inline def shares the caller's group variables: (x ^ y)
+# expect stderr: and its sequence: the assignment reaches the steps after it: (x ^ y)
+# expect stderr: and its smallest: (x ^ y), ((x | y) - (x & y))
+# expect value: group [(Xor (Var "x") (Var "y")), (Sub (Or (Var "x") (Var "y")) (And (Var "x") (Var "y")))]

@@ -1,0 +1,8 @@
+==== command
+eggy1 -n u32 "(x << 3) >> 3"
+==== exit
+0
+==== stdout
+
+(x & 0x1fffffff)
+==== stderr

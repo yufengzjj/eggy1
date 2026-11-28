@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes polish+=factor x
+==== exit
+2
+==== stdout
+==== stderr
+error: invalid value 'polish+=factor' for '--passes <PASSES>': polish is not a list: polish+=factor
+
+For more information, try '--help'.

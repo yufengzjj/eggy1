@@ -1,0 +1,46 @@
+# Number functions give 0 on no elements, conditions are numbers, none is +infinity in arithmetic.
+(import "default")
+num_type = u32
+empty = ((parse "x") | none)
+(print "on no elements:" (size main) (mul main) (vars main) (mixed main) (input main) moved (tiny main) (size (main empty)) (same (main empty) main) (any 1) (all 1))
+(print "!tiny:" !(tiny main))
+(print "a comparison compares the zeros:" ((size main) < (size (main empty)) + 1) ((size main) > (size (main empty))))
+(print "a variable is read without elements too:" split_runs)
+sub = (parse "(x | y) - (x & y)")
+sub | main | (print "an empty group variable:" (size (main empty)) size)
+
+# expect stderr: on no elements: 0 0 0 0 0 0 0 0 0 0 0
+# expect stderr: !tiny: 1
+# expect stderr: a comparison compares the zeros: 1 0
+# expect stderr: a variable is read without elements too: 16
+# expect stderr: an empty group variable: 0 7
+# expect value: group [(Sub (Or (Var "x") (Var "y")) (And (Var "x") (Var "y")))]
+
+# ---
+(import "default")
+num_type = u32
+x = (parse "x - y")
+m = (parse "x * (x * y)")
+m | main | (print (mul + 0) ((mul >= 1) + (vars == 2) * 4))
+x | main | (print !3 !!3 (2 && 5) (0 || 7) (vars * (mixed || 1)))
+m | main | (if mul none) | (save r) | (print "a number holds where it is not 0:" r)
+x | main | (if mul none) | (save r) | (print "(if mul none):" r)
+x | main | (fix (mul < 1) rewrite) | (filter (size == 5)) | (save r) | (print "a comparison counts as 1:" r)
+
+# expect stderr: 2 5
+# expect stderr: 0 1 1 1 2
+# expect stderr: a number holds where it is not 0: 
+# expect stderr: (if mul none): (x - y)
+# expect stderr: a comparison counts as 1: 
+# expect value: group []
+
+# ---
+(import "default")
+(print (none + 1) (1 + none) (none * 0) (none - 1) (0 - none) (none - none) (3 - 5) (7 / 2) (5 / 0) (5 / none) (none / 2))
+(print (18446744073709551614 + 1) (4294967296 * 4294967296) (none > 18446744073709551614) (none == none) (!none))
+(print (none != split_runs) (rewrites + 0) (rewrites == none))
+
+# expect stderr: none none none none 0 0 0 3 none 0 none
+# expect stderr: none none 1 1 0
+# expect stderr: 1 none 1
+# expect value: group []

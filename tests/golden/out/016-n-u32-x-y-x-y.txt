@@ -1,0 +1,8 @@
+==== command
+eggy1 -n u32 "(x & y) + (x | y)"
+==== exit
+0
+==== stdout
+
+(x + y)
+==== stderr

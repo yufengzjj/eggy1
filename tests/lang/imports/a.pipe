@@ -1,0 +1,3 @@
+(import "sub/b.pipe")
+(print "a.pipe runs")
+imported_a = imported_b + 1

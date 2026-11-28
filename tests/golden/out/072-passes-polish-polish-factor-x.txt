@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes polish=polish/factor x
+==== exit
+2
+==== stdout
+==== stderr
+error: invalid value 'polish=polish/factor' for '--passes <PASSES>': names cannot contain '/': write polish_factor
+
+For more information, try '--help'.

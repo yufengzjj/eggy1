@@ -1,0 +1,18 @@
+# Imports: once per program, relative to the importing file; a missing file and an import inside a form are errors.
+(import "imports/a.pipe")
+(import "imports/a.pipe")
+imported_a
+
+# expect stderr: a.pipe runs
+# expect value: 2
+
+# ---
+(import "nowhere.pipe")
+
+# expect error: import "nowhere.pipe": no file nowhere.pipe and no source named nowhere.pipe
+
+# ---
+(import "default")
+(def (f) (import "default"))
+
+# expect error: (import "PATH") is a top-level item of a program, not a step

@@ -1,0 +1,8 @@
+==== command
+eggy1 --passes "off=relate off-=relate" -n u32 "(x ^ y) + 2*(x & y)"
+==== exit
+0
+==== stdout
+
+(x + y)
+==== stderr

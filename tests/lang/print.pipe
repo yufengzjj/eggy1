@@ -1,0 +1,8 @@
+# print writes its values to stderr, one line per call.
+(print "hello world")
+n_print = 6
+(print "n is" n_print (n_print * 7))
+
+# expect stderr: hello world
+# expect stderr: n is 6 42
+# expect value: group []

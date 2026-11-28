@@ -1,0 +1,112 @@
+==== command
+eggy1 --stats -n u8 "(a + b) * 0"
+==== exit
+0
+==== stdout
+
+0
+==== stderr
+final:
+  final/pre/first                                         1     <t>s
+pass:
+  pass/cluster_top                                        1     <t>s
+  pass/cluster_top/self                                   1     <t>s
+  pass/cut_products                                       2     <t>s
+  pass/cut_products/self                                  2     <t>s
+  pass/drop_identities                                   20     <t>s
+  pass/drop_identities/self                              20     <t>s
+  pass/finish                                             2     <t>s
+  pass/finish/gain                                        1     <t>s
+  pass/finish/self                                        2     <t>s
+  pass/finish/smaller                                     1     <t>s
+  pass/finish/survived                                    1     <t>s
+  pass/halve                                              2     <t>s
+  pass/halve/self                                         2     <t>s
+  pass/over_const_bitwise                                 2     <t>s
+  pass/over_const_bitwise/self                            2     <t>s
+  pass/over_products                                      2     <t>s
+  pass/over_products/self                                 2     <t>s
+  pass/over_shared_bitwise                                2     <t>s
+  pass/over_shared_bitwise/self                           2     <t>s
+  pass/polish_decompose                                   2     <t>s
+  pass/polish_decompose/self                              2     <t>s
+  pass/polish_factor                                      2     <t>s
+  pass/polish_factor/self                                 2     <t>s
+  pass/polish_join_constants                              2     <t>s
+  pass/polish_join_constants/self                         2     <t>s
+  pass/polish_join_linear                                 2     <t>s
+  pass/polish_join_linear/self                            2     <t>s
+  pass/polish_over_const_bitwise                          2     <t>s
+  pass/polish_over_const_bitwise/self                     2     <t>s
+  pass/polish_over_products                               2     <t>s
+  pass/polish_over_products/self                          2     <t>s
+  pass/polish_over_shared_bitwise                         2     <t>s
+  pass/polish_over_shared_bitwise/self                    2     <t>s
+  pass/polish_push_not                                    2     <t>s
+  pass/polish_push_not/self                               2     <t>s
+  pass/polish_recombine                                   2     <t>s
+  pass/polish_recombine/self                              2     <t>s
+  pass/polish_shift_cases                                 2     <t>s
+  pass/polish_shift_cases/self                            2     <t>s
+  pass/recombine                                          2     <t>s
+  pass/recombine/self                                     2     <t>s
+  pass/relate                                             1     <t>s
+  pass/relate/self                                        1     <t>s
+  pass/rewrite_top                                        1     <t>s
+  pass/rewrite_top/self                                   1     <t>s
+  pass/shifted_xor                                        2     <t>s
+  pass/shifted_xor/self                                   2     <t>s
+  pass/simplify_rebuilt                                   2     <t>s
+  pass/simplify_rebuilt/gain                              1     <t>s
+  pass/simplify_rebuilt/self                              2     <t>s
+  pass/simplify_rebuilt/smaller                           1     <t>s
+  pass/simplify_rebuilt/survived                          1     <t>s
+  pass/split_bits                                         2     <t>s
+  pass/split_bits/self                                    2     <t>s
+  pass/tfunc                                              1     <t>s
+  pass/tfunc/self                                         1     <t>s
+  pass/tfunc_whole                                        2     <t>s
+  pass/tfunc_whole/gain                                   3     <t>s
+  pass/tfunc_whole/self                                   2     <t>s
+  pass/tfunc_whole/smaller                                1     <t>s
+  pass/unify_operands                                     2     <t>s
+  pass/unify_operands/self                                2     <t>s
+  pass/unshift                                            2     <t>s
+  pass/unshift/self                                       2     <t>s
+polish_decompose:
+  polish_decompose/run                                    2     <t>s
+polish_factor:
+  polish_factor/run                                       2     <t>s
+polish_join_constants:
+  polish_join_constants/run                               2     <t>s
+polish_join_linear:
+  polish_join_linear/run                                  2     <t>s
+polish_over_const_bitwise:
+  polish_over_const_bitwise/run                           2     <t>s
+polish_over_products:
+  polish_over_products/run                                2     <t>s
+polish_over_shared_bitwise:
+  polish_over_shared_bitwise/run                          2     <t>s
+polish_push_not:
+  polish_push_not/run                                     2     <t>s
+polish_recombine:
+  polish_recombine/run                                    2     <t>s
+polish_shift_cases:
+  polish_shift_cases/run                                  2     <t>s
+pre:
+  pre/first/made                                          2     <t>s
+  pre/first/main                                          2     <t>s
+  pre/halve_first/made                                    2     <t>s
+  pre/halve_input/made                                    2     <t>s
+  pre/no_wide/made                                        2     <t>s
+  pre/no_wide_abstracted/made                             2     <t>s
+  pre/over_const_bitwise/made                             2     <t>s
+  pre/over_products/made                                  2     <t>s
+  pre/over_shared_bitwise/made                            2     <t>s
+  pre/split_bits/made                                     2     <t>s
+  pre/unclustered/made                                    2     <t>s
+  pre/unified/made                                        2     <t>s
+rerun_printed:
+  rerun_printed/run                                       1     <t>s
+round:
+  round/minimal                                           3     <t>s

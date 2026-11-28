@@ -1,0 +1,83 @@
+# Malformed definitions and parameter types are errors.
+(import "default")
+(def (f x) id)
+
+# expect error: def (f x): parameter x is never used in the body
+
+# ---
+(import "default")
+(def @pure (f) id)
+
+# expect error: unknown attribute @pure of def; known: @inline @timed
+
+# ---
+(import "default")
+(def f id)
+
+# expect error: expected (NAME) after def, found f
+
+# ---
+(import "default")
+(def (f) id id)
+
+# expect error: expected ), found id
+
+# ---
+(import "default")
+(def (f c:term->num->num) c)
+
+# expect error: type term->num->num of parameter c: a function takes one input, term or group, and gives num, term, term? or group
+
+# ---
+(import "default")
+(def (f c:num->term) c)
+
+# expect error: type num->term of parameter c: a function takes one input, term or group, and gives num, term, term? or group
+
+# ---
+(import "default")
+(def (f c:term->num g) g | c | lowbits)
+
+# expect error: c gives num; lowbits takes t:term
+
+# ---
+(import "default")
+(def @pipe (f g) g | lowbits)
+
+# expect error: unknown attribute @pipe of def; known: @inline @timed
+
+# ---
+(import "default")
+(def (f c:term->num) (best 1 c))
+
+# expect error: parameter c:term->num is used where pipe is wanted
+
+# ---
+(import "default")
+(def (f c:term->term) (filter c))
+
+# expect error: parameter c:term->term is used where term->num is wanted
+
+# ---
+(import "default")
+(def (f x:num->) x)
+
+# expect error: expected a type after ->, found )
+
+# ---
+(import "default")
+(def (f x:int->num) x)
+
+# expect error: unknown type int->num of parameter x; known: pipe group term num name, and A->B as in term->num
+
+# ---
+(import "default")
+(def (f n) n = 3)
+
+# expect error: parameter n cannot be assigned
+
+# ---
+(import "default")
+(def (f n) (fix n id) | n = id)
+
+# expect error: parameter n cannot be assigned

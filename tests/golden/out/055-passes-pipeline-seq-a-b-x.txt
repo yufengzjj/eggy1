@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes "pipeline=seq(a,b)" x
+==== exit
+2
+==== stdout
+==== stderr
+error: invalid value 'pipeline=seq(a,b)' for '--passes <PASSES>': unexpected character ',' in pipeline (the old seq(a,b) syntax is no longer read: write a | b, (best 1 a b), (if c a))
+
+For more information, try '--help'.

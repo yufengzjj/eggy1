@@ -1,0 +1,8 @@
+==== command
+eggy1 -m 3 -n u32 "(x ^ y) + 2*(x & y)"
+==== exit
+0
+==== stdout
+
+(x + y)
+==== stderr

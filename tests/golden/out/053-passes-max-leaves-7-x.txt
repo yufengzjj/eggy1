@@ -1,0 +1,7 @@
+==== command
+eggy1 --passes max_leaves=7 x
+==== exit
+1
+==== stdout
+==== stderr
+error: max_leaves is at most 6

@@ -1,0 +1,92 @@
+# Recursion and late binding: calls before the definition, the last definition runs.
+(import "default")
+(def (even n:num) (if (n > 0) (odd (n - 1)) (parse "e")))
+(def (odd n:num) (if (n > 0) (even (n - 1)) (parse "o")))
+(parse "x") | (even 3) | main | show
+
+# expect value: o
+
+# ---
+(import "default")
+(def (even n:num) (if (n > 0) (odd (n - 1)) (parse "e")))
+(def (odd n:num) (if (n > 0) (even (n - 1)) (parse "o")))
+(parse "x") | (even 400) | main | show
+
+# expect value: e
+
+# ---
+(import "default")
+(def (g) (h 1) | (filter (big 0)))
+(def (h n) (fix n id))
+(def (big k) size > k)
+(parse "x + y") | g | main | show
+
+# expect value: (x + y)
+
+# ---
+(import "default")
+(def (f n:num) (fix n (parse "a")))
+(def (g) (f 1))
+(def (f k:num) (fix k (parse "b")))
+(parse "x") | g | main | show
+
+# expect value: b
+
+# ---
+(import "default")
+(def (f) (fix 1 (parse "a")))
+(def (g) f)
+(parse "x") | g | main | show
+(def (f) (fix 1 (parse "b")))
+
+# expect value: b
+
+# ---
+(import "default")
+(def (f s:name) (off s) | ((parse "a")))
+(def (g) (f relate))
+(def (f t:name) (on t) | ((parse "b")))
+(parse "x") | g | main | show
+
+# expect value: b
+
+# ---
+(def (f) (f 1))
+
+# expect error: f takes 1 argument; | gives the last: (f g:group) group; f is called before its definition, where a call reads it by its head: a function that gives a group, its parameters of the types written
+
+# ---
+(import "default")
+(def (f) f)
+(parse "x") | f
+
+# expect error: recursion deeper than 2000 calls in f
+
+# ---
+(import "default")
+(def (app p:pipe) p)
+(def (f) (app f))
+(parse "x") | f
+
+# expect error: recursion deeper than 2000 calls in f
+
+# ---
+(import "default")
+(def (f) (memo loop f))
+(parse "x + y") | f
+
+# expect error: recursion deeper than 2000 calls in f
+
+# ---
+(import "default")
+(def (f) (regions f f))
+(parse "x + y") | f
+
+# expect error: recursion deeper than 2000 calls in f
+
+# ---
+(import "default")
+(def (f n:num) (f (n + 1)) | id)
+(parse "x") | (f 0)
+
+# expect error: recursion deeper than 2000 calls in f

@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes split_runs=x x
+==== exit
+2
+==== stdout
+==== stderr
+error: invalid value 'split_runs=x' for '--passes <PASSES>': split_runs=x: split_runs is a variable that holds a number, so it cannot be bound to a group: x gives a group
+
+For more information, try '--help'.

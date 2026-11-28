@@ -1,0 +1,112 @@
+# Command lines of eggy1 (the arguments only), one per line, run from the crate root.
+# Snapshots are in tests/golden/out/ (NNN-slug.txt, NNN the case's place in this file);
+# UPDATE_GOLDEN=1 cargo test --test golden rewrites them.
+# [full] cases compare exit status, stdout and stderr (times masked);
+# [status] cases (time-dependent) compare only the exit status and whether the run was cut.
+
+[full]
+# Each numeric type, and the default (i64).
+-n u8 "(x ^ y) + 2*(x & y)"
+-n i8 "(x ^ y) + 2*(x & y)"
+-n u16 "(x ^ y) + 2*(x & y)"
+-n i16 "(x ^ y) + 2*(x & y)"
+-n u32 "(x ^ y) + 2*(x & y)"
+-n i32 "(x ^ y) + 2*(x & y)"
+-n u64 "(x ^ y) + 2*(x & y)"
+-n i64 "(x ^ y) + 2*(x & y)"
+"(a + b) * 0"
+-n u8 "x - (x & y)"
+-n u16 "(x | 0xff00) & 0x0ff0"
+-n i32 -- "-2*x + y + 2*x"
+-n u32 "(x << 3) >> 3"
+-n u32 "mulhi(x, 3) + 0"
+-n i16 "(x + 1) * 2 - 2"
+-n u32 "(x & y) + (x | y)"
+
+# Rounds and iterations.
+-m 1 -n u32 "(x ^ y) + 2*(x & y)"
+-m 3 -n u32 "(x ^ y) + 2*(x & y)"
+-i 1 -n u32 "(x ^ y) + 2*(x & y)"
+-i 50 -n u8 "(x & y) + (x | y)"
+
+# --passes items of each kind.
+--passes extra=0 -n u32 "(x ^ y) + 2*(x & y)"
+--passes "keep = 2" -n u32 "(x ^ y) + 2*(x & y)"
+--passes off=relate -n u32 "(x ^ y) + 2*(x & y)"
+--passes off+=lowbits -n u32 "(x ^ y) + 2*(x & y)"
+--passes "off=relate off-=relate" -n u32 "(x ^ y) + 2*(x & y)"
+--passes pre=unified,split_bits -n u32 "(x ^ y) + 2*(x & y)"
+--passes pre-=halve_input -n u32 "(x ^ y) + 2*(x & y)"
+--passes pre+=split_bits -n u32 "(x ^ y) + 2*(x & y)"
+--passes polish=push_not,factor -n u32 "(x ^ y) + 2*(x & y)"
+--passes "pipeline=prepass | (egglog first)" -n u32 "(x ^ y) + 2*(x & y)"
+--passes "prepass=lowbits | rewrite" -n u32 "(x ^ y) + 2*(x & y)"
+--passes "rewrite=(best 1 simba small_blocks)" -n u32 "(x ^ y) + 2*(x & y)"
+--passes "simba=(best 1 clustered semi_linear)" -n u32 "(x ^ y) + 2*(x & y)"
+--passes file=tests/golden/fixtures/settings.pipe -n u32 "(x ^ y) + 2*(x & y)"
+--passes "file=tests/golden/fixtures/settings.pipe prepass=lean_prepass" -n u32 "(x ^ y) + 2*(x & y)"
+--passes "(def (mypre) lowbits | rewrite) prepass=mypre" -n u32 "(x ^ y) + 2*(x & y)"
+
+# Reports.
+--stats -n u8 "(a + b) * 0"
+--trace -n u8 "x - (x & y)"
+--trace -n u32 "(x ^ y) + 2*(x & y) - (x | y)*3"
+--show-passes
+--show-passes --passes "pre-=halve_input polish=push_not,factor extra=0"
+--show-builtins
+
+# Warnings.
+--passes "(def (unused) id)" -n u32 "x + 0"
+--passes "(let l id)" -n u32 "x + 0"
+--passes "prepass=lowbits | keep = 2" -n u32 "x + 0"
+--passes "prepass=keeq = 3 | lowbits" -n u32 "x + 0"
+
+# Errors.
+"(a + "
+""
+-n u7 x
+--passes off=nosuchpass x
+--passes bogus=1 x
+--passes "pipeline=(nosuch)" x
+--passes max_leaves=7 x
+--passes polish/factor x
+--passes "pipeline=seq(a,b)" x
+--passes "prepass=rewrite |" x
+--passes "prepass=(max_leaves = (vars main) * 4 | check_limits | rewrite)" "x - y"
+
+# Spec items that are errors.
+--passes minimal=0 x
+--passes relate=none x
+--passes nope=1 x
+--passes kep=3 x
+--passes "split_runs=4 | rewrite" x
+--passes keep+=1 x
+--passes size=3 x
+--passes split_runs+=1 x
+--passes split_runs=x x
+--passes pre=done x
+--passes pre+=nope x
+--passes off=semi/bit_split x
+--passes semi/peel_shapes=1 x
+--passes "semi/peel_shapes = 1" x
+--passes polish=polish/factor x
+--passes polish+=factor x
+--passes polish=nope x
+--passes "sub_cluster=(regions simba)" x
+--passes sub_split_bits=rewrite x
+--passes sub_nope=rewrite x
+--passes schedule=run:nope x
+--passes schedule=go:simplify x
+--passes file=no/such/file.pipe x
+--passes time-limit=500 x
+--passes "prepass=seq(lowbits,rewrite)" x
+--passes "(let x id) extra" x
+--passes "pipeline=(seq rewrite" x
+
+# Spaces around = make an item the source form, which gives no warning.
+--passes "keep = 3 extra=1" -n u32 "x + 0"
+
+[status]
+--passes time_limit=0 -n u32 "(x ^ y) + 2*(x & y)"
+--passes time_limit=60000 -n u32 "(x ^ y) + 2*(x & y)"
+--passes time_limit=none -n u32 "(x ^ y) + 2*(x & y)"

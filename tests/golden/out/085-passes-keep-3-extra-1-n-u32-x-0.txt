@@ -1,0 +1,8 @@
+==== command
+eggy1 --passes "keep = 3 extra=1" -n u32 "x + 0"
+==== exit
+0
+==== stdout
+
+x
+==== stderr

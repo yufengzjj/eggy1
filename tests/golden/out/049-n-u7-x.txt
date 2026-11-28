@@ -1,0 +1,10 @@
+==== command
+eggy1 -n u7 x
+==== exit
+2
+==== stdout
+==== stderr
+error: invalid value 'u7' for '--num-type <NUM_TYPE>'
+  [possible values: i64, u64, i32, u32, i16, u16, i8, u8]
+
+For more information, try '--help'.

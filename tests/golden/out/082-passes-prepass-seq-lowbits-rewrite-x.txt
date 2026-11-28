@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes "prepass=seq(lowbits,rewrite)" x
+==== exit
+2
+==== stdout
+==== stderr
+error: invalid value 'prepass=seq(lowbits,rewrite)' for '--passes <PASSES>': unexpected character ',' in pipeline (the old seq(a,b) syntax is no longer read: write a | b, (best 1 a b), (if c a))
+
+For more information, try '--help'.

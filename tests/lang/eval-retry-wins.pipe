@@ -1,0 +1,27 @@
+# retry keeps a where b gives none and takes b no larger; wins 0 runs nothing.
+(import "default")
+num_type = u32
+sub = (parse "(x | y) - (x & y)")
+r = (sub | (retry 1 rewrite none))
+(print "(retry 1 rewrite none):" r)
+r = (sub | (retry 1 id rewrite))
+(print "b no larger is taken:" r)
+r = (sub | (retry 1 none rewrite))
+(print "b is taken where a gives none:" r)
+r = (sub | (retry 0 id rewrite))
+(print "(retry 0 id rewrite):" r)
+r = (sub | (wins 0 (smaller s rewrite)))
+(print "(wins 0 (smaller s rewrite)):" r)
+r = (sub | (wins 0 none))
+(print "(wins 0 none):" r)
+r = (sub | (wins 1 (smaller s rewrite)))
+(print "(wins 1 (smaller s rewrite)):" r)
+
+# expect stderr: (retry 1 rewrite none): (x ^ y)
+# expect stderr: b no larger is taken: (x ^ y)
+# expect stderr: b is taken where a gives none: (x ^ y)
+# expect stderr: (retry 0 id rewrite): ((x | y) - (x & y))
+# expect stderr: (wins 0 (smaller s rewrite)): ((x | y) - (x & y))
+# expect stderr: (wins 0 none): ((x | y) - (x & y))
+# expect stderr: (wins 1 (smaller s rewrite)): (x ^ y)
+# expect value: group []

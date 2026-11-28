@@ -1,0 +1,5 @@
+# Reading a group variable that nothing bound is an error before the program runs.
+(print "not reached")
+(size (main nothing_here))
+
+# expect error: the program reads group variable nothing_here before it is bound

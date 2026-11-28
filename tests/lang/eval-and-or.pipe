@@ -1,0 +1,25 @@
+# && and || evaluate their later operands only while the result is open; other operators evaluate every operand.
+(import "default")
+v = (parse "x")
+(print "0 && b && c:")
+(v | main | (if (0 && ((print "b") | size) && ((print "c") | size)) id))
+(print "1 && b && c:")
+(v | main | (if (1 && ((print "b") | size) && ((print "c") | size)) id))
+(print "1 || b || c:")
+(v | main | (if (1 || ((print "b") | size) || ((print "c") | size)) id))
+(print "0 || b || c, size is 1, so c is not needed:")
+(v | main | (if (0 || ((print "b") | size) || ((print "c") | size)) id))
+(print "b + c > 0:")
+(v | main | (if (((print "b") | size) + ((print "c") | size) > 0) id))
+
+# expect stderr: 0 && b && c:
+# expect stderr: 1 && b && c:
+# expect stderr: b
+# expect stderr: c
+# expect stderr: 1 || b || c:
+# expect stderr: 0 || b || c, size is 1, so c is not needed:
+# expect stderr: b
+# expect stderr: b + c > 0:
+# expect stderr: b
+# expect stderr: c
+# expect value: group [(Var "x")]

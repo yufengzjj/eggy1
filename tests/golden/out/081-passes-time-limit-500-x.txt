@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes time-limit=500 x
+==== exit
+2
+==== stdout
+==== stderr
+error: invalid value 'time-limit=500' for '--passes <PASSES>': time-limit=500: unknown variable time-limit: names use _, not -; write time_limit
+
+For more information, try '--help'.

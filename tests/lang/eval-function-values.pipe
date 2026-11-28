@@ -1,0 +1,146 @@
+# Function values: conditions as functions, stored function values, defs that return functions, built-ins without their input.
+(import "default")
+num_type = u32
+sub = (parse "(x | y) - (x & y)")
+(def (keep_if pred g:group) g | (filter pred))
+(def (under k) (size <= k))
+(def (each f:term->term g:group) g | f)
+(def (pick pred) (save t) | (if ((pred t) > 5) rewrite))
+(print pick each keep_if)
+(def (c1) main | (union id rewrite) | (keep_if (size <= 5)))
+sub | c1 | (save r) | (print "the condition is a function applied to each element:" r)
+(def (c2) main | small:term->num = (size <= 5) | (union id rewrite) | (filter small))
+sub | c2 | (save r) | (print "a stored function value:" r)
+(def (c3) main | f:term->num = size | (union id rewrite) | (filter (f < 5)))
+sub | c3 | (save r) | (print "a stored function applied to the input of the step:" r)
+(def (c4) main | (save t) | f:term->num = size | (union id rewrite) | (filter ((f (main t)) < 5)))
+sub | c4 | (save r) | (print "or to an element of a group:" r)
+(def (c5) main | (union id rewrite) | (filter (under 5)))
+sub | c5 | (save r) | (print "a def that returns a function:" r)
+(def (c6) main | (union id rewrite) | (keep_if (under 5)))
+sub | c6 | (save r) | (print "(keep_if (under 5)):" r)
+(def (c7) main | (if (under 5) rewrite))
+sub | c7 | (save r) | (print "the same def called in an expression gives a number:" r)
+(def (f8 n) small:term->num = (size <= n) | (union id rewrite) | (keep_if small))
+(def (c8) main | (f8 5))
+sub | c8 | (save r) | (print "a closure reads the frame of the def it is written in:" r)
+(def (c9) main | (f8 9))
+sub | c9 | (save r) | (print "(f8 9):" r)
+(def (c10) main | (each (rewrite_top rewrite)))
+sub | c10 | (save r) | (print "a built-in without its input is a function value:" r)
+(def (c11) main | f:term->term = (rewrite_top rewrite) | f)
+sub | c11 | (save r) | (print "and can be stored:" r)
+(def (with_budget n p:pipe) rewrites = n | p)
+(def (app p:pipe g:group) g | p)
+(def (c12) main | (app (with_budget 0 rewrite)) | (app (with_budget 8 rewrite)))
+sub | c12 | (save r) | (print "a def without its last argument:" r)
+(def (big k g:group) (size (main g)) > k)
+(def (c13) main | (union id rewrite) | (keep_if (big 5)))
+sub | c13 | (save r) | (print "group->num where term->num is wanted: on each element alone:" r)
+(def (when c:group->num p) (if (c > 5) p))
+(def (c14) main | (when (size main) rewrite))
+sub | c14 | (save r) | (print "(when (size main) rewrite):" r)
+(def (c15) main | (pick (size main)))
+sub | c15 | (save r) | (print "a parameter called on a group is a function:" r)
+(def (c16) main | (pick (vars main)))
+sub | c16 | (save r) | (print "(pick (vars main)):" r)
+
+# expect stderr: (pick pred:group->num g:group) group (each f:term->term g:group) group (keep_if pred:term->num g:group) group
+# expect stderr: the condition is a function applied to each element: (x ^ y)
+# expect stderr: a stored function value: (x ^ y)
+# expect stderr: a stored function applied to the input of the step: (x ^ y)
+# expect stderr: or to an element of a group: 
+# expect stderr: a def that returns a function: (x ^ y)
+# expect stderr: (keep_if (under 5)): (x ^ y)
+# expect stderr: the same def called in an expression gives a number: ((x | y) - (x & y))
+# expect stderr: a closure reads the frame of the def it is written in: (x ^ y)
+# expect stderr: (f8 9): ((x | y) - (x & y)), (x ^ y)
+# expect stderr: a built-in without its input is a function value: (x ^ y)
+# expect stderr: and can be stored: (x ^ y)
+# expect stderr: a def without its last argument: (x ^ y)
+# expect stderr: group->num where term->num is wanted: on each element alone: ((x | y) - (x & y))
+# expect stderr: (when (size main) rewrite): (x ^ y)
+# expect stderr: a parameter called on a group is a function: (x ^ y)
+# expect stderr: (pick (vars main)): ((x | y) - (x & y))
+# expect value: group [(Sub (Or (Var "x") (Var "y")) (And (Var "x") (Var "y")))]
+
+# ---
+(import "default")
+(def (when c:group->num p) (if (c > 5) p))
+(def (prepass_steps) (when size rewrite))
+
+# expect error: prepass_steps: size takes t:term? and gives num; its input here is a group: write the element, as in (size main) or (size (index i r))
+
+# ---
+(import "default")
+(def (each f:term->term g:group) g | f)
+(def (prepass_steps) main | (each (best 1 rewrite)))
+
+# expect error: each takes f:term->term: (each f:term->term g:group) group; (best 1 rewrite) is pipe
+
+# ---
+(import "default")
+(def (keep_if pred g:group) g | (filter pred))
+(def (prepass_steps) main | f:term->term = (rewrite_top rewrite) | (keep_if f))
+
+# expect error: keep_if takes pred:term->num: (keep_if pred:term->num g:group) group; f is term->term
+
+# ---
+(import "default")
+(def (prepass_steps) main | f:term->num = size | (union id rewrite) | f)
+
+# expect error: main | f:term->num = size | (union id rewrite) | f gives a number, not a group: a pipeline that ends in a number goes where a number does, as in x = (a | size)
+
+# ---
+(import "default")
+(def (prepass_steps) main | f:term->num = size | (best 1 f))
+
+# expect error: f gives a number, not a group: it holds term->num; a step calls a function that gives a group
+
+# ---
+(import "default")
+(def (prepass_steps) main | f:term->term = (best 1 rewrite))
+
+# expect error: f holds term->term; (best 1 rewrite) is pipe
+
+# ---
+(import "default")
+(def (prepass_steps) main | f:term->num = size | (save f))
+
+# expect error: f is a function variable, so it cannot name a group variable
+
+# ---
+(import "default")
+(def (prepass_steps) main | f = size | (save f))
+
+# expect error: f is a number variable, so it cannot name a group variable
+
+# ---
+(import "default")
+(def (prepass_steps) main | f:term->num = size | f = 3)
+
+# expect error: f is a function variable, so it cannot hold a number: 3 gives a number; write f:TYPE = ... for a function
+
+# ---
+(import "default")
+(def (prepass_steps) main | (save f) | f:term->num = size)
+
+# expect error: f is a group variable, so it cannot hold a function value
+
+# ---
+(import "default")
+(def (prepass_steps) main | keep:term->num = size)
+
+# expect error: keep cannot be assigned
+
+# ---
+(import "default")
+(def (prepass_steps) main | (save f) | f = size)
+
+# expect error: f is a group variable, so it cannot hold a number: size gives a number
+
+# ---
+(import "default")
+(def (f p) (filter p) | (best 1 p))
+
+# expect error: parameter p is used as term->num and as pipe

@@ -1,0 +1,30 @@
+# The run settings are variables: their defaults, keep read as at least 1, a number variable holds where it is not 0.
+(import "default")
+num_type = u32
+d = (parse "x - y")
+(print "a run without -m leaves restarts none:" keep extra restarts)
+(d | keep = 0 | extra = keep + 3 | (if (extra == 3 && keep == 1) (save ok)) | (seq ok))
+(print "assignments end with their sequence:" extra)
+r = (d | keep = 0 | (best keep id (union id rewrite)))
+(print "keep reads as at least 1:" r)
+d | extra = 0
+(print extra)
+r = (d | (if extra none))
+(print "a number variable holds where it is not 0:" r)
+r = (d | (if !extra none))
+(print "(if !extra none):" r)
+d | rerun_input = 0
+r = (d | (if rerun_input none))
+(print "(if rerun_input none):" r)
+r = (d | (if (time_limit && prove_minimal) none))
+(print "none holds:" r)
+
+# expect stderr: a run without -m leaves restarts none: 2 2 none
+# expect stderr: assignments end with their sequence: 2
+# expect stderr: keep reads as at least 1: (x - y)
+# expect stderr: 0
+# expect stderr: a number variable holds where it is not 0: (x - y)
+# expect stderr: (if !extra none): 
+# expect stderr: (if rerun_input none): (x - y)
+# expect stderr: none holds: 
+# expect value: group [(Sub (Var "x") (Var "y"))]

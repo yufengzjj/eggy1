@@ -149,74 +149,16 @@ mod tests {
         p.finish().unwrap().0
     }
 
-    fn text(source: &str) -> String {
-        match value(source) {
-            Ok(Some(Value::Text(t))) => t,
-            r => panic!("{source}: {}", r.err().unwrap_or_else(|| "no text".into())),
-        }
-    }
-
     #[test]
-    fn a_program_runs_once_top_to_bottom() {
-        assert!(matches!(value("1 + 2"), Ok(Some(Value::Num(3)))));
-        assert!(matches!(value("x_global = 4\nx_global * 2"), Ok(Some(Value::Num(8)))), "a new name assigned a number is a global");
-        assert_eq!(text("\"a b\""), "a b");
-        assert!(matches!(value("(print \"hello world\")"), Ok(Some(Value::Group(g))) if g.is_empty()), "the candidates start empty");
-        assert!(matches!(value("(def (f) id)"), Ok(None)) && matches!(value("keep = 3"), Ok(None)), "a definition or an assignment gives no value");
-        assert!(matches!(value("(import \"default\")\nf:term->num = size\nf"), Ok(Some(Value::Fn(_)))));
-        let lib = "(import \"default\")\n";
-        assert_eq!(text(&format!("{lib}(parse \"x + 0xff\") | main | show")), "(x + 0xff)", "i64 when num_type is none");
-        assert_eq!(text(&format!("{lib}num_type = i8\n(parse \"x + 0xff\") | main | show")), "(x - 1)");
-        assert_eq!(text(&format!("{lib}num_type = u8\nt = (parse \"(Add (Var \\\"x\\\") (Num -1))\")\n(show (main t))")), "(x + 0xff)", "an egglog term, and a group variable of the top level");
-        assert_eq!(text(&format!("{lib}num_type = u32\n(parse \"(x & y) + (x | y)\")\nsimplify\nmain\nshow")), "(x + y)", "the steps of the top level are one sequence");
-        let r = execute_then(&passes(&format!("{lib}trace = 0\nnum_type = u16")), &[("num_type", "u8"), ("restarts", "5")], || (host::num_type(), get(crate::rust_vars::RESTARTS))).unwrap().1;
+    fn caller_globals_come_first() {
+        let r = execute_then(&passes("(import \"default\")\ntrace = 0\nnum_type = u16"), &[("num_type", "u8"), ("restarts", "5")], || (host::num_type(), get(crate::rust_vars::RESTARTS))).unwrap().1;
         assert_eq!(r, ("u16", 5), "the caller's globals come first, a definition as none keeps them");
-        for (bad, msg) in [
-            ("lowbits", "lowbits has no group to work on at the top level"),
-            ("(import \"default\")\nsimplify", "simplify has no group"),
-            ("(import \"default\")\nt = (parse \"x\")\nsimplify", "simplify has no group"),
-            ("t = (lowbits | unshift)", "has no group"),
-            ("show", "show has no element"),
-            ("(import \"default\")\n(parse \"x\") | show", "show takes t:term? and gives text; its input here is a group: write the element, as in (show main)"),
-            ("(size (main t))", "the program reads group variable t before it is bound"),
-            ("num_type = u7", "num_type takes a numeric type"),
-            ("(import \"default\")\n(parse \"x\") | main | show | rewrite", "show gives text; rewrite takes g:group"),
-            ("(import \"default\")\n(parse \"x\") | (fix 2 show)", "show gives a text, not a group"),
-        ] {
-            let e = value(bad).err().unwrap_or_else(|| panic!("{bad} runs"));
-            assert!(e.contains(msg), "{bad}: {e}");
-        }
     }
 
     #[test]
-    fn recursion_and_late_binding() {
-        let run = |lines: &[&str]| text(&format!("(import \"default\")\n{}", lines.join("\n")));
-        let parity = ["(def (even n:num) (if (n > 0) (odd (n - 1)) (parse \"e\")))", "(def (odd n:num) (if (n > 0) (even (n - 1)) (parse \"o\")))"];
-        assert_eq!(run(&[&parity[..], &["(parse \"x\") | (even 3) | main | show"]].concat()), "o", "a call before the definition, and recursion through another function");
-        assert_eq!(run(&[&parity[..], &["(parse \"x\") | (even 400) | main | show"]].concat()), "e");
-        let late = ["(def (g) (h 1) | (filter (big 0)))", "(def (h n) (fix n id))", "(def (big k) size > k)", "(parse \"x + y\") | g | main | show"];
-        assert_eq!(run(&late), "(x + y)", "the signature of a function defined later comes from its definition");
-        let again = ["(def (f n:num) (fix n (parse \"a\")))", "(def (g) (f 1))", "(def (f k:num) (fix k (parse \"b\")))", "(parse \"x\") | g | main | show"];
-        assert_eq!(run(&again), "b", "a call runs the last definition, also one read before it");
-        let after = ["(def (f) (fix 1 (parse \"a\")))", "(def (g) f)", "(parse \"x\") | g | main | show", "(def (f) (fix 1 (parse \"b\")))"];
-        assert_eq!(run(&after), "b", "the program runs after it is read whole");
-        let named = ["(def (f s:name) (off s) | ((parse \"a\")))", "(def (g) (f relate))", "(def (f t:name) (on t) | ((parse \"b\")))", "(parse \"x\") | g | main | show"];
-        assert_eq!(run(&named), "b", "with its name arguments in place");
-        let e = value("(def (f) (f 1))").err().unwrap();
-        assert!(e.contains("f takes 1 argument; | gives the last"), "{e}");
+    fn a_call_before_its_definition_needs_its_arguments() {
         let e = value("(def (f n) (fix n (f n)))").err().unwrap();
         assert!(e.contains("f is called before its definition"), "{e}");
-        let deep = format!("recursion deeper than {} calls in f", super::super::eval::MAX_DEPTH);
-        for bad in [
-            ["(def (f) f)", "(parse \"x\") | f"],
-            ["(def (app p:pipe) p)\n(def (f) (app f))", "(parse \"x\") | f"],
-            ["(def (f) (memo loop f))", "(parse \"x + y\") | f"],
-            ["(def (f) (regions f f))", "(parse \"x + y\") | f"],
-            ["(def (f n:num) (f (n + 1)) | id)", "(parse \"x\") | (f 0)"],
-        ] {
-            let e = value(&format!("(import \"default\")\n{}", bad.join("\n"))).err().unwrap_or_else(|| panic!("{bad:?} runs"));
-            assert!(e.contains(&deep), "{bad:?}: {e}");
-        }
     }
 
     #[test]
@@ -230,13 +172,10 @@ mod tests {
         let a = dir.join("a.pipe").display().to_string().replace('\\', "/");
         let p = passes(&format!("(import \"{a}\")\n(import \"{a}\")"));
         assert_eq!(p.program.len(), 2, "a file is imported once per program, its imports relative to it");
-        assert!(matches!(value(&format!("(import \"{a}\")\nimported_a")), Ok(Some(Value::Num(2)))));
         let c = dir.join("sub/c.pipe").display().to_string().replace('\\', "/");
         let e = value(&format!("(import \"{c}\")")).err().unwrap();
         assert!(e.contains("import cycle: ") && e.contains("c.pipe -> ") && e.contains("d.pipe -> "), "{e}");
         std::fs::remove_dir_all(&dir).unwrap();
-        assert!(value("(import \"nowhere.pipe\")").err().unwrap().contains("no file nowhere.pipe and no source named nowhere.pipe"));
-        assert!(value("(import \"default\")\n(def (f) (import \"default\"))").err().unwrap().contains("top-level item"));
         let twice = passes("(import \"default\")\n(import \"default\")");
         assert_eq!(twice, host::DEFAULT.0, "the default library is read once");
     }

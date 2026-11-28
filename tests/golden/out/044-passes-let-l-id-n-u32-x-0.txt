@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes "(let l id)" -n u32 "x + 0"
+==== exit
+0
+==== stdout
+
+x
+==== stderr
+--passes: warning: (let l ...) is never used: a name is expanded only where a later item writes it

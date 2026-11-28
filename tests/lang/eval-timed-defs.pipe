@@ -1,0 +1,35 @@
+# Only @timed definitions are skipped past the time limit.
+(import "default")
+num_type = u32
+(def (f) (print 1))
+(def @timed (g) (print 2))
+(def @inline @timed (h) (print 3))
+(def @inline @timed (k n) (print n))
+v = (parse "x")
+(v | main | f | g | h | (k 4))
+(print "past the time limit:")
+(v | main | time_limit = 0 | f | g | h | (k 4))
+
+# expect stderr: 1
+# expect stderr: 2
+# expect stderr: 3
+# expect stderr: 4
+# expect stderr: past the time limit:
+# expect stderr: 1
+# expect value: group [(Var "x")]
+
+# ---
+(import "default")
+(def @timed (n) size + 1)
+
+# expect error: def (n): @timed is for a function that gives a group, which a call past the time limit skips
+
+# ---
+(import "default")
+(def @timed (prepass_steps) (print "a function of default.pipe defined again may be @timed"))
+v = (parse "x")
+(v | prepass_steps)
+(v | time_limit = 0 | prepass_steps)
+
+# expect stderr: a function of default.pipe defined again may be @timed
+# expect value: group [(Var "x")]

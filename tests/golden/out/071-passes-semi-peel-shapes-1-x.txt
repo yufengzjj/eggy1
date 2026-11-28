@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes "semi/peel_shapes = 1" x
+==== exit
+2
+==== stdout
+==== stderr
+error: invalid value 'semi/peel_shapes = 1' for '--passes <PASSES>': semi/peel_shapes = 1: names cannot contain '/': write semi_peel_shapes
+
+For more information, try '--help'.

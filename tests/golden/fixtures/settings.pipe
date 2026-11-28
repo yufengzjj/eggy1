@@ -1,0 +1,4 @@
+# A --passes file: settings and a definition the command line can use.
+extra = 0
+keep = 2
+(def (lean_prepass) lowbits | rewrite)

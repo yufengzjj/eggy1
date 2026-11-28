@@ -1,0 +1,11 @@
+# main and index pick an element of a group, size and same give 0 on none.
+(import "default")
+(parse "(x ^ y) + 2*(x & y)") | (save t) | (union id rewrite) | (save u) | none | (save e)
+(print "on no elements:" (size (main t)) (size main) (same (main t) main) ((main t) | size) ((index 1 u) | size))
+(t | (print u (size (main t)) (size (main e)) (size (index 0 u)) (size (index 1 u)) (size (index 2 u)) (size (index none u))))
+(t | main | (print (same (main t)) (same (main e)) (same (index 1 u)) (rewrite | main | (same (index 1 u)))))
+
+# expect stderr: on no elements: 9 0 0 9 3
+# expect stderr: ((x ^ y) + (2 * (x & y))), (x + y) 9 0 9 3 0 0
+# expect stderr: 1 0 0 1
+# expect value: group [(Add (Xor (Var "x") (Var "y")) (Mul (Num 2) (And (Var "x") (Var "y"))))]

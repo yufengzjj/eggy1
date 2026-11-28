@@ -1,0 +1,166 @@
+# Definitions that replace, clash with or are checked against earlier names, and their warnings.
+(import "default")
+(def (f) id)
+(def (f n:num) (fix n id))
+
+# expect error: f is defined before as (f g:group) group; a later definition replaces it only with the same signature, not (f n:num g:group) group
+
+# ---
+(import "default")
+(def (f) id)
+(def (f) size + 1)
+
+# expect error: size gives a number, not a group: (size t:term?) num; a step calls a function that gives a group
+
+# ---
+(import "default")
+(def (f) id)
+(let f id)
+
+# expect error: let f: f is already a function (def (f) ...), which only a def defines again
+
+# ---
+(import "default")
+(def (f) id)
+(def @inline (f) id)
+
+# expect error: def @inline (f): f is already a function (def (f) ...), which only a def defines again
+
+# ---
+(import "default")
+(let f id)
+(def (f) id)
+
+# expect error: def (f): f is already defined by let or def @inline
+
+# ---
+(import "default")
+(def (gates) id)
+
+# expect error: def (gates): gates is already defined by let or def @inline
+
+# ---
+(import "default")
+(def (lowbits) id)
+
+# expect error: def (lowbits): the name of a pass, form or macro
+
+# ---
+(import "default")
+(def (split_runs) id)
+
+# expect error: def (split_runs): the name of a variable or function
+
+# ---
+(import "default")
+(def @inline (prepass_steps) id)
+
+# expect error: def @inline (prepass_steps): prepass_steps is already a function (def (prepass_steps) ...), which only a def defines again
+
+# ---
+(import "default")
+(def (prepass_steps n:num) id)
+
+# expect error: prepass_steps is defined before as (prepass_steps g:group) group; a later definition replaces it only with the same signature, not (prepass_steps n:num g:group) group
+
+# ---
+(import "default")
+(let polish id)
+
+# expect error: let polish: the name of a pass, form or macro
+
+# ---
+(import "default")
+(def (f) (filter (same (main t))))
+
+# expect error: f reads group variable t before it is bound (t = ... or (save t))
+
+# ---
+(import "default")
+(def (f) (save t))
+(def (prepass_steps) f | (filter (same (main t))))
+
+# expect error: prepass_steps reads group variable t before it is bound (t = ... or (save t))
+
+# ---
+(import "default")
+(def (f) id)
+(def (prepass_steps) (f 1))
+
+# expect error: f takes 1 argument; | gives the last: (f g:group) group
+
+# ---
+(import "default")
+(def (f) id)
+(def (prepass_steps) (if f id))
+
+# expect error: f gives a group, not a number: (f g:group) group; an expression reads variables and number functions
+
+# ---
+(import "default")
+(def (f) id)
+(def (prepass_steps) f = 1)
+
+# expect error: f is a function and cannot be assigned: (f g:group) group
+
+# ---
+(import "default")
+(def (f) id)
+(def (f) rewrite)
+(def (prepass_steps) f)
+
+# ---
+(import "default")
+(def (f) prepass_steps)
+(def (g) f)
+(def (prepass_steps) lowbits | g)
+
+# ---
+(import "default")
+(def (f) polish_steps)
+(def (g) (if (mixed main) f))
+(def (polish_steps) g)
+
+# ---
+(import "default")
+(def (f) egglog)
+(def (pipeline) f | (polish polish_steps))
+
+# ---
+(import "default")
+(def (f) egglog)
+(def (g) f)
+(def (prepass_steps) g)
+
+# ---
+(import "default")
+(def (f) rewrite | (relate rewrite))
+(def (simba_steps) (clustered f))
+
+# ---
+(import "default")
+(def @inline (g) id)
+(def @inline (g) rewrite)
+(def (prepass_steps) g)
+
+# ---
+(import "default")
+(def (f) (save t) | (seq t))
+(def (prepass_steps) (save t) | f | (seq t))
+
+# ---
+(import "default")
+(def (f) rewrite)
+(def @inline (g) rewrite)
+(def (h) (relate rewrite))
+(def (prepass_steps) h)
+
+# expect warning: (def (f) ...) is never used: it runs only where a later item calls it
+# expect warning: (def @inline (g) ...) is never used: it is expanded only where a later item calls it
+
+# ---
+(import "default")
+(def (f) (save t) | rewrite)
+(def (prepass_steps) f)
+
+# expect warning: f: group variable t is bound and never read

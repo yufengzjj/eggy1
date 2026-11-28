@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes file=tests/golden/fixtures/settings.pipe -n u32 "(x ^ y) + 2*(x & y)"
+==== exit
+0
+==== stdout
+
+(x + y)
+==== stderr
+--passes: warning: (def (lean_prepass) ...) is never used: it runs only where a later item calls it

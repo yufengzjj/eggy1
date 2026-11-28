@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes "(let x id) extra" x
+==== exit
+2
+==== stdout
+==== stderr
+error: invalid value '(let x id) extra' for '--passes <PASSES>': expected key=value: extra
+
+For more information, try '--help'.

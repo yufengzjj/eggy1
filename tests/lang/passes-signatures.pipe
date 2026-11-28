@@ -1,0 +1,23 @@
+# Signatures inferred for definitions with name, group, pipeline and numeric parameters, printed as function values.
+(import "default")
+(def (try_without name p) (best 1 p ((off name) | p)))
+(def (hold r:group p:pipe) p | (union id (seq r)))
+(def (prepass_steps) (try_without relate rewrite) | (save t) | (hold t (lowbits | rewrite)))
+(print try_without hold)
+
+# expect stderr: (try_without name:name p:pipe g:group) group (hold r:group p:pipe g:group) group
+# expect value: group []
+
+# ---
+(import "default")
+(def (with_budget n p:pipe) rewrites = n | p)
+(def (if_small k p) (if ((size main) <= k) p))
+(def (g q:pipe) q | rewrite)
+(def (f n) (if_small (n * 2) (g ((filter (size <= n)) | (with_budget (n + 1) rewrite)))))
+(def @inline (lim n p:pipe) split_runs = n | p)
+(def @inline (lim2 n p:pipe) (split_runs = n | p))
+(def (prepass_steps) (f 3) | (lim none id) | (lim2 ((size main) - 1) (with_budget 8 rewrite)))
+(print with_budget f lim)
+
+# expect stderr: (with_budget n:num p:pipe g:group) group (f n:num g:group) group (lim n:num p:pipe g:group) group
+# expect value: group []

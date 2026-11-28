@@ -1,0 +1,155 @@
+# Reads of group variables bound before them, and warnings about group variables.
+(import "default")
+(def (prepass_steps) (filter (same (main x))))
+
+# expect error: prepass_steps reads group variable x before it is bound (x = ... or (save x))
+
+# ---
+(import "default")
+(def (prepass_steps) (save t) | (filter (same (main u))))
+
+# expect error: prepass_steps reads group variable u before it is bound (u = ... or (save u))
+
+# ---
+(import "default")
+(def (prepass_steps) (filter (same (main t))) | (save t))
+
+# expect error: prepass_steps reads group variable t before it is bound (t = ... or (save t))
+
+# ---
+(import "default")
+(def (polish_steps) (filter (size < (size (main t)))))
+
+# expect error: polish_steps reads group variable t before it is bound (t = ... or (save t))
+
+# ---
+(import "default")
+(def (rewrite) (if (same (main t) main) id))
+
+# expect error: rewrite reads group variable t before it is bound (t = ... or (save t))
+
+# ---
+(import "default")
+(def (prepass_steps) (if (mixed main) (save t)) | (label u))
+
+# expect error: prepass_steps reads group variable u before it is bound (u = ... or (save u))
+
+# ---
+(import "default")
+(def (pipeline) (retry ((size main) < (size (main t))) id (save t)))
+
+# expect error: pipeline reads group variable t before it is bound (t = ... or (save t))
+
+# ---
+(import "default")
+(def (prepass_steps) t = (filter (same (main t))))
+
+# expect error: prepass_steps reads group variable t before it is bound (t = ... or (save t))
+
+# ---
+(import "default")
+(def (prepass_steps) t = u | (seq t))
+
+# expect error: prepass_steps reads group variable u before it is bound (u = ... or (save u))
+
+# ---
+(import "default")
+(def (prepass_steps) (filter (same (main t))) | t = id)
+
+# expect error: prepass_steps reads group variable t before it is bound (t = ... or (save t))
+
+# ---
+(import "default")
+(def (prepass_steps) t = (u = id) | (seq u) | (filter (same (main v))))
+
+# expect error: prepass_steps reads group variable v before it is bound (v = ... or (save v))
+
+# ---
+(import "default")
+(def (f) t = id)
+(def (prepass_steps) f | (filter (same (main t))))
+
+# expect error: prepass_steps reads group variable t before it is bound (t = ... or (save t))
+
+# ---
+(import "default")
+(def (prepass_steps) (if (mixed main) (save t)) | (seq t))
+
+# ---
+(import "default")
+(def (prepass_steps) (fix 3 (union (filter (same (main t))) id) | (save t)))
+
+# ---
+(import "default")
+(def (pipeline) (retry ((size main) < (size (main t))) (save t) (seq t)))
+
+# ---
+(import "default")
+(def (prepass_steps) (best (size (main t)) (save t) id))
+
+# ---
+(import "default")
+(def (prepass_steps) t = rewrite | (seq t))
+
+# ---
+(import "default")
+(def (prepass_steps) t = (u = id) | (seq u) | (seq t))
+
+# ---
+(import "default")
+(def (f p:pipe) p | none)
+(def (prepass_steps) (f t = rewrite) | (seq t))
+
+# ---
+(import "default")
+(let foo rewrite)
+(let bar lowbits)
+(def (prepass_steps) bar | (save t) | (save q) | (seq t) | ((off relate) | (save x) | id) | (rewrite | (off relate)))
+
+# expect warning: (let foo ...) is never used: a name is expanded only where a later item writes it
+# expect warning: prepass_steps: group variable q is bound and never read
+# expect warning: prepass_steps: group variable x is bound and never read
+# expect warning: prepass_steps: (off relate) ends its sequence and changes nothing
+
+# ---
+(import "default")
+(def (prepass_steps) (save t) | rewrite | (save t) | (seq t))
+
+# expect warning: prepass_steps: group variable t is bound again before its value is read
+
+# ---
+(import "default")
+(def (prepass_steps) t = (off relate) | (seq t))
+
+# expect warning: prepass_steps: (off relate) ends its sequence and changes nothing
+
+# ---
+(import "default")
+(def (prepass_steps) t = id | t = rewrite | (seq t) | u = rewrite | id)
+
+# expect warning: prepass_steps: group variable u is bound and never read
+# expect warning: prepass_steps: group variable t is bound again before its value is read
+
+# ---
+(import "default")
+(def (prepass_steps) (save t) | (if (mixed main) (save t)) | (seq t))
+
+# ---
+(import "default")
+(def (prepass_steps) (save t) | (cand pre_unified unified (save t)) | (seq t))
+
+# ---
+(import "default")
+(def (prepass_steps) (fix 3 (save t) | rewrite) | (seq t))
+
+# ---
+(import "default")
+(def (prepass_steps) (save t) | (filter (size < (size (main t)))) | (save t) | (seq t))
+
+# ---
+(import "default")
+(def (prepass_steps) (save t) | (first rewrite (save t)) | (seq t))
+
+# ---
+(import "default")
+(def (prepass_steps) (if (mixed main) (save t) (save t)) | (seq t))

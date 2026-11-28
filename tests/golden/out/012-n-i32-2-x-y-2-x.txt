@@ -1,0 +1,8 @@
+==== command
+eggy1 -n i32 -- "-2*x + y + 2*x"
+==== exit
+0
+==== stdout
+
+y
+==== stderr

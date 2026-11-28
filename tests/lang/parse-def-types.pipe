@@ -1,0 +1,31 @@
+# Written parameter types, function types and group parameters, printed as the signature.
+(import "default")
+(def (f p:group->group) p | lowbits)
+(print f)
+
+# expect stderr: (f p:pipe g:group) group
+# expect value: group []
+
+# ---
+(import "default")
+(def (f p:group -> group) (best 1 p))
+(print f)
+
+# expect stderr: (f p:pipe g:group) group
+# expect value: group []
+
+# ---
+(import "default")
+(def (f r:group) u = r | (u | id))
+(print f)
+
+# expect stderr: (f r:group g:group) group
+# expect value: group []
+
+# ---
+(import "default")
+(def (f a:group p:pipe) p | (a | id))
+(print f)
+
+# expect stderr: (f a:group p:pipe g:group) group
+# expect value: group []

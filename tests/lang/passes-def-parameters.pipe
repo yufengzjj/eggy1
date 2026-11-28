@@ -1,0 +1,300 @@
+# Parameters of definitions: their uses, arguments at calls, errors and warnings.
+(import "default")
+(def (f a:pipe b:pipe) (seq a) | (seq b))
+(def (prepass_steps) (save t) | (f t t))
+
+# ---
+(import "default")
+(def (f p:pipe) (save t) | p | (seq t))
+(def (prepass_steps) (save t) | (f ((seq t) | rewrite)))
+
+# ---
+(import "default")
+(def (f r) (tag r id) | (origin r id) | (smaller r id) | (egglog r))
+(def (pipeline) (f x))
+
+# ---
+(import "default")
+(def (f r) (if ((size (main r)) > 1 && (same (main r) main)) id) | (label r))
+(def (prepass_steps) (save t) | (f t))
+
+# ---
+(import "default")
+(def (f n) (fix n n))
+
+# expect error: parameter n is used as an expression and as a pipeline
+
+# ---
+(import "default")
+(def (f n) (fix n id) | (seq n))
+
+# expect error: parameter n is used as an expression and as a pipeline
+
+# ---
+(import "default")
+(def (f n) (fix n id) | n = 1)
+
+# expect error: parameter n cannot be assigned
+
+# ---
+(import "default")
+(def (g) (if (size <= n) id))
+(def (f n) (fix n g))
+
+# expect error: unknown name n in an expression; known: size vars depth mul bitconst arith_in_bit shift div (same ...) (any ...) (all ...) (opaque ...) minimal mixed (rebuilds ...) moved was_cut input tiny fits_split used_wide used_clustered few_rewrites replaceable abstracted no_leaves wide const_bitwise cofactor and the variables
+
+# ---
+(import "default")
+(def (f n p) (fix n p))
+(def (prepass_steps) (f id id))
+
+# expect error: id gives a group, not a number: (id g:group) group; an expression reads variables and number functions; f takes 3 arguments; | gives the last: (f n:num p:pipe g:group) group
+
+# ---
+(import "default")
+(def (f n p) (fix n p))
+(def (prepass_steps) (f 3 4))
+
+# expect error: f takes 3 arguments; | gives the last: (f n:num p:pipe g:group) group
+
+# ---
+(import "default")
+(def (f n p) (fix n p))
+(def (prepass_steps) (f 3))
+
+# expect error: f takes 3 arguments; | gives the last: (f n:num p:pipe g:group) group
+
+# ---
+(import "default")
+(def (f r:group n) (seq r) | (fix n id))
+(def (prepass_steps) (f 3 3))
+
+# expect error: expected a group variable after f, found 3
+
+# ---
+(import "default")
+(def (f n) (fix n id))
+(def (prepass_steps) (f relate = 1))
+
+# expect error: an assignment is a step; compare with ==; f takes 2 arguments; | gives the last: (f n:num g:group) group
+
+# ---
+(import "default")
+(def (f n) (fix n id))
+(def (prepass_steps) (f (seq t)))
+
+# expect error: seq gives a group, not a number: (seq p:pipe... g:group) group; an expression reads variables and number functions; f takes 2 arguments; | gives the last: (f n:num g:group) group
+
+# ---
+(import "default")
+(def (f n) (fix n id))
+(def (prepass_steps) (f ((size (main t)) + 1)))
+
+# expect error: prepass_steps reads group variable t before it is bound (t = ... or (save t))
+
+# ---
+(import "default")
+(def @inline (f n) (filter (same (main t))) | (fix n id))
+(def (prepass_steps) (f 1))
+
+# expect error: prepass_steps reads group variable t before it is bound (t = ... or (save t))
+
+# ---
+(import "default")
+(def (k r:group) (seq r))
+(def @inline (i n) (k t) | (fix n id))
+(def (prepass_steps) (i 1))
+
+# expect error: prepass_steps reads group variable t before it is bound (t = ... or (save t))
+
+# ---
+(import "default")
+(def (f p) id | p | (filter (same (main p))))
+
+# expect error: def (f p): parameter p is used as a group or a term and as a step p
+
+# ---
+(import "default")
+(def (f r) (seq r) | (tag r id))
+
+# expect error: def (f r): parameter r is used as name and as a step
+
+# ---
+(import "default")
+(def (f p q) p)
+
+# expect error: def (f p q): parameter q is never used in the body
+
+# ---
+(import "default")
+(def (f r) r = 1)
+
+# expect error: parameter r cannot be assigned
+
+# ---
+(import "default")
+(def (f relate) id)
+
+# expect error: def (f relate): parameter relate is the name of a variable, function or definition
+
+# ---
+(import "default")
+(def (f rewrite) id)
+
+# expect error: def (f rewrite): parameter rewrite is the name of a variable, function or definition
+
+# ---
+(import "default")
+(def (f gates) id)
+
+# expect error: def (f gates): parameter gates is the name of a variable, function or definition
+
+# ---
+(import "default")
+(def (f p p) p)
+
+# expect error: def (f p p): parameter p is written twice
+
+# ---
+(import "default")
+(def (f f) id)
+
+# expect error: def (f f): parameter f is written twice; f is called before its definition, where a call reads it by its head: a function that gives a group, its parameters of the types written
+
+# ---
+(import "default")
+(def (prepass_steps p:pipe) p)
+
+# expect error: prepass_steps is defined before as (prepass_steps g:group) group; a later definition replaces it only with the same signature, not (prepass_steps p:pipe g:group) group
+
+# ---
+(import "default")
+(def (f p) (p id))
+
+# expect error: parameter p takes a group value: (p g)
+
+# ---
+(import "default")
+(def (f p:pipe) p)
+(def (prepass_steps) f)
+
+# expect error: f needs parentheses: (f ...); (f p:pipe g:group) group
+
+# ---
+(import "default")
+(def (f p:pipe) p)
+(def (prepass_steps) (f))
+
+# expect error: f takes 2 arguments; | gives the last: (f p:pipe g:group) group
+
+# ---
+(import "default")
+(def (f p:pipe) p)
+(def (prepass_steps) (f id id))
+
+# expect error: f takes 2 arguments; | gives the last: (f p:pipe g:group) group
+
+# ---
+(import "default")
+(def (f r:group p:pipe) (seq r) | p)
+(def (prepass_steps) (f (id) id))
+
+# expect error: expected a group variable after f, found (
+
+# ---
+(import "default")
+(def (f r:group p:pipe) (seq r) | p)
+(def (prepass_steps) (f t))
+
+# expect error: f takes 2 arguments: (f r:group p:pipe) group
+
+# ---
+(import "default")
+(def (f n p:pipe) (off n) | p)
+(def (prepass_steps) (f nope id))
+
+# expect error: unknown off name nope (the argument for n); known: lowbits,unshift,tfunc_whole,relate,tfunc,unify_operands,recombine,cut_products,shifted_xor,simplify_rebuilt,cluster_regions,simba,small_blocks,wide_blocks,poly_mba,poly_masked,rebuild_values,common_multiple,related_leaves,one_wide_term,semi_linear,drop_unused,clustered,peel,peel_clustered,semi_grouped,semi_peel_grouped,semi_shapes,semi_pairs,semi_peel_shapes,semi_split,semi_scaled,semi_bit_split,semi_short_consts,cut,rerun_input,prove_minimal,relate_parts
+
+# ---
+(import "default")
+(def (f p:pipe) p)
+(def (prepass_steps) (if f id))
+
+# expect error: f gives a group, not a number: (f p:pipe g:group) group; an expression reads variables and number functions
+
+# ---
+(import "default")
+(def (f p:pipe) p)
+(def (prepass_steps) f = 1)
+
+# expect error: f is a function and cannot be assigned: (f p:pipe g:group) group
+
+# ---
+(import "default")
+(def (f r:group) (seq r))
+(def (prepass_steps) (f t))
+
+# expect error: prepass_steps reads group variable t before it is bound (t = ... or (save t))
+
+# ---
+(import "default")
+(def (f a:group b:group) (seq a) | (seq b))
+(def (prepass_steps) (save t) | (f t u))
+
+# expect error: prepass_steps reads group variable u before it is bound (u = ... or (save u))
+
+# ---
+(import "default")
+(def (f a) (save a))
+
+# expect error: parameter a cannot be assigned
+
+# ---
+(import "default")
+(def (f a) a = rewrite)
+
+# expect error: parameter a cannot be assigned
+
+# ---
+(import "default")
+(def (f p:pipe) id | p)
+(def (prepass_steps) (f (filter (same (main t)))))
+
+# expect error: prepass_steps reads group variable t before it is bound (t = ... or (save t))
+
+# ---
+(import "default")
+(def (f p:pipe) (save t) | p)
+(def (prepass_steps) (f id))
+
+# expect warning: f: group variable t is bound and never read
+
+# ---
+(import "default")
+(def (f p:pipe) p)
+(def @inline (g p:pipe) p)
+(def (prepass_steps) id)
+
+# expect warning: (def (f p) ...) is never used: it runs only where a later item calls it
+# expect warning: (def @inline (g p) ...) is never used: it is expanded only where a later item calls it
+
+# ---
+(import "default")
+(def (f p n) (fix n p))
+(def (prepass_steps) id)
+
+# expect warning: (def (f p n) ...) is never used: it runs only where a later item calls it
+
+# ---
+(import "default")
+(def @inline (f n) (save s) | (fix n id))
+(def (prepass_steps) (f 2) | rewrite)
+
+# expect warning: prepass_steps: group variable s is bound and never read
+
+# ---
+(import "default")
+(def @inline (f n) split_runs = n)
+(def (prepass_steps) rewrite | (f 2))
+
+# expect warning: prepass_steps: split_runs = n ends its sequence and changes nothing

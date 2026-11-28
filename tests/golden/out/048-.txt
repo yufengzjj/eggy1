@@ -1,0 +1,7 @@
+==== command
+eggy1 ""
+==== exit
+0
+==== stdout
+please enter a expression
+==== stderr

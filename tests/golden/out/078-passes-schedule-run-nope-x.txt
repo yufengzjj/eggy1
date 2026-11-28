@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes schedule=run:nope x
+==== exit
+2
+==== stdout
+==== stderr
+error: invalid value 'schedule=run:nope' for '--passes <PASSES>': unknown ruleset nope; known: default-ruleset,canonicalization,constant-folding,analysis,identity-zero-element,simplify
+
+For more information, try '--help'.

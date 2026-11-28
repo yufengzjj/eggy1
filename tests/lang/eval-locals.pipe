@@ -1,0 +1,57 @@
+# Local variables hold a number or a function value, evaluated once where they are bound; a closure captures the values it reads.
+(import "default")
+num_type = u32
+sub = (parse "(x | y) - (x & y)")
+(def (c1) main | n = (size - 5) | (fix n rewrite))
+sub | c1 | (save r) | (print "a number local read by fix:" r)
+(def (c2) main | n = (size * 2) | (if (n > 20) rewrite))
+sub | c2 | (save r) | (print "and by a condition, evaluated once where it is bound:" r)
+(def (c3) main | n = size | rewrite | (if (n > (size main)) (relate rewrite) none))
+sub | c3 | (save r) | (print "n keeps the size of the input:" r)
+(def (c4) main | n = 5 | small:term->num = (size <= n) | n = 0 | (union id rewrite) | (filter small))
+sub | c4 | (save r) | (print "a closure captures the value the local has when it is bound:" r)
+(def (c5) main | (save t) | small:term->num = (same (main t)) | t = rewrite | (union id rewrite) | (filter small))
+sub | c5 | (save r) | (print "and a group variable's:" r)
+(def (under2 k:num) n = (k + 1) | (size main) <= n)
+(def (c6) main | (union id rewrite) | (filter (under2 4)))
+sub | c6 | (save r) | (print "a def returning a function that reads its own local:" r)
+(def (keep_if pred g:group) g | (filter pred))
+(def (mk k:num) n = (k + 1) | f:term->num = (size <= n) | (union id rewrite) | (keep_if f))
+(def (c7) main | (mk 4))
+sub | c7 | (save r) | (print "a closure passed on reads the local of the def it is written in:" r)
+
+# expect stderr: a number local read by fix: (x ^ y)
+# expect stderr: and by a condition, evaluated once where it is bound: ((x | y) - (x & y))
+# expect stderr: n keeps the size of the input: (x ^ y)
+# expect stderr: a closure captures the value the local has when it is bound: (x ^ y)
+# expect stderr: and a group variable's: ((x | y) - (x & y))
+# expect stderr: a def returning a function that reads its own local: (x ^ y)
+# expect stderr: a closure passed on reads the local of the def it is written in: (x ^ y)
+# expect warning: c5: group variable t is bound and never read
+# expect warning: c5: group variable t is bound again before its value is read
+# expect value: group [(Xor (Var "x") (Var "y"))]
+
+# ---
+(import "default")
+(def (prepass_steps) main | n = 3 | f:term->num = size | rewrite)
+
+# expect warning: prepass_steps: number variable n is bound and never read
+# expect warning: prepass_steps: function variable f is bound and never read
+
+# ---
+(import "default")
+(def (prepass_steps) main | relate = rewrite)
+
+# expect error: relate is a variable that holds a number, so it cannot be bound to a group: rewrite gives a group
+
+# ---
+(import "default")
+(def (prepass_steps) main | n = 1 | n = rewrite)
+
+# expect error: n is a number variable, so it cannot be bound to a group: rewrite gives a group
+
+# ---
+(import "default")
+(def (prepass_steps) main | size = 3)
+
+# expect error: size is computed from the group and cannot be assigned: (size t:term?) num

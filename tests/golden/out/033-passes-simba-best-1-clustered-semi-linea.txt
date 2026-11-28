@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes "simba=(best 1 clustered semi_linear)" -n u32 "(x ^ y) + 2*(x & y)"
+==== exit
+2
+==== stdout
+==== stderr
+error: invalid value 'simba=(best 1 clustered semi_linear)' for '--passes <PASSES>': clustered needs parentheses: (clustered ...); (clustered sub:pipe t:term) term?
+
+For more information, try '--help'.

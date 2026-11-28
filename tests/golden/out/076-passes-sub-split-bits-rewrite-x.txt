@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes sub_split_bits=rewrite x
+==== exit
+2
+==== stdout
+==== stderr
+error: invalid value 'sub_split_bits=rewrite' for '--passes <PASSES>': sub_split_bits=P is no longer read: a pass takes the function it runs on parts of its term as an argument, as in (relate rewrite)
+
+For more information, try '--help'.

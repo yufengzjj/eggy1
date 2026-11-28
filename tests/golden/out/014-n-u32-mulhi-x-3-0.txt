@@ -1,0 +1,8 @@
+==== command
+eggy1 -n u32 "mulhi(x, 3) + 0"
+==== exit
+0
+==== stdout
+
+mulhi(x, 3)
+==== stderr

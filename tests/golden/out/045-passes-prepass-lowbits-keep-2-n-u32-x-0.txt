@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes "prepass=lowbits | keep = 2" -n u32 "x + 0"
+==== exit
+0
+==== stdout
+
+x
+==== stderr
+--passes: warning: prepass_steps: keep = 2 ends its sequence and changes nothing

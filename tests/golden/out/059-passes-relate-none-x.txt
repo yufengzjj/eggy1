@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes relate=none x
+==== exit
+2
+==== stdout
+==== stderr
+error: invalid value 'relate=none' for '--passes <PASSES>': relate=none: relate is a switch: assign it 0 (off) or 1 (on)
+
+For more information, try '--help'.

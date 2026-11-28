@@ -1,0 +1,8 @@
+==== command
+eggy1 -i 50 -n u8 "(x & y) + (x | y)"
+==== exit
+0
+==== stdout
+
+(x + y)
+==== stderr

@@ -1,0 +1,106 @@
+# The parameter types inferred from their uses, printed as the signature.
+(import "default")
+(def (f p:pipe g) g | p | rewrite)
+(print f)
+
+# expect stderr: (f p:pipe g:group) group
+# expect value: group []
+
+# ---
+(import "default")
+(def (f g) g | lowbits)
+(print f)
+
+# expect stderr: (f g:term) group
+# expect value: group []
+
+# ---
+(import "default")
+(def (f g) g | x = 3 | (print "a") | lowbits)
+(print f)
+
+# expect stderr: (f g:term) group
+# expect warning: f: number variable x is bound and never read
+# expect value: group []
+
+# ---
+(import "default")
+(def (f g) g | x = (size main) | lowbits)
+(print f)
+
+# expect stderr: (f g:group) group
+# expect warning: f: number variable x is bound and never read
+# expect value: group []
+
+# ---
+(import "default")
+(def (f g:group) g | lowbits)
+(print f)
+
+# expect stderr: (f g:group) group
+# expect value: group []
+
+# ---
+(import "default")
+(def (f p:pipe) p | rewrite)
+(print f)
+
+# expect stderr: (f p:pipe g:group) group
+# expect value: group []
+
+# ---
+(import "default")
+(def (k g:term) g)
+(print k)
+
+# expect stderr: (k g:term) group
+# expect value: group []
+
+# ---
+(import "default")
+(def (f t:term p) t | p | (best 1 p))
+(print f)
+
+# expect stderr: (f t:term p:pipe) group
+# expect value: group []
+
+# ---
+(import "default")
+(def (f p g) g | lowbits | p | (best 1 p))
+(print f)
+
+# expect stderr: (f p:pipe g:term) group
+# expect value: group []
+
+# ---
+(import "default")
+(def (f p g) g | p | lowbits | (best 1 p))
+(print f)
+
+# expect stderr: (f p:pipe g:group) group
+# expect value: group []
+
+# ---
+(import "default")
+(def (twice p g) (p (p g)))
+(print twice)
+
+# expect stderr: (twice p:pipe g:group) group
+# expect value: group []
+
+# ---
+(import "default")
+(def (f r) t = r | (seq t))
+(print f)
+
+# expect stderr: (f r:pipe g:group) group
+# expect value: group []
+
+# ---
+(import "default")
+(def (f p g) g | x = (p | size) | lowbits)
+(print f)
+
+# expect stderr: (f p:term->term g:term) group
+# expect warning: f: number variable x is bound and never read
+# expect value: group []

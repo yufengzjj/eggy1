@@ -1,0 +1,239 @@
+# Calls are checked against the signatures; the errors name them.
+(import "default")
+(parse "x") | main | (filter (size vars))
+
+# expect error: size takes t:term?; vars is a group — write (main vars)
+
+# ---
+(import "default")
+(parse "x") | main | (if egglog id)
+
+# expect error: egglog gives a group, not a number: (egglog label:name? g:group) group; an expression reads variables and number functions
+
+# ---
+(import "default")
+(parse "x") | main | (if (best 1 id) id)
+
+# expect error: best gives a group, not a number: (best k:num p:pipe... g:group) group; an expression reads variables and number functions
+
+# ---
+(import "default")
+(parse "x") | main | (if mixed)
+
+# expect error: if takes 3 or 4 arguments; | gives the last: (if c:group->num a:pipe b:pipe? g:group) group
+
+# ---
+(import "default")
+(parse "x") | main | (if mixed id id id)
+
+# expect error: if takes 3 or 4 arguments; | gives the last: (if c:group->num a:pipe b:pipe? g:group) group
+
+# ---
+(import "default")
+(parse "x") | main | (retry mixed id)
+
+# expect error: retry takes 4 arguments; | gives the last: (retry c:group->num a:pipe b:pipe g:group) group
+
+# ---
+(import "default")
+(parse "x") | main | (fix 3)
+
+# expect error: fix takes 3 arguments; | gives the last: (fix n:num p:pipe g:group) group
+
+# ---
+(import "default")
+(parse "x") | main | (fix)
+
+# expect error: fix takes 3 arguments; | gives the last: (fix n:num p:pipe g:group) group
+
+# ---
+(import "default")
+(parse "x") | main | (seq)
+
+# expect error: seq takes 2 or more arguments; | gives the last: (seq p:pipe... g:group) group
+
+# ---
+(import "default")
+(parse "x") | main | (best 1)
+
+# expect error: best takes 3 or more arguments; | gives the last: (best k:num p:pipe... g:group) group
+
+# ---
+(import "default")
+(parse "x") | main | (save t 1)
+
+# expect error: save takes 2 arguments; | gives the last: (save r:group g:group) group
+
+# ---
+(import "default")
+(parse "x") | main | (save)
+
+# expect error: save takes 2 arguments; | gives the last: (save r:group g:group) group
+
+# ---
+(import "default")
+(parse "x") | main | (tag)
+
+# expect error: tag takes 3 arguments; | gives the last: (tag n:name p:pipe g:group) group
+
+# ---
+(import "default")
+(parse "x") | main | (lowbits x)
+
+# expect error: lowbits takes 1 argument; | gives the last: (lowbits t:term) term
+
+# ---
+(import "default")
+(parse "x") | main | (id 1)
+
+# expect error: id takes 1 argument; | gives the last: (id g:group) group
+
+# ---
+(import "default")
+(parse "x") | main | (print)
+
+# expect error: print takes 1 or more arguments: (print x:any...)
+
+# ---
+(import "default")
+(parse "x") | main | rewrite | size | rewrite
+
+# expect error: size gives num; rewrite takes g:group
+
+# ---
+(import "default")
+(parse "x") | main | (load t)
+
+# expect error: unknown pass load; known: id none egglog take_minimal reprint settle within pre_done parse show lowbits unshift tfunc_whole tfunc unify_operands shifted_xor simplify_rebuilt drop_identities small_blocks wide_blocks rebuild_values common_multiple related_leaves one_wide_term polish_push_not polish_decompose polish_factor (seq p:pipe...) (union p:pipe...) (best k:num p:pipe...) (first p:pipe...) (fix n:num p:pipe) (if c:group->num a:pipe b:pipe?) (retry c:group->num a:pipe b:pipe) (smallest p:pipe) (scope p:pipe) (regions sub:pipe p:pipe) (again sub:pipe p:pipe) (tag n:name p:pipe) (origin n:name p:pipe) (smaller n:name p:pipe) (wins n:num p:pipe) (filter c:term->num) (save r:group) (label r:group) (clear r:name) (note r:name) (take_min r:name) (assert c:num msg:text) (print x:any...) (prepass p:pipe) (egglog label:name?) (polish p:pipe) (memo n:name p:pipe) (rewrite_top p:pipe) (cluster_regions sub:pipe) (cluster_top sub:pipe) (relate sub:pipe) (recombine sub:pipe) (cut_products sub:pipe) (finish sub:pipe) (halve sub:pipe) (over_const_bitwise sub:pipe) (over_shared_bitwise sub:pipe) (over_products sub:pipe) (split_bits sub:pipe) (rebuild sub:pipe) (simba p:pipe) (poly_mba sub:pipe sub_region:pipe) (drop_unused sub:pipe) (clustered sub:pipe) (peel sub_region:pipe) (peel_clustered sub_region:pipe) (semi_linear sub:pipe) (polish_join_constants sub:pipe) (polish_join_linear sub:pipe) (polish_over_const_bitwise sub:pipe) (polish_over_shared_bitwise sub:pipe) (polish_over_products sub:pipe) (polish_recombine sub:pipe) (polish_shift_cases sub:pipe) (index i:num) (off NAME...) (on NAME...)
+
+# ---
+(import "default")
+(parse "x") | main | fix
+
+# expect error: fix needs parentheses: (fix ...); (fix n:num p:pipe g:group) group
+
+# ---
+(import "default")
+(parse "x") | main | (if any id)
+
+# expect error: any needs parentheses: (any ...); (any c:term->num g:group) num
+
+# ---
+(import "default")
+(parse "x") | main | (if (same) id)
+
+# expect error: same takes 2 arguments; | gives the last: (same r:term? t:term) num
+
+# ---
+(import "default")
+(parse "x") | main | (if (same t 1) id)
+
+# expect error: same takes r:term?; t is a group — write (main t)
+
+# ---
+(import "default")
+(parse "x") | main | (if (size t) id)
+
+# expect error: size takes t:term?; t is a group — write (main t)
+
+# ---
+(import "default")
+(parse "x") | main | (if (size (rewrite)) id)
+
+# expect error: size takes t:term?; (rewrite) is a group — write (main (rewrite))
+
+# ---
+(import "default")
+(parse "x") | main | (if (minimal (main t)) id)
+
+# expect error: minimal takes g:group; (main t) is term?, not a group
+
+# ---
+(import "default")
+(parse "x") | main | off
+
+# expect error: off needs parentheses: (off ...)
+
+# ---
+(import "default")
+(parse "x") | main | egglog/x
+
+# expect error: write egglog/x as (egglog x)
+
+# ---
+(import "default")
+(parse "x") | main | label/b
+
+# expect error: write label/b as (label b)
+
+# ---
+(import "default")
+(parse "x") | main | off/relate | rewrite
+
+# expect error: write off/relate as (off relate)
+
+# ---
+(import "default")
+(parse "x") | main | polish/factor
+
+# expect error: names cannot contain '/': write polish_factor
+
+# ---
+(import "default")
+(parse "x") | main | (smaller polish/factor polish_factor)
+
+# expect error: names cannot contain '/': write polish_factor
+
+# ---
+(import "default")
+(parse "x") | main | semi/bit_split = 0 | rewrite
+
+# expect error: names cannot contain '/': write semi_bit_split
+
+# ---
+(import "default")
+(parse "x") | main | (if poly/masked id)
+
+# expect error: names cannot contain '/': write poly_masked
+
+# ---
+(import "default")
+(parse "x") | main | extern
+
+# expect error: extern declarations are only read from src/builtins.pipe
+
+# ---
+(import "default")
+(parse "x") | main | (extern (x g:group) group)
+
+# expect error: extern declarations are only read from src/builtins.pipe
+
+# ---
+(import "default")
+(parse "x") | main | rewrite = 1
+
+# expect error: rewrite is a function and cannot be assigned: (rewrite g:group) group
+
+# ---
+(import "default")
+(parse "x") | main | relate
+
+# expect error: relate needs parentheses: (relate ...); (relate sub:pipe t:term) term
+
+# ---
+(import "default")
+(parse "x") | main | same = 1
+
+# expect error: same is computed from the group and cannot be assigned: (same r:term? t:term) num
+
+# ---
+(import "default")
+(parse "x") | main | nope
+
+# expect error: unknown pass nope; known: id none egglog take_minimal reprint settle within pre_done parse show lowbits unshift tfunc_whole tfunc unify_operands shifted_xor simplify_rebuilt drop_identities small_blocks wide_blocks rebuild_values common_multiple related_leaves one_wide_term polish_push_not polish_decompose polish_factor (seq p:pipe...) (union p:pipe...) (best k:num p:pipe...) (first p:pipe...) (fix n:num p:pipe) (if c:group->num a:pipe b:pipe?) (retry c:group->num a:pipe b:pipe) (smallest p:pipe) (scope p:pipe) (regions sub:pipe p:pipe) (again sub:pipe p:pipe) (tag n:name p:pipe) (origin n:name p:pipe) (smaller n:name p:pipe) (wins n:num p:pipe) (filter c:term->num) (save r:group) (label r:group) (clear r:name) (note r:name) (take_min r:name) (assert c:num msg:text) (print x:any...) (prepass p:pipe) (egglog label:name?) (polish p:pipe) (memo n:name p:pipe) (rewrite_top p:pipe) (cluster_regions sub:pipe) (cluster_top sub:pipe) (relate sub:pipe) (recombine sub:pipe) (cut_products sub:pipe) (finish sub:pipe) (halve sub:pipe) (over_const_bitwise sub:pipe) (over_shared_bitwise sub:pipe) (over_products sub:pipe) (split_bits sub:pipe) (rebuild sub:pipe) (simba p:pipe) (poly_mba sub:pipe sub_region:pipe) (drop_unused sub:pipe) (clustered sub:pipe) (peel sub_region:pipe) (peel_clustered sub_region:pipe) (semi_linear sub:pipe) (polish_join_constants sub:pipe) (polish_join_linear sub:pipe) (polish_over_const_bitwise sub:pipe) (polish_over_shared_bitwise sub:pipe) (polish_over_products sub:pipe) (polish_recombine sub:pipe) (polish_shift_cases sub:pipe) (index i:num) (off NAME...) (on NAME...)
+
+# ---
+(import "default")
+(parse "x") | main | (if nope id)
+
+# expect error: unknown name nope in an expression; known: size vars depth mul bitconst arith_in_bit shift div (same ...) (any ...) (all ...) (opaque ...) minimal mixed (rebuilds ...) moved was_cut input tiny fits_split used_wide used_clustered few_rewrites replaceable abstracted no_leaves wide const_bitwise cofactor and the variables

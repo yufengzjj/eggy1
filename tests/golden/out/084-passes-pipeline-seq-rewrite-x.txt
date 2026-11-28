@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes "pipeline=(seq rewrite" x
+==== exit
+2
+==== stdout
+==== stderr
+error: invalid value 'pipeline=(seq rewrite' for '--passes <PASSES>': line 1: unclosed form: (def (pipeline) (seq rewrite)
+
+For more information, try '--help'.

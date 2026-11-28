@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes off=semi/bit_split x
+==== exit
+2
+==== stdout
+==== stderr
+error: invalid value 'off=semi/bit_split' for '--passes <PASSES>': names cannot contain '/': write semi_bit_split
+
+For more information, try '--help'.

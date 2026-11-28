@@ -1,0 +1,10 @@
+# Number assignments and arithmetic, checked by assert; the last statement gives the value.
+a_num = 7
+b_num = a_num * 3 - 1
+(assert (b_num == 20) "b_num is 20")
+(assert (b_num / 0 == none) "dividing by 0 gives none")
+(assert (a_num - 9 == 0) "- stops at 0")
+(assert (a_num < b_num && !(a_num == b_num)) "comparisons give 1 or 0")
+b_num + 1
+
+# expect value: 21

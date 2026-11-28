@@ -1,0 +1,55 @@
+# Top-level programs that are errors: no group to work on, unbound group variables, wrong kinds.
+lowbits
+
+# expect error: lowbits has no group to work on at the top level of the program, which starts with none: start from a value, as in (parse "x + y") | ... or t = (parse "x + y")
+
+# ---
+(import "default")
+simplify
+
+# expect error: simplify has no group to work on at the top level of the program, which starts with none: start from a value, as in (parse "x + y") | ... or t = (parse "x + y")
+
+# ---
+(import "default")
+t = (parse "x")
+simplify
+
+# expect error: simplify has no group to work on at the top level of the program, which starts with none: start from a value, as in (parse "x + y") | ... or t = (parse "x + y")
+
+# ---
+t = (lowbits | unshift)
+
+# expect error: (lowbits | unshift) has no group to work on at the top level of the program, which starts with none: start from a value, as in (parse "x + y") | ... or t = (parse "x + y")
+
+# ---
+show
+
+# expect error: show has no element to work on at the top level of the program, which starts with none: write its input, as in (show (main t))
+
+# ---
+(import "default")
+(parse "x") | show
+
+# expect error: show takes t:term? and gives text; its input here is a group: write the element, as in (show main) or (show (index i r))
+
+# ---
+(size (main t))
+
+# expect error: the program reads group variable t before it is bound
+
+# ---
+num_type = u7
+
+# expect error: num_type = u7: num_type takes a numeric type, not u7; known: i64 u64 i32 u32 i16 u16 i8 u8
+
+# ---
+(import "default")
+(parse "x") | main | show | rewrite
+
+# expect error: show gives text; rewrite takes g:group
+
+# ---
+(import "default")
+(parse "x") | (fix 2 show)
+
+# expect error: show gives a text, not a group: (show t:term?) text; a text ends a top-level statement, as in (parse "x + y") | show, or is the input of parse

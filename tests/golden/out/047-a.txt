@@ -1,0 +1,7 @@
+==== command
+eggy1 "(a + "
+==== exit
+1
+==== stdout
+==== stderr
+error: parse: "(a +": expected an operand, found the end of the expression

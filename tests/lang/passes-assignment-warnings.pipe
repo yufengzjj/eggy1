@@ -1,0 +1,68 @@
+# Warnings about assignments in pipelines and new local variables named near a global.
+(import "default")
+(def (prepass_steps) rewrite | split_runs = 4)
+
+# expect warning: prepass_steps: split_runs = 4 ends its sequence and changes nothing
+
+# ---
+(import "default")
+(def (prepass_steps) (off relate))
+
+# expect warning: prepass_steps: (off relate) ends its sequence and changes nothing
+
+# ---
+(import "default")
+(def (prepass_steps) split_runs = 4 | split_runs = 8 | rewrite)
+
+# expect warning: prepass_steps: split_runs is assigned again before anything reads it
+
+# ---
+(import "default")
+(def (prepass_steps) (off relate) | relate = 1 | rewrite)
+
+# expect warning: prepass_steps: relate is assigned again before anything reads it
+
+# ---
+(import "default")
+(def (prepass_steps) split_runs = 4 | rewrite | split_runs = 8 | rewrite)
+
+# ---
+(import "default")
+(def (prepass_steps) split_runs = 4 | split_runs = split_runs * 2 | rewrite)
+
+# ---
+(import "default")
+(def (prepass_steps) split_runs = 4 | (split_runs = 8 | rewrite) | rewrite)
+
+# ---
+(import "default")
+(def (prepass_steps) cut = 1 | rewrite)
+
+# ---
+(import "default")
+(def (prepass_steps) kep = 3 | rewrite)
+
+# expect warning: prepass_steps: number variable kep is bound and never read
+# expect warning: prepass_steps: number variable kep is a new local variable; did you mean keep?
+
+# ---
+(import "default")
+(def (prepass_steps) (save rewrits) | rewrite | (seq rewrits))
+
+# expect warning: prepass_steps: group variable rewrits is a new local variable; did you mean rewrites?
+
+# ---
+(import "default")
+(def (prepass_steps) (save r) | (seq r))
+
+# ---
+(import "default")
+(def (prepass_steps) (save tt) | (seq tt))
+
+# ---
+(import "default")
+(def (prepass_steps) (save mux) | (seq mux))
+
+# ---
+(import "default")
+(def (prepass_steps) (save before) | (seq before))

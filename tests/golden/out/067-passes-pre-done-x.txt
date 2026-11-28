@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes pre=done x
+==== exit
+2
+==== stdout
+==== stderr
+error: invalid value 'pre=done' for '--passes <PASSES>': unknown pre name done; known: unified,no_wide,split_bits,halve_first,over_products,over_const_bitwise,over_shared_bitwise,halve_input,unclustered
+
+For more information, try '--help'.

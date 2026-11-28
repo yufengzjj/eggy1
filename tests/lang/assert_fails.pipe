@@ -1,0 +1,6 @@
+# A failing assert ends the run with its message.
+x_fail = 2
+(assert (x_fail > 3) "x_fail is greater than 3")
+(print "not reached")
+
+# expect error: x_fail is greater than 3

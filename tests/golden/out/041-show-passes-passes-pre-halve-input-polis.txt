@@ -1,0 +1,160 @@
+==== command
+eggy1 --show-passes --passes "pre-=halve_input polish=push_not,factor extra=0"
+==== exit
+0
+==== stdout
+# The program: (import "default"); num_type = i64; restarts = 2; iter_limit = 10; pre_halve_input = 0; (def (polish_steps) (scope rewrites = polish_rewrites | (wins polish_wins (smaller polish_push_not polish_push_not | drop_identities) | (smaller polish_factor polish_factor | drop_identities)))); extra = 0; (parse "EXPR") | simplify | time_limit = none | (if was_cut (print "time limit reached: the result is the smallest form found by then")) | main | show
+schedule=run:default-ruleset,run:canonicalization,sat:constant-folding,sat:analysis,sat:identity-zero-element,run:simplify pre_halve_input=0 extra=0
+pipeline=cut = 1
+| (smallest
+    (fix 1
+      (if (opaque prepass_steps main)
+        ((union id (main | (prepass prepass_steps))) | (if minimal take_minimal (egglog first)))
+        (retry (rerun_input && (mixed main) && !minimal)
+          (main | (prepass prepass_steps) | (if minimal take_minimal (egglog first)))
+          ((union id (main | (prepass prepass_steps))) | (egglog rerun_input)))))
+    | (if moved
+        (fix (restarts - 1)
+          main | (prepass prepass_steps) | (if minimal take_minimal (egglog later))))
+    | (if moved
+        (fix extra
+          (if (rebuilds prepass_steps main)
+            (main | (prepass prepass_steps) | (if minimal take_minimal (egglog later))))))
+    | (polish polish_steps))
+| (if (printed && !(input main))
+    (tag rerun_printed
+      (best 1
+        id
+        (main
+        | reprint
+        | (smallest
+            (fix 1
+              (if (opaque prepass_steps main)
+                ((union id (main | (prepass prepass_steps)))
+                | (if minimal take_minimal (egglog first)))
+                (retry (rerun_input && (mixed main) && !minimal)
+                  (main | (prepass prepass_steps) | (if minimal take_minimal (egglog first)))
+                  ((union id (main | (prepass prepass_steps))) | (egglog rerun_input)))))
+            | (if moved
+                (fix (printed - 1)
+                  main | (prepass prepass_steps) | (if minimal take_minimal (egglog later))))
+            | (polish polish_steps))))))
+prepass=(scope
+  (save t0)
+  | (if ((mul main) < 1) (off poly_mba))
+  | (if ((mul main) < 1 && (shift main) < 1 && (bitconst main) < 1) (off lowbits))
+  | (if ((mul main) >= 4 && (shift main) < 1) (off small_blocks))
+  | lowbits
+  | unshift
+  | (save t)
+  | (cand 1 first
+      (first tfunc_whole ((rewrite_top rewrite) | (cluster_top rewrite) | (relate rewrite) | tfunc)))
+  | (best 1
+      id
+      (cand pre_unified unified
+        t
+        | unify_operands
+        | (filter !(same (main t)))
+        | (rewrites = unified_rewrites
+          | (first
+              tfunc_whole
+              (rewrite | within | (cluster_regions rewrite) | (relate rewrite) | within | tfunc)))))
+  | (save r)
+  | (union
+      id
+      (cand pre_no_wide no_wide
+        (if used_wide
+          (t
+          | ((off wide_blocks)
+            | (first
+                tfunc_whole
+                ((rewrite_top rewrite) | (cluster_top rewrite) | (relate rewrite) | tfunc)))
+          | (save n)
+          | (filter (size < (size (main r)))))
+          none))
+      (cand 1 no_wide_abstracted
+        n
+        | ((off wide_blocks)
+          | (union (over_const_bitwise (rebuild rewrite)) (over_shared_bitwise (rebuild rewrite))))
+        | (filter (size < (size (main r)) && size <= (size (main n)) * 3 / 4)))
+      (cand pre_split_bits split_bits
+        (if (fits_split main) ((split_bits (rebuild rewrite)) | (filter !(same (main r)))) none))
+      (cand pre_halve_first halve_first
+        (halve rewrite)
+        | (filter !(same (main r)))
+        | (first tfunc_whole ((rewrite_top rewrite) | (cluster_top rewrite) | tfunc)))
+      (cand pre_over_products over_products
+        (over_products (rebuild rewrite)) | (filter !(same (main r))))
+      (cand pre_over_const_bitwise over_const_bitwise
+        (over_const_bitwise (rebuild rewrite)) | (filter !(same (main r))))
+      (cand pre_over_shared_bitwise over_shared_bitwise
+        (over_shared_bitwise (rebuild rewrite)) | (filter !(same (main r))))
+      (cand pre_halve_input halve_input
+        semi_leaves = 2
+        | (if (tiny main)
+            none
+            (t
+            | (halve rewrite)
+            | (filter !(same (main t)))
+            | (first tfunc_whole ((rewrite_top rewrite) | (cluster_top rewrite) | tfunc))))))
+  | (finish rewrite)
+  | (save f)
+  | (filter (!abstracted || size <= (size (main f)) * 3 / 4))
+  | (save b)
+  | (label b)
+  | (cand pre_unclustered unclustered
+      (if (used_clustered && (few_rewrites main))
+        (t
+        | (if !(replaceable main)
+            (relate_leaves = unclustered_relate_leaves
+            | relate_parts = 0
+            | rewrites = unclustered_rewrites
+            | clustered = 0
+            | rewrite
+            | within
+            | (relate rewrite)
+            | within
+            | tfunc
+            | (finish rewrite)
+            | drop_identities)
+            none))
+        none))
+  | (label b)
+  | (save u)
+  | (b | (best keep id))
+  | (save m)
+  | (union
+      (u | (filter (size < (size (main m)))))
+      m
+      (u | (filter (size > (size (main m)) && size < (size (main t0))))))
+  | pre_done)
+polish=(scope
+  rewrites = polish_rewrites
+  | (wins polish_wins
+      (smaller polish_push_not polish_push_not | drop_identities)
+      | (smaller polish_factor polish_factor | drop_identities)))
+rewrite=(memo rewrite
+  (again
+    rewrite
+    (best 1
+      (regions rewrite (best 1 (simba simba_steps) small_blocks wide_blocks))
+      (poly_mba rewrite simba_steps))))
+simba=(if (no_leaves main)
+  none
+  (if (wide main)
+    ((save in)
+    | (best 1
+        ((drop_unused rewrite) | (save d))
+        ((clustered rewrite) | (save c))
+        (d
+        | (if (any 1)
+            none
+            (in
+            | (first (peel simba_steps) (c | (peel_clustered simba_steps)))
+            | (filter !(same (main in))))))))
+    ((save in)
+    | (if (const_bitwise main)
+        (best 1 (semi_linear rewrite))
+        (best 1 rebuild_values common_multiple related_leaves (if !cofactor one_wide_term none)))
+    | (filter (size < (size (main in)))))))
+==== stderr

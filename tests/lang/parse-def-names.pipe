@@ -1,0 +1,281 @@
+# A let or def name may not be a variable, function or form; a def may take a name the Rust code runs.
+(import "default")
+(let g lowbits | unshift)
+
+# expect warning: (let g ...) is never used: a name is expanded only where a later item writes it
+
+# ---
+(import "default")
+(def (g) lowbits | unshift)
+
+# expect warning: (def (g) ...) is never used: it runs only where a later item calls it
+
+# ---
+(import "default")
+(def @inline (g) lowbits | unshift)
+
+# expect warning: (def @inline (g) ...) is never used: it is expanded only where a later item calls it
+
+# ---
+(import "default")
+(let split_runs id)
+
+# expect error: let split_runs: the name of a variable or function
+
+# ---
+(import "default")
+(def @inline (split_runs) id)
+
+# expect error: def @inline (split_runs): the name of a variable or function
+
+# ---
+(import "default")
+(let relate_parts id)
+
+# expect error: let relate_parts: the name of a variable or function
+
+# ---
+(import "default")
+(def @inline (relate_parts) id)
+
+# expect error: def @inline (relate_parts): the name of a variable or function
+
+# ---
+(import "default")
+(let time_limit id)
+
+# expect error: let time_limit: the name of a variable or function
+
+# ---
+(import "default")
+(def @inline (time_limit) id)
+
+# expect error: def @inline (time_limit): the name of a variable or function
+
+# ---
+(import "default")
+(let mixed id)
+
+# expect error: let mixed: the name of a variable or function
+
+# ---
+(import "default")
+(def @inline (mixed) id)
+
+# expect error: def @inline (mixed): the name of a variable or function
+
+# ---
+(import "default")
+(let mul id)
+
+# expect error: let mul: the name of a variable or function
+
+# ---
+(import "default")
+(def @inline (mul) id)
+
+# expect error: def @inline (mul): the name of a variable or function
+
+# ---
+(import "default")
+(let size id)
+
+# expect error: let size: the name of a variable or function
+
+# ---
+(import "default")
+(def @inline (size) id)
+
+# expect error: def @inline (size): the name of a variable or function
+
+# ---
+(import "default")
+(let same id)
+
+# expect error: let same: the name of a variable or function
+
+# ---
+(import "default")
+(def @inline (same) id)
+
+# expect error: def @inline (same): the name of a variable or function
+
+# ---
+(import "default")
+(let none id)
+
+# expect error: let none: the name of a pass, form or macro
+
+# ---
+(import "default")
+(def @inline (none) id)
+
+# expect error: def @inline (none): the name of a pass, form or macro
+
+# ---
+(import "default")
+(let prepass id)
+
+# expect error: let prepass: the name of a pass, form or macro
+
+# ---
+(import "default")
+(def @inline (prepass) id)
+
+# expect error: def @inline (prepass): the name of a pass, form or macro
+
+# ---
+(import "default")
+(let polish id)
+
+# expect error: let polish: the name of a pass, form or macro
+
+# ---
+(import "default")
+(def @inline (polish) id)
+
+# expect error: def @inline (polish): the name of a pass, form or macro
+
+# ---
+(import "default")
+(let relate id)
+
+# expect error: let relate: the name of a pass, form or macro
+
+# ---
+(import "default")
+(def @inline (relate) id)
+
+# expect error: def @inline (relate): the name of a pass, form or macro
+
+# ---
+(import "default")
+(let fix id)
+
+# expect error: let fix: the name of a pass, form or macro
+
+# ---
+(import "default")
+(def @inline (fix) id)
+
+# expect error: def @inline (fix): the name of a pass, form or macro
+
+# ---
+(import "default")
+(let on id)
+
+# expect error: let on: the name of a pass, form or macro
+
+# ---
+(import "default")
+(def @inline (on) id)
+
+# expect error: def @inline (on): the name of a pass, form or macro
+
+# ---
+(import "default")
+(let def id)
+
+# expect error: let def: the name of a pass, form or macro
+
+# ---
+(import "default")
+(def @inline (def) id)
+
+# expect error: def @inline (def): the name of a pass, form or macro
+
+# ---
+(import "default")
+(let extern id)
+
+# expect error: let extern: the name of a pass, form or macro
+
+# ---
+(import "default")
+(def @inline (extern) id)
+
+# expect error: def @inline (extern): the name of a pass, form or macro
+
+# ---
+(import "default")
+(def (split_runs) id)
+
+# expect error: def (split_runs): the name of a variable or function
+
+# ---
+(import "default")
+(def (mixed) id)
+
+# expect error: def (mixed): the name of a variable or function
+
+# ---
+(import "default")
+(def (size) id)
+
+# expect error: def (size): the name of a variable or function
+
+# ---
+(import "default")
+(def (none) id)
+
+# expect error: def (none): the name of a pass, form or macro
+
+# ---
+(import "default")
+(def (lowbits) id)
+
+# expect error: def (lowbits): the name of a pass, form or macro
+
+# ---
+(import "default")
+(def (fix) id)
+
+# expect error: def (fix): the name of a pass, form or macro
+
+# ---
+(import "default")
+(def (on) id)
+
+# expect error: def (on): the name of a pass, form or macro
+
+# ---
+(import "default")
+(def (def) id)
+
+# expect error: def (def): the name of a pass, form or macro
+
+# ---
+(import "default")
+(def (simba) id)
+
+# expect error: def (simba): the name of a pass, form or macro
+
+# ---
+(import "default")
+(def (memo) id)
+
+# expect error: def (memo): the name of a pass, form or macro
+
+# ---
+(import "default")
+(def (id) id)
+
+# expect error: def (id): the name of a pass, form or macro
+
+# ---
+(import "default")
+(def (pipeline) id)
+
+# ---
+(import "default")
+(def (rewrite) id)
+
+# ---
+(import "default")
+(def (prepass_steps) id)
+
+# ---
+(import "default")
+(def (sub_cluster) id)
+
+# expect warning: (def (sub_cluster) ...) is never used: it runs only where a later item calls it

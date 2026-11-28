@@ -1578,11 +1578,6 @@ mod tests {
         parse_on(s, &crate::passes::DEFAULT.1, &mut Vec::new(), crate::lang::flow::Flow::One)
     }
 
-    /// `parse` for a pipeline on a group.
-    fn parse_group(s: &str) -> Result<Pipe, String> {
-        parse_with(s, &crate::passes::DEFAULT.1, &mut Vec::new())
-    }
-
     #[test]
     fn defaults_read_back() {
         let d = Passes::default();
@@ -1609,22 +1604,6 @@ mod tests {
         assert_eq!(cond("(size main)"), Pipe::app("size", vec![main]), "main alone where a term is wanted is main of the input");
         for s in ["(if ((lowbits | main | size) > 3) id)", "(save g) | (if (mixed (main g)) id)", "(save g) | (if (((main g) | mixed) + (minimal g) + (size (index 1 g))) id)", "(if (rewrite | minimal) id)", "(save g) | (if (same (main g) main) id)", "(if (size main) id)", "main | (prepass id)"] {
             assert_eq!(show(&parse(s).unwrap()), s, "{s}");
-        }
-        for (bad, msg) in [
-            ("(if ((lowbits | size) > 3) id)", "size takes t:term? and gives num; its input here is a group: write the element, as in (size main) or (size (index i r))"),
-            ("(if (opaque id) id)", "as in (opaque id main)"),
-            ("rewrite | size | lowbits", "size gives num; lowbits takes t:term"),
-            ("(save g) | (if (g | mixed) id)", "mixed takes t:term?"),
-            ("(if mixed id)", "mixed takes t:term?"),
-            ("(fix size id)", "size takes t:term?"),
-            ("(filter (any size))", ""),
-        ] {
-            if msg.is_empty() {
-                assert!(parse_group(bad).is_ok(), "{bad}");
-                continue;
-            }
-            let e = parse_group(bad).unwrap_err();
-            assert!(e.contains(msg), "{bad}: {e}");
         }
     }
 
@@ -1674,22 +1653,6 @@ mod tests {
         }
         assert_eq!(show(&parse("(if !((mul main) < 1 || (tiny main)) id)").unwrap()), "(if !((mul main) < 1 || (tiny main)) id)");
         assert_eq!(show(&parse("(fix (2 * (keep + 1)) id)").unwrap()), "(fix (2 * (keep + 1)) id)");
-        for bad in [
-            "nope",
-            "(if minimal a | b)",
-            "(union rewrite | unshift)",
-            "(relate)",
-            "relate",
-            "(fix many id)",
-            "(if nope id)",
-            "(off nope)",
-            "seq",
-            "(retry minimal id)",
-            "rewrite)",
-            "seq(rewrite,polish)",
-        ] {
-            assert!(parse(bad).is_err(), "{bad}");
-        }
         assert!(is_old_syntax("seq(a,b)") && !is_old_syntax("(seq a b)"));
     }
 
@@ -1743,35 +1706,6 @@ mod tests {
             assert_eq!(parse(&pretty(&p)).unwrap(), p, "{ok}: {}", pretty(&p));
         }
         assert_eq!(show(&parse("split_runs=vars*2|rewrite").unwrap()), "split_runs = vars * 2 | rewrite");
-        for (bad, msg) in [
-            ("(if (size = 3) id)", "compare with =="),
-            ("(filter (vars = 2 || mul > 1))", "compare with =="),
-            ("(if size = 3 id)", "compare with =="),
-            ("(fix n = 3 id)", "compare with =="),
-            ("size = 1", "cannot be assigned"),
-            ("mixed = 1", "cannot be assigned"),
-            ("minimal = 1", "prove_minimal"),
-            ("relate = none", "switch"),
-            ("split_runs = on", "unknown name on"),
-            ("(if nope id)", "unknown name nope"),
-            ("(if same id)", "same needs parentheses"),
-            ("split_runs = 18446744073709551615", "number too large"),
-            ("split_runs =", "found the end"),
-            ("(with rewrites=8 semi_leaves=2 rewrite)", "write (KEY = VALUE | ... | p)"),
-            ("rewrite | (with bit_splits=2 rewrite)", "bit_split_budget"),
-            ("with", "no longer read"),
-            ("(time-limit 500) | rewrite", "write time_limit = N"),
-            ("rewrite | time-limit", "time_limit = none for no limit"),
-            ("(if true id)", "write 1"),
-            ("(filter (true && mixed))", "(any 1)"),
-            ("split_runs = size-mul-x", "size-mul-x reads as size - mul - x: names use _, not -"),
-            ("tfunc-whole", "write tfunc_whole"),
-            ("split_runs = size-mul | tfunc-whole", "tfunc-whole reads as tfunc - whole"),
-            ("(if (prove-minimal) id)", "write prove_minimal"),
-        ] {
-            let e = parse(bad).unwrap_err();
-            assert!(e.contains(msg), "{bad}: {e}");
-        }
     }
 
     #[test]
@@ -1810,54 +1744,13 @@ mod tests {
         same("(relate = 0 | rewrite)", "relate = 0 | rewrite");
         same("(rewrite | unshift)", "rewrite | unshift");
         assert_eq!(parse("(if (size + 1) id)").unwrap(), Pipe::app("if", vec![op("+", vec![Pipe::app("size", vec![]), Pipe::Num(1)]), id(), id()]));
-        assert_eq!(parse("(filter (size vars))").unwrap_err(), "size takes t:term?; vars is a group — write (main vars)");
-        assert_eq!(parse_group("(if (size + 1) id)").unwrap_err(), "size takes t:term? and gives num; its input here is a group: write the element, as in (size main) or (size (index i r))");
         same("(filter (any mul > 1 && tiny))", "(filter (any (mul > 1 && tiny)))");
         assert_eq!(parse("(if lowbits id)").unwrap(), Pipe::app("if", vec![Pipe::global(var_index("lowbits").unwrap()), id(), id()]), "a switch in an expression");
         for (bad, msg) in [
             ("mixed", "mixed gives a number, not a group: (mixed t:term?) num"),
             ("(any 1)", "any gives a number"),
             ("(size (main t))", "size gives a number"),
-            ("(if egglog id)", "egglog gives a group, not a number: (egglog label:name? g:group) group"),
-            ("(if (best 1 id) id)", "best gives a group"),
-            ("(if mixed)", "if takes 3 or 4 arguments; | gives the last: (if c:group->num a:pipe b:pipe? g:group) group"),
-            ("(if mixed id id id)", "if takes"),
-            ("(retry mixed id)", "retry takes 4 arguments; | gives the last"),
-            ("(fix 3)", "fix takes 3 arguments; | gives the last"),
-            ("(fix)", "fix takes"),
-            ("(seq)", "seq takes 2 or more arguments; | gives the last"),
-            ("(best 1)", "best takes"),
-            ("(save t 1)", "save takes 2 arguments; | gives the last: (save r:group g:group) group"),
-            ("(save)", "save takes 2 arguments"),
-            ("(tag)", "tag takes 3 arguments"),
-            ("(lowbits x)", "lowbits takes 1 argument; | gives the last: (lowbits t:term) term"),
-            ("(id 1)", "id takes 1 argument"),
-            ("(print)", "print takes 1 or more arguments: (print x:any...)"),
-            ("rewrite | size | rewrite", "size gives num; rewrite takes g:group"),
-            ("(load t)", "unknown pass load"),
-            ("fix", "fix needs parentheses: (fix ...); (fix n:num p:pipe g:group) group"),
-            ("(if any id)", "any needs parentheses"),
-            ("(if (same) id)", "same takes 2 arguments; | gives the last: (same r:term? t:term) num"),
-            ("(if (same t 1) id)", "same takes r:term?; t is a group — write (main t)"),
-            ("(if (size t) id)", "size takes t:term?; t is a group — write (main t)"),
-            ("(if (size (rewrite)) id)", "size takes t:term?; (rewrite) is a group — write (main (rewrite))"),
-            ("(if (minimal (main t)) id)", "minimal takes g:group; (main t) is term?, not a group"),
             ("split_runs", "split_runs is a variable, not a step"),
-            ("off", "off needs parentheses"),
-            ("egglog/x", "write egglog/x as (egglog x)"),
-            ("label/b", "write label/b as (label b)"),
-            ("off/relate | rewrite", "write off/relate as (off relate)"),
-            ("polish/factor", "names cannot contain '/': write polish_factor"),
-            ("(smaller polish/factor polish_factor)", "names cannot contain '/': write polish_factor"),
-            ("semi/bit_split = 0 | rewrite", "names cannot contain '/': write semi_bit_split"),
-            ("(if poly/masked id)", "names cannot contain '/': write poly_masked"),
-            ("extern", NO_EXTERN),
-            ("(extern (x g:group) group)", NO_EXTERN),
-            ("rewrite = 1", "rewrite is a function and cannot be assigned: (rewrite g:group) group"),
-            ("relate", "relate needs parentheses: (relate ...); (relate sub:pipe t:term) term"),
-            ("same = 1", "computed from the group"),
-            ("nope", "unknown pass nope; known: id none egglog"),
-            ("(if nope id)", "unknown name nope in an expression; known: size vars"),
         ] {
             let e = parse(bad).unwrap_err();
             assert!(e.contains(msg), "{bad}: {e}");
@@ -1873,47 +1766,9 @@ mod tests {
     }
 
     #[test]
-    fn let_names_are_not_variables_or_functions() {
-        let def = |s: &str| parse_definition(s, &Defs::new(), &mut Vec::new()).map(|d| d.name);
-        assert_eq!(def("(let g lowbits | unshift)").unwrap(), "g");
-        assert_eq!(def("(def (g) lowbits | unshift)").unwrap(), "g");
-        assert_eq!(def("(def @inline (g) lowbits | unshift)").unwrap(), "g");
-        for name in ["split_runs", "relate_parts", "time_limit", "mixed", "mul", "size", "same", "none", "prepass", "polish", "relate", "fix", "on", "def", "extern"] {
-            assert!(def(&format!("(let {name} id)")).is_err(), "{name}");
-            assert!(def(&format!("(def @inline ({name}) id)")).is_err(), "{name}");
-        }
-        for name in ["split_runs", "mixed", "size", "none", "lowbits", "fix", "on", "def", "simba", "memo", "id"] {
-            assert!(def(&format!("(def ({name}) id)")).is_err(), "{name}");
-        }
-        for name in ["pipeline", "rewrite", "prepass_steps", "sub_cluster"] {
-            assert_eq!(def(&format!("(def ({name}) id)")).unwrap(), name, "no name the Rust code knows");
-        }
-        for (bad, msg) in [("(def (f x) id)", "parameter x is never used"), ("(def @pure (f) id)", "unknown attribute @pure"), ("(def f id)", "expected (NAME)"), ("(def (f) id id)", "expected )")] {
-            let e = def(bad).unwrap_err();
-            assert!(e.contains(msg), "{bad}: {e}");
-        }
-    }
-
-    #[test]
     fn function_type_annotations() {
         let def = |s: &str| parse_definition(s, &Defs::new(), &mut Vec::new());
-        assert!(def("(def (f p:group->group) p | lowbits)").unwrap().params[0].ty.is_pipe());
-        assert_eq!(def("(def (f p:group -> group) (best 1 p))").unwrap().params[0].ty, Ty::pipe());
         assert_eq!(def("(def (f k:num) (if (size <= k) lowbits))").unwrap().params[0].ty, Ty::Num);
-        for (bad, msg) in [
-            ("(def (f c:term->num->num) c)", "a function takes one input, term or group"),
-            ("(def (f c:num->term) c)", "a function takes one input, term or group"),
-            ("(def (f c:term->num g) g | c | lowbits)", "c gives num; lowbits takes t:term"),
-            ("(def @pipe (f g) g | lowbits)", "unknown attribute @pipe of def"),
-            ("(def (f c:term->num) (best 1 c))", "parameter c:term->num is used where pipe is wanted"),
-            ("(def (f c:term->term) (filter c))", "parameter c:term->term is used where term->num is wanted"),
-
-            ("(def (f x:num->) x)", "a type after ->"),
-            ("(def (f x:int->num) x)", "unknown type int->num"),
-        ] {
-            let Err(e) = def(bad) else { panic!("{bad} parses") };
-            assert!(e.contains(msg), "{bad}: {e}");
-        }
     }
 
     #[test]
@@ -1923,7 +1778,6 @@ mod tests {
         assert_eq!(parse("t = rewrite | unshift").unwrap(), Pipe::Seq(vec![bind("t", "rewrite"), parse("unshift").unwrap()]));
         assert_eq!(parse("t = u | rewrite").unwrap(), Pipe::Seq(vec![Pipe::Bind(Slot::Local("t".into(), Holds::Group), Arc::new(group("u".into()))), parse("rewrite").unwrap()]), "t = u binds u's group");
         assert_eq!(show(&parse("(save u) | t = (u | unshift)").unwrap()), "(save u) | t = (u | unshift)");
-        assert_eq!(parse_definition("(def (f r:group) u = r | (u | id))", &Defs::new(), &mut Vec::new()).unwrap().params[0].ty, Ty::Group);
         assert_eq!(parse("t = unshift").unwrap(), bind("t", "unshift"), "unshift after a group variable is the pass");
         assert_eq!(parse("t = (relate = 0 | rewrite)").unwrap(), bind("t", "relate = 0 | rewrite"));
         assert_eq!(parse("t = (best 1 id rewrite)").unwrap(), bind("t", "(best 1 id rewrite)"));
@@ -1933,34 +1787,15 @@ mod tests {
             assert_eq!(show(&parse(s).unwrap()), s, "{s}");
             assert_eq!(parse(&show(&parse(s).unwrap())).unwrap(), parse(s).unwrap(), "{s}");
         }
-        for (bad, msg) in [
-            ("t = u + 1", "unknown name u"),
-            ("t = (u)", "unknown name u"),
-            ("keep = rewrite", "keep is a variable that holds a number, so it cannot be bound to a group"),
-            ("(save keep)", "keep is a variable that holds a number, so it cannot name a group variable"),
-            ("(if (same (main relate)) id)", "relate is a variable that holds a number"),
-            ("rewrite = id", "rewrite is a function and cannot be assigned"),
-            ("size = id", "cannot be assigned"),
-            ("t = rewrite = 1", "rewrite is a function and cannot be assigned"),
-        ] {
-            let e = parse(bad).unwrap_err();
-            assert!(e.contains(msg), "{bad}: {e}");
-        }
         let lets = |item: &str| {
             let d = parse_definition(item, &Defs::new(), &mut Vec::new()).unwrap();
             let mut defs = Defs::new();
             defs.insert(d.name, Named { pipe: d.pipe, flat: d.flat, run: false, params: Vec::new(), def: None, input: None });
             defs
         };
-        assert!(parse_with("g = id", &lets("(let g lowbits)"), &mut Vec::new()).unwrap_err().contains("defined by let"));
         assert_eq!(parse_with("t = g", &lets("(let g lowbits | unshift)"), &mut Vec::new()).unwrap(), bind("t", "lowbits | unshift"));
-        let d = parse_definition("(def (f a:group p:pipe) p | (a | id))", &Defs::new(), &mut Vec::new()).unwrap();
-        assert_eq!(def_sig(&d.name, &d.params).to_string(), "(f a:group p:pipe g:group) group");
         let d = parse_definition("(def (f p:pipe g:group) g | p)", &Defs::new(), &mut Vec::new()).unwrap();
         assert_eq!((d.input.as_deref(), def_sig(&d.name, &d.params).to_string().as_str()), (Some("g"), "(f p:pipe g:group) group"), "a last group parameter the body starts with is its input");
-        let def_err = |s: &str| parse_definition(s, &Defs::new(), &mut Vec::new()).err().unwrap();
-        assert!(def_err("(def (f n) n = 3)").contains("parameter n cannot be assigned"));
-        assert!(def_err("(def (f n) (fix n id) | n = id)").contains("parameter n cannot be assigned"));
         assert!(parse_assign("t", "rewrite").unwrap_err().contains("unknown variable t"), "a --passes item NAME=VALUE is to a variable that holds a number");
     }
 

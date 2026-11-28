@@ -1,0 +1,117 @@
+# Calls with explicit inputs and functions that give numbers: errors where kinds do not fit.
+(import "default")
+(def (k r:group n:num p:pipe x:name) (seq r) | (fix n p) | (tag x id))
+(def (prepass_steps) (save t) | (k t 2 id x))
+
+# expect warning: prepass_steps: (k t 2 id x) does not take the input; its value is dropped — write ((k t 2 id x) | ...) to start from it
+
+# ---
+(import "default")
+(def (big k g:group) (size (main g)) > k)
+(def (prepass_steps) keep = (big 3) | id)
+
+# ---
+(import "default")
+(def (prepass_steps) size | rewrite)
+
+# expect error: size gives a number, not a group: (size t:term?) num; a step calls a function that gives a group
+
+# ---
+(import "default")
+(def (prepass_steps) rewrite | size | rewrite)
+
+# expect error: size gives num; rewrite takes g:group
+
+# ---
+(import "default")
+(def (big k g:group) (size (main g)) > k)
+(def (prepass_steps) big | rewrite)
+
+# expect error: big needs parentheses: (big ...); (big k:num g:group) num
+
+# ---
+(import "default")
+(def (big k g:group) (size (main g)) > k)
+(def (prepass_steps) (big 3 (lowbits | unshift)))
+
+# expect error: big gives a number, not a group: (big k:num g:group) num; a step calls a function that gives a group
+
+# ---
+(import "default")
+(def (big k g:group) (size (main g)) > k)
+(def (prepass_steps) t = (big 3 (lowbits | unshift)) | (save t))
+
+# expect error: t is a number variable, so it cannot name a group variable
+
+# ---
+(import "default")
+(def (big k g:group) size > k)
+
+# expect error: big: size takes t:term? and gives num; its input here is a group: write the element, as in (size main) or (size (index i r))
+
+# ---
+(import "default")
+(def @pipe (f g) rewrite)
+
+# expect error: unknown attribute @pipe of def; known: @inline @timed
+
+# ---
+(import "default")
+(def @inline (f g:group) g | size)
+
+# expect error: def @inline (f g): a function that gives a number is a run of its own, so it cannot be @inline or a let
+
+# ---
+(import "default")
+(def (f x:bogus) id)
+
+# expect error: unknown type bogus of parameter x; known: pipe group term num name, and A->B as in term->num
+
+# ---
+(import "default")
+(def (f p:pipe) (fix p id))
+
+# expect error: parameter p is used as a pipeline and as an expression
+
+# ---
+(import "default")
+(def (twice p g) (p (p g)))
+(def (prepass_steps) id | (twice rewrite t))
+
+# expect error: prepass_steps reads group variable t before it is bound (t = ... or (save t))
+
+# ---
+(import "default")
+(def (f p:pipe g:group) g | p)
+(def (h a:group) (f id a))
+(def (prepass_steps) (h u))
+
+# expect error: prepass_steps reads group variable u before it is bound (u = ... or (save u))
+
+# ---
+(import "default")
+(def (f p:pipe g:group) g | p)
+(def (prepass_steps) (f id u))
+
+# expect error: prepass_steps reads group variable u before it is bound (u = ... or (save u))
+
+# ---
+(import "default")
+(def (f p:pipe g:group) g | p)
+(def (prepass_steps) (f id 1))
+
+# expect error: f takes 2 arguments; | gives the last: (f p:pipe g:group) group
+
+# ---
+(import "default")
+(def (big k g:group) (size (main g)) > k)
+(def (prepass_steps) t = (big 3) | (save t))
+
+# expect error: t is a number variable, so it cannot name a group variable
+
+# ---
+(import "default")
+(def (big k g:group) (size (main g)) > k)
+(def (prepass_steps) t = (k + 1))
+
+# expect error: unknown name k in an expression; known: size vars depth mul bitconst arith_in_bit shift div (same ...) (any ...) (all ...) (opaque ...) minimal mixed (rebuilds ...) moved was_cut input tiny fits_split used_wide used_clustered few_rewrites replaceable abstracted no_leaves wide const_bitwise cofactor and the variables

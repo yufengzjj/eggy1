@@ -1,0 +1,9 @@
+# A function with a written parameter type, run on a parsed term.
+(import "default")
+num_type = u8
+(def (under k:num) size <= k)
+t = (parse "x + 0")
+(assert (under 5 (main t)) "x + 0 has at most 5 nodes")
+t | simplify | (show main)
+
+# expect value: x

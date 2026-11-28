@@ -1,0 +1,67 @@
+# A program runs once from the top: its value, a new global, text, the empty group, no value.
+1 + 2
+
+# expect value: 3
+
+# ---
+x_global = 4
+x_global * 2
+
+# expect value: 8
+
+# ---
+"a b"
+
+# expect value: a b
+
+# ---
+(print "hello world")
+
+# expect stderr: hello world
+# expect value: group []
+
+# ---
+(def (f) id)
+
+# expect warning: (def (f) ...) is never used: it runs only where a later item calls it
+
+# ---
+keep = 3
+
+# ---
+(import "default")
+f:term->num = size
+f
+
+# expect value: function
+
+# ---
+(import "default")
+(parse "x + 0xff") | main | show
+
+# expect value: (x + 0xff)
+
+# ---
+(import "default")
+num_type = i8
+(parse "x + 0xff") | main | show
+
+# expect value: (x - 1)
+
+# ---
+(import "default")
+num_type = u8
+t = (parse "(Add (Var \"x\") (Num -1))")
+(show (main t))
+
+# expect value: (x + 0xff)
+
+# ---
+(import "default")
+num_type = u32
+(parse "(x & y) + (x | y)")
+simplify
+main
+show
+
+# expect value: (x + y)

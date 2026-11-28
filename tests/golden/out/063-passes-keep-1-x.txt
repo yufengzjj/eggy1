@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes keep+=1 x
+==== exit
+2
+==== stdout
+==== stderr
+error: invalid value 'keep+=1' for '--passes <PASSES>': keep is not a list: keep+=1
+
+For more information, try '--help'.

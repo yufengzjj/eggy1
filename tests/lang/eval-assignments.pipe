@@ -1,0 +1,66 @@
+# Assignments, on and off bind in their sequence: a group, scope or pipeline argument ends them, a branch that is no sequence does not.
+(import "default")
+num_type = u32
+v = (parse "x")
+(v | main | ((off relate) | id))
+(print "a group ends its off:" (relate + 0))
+(v | main | (rewrites = 8 | (off relate)))
+(print "a sequence ends its off:" (relate + 0))
+(v | main | (scope (off relate)))
+(print "scope ends its off:" (relate + 0))
+v | main | (if 1 (off relate))
+(print "a branch that is no sequence does not:" (relate + 0))
+
+# expect stderr: a group ends its off: none
+# expect stderr: a sequence ends its off: none
+# expect stderr: scope ends its off: none
+# expect stderr: a branch that is no sequence does not: 0
+# expect value: group [(Var "x")]
+
+# ---
+(import "default")
+num_type = u32
+v = (parse "x")
+v | (off relate tfunc)
+(print "several names in one off:" (relate + 0) (tfunc + 0))
+v | (on relate)
+(print "the later switch counts:" (relate + 0) (tfunc + 0))
+(print cut)
+v | (on cut)
+(print cut)
+
+# expect stderr: several names in one off: 0 0
+# expect stderr: the later switch counts: 1 0
+# expect stderr: 0
+# expect stderr: 1
+# expect value: group [(Var "x")]
+
+# ---
+(import "default")
+num_type = u32
+d = (parse "x - y")
+d | main | split_runs = vars * 3
+(print "the right side is evaluated on the group:" split_runs)
+d | main | (split_runs = 1 | id)
+(print "a group ends its assignment:" split_runs)
+(d | main | relate = 0 | cut = 2)
+(print "a sequence ends its assignments:" (relate + 0) cut)
+d | main | relate = 0
+d | main | cut = 2
+(print "a switch is on for any value but 0:" (relate + 0) cut)
+d | main | rewrites = 5
+d | main | rewrites = 9
+(print rewrites)
+d | main | rewrites = none
+(print rewrites)
+d | main | (origin x (bit_split_budget = bit_split_budget + 1))
+(print "a pipeline argument is a scope:" bit_split_budget)
+
+# expect stderr: the right side is evaluated on the group: 6
+# expect stderr: a group ends its assignment: 6
+# expect stderr: a sequence ends its assignments: none 0
+# expect stderr: a switch is on for any value but 0: 0 1
+# expect stderr: 9
+# expect stderr: none
+# expect stderr: a pipeline argument is a scope: none
+# expect value: group [(Sub (Var "x") (Var "y"))]

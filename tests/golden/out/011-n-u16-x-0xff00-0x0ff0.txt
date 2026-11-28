@@ -1,0 +1,8 @@
+==== command
+eggy1 -n u16 "(x | 0xff00) & 0x0ff0"
+==== exit
+0
+==== stdout
+
+((0xf0 & x) + 0xf00)
+==== stderr

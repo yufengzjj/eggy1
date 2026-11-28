@@ -1,0 +1,9 @@
+==== command
+eggy1 --passes "pipeline=prepass | (egglog first)" -n u32 "(x ^ y) + 2*(x & y)"
+==== exit
+2
+==== stdout
+==== stderr
+error: invalid value 'pipeline=prepass | (egglog first)' for '--passes <PASSES>': prepass needs parentheses: (prepass ...); (prepass p:pipe t:term) group
+
+For more information, try '--help'.

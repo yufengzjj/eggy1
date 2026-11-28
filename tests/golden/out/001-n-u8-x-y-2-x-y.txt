@@ -1,0 +1,8 @@
+==== command
+eggy1 -n u8 "(x ^ y) + 2*(x & y)"
+==== exit
+0
+==== stdout
+
+(x + y)
+==== stderr

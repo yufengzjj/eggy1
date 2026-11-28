@@ -1,0 +1,23 @@
+# Top-level assignments run in order on the group of the top level, after default.pipe's.
+(import "default")
+(print "default.pipe comes first:" keep)
+extra = 5
+split_runs = (vars main) * 3
+extra = extra + 1
+(print "a later item reads an earlier:" extra)
+(print "evaluated on the group of the top level, empty at first:" split_runs)
+(parse "x - y") | split_runs = (vars main) * 3
+(print "and on the group a statement gives:" split_runs)
+
+# expect stderr: default.pipe comes first: 2
+# expect stderr: a later item reads an earlier: 6
+# expect stderr: evaluated on the group of the top level, empty at first: 0
+# expect stderr: and on the group a statement gives: 6
+# expect value: group [(Sub (Var "x") (Var "y"))]
+
+# ---
+(import "default")
+(def (prepass_steps) (max_leaves = 7 | id))
+(parse "x - y") | prepass_steps | main | show
+
+# expect value: (x - y)

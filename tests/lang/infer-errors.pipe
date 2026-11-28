@@ -1,0 +1,59 @@
+# A parameter type that no use fixes, or that two uses disagree on, is an error.
+(import "default")
+(def @inline (f t:term p:pipe) t | p)
+
+# expect error: def @inline (f t p): a term parameter is for a def that runs, not @inline
+
+# ---
+(import "default")
+(def (k g) g)
+
+# expect error: def (k g): cannot infer the type of g in k: write g:TYPE
+
+# ---
+(import "default")
+(def (f p g) g | p | rewrite)
+
+# expect error: def (f p g): cannot infer the type of p in f: write p:TYPE
+
+# ---
+(import "default")
+(def (f p q) p | q)
+
+# expect error: def (f p q): cannot infer the type of p in f: write p:TYPE
+
+# ---
+(import "default")
+(def (f n p) rewrites = n | p)
+
+# expect error: def (f n p): cannot infer the type of p in f: write p:TYPE
+
+# ---
+(import "default")
+(def (f g) g | (best 1 g))
+
+# expect error: def (f g): parameter g is used as a group or a term and as a step g
+
+# ---
+(import "default")
+(def (f p) (best 1 p) | (filter p))
+
+# expect error: def (f p): parameter p is used as term->num and as pipe
+
+# ---
+(import "default")
+(def (f p) id | p | (filter (same (main p))))
+
+# expect error: def (f p): parameter p is used as a group or a term and as a step p
+
+# ---
+(import "default")
+(def (f r) (seq r) | (tag r id))
+
+# expect error: def (f r): parameter r is used as name and as a step
+
+# ---
+(import "default")
+(def (f p q) q | (best 1 p) | p | lowbits | (filter p))
+
+# expect error: def (f p q): parameter p is used as term->num and as pipe

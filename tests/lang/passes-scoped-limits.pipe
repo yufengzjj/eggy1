@@ -1,0 +1,106 @@
+# Limits assigned inside a scope end with their sequence, and memos and caches keep scopes apart.
+(import "default")
+num_type = u8
+t = (parse "((x * (x * x)) + x) & 1")
+r = (t | (scope lowbits))
+(print "x*x*x + x is even:" r)
+r = (t | (scope (lowbits_max_try = 1 | id) | lowbits))
+(print "the assignment ends with its sequence:" r)
+r = (t | (scope lowbits_max_try = 1 | lowbits))
+(print "with nothing enumerated nothing folds:" r)
+r = (t | (scope (lowbits_max_try = 1 | lowbits) | lowbits))
+(print r)
+
+# expect stderr: x*x*x + x is even: 0
+# expect stderr: the assignment ends with its sequence: 0
+# expect stderr: with nothing enumerated nothing folds: (((x * (x * x)) + x) & 1)
+# expect stderr: 0
+# expect value: group []
+
+# ---
+(import "default")
+num_type = u8
+t = (parse "(x + y) * (x + y) - (x * x + 2 * (x * y))")
+r = (t | (scope (best 1 id (poly_mba rewrite simba_steps))))
+(print r)
+r = (t | (scope poly_max_monos = 0 | (best 1 id (poly_mba rewrite simba_steps))))
+(print "no product is multiplied out:" r)
+r = (t | (scope (poly_max_monos = 0 | id) | (best 1 id (poly_mba rewrite simba_steps))))
+(print "the assignment ends with its sequence:" r)
+r = (t | (scope (poly_max_monos = 0 | (best 1 id (poly_mba rewrite simba_steps))) | (best 1 id (poly_mba rewrite simba_steps))))
+(print "the memo keeps the scopes apart:" r)
+
+# expect stderr: (y * y)
+# expect stderr: no product is multiplied out: (((x + y) * (x + y)) - ((x * x) + (2 * (x * y))))
+# expect stderr: the assignment ends with its sequence: (y * y)
+# expect stderr: the memo keeps the scopes apart: (y * y)
+# expect value: group []
+
+# ---
+(import "default")
+num_type = u32
+t = (parse "(s - (z & (y | s))) + z + (u ^ x ^ z)")
+(print "before:" (size (main t)))
+r = (t | (scope (polish_join_linear rewrite)))
+(print "a move makes it smaller:" (size (main r)))
+r = (t | (scope join_linear_max_groups = 0 | (polish_join_linear rewrite)))
+(print "no region is moved in:" (size (main r)))
+r = (t | (scope (join_linear_max_groups = 0 | id) | (polish_join_linear rewrite)))
+(print "the assignment ends with its sequence:" (size (main r)))
+r = (t | (scope (join_linear_max_groups = 0 | (polish_join_linear rewrite)) | (polish_join_linear rewrite)))
+(print "the memo keeps the scopes apart:" (size (main r)))
+
+# expect stderr: before: 15
+# expect stderr: a move makes it smaller: 12
+# expect stderr: no region is moved in: 15
+# expect stderr: the assignment ends with its sequence: 12
+# expect stderr: the memo keeps the scopes apart: 12
+# expect value: group []
+
+# ---
+(import "default")
+t = (parse "x & -(x & -(x & y))")
+r = (t | (scope tfunc))
+(print r)
+r = (t | (scope tfunc_max_size = 2 | tfunc))
+(print "no table entry is small enough:" r)
+r = (t | (scope (tfunc_max_size = 2 | id) | tfunc))
+(print "the assignment ends with its sequence:" r)
+r = (t | (scope (tfunc_max_size = 2 | tfunc) | tfunc))
+(print "the tables keep the values apart:" r)
+
+# expect stderr: (x & y)
+# expect stderr: no table entry is small enough: (x & -(x & -(x & y)))
+# expect stderr: the assignment ends with its sequence: (x & y)
+# expect stderr: the tables keep the values apart: (x & y)
+# expect value: group []
+
+# ---
+(import "default")
+t = (parse "-2*((((h ^ g) & a) | f) - (((h ^ g) & a) & f)) - 2*(((g + j) - (g & j)) + ((a | h) - (a & h)) - ((g | j) | (a ^ h))) + 2*(((b | h) - (b & h)) + ((g + d) - (g | d)) - ((b ^ h) | (g & d))) + 3*(~f & ~b) + c + i")
+(print "input:" (size (main t)))
+r = (t | (scope (best 1 id wide_blocks)))
+(print "a block form is smaller:" (size (main r)) (same (main t) (main r)))
+r = (t | (scope wide_blocks_max_block = 2 | (best 1 id wide_blocks)))
+(print "no block is small enough:" (same (main t) (main r)))
+u = (t | (scope (best 1 id wide_blocks)))
+r = (t | (scope (wide_blocks_max_block = 2 | id) | (best 1 id wide_blocks)))
+(print "the assignment ends with its sequence:" (same (main u) (main r)))
+r = (t | (scope (wide_blocks_max_block = 2 | (best 1 id wide_blocks)) | (best 1 id wide_blocks)))
+(print "the cache keeps the scopes apart:" (same (main u) (main r)))
+
+# expect stderr: input: 81
+# expect stderr: a block form is smaller: 36 0
+# expect stderr: no block is small enough: 1
+# expect stderr: the assignment ends with its sequence: 1
+# expect stderr: the cache keeps the scopes apart: 1
+# expect value: group []
+
+# ---
+(import "default")
+pick = 0
+(def (rewrite) (memo rewrite (if pick (again rewrite (best 1 (regions rewrite (best 1 (simba simba_steps) small_blocks wide_blocks)) (poly_mba rewrite simba_steps))) id)))
+(def (prepass_steps) (scope pick = 0 | rewrite | pick = 1 | rewrite))
+(parse "(x & y) + (x | y)") | prepass_steps | main | show
+
+# expect value: (x + y)

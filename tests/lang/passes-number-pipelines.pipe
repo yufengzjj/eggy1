@@ -1,0 +1,108 @@
+# Pipelines that end in a number: where they are read and where they are errors.
+(import "default")
+(def (prepass_steps) (fix (rewrite | main | size) id))
+
+# ---
+(import "default")
+(def (prepass_steps) main | (if ((rewrite | main | size) < size) id))
+
+# ---
+(import "default")
+(def (prepass_steps) (if (any (rewrite | main | size) < 3) id))
+
+# ---
+(import "default")
+(def (prepass_steps) (if ((size (main (rewrite))) < (mixed (main (lowbits | unshift)))) id))
+
+# ---
+(import "default")
+(def (polish_steps) keep = ((prepass prepass_steps) | main | size) | id)
+
+# ---
+(import "default")
+(def (prepass_steps) (fix 3 rewrite | size))
+
+# expect error: rewrite | size gives a number, not a group: a pipeline that ends in a number goes where a number does, as in x = (a | size)
+
+# ---
+(import "default")
+(def (prepass_steps) rewrite | size | rewrite)
+
+# expect error: size gives num; rewrite takes g:group
+
+# ---
+(import "default")
+(def (prepass_steps) (if ((rewrite | id) < 3) id))
+
+# expect error: (rewrite | id) gives a group, not a number: end it with a step that gives a number, as in (a | size)
+
+# ---
+(import "default")
+(def (f g:group) (size (main g)) > (rewrite | size))
+
+# expect error: f: size takes t:term? and gives num; its input here is a group: write the element, as in (size main) or (size (index i r))
+
+# ---
+(import "default")
+(def @inline (f) rewrite | size)
+
+# expect error: def @inline (f): a function that gives a number is a run of its own, so it cannot be @inline or a let
+
+# ---
+(import "default")
+(def (prepass_steps) t = (rewrite | size) | (save t))
+
+# expect error: t is a number variable, so it cannot name a group variable
+
+# ---
+(import "default")
+(def (prepass_steps) (save t) | t = 1 | (seq t))
+
+# expect error: t is a group variable, so it cannot hold a number: 1 gives a number
+
+# ---
+(import "default")
+(def (prepass_steps) keep = (lowbits | unshift))
+
+# expect error: keep is a variable that holds a number, so it cannot be bound to a group: (lowbits | unshift) gives a group
+
+# ---
+(import "default")
+(def (f p:pipe g:group) g | p)
+(def (prepass_steps) (f id rewrite))
+
+# expect error: f takes 2 arguments; | gives the last: (f p:pipe g:group) group
+
+# ---
+(import "default")
+(def (prepass_steps) (lowbits x))
+
+# expect error: lowbits takes 1 argument; | gives the last: (lowbits t:term) term
+
+# ---
+(import "default")
+(def (prepass_steps) (save t) | rewrite | t)
+
+# expect warning: prepass_steps: t does not take the input; its value is dropped — write (t | ...) to start from it
+
+# ---
+(import "default")
+(def (prepass_steps) (save t) | rewrite | (seq t))
+
+# ---
+(import "default")
+(def @inline (k g:group) g | rewrite)
+(def (prepass_steps) rewrite | k)
+
+# ---
+(import "default")
+(def (f r) t = r | (seq t))
+(def (h r) (fix 2 r))
+(def (prepass_steps) (f rewrite) | (h id))
+
+# ---
+(import "default")
+(def (h r) r)
+(def (prepass_steps) (h id))
+
+# expect error: def (h r): cannot infer the type of r in h: write r:TYPE
