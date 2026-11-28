@@ -149,6 +149,11 @@ pub(crate) fn seq_of(mut stages: Vec<Pipe>) -> Pipe {
     if stages.len() == 1 { stages.pop().unwrap() } else { Pipe::Seq(stages) }
 }
 
+/// Whether the stage `p` gives a number or a text: a pipeline in parentheses that ends in one.
+fn gives_value(p: &Pipe) -> bool {
+    matches!(p, Pipe::Seq(_)) && super::eval::step_kind(p) == super::eval::StepKind::Value && !gives_tuple(p)
+}
+
 /// The pipeline `p | e` that gives the number `e` gives, `p` a sequence written out: `p` and
 /// its steps are one scope alike, and it shows the same.
 pub(crate) fn number_seq(p: Pipe, e: Pipe) -> Pipe {
@@ -224,7 +229,7 @@ impl<'a> Parser<'a> {
     /// of a variable, number function or numeric parameter, maybe after `(`.
     pub(crate) fn expr_ahead(&self) -> bool {
         let k = (0..).find(|k| self.peek_at(*k) != Some(&Tok::Open)).unwrap();
-        if self.tuple_literal_at(0) {
+        if self.tuple_inside(k) {
             return false;
         }
         if self.tuple_index_at(k.saturating_sub(1)) {
@@ -447,12 +452,35 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// A pipeline in parentheses after the `(`, which gives what its last step gives: a group, a
+    /// tuple, or a number or a text.
+    fn paren_pipe(&mut self) -> Result<Pipe, String> {
+        let (stages, tail) = self.stages_of_pipe()?;
+        let p = seq_of(stages);
+        Ok(match tail {
+            Some(e) => number_seq(p, e),
+            None => p,
+        })
+    }
+
+    /// Whether an opening parenthesis among the first `k` tokens starts a tuple, so the
+    /// pipeline ahead starts with one and gives what its steps give.
+    fn tuple_inside(&self, k: usize) -> bool {
+        (0..k).any(|j| self.tuple_literal_at(j))
+    }
+
+    /// Whether a number written out is ahead, maybe after `(`, or `!`.
+    fn number_literal_ahead(&self) -> bool {
+        let k = (0..).find(|k| self.peek_at(*k) != Some(&Tok::Open)).unwrap();
+        !self.tuple_inside(k) && matches!(self.peek_at(k), Some(Tok::Num(_) | Tok::Not))
+    }
+
     /// Whether a step that gives a number is ahead, maybe after `(`: a number, `!`, a number
     /// function, a function defined that gives a number, or a variable that holds a number and
     /// names no step.
     fn number_step_ahead(&self) -> bool {
         let k = (0..).find(|k| self.peek_at(*k) != Some(&Tok::Open)).unwrap();
-        if self.tuple_literal_at(0) {
+        if self.tuple_inside(k) {
             return false;
         }
         if self.tuple_index_at(k.saturating_sub(1)) {
@@ -511,8 +539,9 @@ impl<'a> Parser<'a> {
         }
         loop {
             let value = match () {
+                _ if matches!(self.peek(), Some(Tok::Str(_))) => Some(self.text_value()?),
                 _ if !stages.is_empty() && self.text_tail && self.text_ahead() => Some(self.text_value()?),
-                _ if !stages.is_empty() && self.number_step_ahead() => Some(self.or()?),
+                _ if (!stages.is_empty() || self.number_literal_ahead()) && self.number_step_ahead() => Some(self.or()?),
                 _ => None,
             };
             if let Some(e) = value {
@@ -535,7 +564,10 @@ impl<'a> Parser<'a> {
             };
             let p = self.stage()?;
             self.input |= starts_with_value(&p);
-            if gives_tuple(&p) && self.peek() == Some(&Tok::Bar) {
+            if gives_value(&p) && self.peek() != Some(&Tok::Bar) {
+                return Ok((stages, Some(p)));
+            }
+            if (gives_tuple(&p) || gives_value(&p)) && self.peek() == Some(&Tok::Bar) {
                 let (steps, last) = self.then_applied(p)?;
                 stages.extend(steps);
                 if last.is_some() {
@@ -809,13 +841,9 @@ impl<'a> Parser<'a> {
                             let Some(input) = self.group_input(false)? else { return Err(format!("{n} takes {}: {s}", s.arity())) };
                             explicit(input, construct(&n, Vec::new()).ok_or_else(|| unimplemented(s))?)
                         }
-                        _ => {
-                            self.pipe()?
-                        }
+                        _ => self.paren_pipe()?,
                     },
-                    _ => {
-                        self.pipe()?
-                    }
+                    _ => self.paren_pipe()?,
                 };
                 self.expect(Tok::Close, ")")?;
                 Ok(p)
@@ -1018,13 +1046,13 @@ impl<'a> Parser<'a> {
     /// unless written alone (`t = u` binds a group variable).
     pub(crate) fn number_ahead(&self, number_var: bool) -> bool {
         let k = (0..).find(|k| self.peek_at(*k) != Some(&Tok::Open)).unwrap();
-        if self.tuple_literal_at(0) {
+        if self.tuple_inside(k) {
             return false;
         }
         if self.tuple_index_at(k.saturating_sub(1)) {
             return self.number_index_at(k);
         }
-        let Some(Tok::Name(n)) = self.peek_at(k) else { return true };
+        let Some(Tok::Name(n)) = self.peek_at(k) else { return !matches!(self.peek_at(k), Some(Tok::Str(_))) };
         if self.tuple_term_at(k) {
             return false;
         }
@@ -1424,6 +1452,9 @@ impl<'a> Parser<'a> {
         }
         if self.tuple_term_at(0) {
             return Ok(self.tuple_term()?.0);
+        }
+        if self.peek() == Some(&Tok::Open) && !self.number_ahead(true) {
+            return self.stage();
         }
         let Some(Tok::Str(_) | Tok::Name(_)) = self.peek() else { return self.arg() };
         let n = match self.next() {

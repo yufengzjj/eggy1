@@ -1,0 +1,332 @@
+# The examples of docs/lang/evaluation.md, by section.
+# 1. The last parameter is the input: a call without it takes the step's input.
+(def (add k n:num) n + k)
+(print (add 1 2))
+2 | (add 1)
+
+# expect stderr: 3
+# expect value: 3
+
+# ---
+(import "default")
+t = (parse "x + 0")
+(drop_identities t) | main | show
+
+# expect value: x
+
+# ---
+(import "default")
+t = (parse "x + 0")
+t | drop_identities | main | show
+
+# expect value: x
+
+# ---
+# 2.1 A step that gives a value passes it on, whether or not it uses its input.
+(def (add k n:num) n + k)
+(parse "x") | 1 | (add 1) | (add 1)
+
+# expect value: 3
+
+# ---
+(parse "x + y") | main | show | parse | main | show
+
+# expect value: (x + y)
+
+# ---
+# 2.2 A step with no value passes on what it is given.
+(def (add k n:num) n + k)
+2 | (print "a") | k = 5 | (on lowbits) | (assert (k > 0) "positive") | (add k)
+
+# expect stderr: a
+# expect value: 7
+
+# ---
+# 2.3 Parentheses are not special.
+(parse "x") | ((parse "y") | (print "a")) | main | show
+
+# expect stderr: a
+# expect value: y
+
+# ---
+# 2.4 A pipeline may start from any value.
+(def (sum t:(num, num)) (index 0 t) + (index 1 t))
+(print ((1, 2) | sum))
+t = (parse "x")
+t | main | show
+
+# expect stderr: 3
+# expect value: x
+
+# ---
+"x + y" | parse | main | show
+
+# expect value: (x + y)
+
+# ---
+# 2.5 A dropped value that nothing read: a warning.
+(def (f) main | (parse "y") | main)
+(parse "x") | f
+
+# expect warning: f: (parse "y") does not use its input; the value of the step before is dropped
+# expect value: group [(Var "y")]
+
+# ---
+# 2.5 No warning after a print or an assignment that read the value.
+(import "default")
+(def (f) main | (print size) | (parse "y") | main)
+(parse "x") | f
+
+# expect stderr: 1
+# expect value: group [(Var "y")]
+
+# ---
+# 2.6 The next step does not take the value: a type error.
+(parse "x") | 1 | lowbits
+
+# expect error: 1 gives num; lowbits takes t:term
+
+# ---
+# 3. A group to a function of one term: each element, in order, repeats dropped.
+(import "default")
+(parse "x + 0") | (union id (parse "x") (parse "y * 1")) | drop_identities
+
+# expect value: group [(Var "x"), (Var "y")]
+
+# ---
+(import "default")
+(parse "x * y") | (union id (parse "(x | y) - (x & y)")) | small_blocks
+
+# expect value: group [(Xor (Var "x") (Var "y"))]
+
+# ---
+(import "default")
+(parse "x") | (union id (parse "y")) | reprint
+
+# expect value: group [(Var "x"), (Var "y")]
+
+# ---
+(import "default")
+(parse "x + y") | size
+
+# expect error: size takes t:term? and gives num; its input here is a group: write the element, as in (size main) or (size (index i r))
+
+# ---
+# 3. One term to a group input: the group of it alone; none is the empty group.
+(import "default")
+(parse "x") | (union id (parse "y")) | main | (union id (parse "z"))
+
+# expect value: group [(Var "x"), (Var "z")]
+
+# ---
+(import "default")
+(parse "x") | none | main | (print size) | (union id (parse "z"))
+
+# expect stderr: 0
+# expect value: group [(Var "z")]
+
+# ---
+(import "default")
+(parse "x") | none | main | lowbits
+
+# expect value: group []
+
+# ---
+# 4. Rule 1: where a function type is wanted, the function value.
+(import "default")
+(def (small) size <= 1)
+(parse "x + y") | (union id (parse "x")) | (filter small)
+
+# expect value: group [(Var "x")]
+
+# ---
+# 4. Rule 2: applied to the step's input.
+(import "default")
+(def (h) size + 1)
+(parse "x + y") | main | (print size h (size + 1) rewrite)
+
+# expect stderr: 3 4 4 (x + y)
+# expect value: group [(Add (Var "x") (Var "y"))]
+
+# ---
+# 4. Rule 3: a function value where one fits and it cannot be evaluated.
+(import "default")
+(def (under k) size <= k)
+(print size under)
+(parse "x") | main | (print under)
+
+# expect stderr: (size t:term?) num (under k:num t:term) num
+# expect stderr: (under k:num t:term) num
+# expect value: group [(Var "x")]
+
+# ---
+# 4. Rule 4: an error where only a result fits.
+(import "default")
+size + 1
+
+# expect error: size has no input here: the top level of the program starts with none; write its input, as in (size (main t)), or start from a value, as in t | main | size; (size t:term?) num
+
+# ---
+(import "default")
+(parse "x") | (print size)
+
+# expect error: size takes t:term? and gives num; its input here is a group: write the element, as in (size main) or (size (index i r))
+
+# ---
+# 4. A call that leaves out more than its input is an error.
+(import "default")
+(parse "x") | (fix 3)
+
+# expect error: fix takes 3 arguments; | gives the last: (fix n:num p:pipe g:group) group
+
+# ---
+(def (add k n:num) n + k)
+3 | add
+
+# expect error: add takes 2 arguments: (add k:num n:num) num
+
+# ---
+(import "default")
+(def (under k) size <= k)
+(parse "x") | (filter under)
+
+# expect error: under needs parentheses: (under ...); (under k:num t:term) num
+
+# ---
+# 5. The implicit input of an expression: an element in filter, the group in if.
+(import "default")
+t = ((parse "x + y") | (union id (parse "x")))
+(print (t | (filter (size <= 1)) | main | size))
+(print (t | (if (any (size <= 1)) (filter (size > 1))) | main | size))
+t | main | (if (size > 1) (print "one term after main"))
+
+# expect stderr: 1
+# expect stderr: 3
+# expect stderr: one term after main
+# expect value: group [(Add (Var "x") (Var "y"))]
+
+# ---
+(import "default")
+t = ((parse "x + y") | (union id (parse "x")))
+t | (if (size > 1) none)
+
+# expect error: size takes t:term? and gives num; its input here is a group: write the element, as in (size main) or (size (index i r))
+
+# ---
+# 6. The top level starts with no input.
+(print "hello")
+
+# expect stderr: hello
+
+# ---
+(import "default")
+rewrite
+
+# expect error: rewrite has no input here: the top level of the program starts with none; write its input, as in (rewrite t), or start from a value, as in t | rewrite; (rewrite g:group) group
+
+# ---
+(import "default")
+split_runs = (vars main) * 3
+
+# expect error: main has no input here: the top level of the program starts with none; write its input, as in (main t), or start from a value, as in t | main
+
+# ---
+# 6. A statement goes on from the value the one before gave.
+(import "default")
+(parse "x + y") | main
+(print size)
+show
+
+# expect stderr: 3
+# expect value: (x + y)
+
+# ---
+# 6. The value of the program.
+(import "default")
+(parse "x") | (print "a")
+
+# expect stderr: a
+# expect value: group [(Var "x")]
+
+# ---
+(import "default")
+(parse "x") | k = 5
+
+# ---
+# 7. Tuples.
+(import "default")
+(def (mk n) (n + 1, n))
+(def (swap t:(num, num)) ((index 1 t), (index 0 t)))
+(def (sum t:(num, num)) (index 0 t) + (index 1 t))
+(def (pair n:num g:group) (g, n))
+(print (size, 1))
+(print ((parse "x + y") | main | (size, mul)))
+(print ((mk 2) | (print "a") | swap) ((3, 4) | sum))
+(parse "x + y") | (pair 4) | (index 0) | main | show
+
+# expect stderr: (term->num, 1)
+# expect stderr: (3, 0)
+# expect stderr: a
+# expect stderr: (2, 3) 7
+# expect value: (x + y)
+
+# ---
+(def (pair n:num g:group) (g, n))
+(parse "x") | (pair 3) | main
+
+# expect error: (pair 3) gives (group, num); main takes g:group
+
+# ---
+# 2.3 A pipeline in parentheses starts with any value, a number or a text too.
+(def (add k n:num) n + k)
+x = (1 | (add 1))
+(print x ((1) | (add 1)) (1 | (add 1)))
+(1 | (add 1)) | (add 1)
+
+# expect stderr: 2 2 2
+# expect value: 3
+
+# ---
+("x + y" | parse) | main | show
+
+# expect value: (x + y)
+
+# ---
+(def (add k n:num) n + k)
+(parse "x") | (1 | (add 1))
+
+# expect value: 2
+
+# ---
+# 2.3 A pipeline in parentheses that starts with a tuple and ends in a step with no value gives the tuple.
+((1, 2) | (print "a"))
+
+# expect stderr: a
+# expect value: (1, 2)
+
+# ---
+(parse "x") | ((1, 2) | (print "a"))
+
+# expect stderr: a
+# expect value: (1, 2)
+
+# ---
+(def (sum t:(num, num)) (index 0 t) + (index 1 t))
+(parse "x") | ((1, 2) | (print "a")) | sum
+
+# expect stderr: a
+# expect value: 3
+
+# ---
+# 4. An any argument in parentheses that gives a group is read as a step.
+(import "default")
+t = ((parse "x + 0") | (union id (parse "y")))
+(print (drop_identities t) (t | drop_identities) (t | main | size) ((parse "z") | (print "inner")))
+(print ("x + y" | parse) (t | (if ((size main) > 1) none)))
+u = ("y" | parse)
+u | main | show
+
+# expect stderr: inner
+# expect stderr: x, y x, y 3 z
+# expect stderr: (x + y) 
+# expect value: y

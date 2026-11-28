@@ -19,7 +19,7 @@ text    := 'show' | '(' 'show' input ')'   # 给出文本的函数，只作顶�
 program := step ('|' step)*                # 一条序列（seq）
 numpipe := step ('|' step)* '|' expr       # 最后一步给出一个数（《[表达式](expressions.md)》 第 3 节）
 step    := NAME                            # 不带参数的函数（包括 def 定义的）、let 名，或组值（《[函数定义](functions.md)》 第 3 节）
-         | expr                            # 用到输入的给出数，接下一步时按它的输入类型（《[组、元素和管线](pipeline.md)》 第 2 节）
+         | expr                            # 用到输入的给出数，接下一步时按它的输入类型（《[求值](evaluation.md)》 第 2 节）
          | NAME '=' expr                   # 赋值（《[变量与作用域](variables.md)》）：右边是数，NAME 是存数的变量
          | NAME '=' step                   # 绑定组变量（《[变量与作用域](variables.md)》 第 5 节）：右边给出组
          | NAME ':' TYPE '=' (expr | step) # 绑定函数变量（《[函数定义](functions.md)》 第 8 节）
@@ -58,7 +58,7 @@ body    := program | numpipe | expr
 - **函数**没有绑定，最后一个参数是输入，按返回的东西分：
   - **数值函数**返回一个数：`mixed`、`size`、`(size (main R))`、`(any C)`（《[表达式](expressions.md)》 第 3 节）。
   - **组函数**返回一个组：不带参数的 `lowbits`、`rewrite`、`egglog`（《[化简库的内置函数](../lang-lib/builtins.md)》 第 4 节，习惯上叫 pass）；带参数的 `(save R)`、`(egglog LABEL)`，以及参数里有管线的**高阶函数** `(best K a b)`、`(fix N p)`、`(if C a b)`（《[化简库的内置函数](../lang-lib/builtins.md)》 第 3 节）。
-  - **没有返回值的函数**：`print`、`assert`，作一步时原样传下输入（《[组、元素和管线](pipeline.md)》 第 2 节）。
+  - **没有返回值的函数**：`print`、`assert`，作一步时原样传下收到的值（《[求值](evaluation.md)》 第 2 节）。
   - 内置函数分哪一类、怎么调用、带什么参数，都由 `src/builtins.pipe` 里的签名决定（《[化简库的内置函数](../lang-lib/builtins.md)》 第 2 节）；`def` 定义的函数的签名由函数体推出（《[函数定义](functions.md)》）。
 - **宏**在解析时展开：`let`、`on`、`off`、`smallest`（《[变量与作用域](variables.md)》 第 4 节）。
 
@@ -66,7 +66,7 @@ body    := program | numpipe | expr
 
 | 位置 | 要的是 |
 |---|---|
-| 步骤 | 任何函数（包括 `def` 定义的）、`let` 名、宏、组值，或表达式（《[组、元素和管线](pipeline.md)》 第 2 节） |
+| 步骤 | 任何函数（包括 `def` 定义的）、`let` 名、宏、组值，或表达式（《[求值](evaluation.md)》 第 2 节） |
 | `=` 左边 | 变量（存数的，或组变量） |
 | 表达式里 | 存数的变量（全局变量、局部数变量）、数值函数（包括返回数的 `def`）、数值参数、函数变量和函数参数（用在输入上） |
 

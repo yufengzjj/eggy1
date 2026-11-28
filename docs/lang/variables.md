@@ -7,7 +7,7 @@
 - 这条规则说的是《[化简库的变量](../lang-lib/variables.md)》的变量（**全局变量**，定义在源文件里，见《[命令行和 --passes](../cli.md)》 第 3 节；Rust 的 pass 也读它们）。给别的名字赋值是**局部变量**（第 5 节）：数、组、函数值都可以存，按词法查找，每次运行一套，不参与这种查找。
 - **作用域**有三种：序列（`a | b | ...`，包括分组 `( ... )` 和 `(seq ...)`）、`scope`、每条管线的一次运行。其他形式（`if`、`fix`、`union`、`best`……）不是作用域：`(if C x = 1)` 的绑定落在 `if` 所在的序列里，`(if C (x = 1 | p))` 的绑定只在那条分组序列里。
 - "往上"沿调用链走（动态作用域）：`semi_leaves = 2 | polish` 里，`polish` 读到 2，除非它自己在内层再赋值。
-- 赋值原样传下输入，所以可以写在序列的任何位置。
+- 赋值是没有值的步骤，原样传下收到的值（《[求值](evaluation.md)》 第 2 节），所以可以写在序列的任何位置。
 - 赋值右边在执行到这一步时求值，读的是当时的输入。
 
 普通变量是**最内层的绑定起作用**。预算和时限是**链上所有绑定都起作用**：
@@ -51,7 +51,7 @@ a | (if ((size main) > 100) time_limit = 200) | b | c   # 输入大时 b、c 共
 
 给一个不是全局变量（《[化简库的变量](../lang-lib/variables.md)》）的名字赋值，就在本次运行里新建一个**局部变量**；存什么由右边定（第 6 节）：一个数（**数变量**，`n = ((size main) * 2)`，之后 `(fix n p)`、`(if (n > 3) ...)` 读它）、一个组（**组变量**，下面）、一个函数值（**函数变量**，要写类型，`f:term->num = size`，《[函数定义](functions.md)》 第 8 节）。局部变量都按词法查找，规则同下面的组变量；一个名字只存一种（`n is a number variable, so it cannot be bound to a group`、`f is a function variable, so it cannot hold a number`）；不能和全局变量、函数、宏、`let`、`def` 名或参数同名，所以遮不住全局变量。数变量的右边在执行到这一步时、对当时的输入求一次值（`main | n = size | rewrite | (if (n > (size main)) ...)` 比的是 `rewrite` 前后的大小）。
 
-**组变量**存一个组。`R = p` 在当前输入上运行步骤 `p`，把它给出的组绑定到 `R`，输入原样传下去（同其他赋值）；`R = U`（`U` 是组变量）把 `U` 的组绑定到 `R`；`(save R)` 是 `R = id` 的简写；单独写 `R` 是它的值（管线开头从它开始，《[组、元素和管线](pipeline.md)》 第 2 节），`(main R)`、`(index I R)` 取它的一个元素（`(size (main R))`、`(same (main R) main)`），`(label R)` 读它的第一个元素。
+**组变量**存一个组。`R = p` 在当前输入上运行步骤 `p`，把它给出的组绑定到 `R`，输入原样传下去（同其他赋值）；`R = U`（`U` 是组变量）把 `U` 的组绑定到 `R`；`(save R)` 是 `R = id` 的简写；单独写 `R` 是它的值（管线从它开始，《[求值](evaluation.md)》 第 2 节），`(main R)`、`(index I R)` 取它的一个元素（`(size (main R))`、`(same (main R) main)`），`(label R)` 读它的第一个元素。
 
 ```
 t = (lowbits | unshift) | rewrite | (filter (size < (size (main t))))   # rewrite 的结果比 t 小才留下

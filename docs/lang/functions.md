@@ -20,9 +20,9 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P   # 即 (def (NAME) P)�
   - 表达式（以数、`!`、存数的变量、数值函数、返回数的函数或数值参数开头）：返回数。
 - 每个函数的最后一个参数是它的**输入**：
   - **简写**：函数体是不以值开头的管线时，输入是隐含的：`(def (NAME P ...) BODY)` 就是 `(def (NAME P ... g:group) g | BODY)`。`default.pipe` 里的定义、`prepass=P` 这样的项、`let` 都是这种。
-  - 最后一个参数单独写在函数体开头（没写类型，或写成 `g:group`、`g:term`）时，它是输入：调用少写它时绑定这一步的值（`(f x)` 在 `a | (f x)` 里即 `(f x a)`），写全时就是写出的值。没写类型时，它的类型是接收它的那一步要的输入类型，和值在步骤之间流动时的规则一样：`(def (f p:pipe g) g | p | rewrite)` 的 `p` 要组，所以是 `(f p:pipe g:group) group`，`t | (f lowbits)` 就是 `t | lowbits | rewrite`；`(def (h g) g | size)` 的 `size` 要项，所以是 `(h g:term) num`。只把输入往下传的步骤（赋值、`print`、`assert`、开关）不算接收它，看再下一步。输入是项的函数拿到一个组时，对组里每个元素各运行一次函数体，结果按顺序接起来（《[组、元素和管线](pipeline.md)》 第 2 节的组和元素）。
+  - 最后一个参数单独写在函数体开头（没写类型，或写成 `g:group`、`g:term`）时，它是输入：调用少写它时绑定这一步的值（`(f x)` 在 `a | (f x)` 里即 `(f x a)`），写全时就是写出的值。没写类型时，它的类型是接收它的那一步要的输入类型，和值在步骤之间流动时的规则一样：`(def (f p:pipe g) g | p | rewrite)` 的 `p` 要组，所以是 `(f p:pipe g:group) group`，`t | (f lowbits)` 就是 `t | lowbits | rewrite`；`(def (h g) g | size)` 的 `size` 要项，所以是 `(h g:term) num`。只把输入往下传的步骤（赋值、`print`、`assert`、开关）不算接收它，看再下一步。输入是项的函数拿到一个组时，照《[求值](evaluation.md)》 第 3 节对每个元素运行。
   - 最后一个参数是组（写成 `g:group`，或由用法推出，如 `(main g)`、`(index 0 g)`、`(p g)`），而函数体是读它的表达式时，它也是输入。`(def (twice p g) (p (p g)))` 的 `g` 由 `(p g)` 推成组，签名是 `(twice p:pipe g:group) group`。
-  - 函数体以值开头、最后一个参数不是组时，最后一个参数照常是输入：`(def (double n:num) n * 2)` 写全是 `(double 3)`，写在 `|` 后面时取前一步给出的数（`main | size | double`）；写全的调用是一个不用输入的值（《[组、元素和管线](pipeline.md)》 第 2 节）。
+  - 函数体以值开头、最后一个参数不是组时，最后一个参数照常是输入：`(def (double n:num) n * 2)` 写全是 `(double 3)`，写在 `|` 后面时取前一步给出的数（`main | size | double`，《[求值](evaluation.md)》 第 1、2 节）。
   - 函数体是读隐含输入的表达式时，函数像内置的数值函数那样取输入：`(def (under k) size <= k)` 是 `(under k:num t:term) num`（第 8 节）。
 - 函数体里的名字在读到定义时解析。`let` 和 `@inline` 函数只能用在定义之后，用的是那时的定义（重新定义 `gates` 这样的 `let` 名，不会改变已经读好的 `prepass_steps`）。`def`（不带 `@inline`）在定义之前也能调用，调用在运行时取这个名字最后的定义（第 6 节）：`default.pipe` 里 `rewrite` 和 `simba_steps` 互相调用。
 - `--show-passes` 和 `Display` 把 `def` 写在各条管线之前，每个前一行注释是它的签名（`# (twice g:group) group`），照写下的样子打印（除了数和名字，参数都带类型，如 `p:pipe`、`r:group`、`t:term`，这样读回来不变）。`let` 和没有数值参数、不带 `@timed` 的 `@inline` 函数已在使用处展开，不再写出；其他 `@inline` 函数照 `def` 打印（`(def @inline (lim n p:pipe) split_runs = n | p)`）。`--show-builtins` 在最后单列 `def` 的签名，`src/default.pipe` 的（`cand`）和 `--passes` 的各一组。`def` 调用里唯一的、也是最后一个的管线参数照内置函数的写法打印，不加括号（它读到 `)` 为止）。
@@ -62,15 +62,15 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P   # 即 (def (NAME) P)�
 值有这几种：数、组、文本、函数值、名字。
 
 - **组值**：组变量（在文字里前面已经绑定过，`(save t)`、`t = ...`）、组参数、函数的组输入，单独写成一个名字时是一个值，给出它的组，不看当前输入。名字不满足这些条件时读成 pass 名（所以写错的名字报 `unknown pass`）。
-- **以值开头的管线** `g | a | b` 是这个值依次经过各步的结果，即 `(b (a g))`；不以值开头的管线 `a | b` 是一个函数值。值写在 `|` 后面时从这个值接着往下走，前一步的值不再用（《[组、元素和管线](pipeline.md)》 第 2 节）。
+- **以值开头的管线** `g | a | b` 是这个值依次经过各步的结果，即 `(b (a g))`；不以值开头的管线 `a | b` 是一个函数值。值怎样在步骤之间传见《[求值](evaluation.md)》 第 2 节。
 - **函数值**：管线参数是 `group → group` 的函数值；`(p g)` 或 `g | p` 调用它，`(p (p g))` 调用两次。
 
 **调用**：
 
-- `a | (f x)` 少写了输入，由这一步的输入填入；显式写全 `(f x g)` 时最后一个参数是输入，可以是组变量名、组参数，或括号里的一步（`(f x (lowbits | unshift))`：以值开头时是那个值经过各步，否则是这一步的输入经过各步，即 `lowbits | unshift | (f x)`）。写全的调用是一个不用输入的值，写在 `|` 后面时管线从它的值接着走（前一步的值没人读过时警告）：`a | (twice rewrite t) | lowbits`、`u = (twice rewrite t)`。
+- 少写输入和写全的调用见《[求值](evaluation.md)》 第 1 节。显式写出的输入可以是组变量名、组参数，或括号里的一步（`(f x (lowbits | unshift))`：以值开头时是那个值经过各步，否则是这一步的输入经过各步，即 `lowbits | unshift | (f x)`）：`a | (twice rewrite t) | lowbits`、`u = (twice rewrite t)`。
 - 内置函数也可以显式给输入：`(lowbits t)`、`(minimal t)`、`(mixed (main t))`（输入是 `term?` 时写项，《[化简库的内置函数](../lang-lib/builtins.md)》 第 2 节）；只在写满了参数、后面又是一个值时才这样读（`(if c a u)` 的 `u` 仍是可选的管线参数）。单独的 `main` 写在要项的地方是这一步输入的第一个元素：`(size main)`、`(prepass p main)`。
 - 写了参数的函数后面跟一个不是变量、函数或定义的名字时，也读成组变量（在外层绑定的、或写错的），由读写检查判断（`(f x u)` 没有绑定 `u` 时报 `reads group variable u before it is bound`，不报参数个数）；没有参数的函数后面跟这样的名字仍按个数报错（`(lowbits x)`）。
-- **隐式输入**：一步的参数里，少写了输入的函数取这一步的输入，所以 `(if ((size main) <= k) p)` 里的 `main` 是这一步输入的第一个元素、`(if (big 3) p)` 里的 `big` 取这一步的组。项上的函数（`size`）取到一个组时报错（《[组、元素和管线](pipeline.md)》 第 2 节的组和元素）。函数体是表达式而读了隐含的输入时（`(def (under k) size <= k)`），函数取隐含的输入，见第 8 节。
+- **隐式输入**：一步的参数里少写了输入的函数取这一步的输入（《[求值](evaluation.md)》 第 5 节）；函数体是表达式而读了隐含的输入时（`(def (under k) size <= k)`），见第 8 节。
 
 **管线参数是闭包**：传进去的管线带着它写下时所在的运行，即调用处的输入、组变量和参数。它在被调用的函数里每用一次就运行一次，但：
 
@@ -105,10 +105,10 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P   # 即 (def (NAME) P)�
 返回类型就是函数体的类型，推出的签名的最后写着它：`(try_without name:name p:pipe g:group) group`、`(big k:num g:group) num`。
 
 - 返回组的函数写在步骤位置；没有参数时写名字，有参数时写 `(NAME ARG ...)`。
-- 返回数的函数只能写在要数的地方：`(if (big 3) p)`、`(filter (big 3))`、`keep = (big 3)`、表达式里；也可以作管线的最后一步（《[组、元素和管线](pipeline.md)》 第 2 节）。输入没写时取这一步的输入，写了时是那个组：`(big 3 t)`、`(big 3 (lowbits | unshift))`。没有参数的返回数的函数写在括号里时，`(f)`、`(f t)`、`(f (a | b))` 是调用，`(f < 3)` 是表达式。
+- 返回数的函数只能写在要数的地方：`(if (big 3) p)`、`(filter (big 3))`、`keep = (big 3)`、表达式里；也可以作管线的最后一步（《[求值](evaluation.md)》 第 2 节）。输入没写时取这一步的输入，写了时是那个组：`(big 3 t)`、`(big 3 (lowbits | unshift))`。没有参数的返回数的函数写在括号里时，`(f)`、`(f t)`、`(f (a | b))` 是调用，`(f < 3)` 是表达式。
 - 函数体是表达式时，求值不开新的运行，`@inline` 与否结果一样；函数体是以数结束的管线时，调用是一次运行（同返回组的 `def`），不能带 `@inline`（报 `a function that gives a number is a run of its own, so it cannot be @inline or a let`）。所以 `(def @inline (f) lowbits | main | size)`、`(let f lowbits | main | size)` 报错。
 - 函数体里的函数照常在空组和 none 上得 0，所以返回数的函数在空组上也得 0（除非函数体只读变量和参数）。
-- 相邻步骤的类型按《[组、元素和管线](pipeline.md)》 第 2 节相接。
+- 相邻步骤的类型按《[求值](evaluation.md)》 第 2、3 节相接。
 
 ## 6. 名字和递归
 
@@ -119,9 +119,9 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P   # 即 (def (NAME) P)�
 
 ## 7. 错误和警告
 
-解析时报错（《[检查与警告](errors.md)》有全部的检查）：参数名冲突、重复、用法矛盾、没用到、被赋值；未知的类型、属性；推不出参数的类型（`cannot infer the type of p in f: write p:TYPE`）；带 `@timed` 的函数给出的不是它取的（返回数，或返回的元组不是最后一个参数的类型，《[元组](tuples.md)》 第 4 节）；返回数的管线带 `@inline` 或写成 `let`；调用处参数的个数和种类不对（按个数报，附上签名）；返回数的函数写在步骤位置（`f gives a number, not a group`）、返回组的函数写在表达式里（`f gives a group, not a number`）或 `=` 左边（`f is a function and cannot be assigned`）；项上返回数的函数取到组（《[组、元素和管线](pipeline.md)》 第 2 节）；重新定义 `def` 时签名不同；读没绑定的组变量（每个 `def` 的函数体单独检查，组参数和输入算已绑定）。
+解析时报错（《[检查与警告](errors.md)》有全部的检查）：参数名冲突、重复、用法矛盾、没用到、被赋值；未知的类型、属性；推不出参数的类型（`cannot infer the type of p in f: write p:TYPE`）；带 `@timed` 的函数给出的不是它取的（返回数，或返回的元组不是最后一个参数的类型，《[元组](tuples.md)》 第 4 节）；返回数的管线带 `@inline` 或写成 `let`；调用处参数的个数和种类不对（按个数报，附上签名）；返回数的函数写在步骤位置（`f gives a number, not a group`）、返回组的函数写在表达式里（`f gives a group, not a number`）或 `=` 左边（`f is a function and cannot be assigned`）；项上返回数的函数取到组（《[求值](evaluation.md)》 第 3 节）；重新定义 `def` 时签名不同；读没绑定的组变量（每个 `def` 的函数体单独检查，组参数和输入算已绑定）。
 
-只给警告：定义了却没用到的函数（`(def (f p n) ...) is never used`）；丢掉前一步的值的、不用输入的一步（《[组、元素和管线](pipeline.md)》 第 2 节）；以及《[检查与警告](errors.md)》对每条管线做的那些检查，对每个 `def` 的函数体也单独做。
+只给警告：定义了却没用到的函数（`(def (f p n) ...) is never used`）；丢掉前一步的值的、不用输入的一步（《[求值](evaluation.md)》 第 2 节）；以及《[检查与警告](errors.md)》对每条管线做的那些检查，对每个 `def` 的函数体也单独做。
 
 ## 8. 函数类型和函数值
 
@@ -129,21 +129,15 @@ pipeline=P、prepass=P、polish=P、rewrite=P、simba=P   # 即 (def (NAME) P)�
 
 **函数值从哪里来**：
 
-- **部分应用**：少写了最后一个参数（输入）的调用就是函数值，类型是"输入 -> 返回"：`size` 是 `term->num`，`(rewrite_top rewrite)` 是 `term->term`，`rewrite`、`(best 1 a b)` 是 `pipe`，`(big 20)` 是 `group->num`，`(with_budget 8 rewrite)` 是 `pipe`。在步骤位置、表达式里这就是通常的写法（第 3 节的隐式输入）。
-- **写在函数类型位置的表达式或管线**：以隐式输入为参数的函数。`(filter (size <= 20))` 的条件对每个元素求值，`(keep_if (size <= 20))` 传进去的也是这样一个函数。
+- **少写了输入的调用**：写在函数类型的位置时是函数值，类型是"输入 -> 返回"：`size` 是 `term->num`，`(rewrite_top rewrite)` 是 `term->term`，`rewrite`、`(best 1 a b)` 是 `pipe`，`(big 20)` 是 `group->num`，`(with_budget 8 rewrite)` 是 `pipe`。只能少写输入（《[求值](evaluation.md)》 第 1 节）。
+- **写在函数类型位置的表达式或管线**：以隐式输入为参数的函数（《[求值](evaluation.md)》 第 5 节）：`(keep_if (size <= 20))`。
 - **函数参数**（第 2 节）和**函数变量**：函数变量是存函数值的局部变量（《[变量与作用域](variables.md)》 第 5 节），要写类型：`f:term->num = size`、`small:term->num = (size <= 20)`、`f:term->num = (under 20)`、`g:term->term = (relate rewrite)`（右边是表达式或一步，类型要接得上）。不写类型时右边的意思只由右边定：`f = size` 是数变量，`t = rewrite` 是组变量。同一个名字只能存一种（`f is a function variable, so it cannot name a group variable`、`t is a group variable, so it cannot hold a function value`）。
-- **单独写的函数名**（内置函数和 `def` 一样，解析时就定）：
-  1. 位置要函数类型时，是函数值（`(filter size)`、`f:term->num = size`，在程序顶层也是）。
-  2. 位置能接它的结果、这一步有输入、它又只少输入（别的参数都写了或没有）时，用在这一步的输入上：`(size main)`、`size + 1`、管线里的 `(print size)`、`(print rewrite)` 都求值（`print` 写数，或组的各元素）。
-  3. 位置也能接函数值、但求不了值时（没有输入，如程序开头的 `(print size)`；或者还少别的参数，如少 `k` 的 `under`），是函数值；`print` 写它的签名（程序开头的 `(print size under)` 写 `(size t:term?) num (under k:num t:term) num`）。
-  4. 位置只能接结果、又求不了值时报错：程序开头的 `size + 1` 报 `size has no input here: the top level of the program starts with none; write its input, as in (size (main t)), ...`。
-
-  "有输入"是静态的：程序顶层开头没有；给出值的一步（组变量、`(parse ...)`、写出输入的调用）之后有，后面的语句也有；赋值把输入原样传下，所以 `u = (parse "x") | ...` 之后仍然没有；`def` 函数体和函数类型的参数里总有。`any`（`print` 的 `x:any...`）接所有的值（数、文本、组，也接算出来的组）和函数值，由 2、3 定。写了括号的 `(moved)`、`(h)` 是调用，用在这一步的输入上；程序开头没有输入，所以和单独写的一样报 `... has no input here`。函数变量写在 `print` 里时写它的名字和类型。
+- **单独写的函数名**（内置函数和 `def` 一样）：什么时候是函数值、什么时候求值，见《[求值](evaluation.md)》 第 4 节。
 - **返回函数的 `def`**：函数体是表达式而读了隐含的输入时（`(def (under k) size <= k)`），签名是 `(under k:num t:term) num`：输入只读一个项时是 `t:term`，读整组时是 `g:group`。写在要数的地方时取这一步的输入（一个项，`main | (if (under 9) p)`），得一个数；写在函数类型的位置时是 `term->num` 的函数值（`(filter (under 20))`、`(keep_if (under 20))`）。函数体不读隐含输入（`(def (f) keep + 1)`、`(def (big k g:group) (size (main g)) > k)`，后者的输入是 `g`）时照旧返回数。
 
 **调用**：`(pred t)` 或 `t | pred`（表达式里写在括号里，`((pred t) > 5)`、`(t | pred)`），和 `(p g)` 一样；单独写在要数的地方时用在这一步的输入上（`(filter (f < 5))`）。没写注解的参数被这样调用时推成 `group->num`。函数变量的值是闭包：绑定时抓下它读到的局部变量当时的值和调用的参数，在哪里用都一样，之后再给那些变量赋值也不影响它；`(def (f n) small:term->num = (size <= n) | (keep_if small))` 里的 `small` 在 `keep_if` 里面求值时读的仍是 `f` 的 `n`。函数参数传进去的是参数和写下它的运行（第 3 节）。`wins`、`moved`、`scope` 的缓存这些没有名字的状态，按它实际运行的位置算（第 3 节）。
 
-**转换**：传参、存进变量和相邻步骤用同一套规则（《[组、元素和管线](pipeline.md)》 第 2 节的组和元素），给的类型能接到要的类型时隐式转换：
+**转换**：传参、存进变量和相邻步骤用同一套规则（《[求值](evaluation.md)》 第 3 节），给的类型能接到要的类型时隐式转换：
 
 | 要的 | 能给的 | 怎么用 |
 |---|---|---|

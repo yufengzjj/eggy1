@@ -2,7 +2,7 @@
 
 读完程序后检查，出错时拒绝整个程序（命令行把它报成 `--passes` 的错误）：
 
-- 顶层：还没有值时写了计算组的步骤（《[管线语言](README.md)》 第 1 节）；读了顶层还没有绑定的组变量（`the program reads group variable t before it is bound`）；`import` 写在顶层以外、找不到文件、成环。
+- 顶层：还没有值时写了读输入的步骤（《[求值](evaluation.md)》 第 6 节）；读了顶层还没有绑定的组变量（`the program reads group variable t before it is bound`）；`import` 写在顶层以外、找不到文件、成环。
 
 - 名字：未知的变量、函数、`on`/`off` 名、规则集，报错并列出已知的名字。名字里的 `-` 读作减号，没法单独报错；解析出错时，如果写了 `a-b` 这样的词，错误后面加上"`a-b` 读作 `a - b`，名字用 `_`"，`a_b` 是已知名字时提示写 `a_b`。
 - 类型，照签名（《[化简库的内置函数](../lang-lib/builtins.md)》 第 2 节；`def` 的签名见《[函数定义](functions.md)》 第 5 节）检查，报错时附上签名：管线开头写了数值函数（`mixed gives a number, not a group: (mixed t:term?) num`），表达式里写了组函数（`egglog gives a group, not a number`）；参数的个数、种类（表达式、管线、组变量、名字）不对（`retry takes 4 arguments; | gives the last: (retry c:group->num a:pipe b:pipe g:group) group`）；给出数或文本的一步后面再接一步（`size gives num; rewrite takes g:group`）；项上的函数取到组（`size takes t:term? and gives num; its input here is a group: write the element, as in (size main) or (size (index i r))`）；以数结束的管线写在要组的地方，或括号里的管线写在要数的地方却不以数结束。
@@ -24,6 +24,6 @@
 - 绑定了却从不读的组变量；同一层又绑定了一次、中间没读的死存储（写在 `if`（`cand`）、`first` 的后几支、`retry` 的 `b` 或循环体里的绑定不和外面的比较，所以 `(save t) | (if c (save t))` 这种先存默认值再覆盖的写法不算）。
 - 赋值（包括 `(on NAME)`、`(off NAME)`）是所在序列（或整条管线）的最后一步：什么也影响不到。
 - 同一条序列里同一个变量连赋两次，中间只有赋值，也没有读它。
-- 不用输入的一步（`a | t`、`a | (lowbits t)`、`a | (size (main t))`、`a | (t | ...)`）丢掉了前一步给出、没人读过的值：`t does not use its input; the value of the step before is dropped`（《[组、元素和管线](pipeline.md)》 第 2 节）。管线开头和 `(save R)` 之后不警告，带输入的 `@inline` 调用生成的绑定也不警告。
+- 不用输入的一步（`a | t`、`a | (lowbits t)`、`a | (size (main t))`、`a | (t | ...)`）丢掉了前一步给出、没人读过的值：`t does not use its input; the value of the step before is dropped`（《[求值](evaluation.md)》 第 2 节，那里有不警告的情况）；带输入的 `@inline` 调用生成的绑定也不警告。
 
 默认管线没有警告，`default.pipe` 的 `let`、`def` 除了给程序调用的 `simplify` 都用到了，Rust 代码读的变量都有定义、`default.pipe` 定义的变量都有人读，执行完 `default.pipe` 后仍为 `none` 的变量（内部 pass 的开关除外）正好是 `rewrites`、`bit_split_budget`、`time_limit`、`trace`，没有命令行时还有 `restarts`、`iter_limit`、`num_type`（都有测试检查）。顶层的项不做警告检查（程序本来就以赋值结束）。
