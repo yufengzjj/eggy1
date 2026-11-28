@@ -90,7 +90,7 @@ Pipelines are checked when read (unknown names, wrong arguments or types, group 
 before they are bound, passes outside the pipeline that can run them, recursion), and parts that
 do nothing give warnings. The full
 reference, with every form, pass, condition, setting and limit, is
-[docs/pipe-language.md](docs/pipe-language.md) (in Chinese).
+[docs/lang/](docs/lang/README.md) (in Chinese).
 
 ## Benchmarks and fuzzing
 

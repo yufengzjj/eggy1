@@ -1,4 +1,4 @@
-//! The parser of the pipeline language (`docs/pipe-language.md`): `a | b` runs `b` on the
+//! The parser of the pipeline language (`docs/lang/`): `a | b` runs `b` on the
 //! candidates of `a`, `(FORM args...)` is a combinator or a pass with arguments, `NAME = VALUE`
 //! assigns a variable, conditions are expressions (`(if (mul >= 4 && shift < 1) (off
 //! small_blocks))`). Parsed into `ast::Pipe`, names resolved by their signatures.

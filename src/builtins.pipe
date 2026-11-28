@@ -1,4 +1,4 @@
-# The built-in functions of the pipeline language (docs/pipe-language.md), read before
+# The built-in functions of the pipeline language (docs/lang-lib/builtins.md), read before
 # src/default.pipe. Each is implemented in Rust; this file declares its signature:
 #
 #   (extern [@ATTR ...] (NAME PARAM:TYPE ... INPUT:TYPE) [RESULT])

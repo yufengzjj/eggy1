@@ -1,5 +1,5 @@
 //! The built-in functions of the pipeline language: their signatures, declared in
-//! `src/builtins.pipe` (`docs/pipe-language.md`), which the parser reads calls by and the
+//! `src/builtins.pipe` (`docs/lang-lib/builtins.md`), which the parser reads calls by and the
 //! checks read the attributes of; the dispatch table `BUILTINS`, which pairs each with its
 //! implementation; and the implementations that do not depend on the simplification: the
 //! combinators, the operators, `print` and `assert`.

@@ -143,7 +143,7 @@ impl fmt::Display for Param {
     }
 }
 
-/// How a function is called, from its input and result types (`docs/pipe-language.md`).
+/// How a function is called, from its input and result types (`docs/lang/pipeline.md`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// `group -> group`: on the whole list.

@@ -1085,7 +1085,7 @@ pub struct Cli {
         long,
         default_value = "",
         hide_default_value = true,
-        help = "Change the pass pipeline, e.g. \"extra=0 off=relate\" (see docs/pipe-language.md)"
+        help = "Change the pass pipeline, e.g. \"extra=0 off=relate\" (see docs/cli.md)"
     )]
     pub passes: String,
     #[arg(long, help = "Print the pass pipeline in --passes form and exit")]

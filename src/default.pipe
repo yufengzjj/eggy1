@@ -1,4 +1,4 @@
-# The library of the simplification (docs/pipe-language.md), which a program reads with
+# The library of the simplification (docs/lang-lib/), which a program reads with
 # (import "default"): the global variables and their default values, the pipelines the
 # passes are given and the function `simplify`. It holds only definitions: forms `(let ...)`
 # and `(def ...)`, which may span lines, and lines `NAME = VALUE`, each defining a variable
