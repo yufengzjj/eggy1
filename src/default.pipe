@@ -19,7 +19,7 @@ cut = 0
 relate_parts = 1
 
 # Switches of steps inside passes (the passes themselves are switches of their extern
-# @switch): `semi_linear`'s candidate sources and `poly_mba`'s masked expansion.
+# @switch): the sources of `semi_linear`'s forms and `poly_mba`'s masked expansion.
 semi_grouped = 1
 semi_peel_grouped = 1
 semi_shapes = 1
@@ -31,7 +31,7 @@ semi_bit_split = 1
 semi_short_consts = 1
 poly_masked = 1
 
-# The pre-pass candidates `cand` builds, by origin name (`--passes pre=a,b` sets these).
+# The pre-pass terms `cand` builds, by origin name (`--passes pre=a,b` sets these).
 pre_unified = 1
 pre_no_wide = 1
 pre_split_bits = 1
@@ -213,24 +213,24 @@ minimal_max_size_8bit = 5
   | (assert (minimal_lanes <= 16) "minimal_lanes is at most 16")
   | (assert (minimal_max_vars <= 31) "minimal_max_vars is at most 31"))
 
-# A pre-pass candidate with origin n, built when `enabled` (a `pre_NAME` switch, or 1) is not
+# A pre-pass term with origin n, built when `enabled` (a `pre_NAME` switch, or 1) is not
 # 0, on its own budget of bit_split pairs.
 (def @inline @timed (cand enabled:num n p) (if enabled (origin n (bit_split_budget = cand_bit_splits | p)) none))
 
 
 # A later round: the pre-pass rebuilds, then their extraction, or the one proved minimal.
-(let later (prepass prepass_steps) | (if minimal take_minimal (egglog later)))
+(let later main | (prepass prepass_steps) | (if minimal take_minimal (egglog later)))
 
 # The first round. Saturating a large input is most of the run time and rarely beats its
 # rebuild, so the input joins only inputs with shifts, division or mulhi whose rebuild is
 # not tiny (`opaque`), or a rerun when the result still mixes arithmetic or constants
 # into bitwise operations.
 (let first_round
-  (if (opaque prepass_steps)
-    ((union id (prepass prepass_steps)) | (if minimal take_minimal (egglog first)))
-    (retry (rerun_input && mixed && !minimal)
-      ((prepass prepass_steps) | (if minimal take_minimal (egglog first)))
-      ((union id (prepass prepass_steps)) | (egglog rerun_input)))))
+  (if (opaque prepass_steps main)
+    ((union id (main | (prepass prepass_steps))) | (if minimal take_minimal (egglog first)))
+    (retry (rerun_input && (mixed main) && !minimal)
+      (main | (prepass prepass_steps) | (if minimal take_minimal (egglog first)))
+      ((union id (main | (prepass prepass_steps))) | (egglog rerun_input)))))
 
 # The pipeline `simplify` runs: the restart rounds while the extraction changes, extra ones
 # while the pre-pass still rebuilds it, polish, all keeping the smallest form seen (the
@@ -243,22 +243,23 @@ minimal_max_size_8bit = 5
   | (smallest
     (fix 1 first_round)
     | (if moved (fix (restarts - 1) later))
-    | (if moved (fix extra (if (rebuilds prepass_steps) later)))
+    | (if moved (fix extra (if (rebuilds prepass_steps main) later)))
     | (polish polish_steps))
-  | (if (printed && !input)
+  | (if (printed && !(input main))
       (tag rerun_printed
         (best 1 id
-          (reprint
+          (main
+           | reprint
            | (smallest
                (fix 1 first_round)
                | (if moved (fix (printed - 1) later))
                | (polish polish_steps)))))))
 
-# The simplification of the main candidate: the limits checked, `pipeline`, the input
-# itself where that gives no candidate, and the stats of the result settled.
-(def @pipe (simplify g) g | check_limits | pipeline | (if !(any 1) (load g)) | settle)
+# The simplification of a group: the limits checked, `pipeline`, the input itself where that
+# gives an empty group, and the stats of the result settled.
+(def (simplify g:group) g | check_limits | pipeline | (if !(any 1) g) | settle)
 
-# A rebuild of the main candidate: the whole term replaced by a T-function lookup, or its
+# A rebuild of a term: the whole term replaced by a T-function lookup, or its
 # regions rewritten, clustered, related and its subterms replaced (`~(y - 1)` replaced
 # before the rebuild would become `-y`, a leaf the rebuild no longer relates to `y - 1`).
 (let rebuild_main (first tfunc_whole ((rewrite_top rewrite) | (cluster_top rewrite) | (relate rewrite) | tfunc)))
@@ -269,13 +270,13 @@ minimal_max_size_8bit = 5
 # shifts and bitwise operations with a constant operand, and `small_blocks` with more than
 # 3 products and no shift.
 (let gates
-  (if (mul < 1) (off poly_mba))
-  | (if (mul < 1 && shift < 1 && bitconst < 1) (off lowbits))
-  | (if (mul >= 4 && shift < 1) (off small_blocks)))
+  (if ((mul main) < 1) (off poly_mba))
+  | (if ((mul main) < 1 && (shift main) < 1 && (bitconst main) < 1) (off lowbits))
+  | (if ((mul main) >= 4 && (shift main) < 1) (off small_blocks)))
 
 # The pre-pass (`prepass`), on one run (`scope`). Group variables: `t0` the input, `t` with
 # low bits and shifts rewritten, `r` the first rebuild, `n` the rebuild without `wide_blocks`,
-# `f`/`b` the candidates finished, `u` the rebuild without clusters, `m` the ones kept.
+# `f`/`b` the terms finished, `u` the rebuild without clusters, `m` the ones kept.
 (def (prepass_steps)
   (scope
     (save t0) | gates | lowbits | unshift | (save t)
@@ -284,7 +285,7 @@ minimal_max_size_8bit = 5
     # input as written is sometimes smaller; dropped once it needs `unified_rewrites` rewrites.
     | (best 1 id
         (cand pre_unified unified
-          (load t) | unify_operands | (filter !(same (main t)))
+          t | unify_operands | (filter !(same (main t)))
           | (rewrites = unified_rewrites
              | (first tfunc_whole (rewrite | within | (cluster_regions rewrite) | (relate rewrite) | within | tfunc)))))
     | (save r)
@@ -294,13 +295,13 @@ minimal_max_size_8bit = 5
         # beside the first rebuild made the rules finish worse as often as better.
         (cand pre_no_wide no_wide
           (if used_wide
-            ((load t) | ((off wide_blocks) | rebuild_main) | (save n) | (filter (size < (size (main r)))))
+            (t | ((off wide_blocks) | rebuild_main) | (save n) | (filter (size < (size (main r)))))
             none))
         (cand 1 no_wide_abstracted
-          (load n)
+          n
           | ((off wide_blocks) | (union (over_const_bitwise (rebuild rewrite)) (over_shared_bitwise (rebuild rewrite))))
           | (filter (size < (size (main r)) && size <= (size (main n)) * 3 / 4)))
-        (cand pre_split_bits split_bits (if fits_split ((split_bits (rebuild rewrite)) | (filter !(same (main r)))) none))
+        (cand pre_split_bits split_bits (if (fits_split main) ((split_bits (rebuild rewrite)) | (filter !(same (main r)))) none))
         (cand pre_halve_first halve_first (halve rewrite) | (filter !(same (main r))) | rebuild_plain)
         (cand pre_over_products over_products (over_products (rebuild rewrite)) | (filter !(same (main r))))
         (cand pre_over_const_bitwise over_const_bitwise (over_const_bitwise (rebuild rewrite)) | (filter !(same (main r))))
@@ -308,16 +309,16 @@ minimal_max_size_8bit = 5
         # Halving the whole input can give semi-linear regions that are slow to search.
         (cand pre_halve_input halve_input
           (semi_leaves = 2
-           | (if tiny none ((load t) | (halve rewrite) | (filter !(same (main t))) | rebuild_plain)))))
+           | (if (tiny main) none (t | (halve rewrite) | (filter !(same (main t))) | rebuild_plain)))))
     # A form from abstracted subterms only a little smaller than the first rebuild, or
     # larger, made the rules finish worse at least as often as better (Ensia, LLVM Pluto).
     | (finish rewrite) | (save f) | (filter (!abstracted || size <= (size (main f)) * 3 / 4)) | (save b) | (label b)
     # A region rebuilt in clusters is smaller there but can leave the rules a worse start
     # than rebuilding it whole.
     | (cand pre_unclustered unclustered
-        (if (used_clustered && few_rewrites)
-          ((load t)
-           | (if !replaceable
+        (if (used_clustered && (few_rewrites main))
+          (t
+           | (if !(replaceable main)
                (relate_leaves = unclustered_relate_leaves
                 | relate_parts = 0
                 | rewrites = unclustered_rewrites
@@ -326,14 +327,14 @@ minimal_max_size_8bit = 5
                none))
           none))
     # An equal-size one can take the extraction from the first rebuild with nothing gained.
-    | (label b) | (save u) | (load b) | (best keep id) | (save m)
+    | (label b) | (save u) | (b | (best keep id)) | (save m)
     | (union
-        ((load u) | (filter (size < (size (main m)))))
-        (load m)
-        ((load u) | (filter (size > (size (main m)) && size < (size (main t0))))))
+        (u | (filter (size < (size (main m)))))
+        m
+        (u | (filter (size > (size (main m)) && size < (size (main t0))))))
     | pre_done))
 
-# The final polish (`polish`), on one candidate: the polish passes in turn, each kept when
+# The final polish (`polish`), on one term: the polish passes in turn, each kept when
 # smaller, repeated while one is, until `polish_wins` are; on one run whose `rewrite` calls are
 # limited. `join_linear` rewrites every pair of leaf groups many times, and semi-linear groups
 # of many leaves take seconds there. `polish=a,b,...` in --passes writes the same for other
@@ -365,17 +366,17 @@ minimal_max_size_8bit = 5
 # semi-linear rebuild, or the smallest rebuild from its values, kept when smaller than
 # the region; `one_wide_term` costs more than it gains on the cofactors of `poly_mba`.
 (def (simba_steps)
-  (if no_leaves none
-    (if wide
+  (if (no_leaves main) none
+    (if (wide main)
       ((save in)
        | (best 1
            ((drop_unused rewrite) | (save d))
            ((clustered rewrite) | (save c))
-           ((load d)
+           (d
             | (if (any 1) none
-                ((load in) | (first (peel simba_steps) ((load c) | (peel_clustered simba_steps))) | (filter !(same (main in))))))))
+                (in | (first (peel simba_steps) (c | (peel_clustered simba_steps))) | (filter !(same (main in))))))))
       ((save in)
-       | (if const_bitwise
+       | (if (const_bitwise main)
            (best 1 (semi_linear rewrite))
            (best 1 rebuild_values common_multiple related_leaves (if !cofactor one_wide_term none)))
        | (filter (size < (size (main in))))))))

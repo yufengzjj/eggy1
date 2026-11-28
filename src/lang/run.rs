@@ -165,22 +165,23 @@ mod tests {
         assert!(matches!(value("(def (f) id)"), Ok(None)) && matches!(value("keep = 3"), Ok(None)), "a definition or an assignment gives no value");
         assert!(matches!(value("(import \"default\")\nf:term->num = size\nf"), Ok(Some(Value::Fn(_)))));
         let lib = "(import \"default\")\n";
-        assert_eq!(text(&format!("{lib}(parse \"x + 0xff\") | show")), "(x + 0xff)", "i64 when num_type is none");
-        assert_eq!(text(&format!("{lib}num_type = i8\n(parse \"x + 0xff\") | show")), "(x - 1)");
+        assert_eq!(text(&format!("{lib}(parse \"x + 0xff\") | main | show")), "(x + 0xff)", "i64 when num_type is none");
+        assert_eq!(text(&format!("{lib}num_type = i8\n(parse \"x + 0xff\") | main | show")), "(x - 1)");
         assert_eq!(text(&format!("{lib}num_type = u8\nt = (parse \"(Add (Var \\\"x\\\") (Num -1))\")\n(show (main t))")), "(x + 0xff)", "an egglog term, and a group variable of the top level");
-        assert_eq!(text(&format!("{lib}num_type = u32\n(parse \"(x & y) + (x | y)\")\nsimplify\nshow")), "(x + y)", "the steps of the top level are one sequence");
+        assert_eq!(text(&format!("{lib}num_type = u32\n(parse \"(x & y) + (x | y)\")\nsimplify\nmain\nshow")), "(x + y)", "the steps of the top level are one sequence");
         let r = execute_then(&passes(&format!("{lib}trace = 0\nnum_type = u16")), &[("num_type", "u8"), ("restarts", "5")], || (host::num_type(), get(crate::rust_vars::RESTARTS))).unwrap().1;
         assert_eq!(r, ("u16", 5), "the caller's globals come first, a definition as none keeps them");
         for (bad, msg) in [
-            ("lowbits", "lowbits has no candidates to work on at the top level"),
-            ("(import \"default\")\nsimplify", "simplify has no candidates"),
-            ("(import \"default\")\nt = (parse \"x\")\nsimplify", "simplify has no candidates"),
-            ("t = (lowbits | unshift)", "has no candidates"),
-            ("show", "show has no candidate"),
-            ("(load t)", "the program reads group variable t before it is bound"),
+            ("lowbits", "lowbits has no group to work on at the top level"),
+            ("(import \"default\")\nsimplify", "simplify has no group"),
+            ("(import \"default\")\nt = (parse \"x\")\nsimplify", "simplify has no group"),
+            ("t = (lowbits | unshift)", "has no group"),
+            ("show", "show has no element"),
+            ("(import \"default\")\n(parse \"x\") | show", "show takes t:term? and gives text; its input here is a group: write the element, as in (show main)"),
+            ("(size (main t))", "the program reads group variable t before it is bound"),
             ("num_type = u7", "num_type takes a numeric type"),
-            ("(import \"default\")\n(parse \"x\") | show | rewrite", "show gives a text"),
-            ("(import \"default\")\n(parse \"x\") | (fix 2 show)", "show gives a text, not candidates"),
+            ("(import \"default\")\n(parse \"x\") | main | show | rewrite", "show gives text; rewrite takes g:group"),
+            ("(import \"default\")\n(parse \"x\") | (fix 2 show)", "show gives a text, not a group"),
         ] {
             let e = value(bad).err().unwrap_or_else(|| panic!("{bad} runs"));
             assert!(e.contains(msg), "{bad}: {e}");
@@ -191,24 +192,24 @@ mod tests {
     fn recursion_and_late_binding() {
         let run = |lines: &[&str]| text(&format!("(import \"default\")\n{}", lines.join("\n")));
         let parity = ["(def (even n:num) (if (n > 0) (odd (n - 1)) (parse \"e\")))", "(def (odd n:num) (if (n > 0) (even (n - 1)) (parse \"o\")))"];
-        assert_eq!(run(&[&parity[..], &["(parse \"x\") | (even 3) | show"]].concat()), "o", "a call before the definition, and recursion through another function");
-        assert_eq!(run(&[&parity[..], &["(parse \"x\") | (even 400) | show"]].concat()), "e");
-        let late = ["(def (g) (h 1) | (filter (big 0)))", "(def (h n) (fix n id))", "(def (big k) size > k)", "(parse \"x + y\") | g | show"];
+        assert_eq!(run(&[&parity[..], &["(parse \"x\") | (even 3) | main | show"]].concat()), "o", "a call before the definition, and recursion through another function");
+        assert_eq!(run(&[&parity[..], &["(parse \"x\") | (even 400) | main | show"]].concat()), "e");
+        let late = ["(def (g) (h 1) | (filter (big 0)))", "(def (h n) (fix n id))", "(def (big k) size > k)", "(parse \"x + y\") | g | main | show"];
         assert_eq!(run(&late), "(x + y)", "the signature of a function defined later comes from its definition");
-        let again = ["(def (f n:num) (fix n (parse \"a\")))", "(def (g) (f 1))", "(def (f k:num) (fix k (parse \"b\")))", "(parse \"x\") | g | show"];
+        let again = ["(def (f n:num) (fix n (parse \"a\")))", "(def (g) (f 1))", "(def (f k:num) (fix k (parse \"b\")))", "(parse \"x\") | g | main | show"];
         assert_eq!(run(&again), "b", "a call runs the last definition, also one read before it");
-        let after = ["(def (f) (fix 1 (parse \"a\")))", "(def (g) f)", "(parse \"x\") | g | show", "(def (f) (fix 1 (parse \"b\")))"];
+        let after = ["(def (f) (fix 1 (parse \"a\")))", "(def (g) f)", "(parse \"x\") | g | main | show", "(def (f) (fix 1 (parse \"b\")))"];
         assert_eq!(run(&after), "b", "the program runs after it is read whole");
-        let named = ["(def (f s:name) (off s) | (parse \"a\"))", "(def (g) (f relate))", "(def (f t:name) (on t) | (parse \"b\"))", "(parse \"x\") | g | show"];
+        let named = ["(def (f s:name) (off s) | ((parse \"a\")))", "(def (g) (f relate))", "(def (f t:name) (on t) | ((parse \"b\")))", "(parse \"x\") | g | main | show"];
         assert_eq!(run(&named), "b", "with its name arguments in place");
         let e = value("(def (f) (f 1))").err().unwrap();
-        assert!(e.contains("f takes no arguments"), "{e}");
+        assert!(e.contains("f takes 1 argument; | gives the last"), "{e}");
         let e = value("(def (f n) (fix n (f n)))").err().unwrap();
         assert!(e.contains("f is called before its definition"), "{e}");
         let deep = format!("recursion deeper than {} calls in f", super::super::eval::MAX_DEPTH);
         for bad in [
             ["(def (f) f)", "(parse \"x\") | f"],
-            ["(def (app p) p)\n(def (f) (app f))", "(parse \"x\") | f"],
+            ["(def (app p:pipe) p)\n(def (f) (app f))", "(parse \"x\") | f"],
             ["(def (f) (memo loop f))", "(parse \"x + y\") | f"],
             ["(def (f) (regions f f))", "(parse \"x + y\") | f"],
             ["(def (f n:num) (f (n + 1)) | id)", "(parse \"x\") | (f 0)"],

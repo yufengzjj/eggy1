@@ -61,14 +61,13 @@ fn one(text: &str) -> Result<Sig, String> {
         return Err(bad());
     }
     let mut rest = rest.iter().copied().peekable();
-    let (mut pipe, mut timed, mut uncounted, mut switch) = (false, false, false, false);
+    let (mut timed, mut uncounted, mut switch) = (false, false, false);
     while let Some(a) = rest.next_if(|t| t.starts_with('@')) {
         match a {
-            "@pipe" => pipe = true,
             "@timed" => timed = true,
             "@uncounted" => uncounted = true,
             "@switch" => switch = true,
-            _ => return Err(format!("unknown attribute {a}; known: @pipe @timed @uncounted @switch")),
+            _ => return Err(format!("unknown attribute {a}; known: @timed @uncounted @switch")),
         }
     }
     if uncounted && !timed {
@@ -86,13 +85,27 @@ fn one(text: &str) -> Result<Sig, String> {
             None => return Err(bad()),
         }
     }
-    let result = rest.next().ok_or_else(|| format!("{name}: expected a result type"))?;
-    let result = Ty::parse(result).map_err(|e| format!("{name}: {e}"))?;
-    if rest.next() != Some(")") || rest.next().is_some() {
+    let result = match rest.next().ok_or_else(|| format!("{name}: expected a result type"))? {
+        ")" => None,
+        r => {
+            let r = Ty::parse(r).map_err(|e| format!("{name}: {e}"))?;
+            if rest.next() != Some(")") {
+                return Err(bad());
+            }
+            Some(r)
+        }
+    };
+    if rest.next().is_some() {
         return Err(bad());
     }
+    let Some(result) = result else {
+        if switch || params.iter().any(|p| matches!(p.ty, Ty::Term | Ty::MaybeTerm | Ty::Group)) {
+            return Err(format!("{name}: a function without a result has no input and no @switch"));
+        }
+        return Ok(Sig { name, params, input: None, result: Ty::Nothing, timed, uncounted, switch, doc: String::new() });
+    };
     if OPERATORS.contains(&name.as_str()) {
-        return operator(name, params, result, pipe || timed || uncounted || switch);
+        return operator(name, params, result, timed || uncounted || switch);
     }
     let input = params.pop().ok_or_else(|| format!("{name}: the last parameter is the input, term or group"))?;
     if input.rep != Rep::One || !matches!(input.ty, Ty::Term | Ty::Group) && !(input.ty == Ty::MaybeTerm && matches!(result, Ty::Num | Ty::Text)) && !(input.ty == Ty::Text && result == Ty::Group) {
@@ -107,7 +120,7 @@ fn one(text: &str) -> Result<Sig, String> {
     for (i, p) in params.iter().enumerate() {
         match &p.ty {
             Ty::MaybeTerm if result == Ty::Num => {}
-            Ty::Term | Ty::MaybeTerm => return Err(format!("{name}: {p}: only the input is a candidate, or a term? parameter of a function that gives a number")),
+            Ty::Term | Ty::MaybeTerm => return Err(format!("{name}: {p}: only the input is a term, or a term? parameter of a function that gives a number")),
             t @ Ty::Fn(..) if !t.is_function() => return Err(format!("{name}: {p}: a function takes one input, term or group, and gives num, term, term? or group")),
             Ty::Any if p.rep != Rep::Many || i + 1 != params.len() => return Err(format!("{name}: {p}: any is only for a last parameter any...")),
             t if p.rep == Rep::Many && !t.is_pipe() && *t != Ty::Any || p.rep == Rep::Opt && (t.is_expr() || *t == Ty::Text) => return Err(format!("{name}: {p}: only pipe and any take ..., only pipe, group and name take ?")),
@@ -117,7 +130,7 @@ fn one(text: &str) -> Result<Sig, String> {
     if switch && !matches!(input.ty, Ty::Term) {
         return Err(format!("{name}: @switch is for a pass over one term"));
     }
-    Ok(Sig { name, params, input: Some(input), result, pipe, timed, uncounted, switch, doc: String::new() })
+    Ok(Sig { name, params, input: Some(input), result, timed, uncounted, switch, doc: String::new() })
 }
 
 /// The operators of the language, as the parser reads them.
@@ -133,7 +146,7 @@ fn operator(name: String, params: Vec<Param>, result: Ty, attrs: bool) -> Result
     if attrs || result != Ty::Num || params.is_empty() || !params.iter().enumerate().all(operand) {
         return Err(format!("{name}: an operator takes numbers to num, without attributes; only its last operand may be group->num..."));
     }
-    Ok(Sig { name, params, input: None, result, pipe: false, timed: false, uncounted: false, switch: false, doc: String::new() })
+    Ok(Sig { name, params, input: None, result, timed: false, uncounted: false, switch: false, doc: String::new() })
 }
 
 pub(crate) fn param(p: &str) -> Result<Param, String> {
@@ -220,9 +233,9 @@ pub(crate) enum Impl {
     Missing,
     /// `group -> group`, with the call's arguments.
     Group(fn(&[Pipe], Vec<Cand>, &Env) -> Steps),
-    /// `term -> group`, with the call's arguments: on the main candidate, the result replacing
-    /// the list (none without a main candidate); a term given back keeps the origin it came with.
-    Main(fn(&[Pipe], &Cand, &Env) -> Steps),
+    /// `term -> group`, with the call's arguments: on each element, the result groups joined; a
+    /// term given back keeps the origin it came with.
+    Join(fn(&[Pipe], &Cand, &Env) -> Steps),
     /// `term -> term` over the tree, with the call's function arguments: on each candidate, an
     /// unchanged result keeping it.
     Each(fn(&Term, &Ctx, &Fns<'_>) -> Option<Term>),
@@ -236,13 +249,13 @@ pub(crate) enum Impl {
     EachCand(fn(&[Pipe], &Cand, &Env) -> Option<Cand>),
     /// A number function with arguments, on the list whole.
     Num(fn(&[Pipe], &[Cand], &Env) -> u64),
-    /// `term -> num` without arguments: on the main candidate, 0 without one.
+    /// `term -> num` without arguments: on the one term it is given, 0 for none.
     TermNum(fn(&Cand, &Env) -> u64),
     /// `group -> num` without arguments: on the list whole, 0 for no candidates.
     GroupNum(fn(&[Cand], &Env) -> u64),
     /// `text -> group`: the candidates read from the text.
     FromText(fn(&str, &Env) -> Steps),
-    /// `term -> text`: on the main candidate, the empty text without one.
+    /// `term -> text`: on the one term it is given, the empty text for none.
     TermText(fn(&Cand, &Env) -> String),
     /// An operator; its applications hold it (`Fun::Op`) and `Env::value` evaluates them inline.
     Operator(Operator),
@@ -325,7 +338,6 @@ const IMPLS: &[(&str, Impl)] = &[
     ("wins", Impl::Group(wins)),
     ("filter", Impl::Group(|a, set, env| Ok(set.into_iter().filter(|x| env.holds(&a[0], std::slice::from_ref(x))).collect()))),
     ("save", Impl::Group(save)),
-    ("load", Impl::Group(|a, _, env| Ok(env.reg(name(&a[0]))))),
     ("clear", Impl::Group(clear)),
     ("note", Impl::Group(note)),
     ("take_min", Impl::Group(take_min)),
@@ -338,10 +350,6 @@ const IMPLS: &[(&str, Impl)] = &[
     ("all", Impl::Num(|a, set, env| (!set.is_empty() && set.iter().all(|x| env.holds(&a[0], std::slice::from_ref(x)))) as u64)),
     ("moved", Impl::GroupNum(|_, env| env.moved.get() as u64)),
     ("input", Impl::TermNum(|m, env| (m.term() == env.lex.borrow().input) as u64)),
-    ("main", Impl::Group(|_, mut set, _| {
-        set.truncate(1);
-        Ok(set)
-    })),
     ("index", Impl::Group(|a, set, env| {
         let i = env.value(&a[0], &set);
         Ok(usize::try_from(i).ok().filter(|_| i != NONE).and_then(|i| set.into_iter().nth(i)).into_iter().collect())
@@ -593,19 +601,22 @@ mod tests {
     fn declarations() {
         let s = get("if").unwrap();
         assert_eq!(s.to_string(), "(if c:group->num a:pipe b:pipe? g:group) group");
-        assert_eq!(s.takes(), "an expression, a pipeline and an optional pipeline");
-        assert_eq!(get("best").unwrap().takes(), "an expression and one or more pipelines");
-        assert_eq!(get("retry").unwrap().takes(), "an expression and two pipelines");
-        assert_eq!(get("id").unwrap().takes(), "no arguments");
-        assert_eq!(get("save").unwrap().decl(), "(extern @pipe (save r:group g:group) group)");
-        assert_eq!(get("relate").unwrap().decl(), "(extern @pipe @switch @timed (relate sub:pipe t:term) term)");
+        assert_eq!(s.arity(), "3 or 4 arguments; | gives the last");
+        assert_eq!(get("best").unwrap().arity(), "3 or more arguments; | gives the last");
+        assert_eq!(get("retry").unwrap().arity(), "4 arguments; | gives the last");
+        assert_eq!(get("id").unwrap().arity(), "1 argument; | gives the last");
+        assert_eq!(get("print").unwrap().arity(), "1 or more arguments");
+        assert_eq!(get("save").unwrap().decl(), "(extern (save r:group g:group) group)");
+        assert_eq!(get("relate").unwrap().decl(), "(extern @switch @timed (relate sub:pipe t:term) term)");
         assert!(get("simba").unwrap().switch && !get("finish").unwrap().switch);
-        assert!(all().iter().all(|s| s.pipe != (s.is_op() || s.kind() == Kind::FromText)), "every built-in but an operator and parse can be a step");
+        assert_eq!(get("print").unwrap().to_string(), "(print x:any...)");
+        assert_eq!(get("assert").unwrap().kind(), Kind::Effect);
+        assert!(get("load").is_none() && get("main").is_none());
         assert_eq!(get("&&").unwrap().decl(), "(extern (&& a:num b:group->num...) num)");
         assert_eq!(get("!").unwrap().kind(), Kind::Op);
         assert_eq!(all().iter().filter(|s| s.is_op()).map(|s| s.name.as_str()).collect::<Vec<_>>(), OPERATORS);
         assert_eq!(get("simba").unwrap().kind(), Kind::Alt);
-        assert_eq!(get("prepass").unwrap().kind(), Kind::Main);
+        assert_eq!(get("prepass").unwrap().kind(), Kind::Join);
         assert!(!get("egglog").unwrap().required());
         assert!(all().iter().all(|s| !s.doc.is_empty()));
         let ok = "# The input.\n(extern (x g:group) group)\n\n# Two lines\n# The second describes it.\n(extern @timed (y n:name\n  t:term) term?)";
@@ -626,7 +637,9 @@ mod tests {
             ("# a\n(extern (x g:group) group", "unclosed"),
             ("# a\n(def (x g:group) group)", "expected (extern"),
             ("# a
-(extern @pipe (+ a:num b:num) num)", "an operator takes"),
+(extern @timed (+ a:num b:num) num)", "an operator takes"),
+            ("# a\n(extern @pipe (x g:group) group)", "unknown attribute"),
+            ("# a\n(extern (x g:group))", "a function without a result has no input"),
             ("# a
 (extern (+ a:num g:group) num)", "an operator takes"),
             ("# a
@@ -649,11 +662,11 @@ mod tests {
         for f in ["best", "fix", "wins"] {
             assert_eq!(ty(f), Ty::Num, "{f}");
         }
-        assert_eq!(get("filter").unwrap().takes(), "an expression");
+        assert_eq!(get("filter").unwrap().arity(), "2 arguments; | gives the last");
         let sigs = parse("# a\n(extern (x c:term->num p:group->group... g:group) group)").unwrap();
         assert_eq!(sigs[0].to_string(), "(x c:term->num p:pipe... g:group) group");
         assert_eq!(parse("# a\n(extern (x f:term->term g:group) group)").unwrap()[0].to_string(), "(x f:term->term g:group) group");
-        assert!(Ty::parse("term->term").unwrap().fits(&Ty::pipe()) && Ty::parse("term->num").unwrap().fits(&Ty::parse("group->num").unwrap()) && !Ty::pipe().fits(&Ty::parse("term->term").unwrap()));
+        assert!(Ty::parse("term->term").unwrap().fits(&Ty::pipe()) && !Ty::parse("term->num").unwrap().fits(&Ty::parse("group->num").unwrap()) && !Ty::pipe().fits(&Ty::parse("term->term").unwrap()));
         for (bad, msg) in [
             ("# a\n(extern (x p:num->term g:group) group)", "a function takes one input, term or group"),
             ("# a\n(extern (x c:term->num? g:group) group)", "only pipe and any take"),
@@ -672,8 +685,8 @@ mod tests {
             let runs_as_declared = match b.imp {
                 Impl::Form => ["seq", "smallest"].contains(&b.name),
                 Impl::Missing => false,
-                Impl::Group(_) => kind == Kind::Group || kind == Kind::Pick,
-                Impl::Main(_) => kind == Kind::Main,
+                Impl::Group(_) => kind == Kind::Group || kind == Kind::Pick || kind == Kind::Effect,
+                Impl::Join(_) => kind == Kind::Join,
                 Impl::Each(_) | Impl::Polish(_) | Impl::EachCand(_) => kind == Kind::Each,
                 Impl::Alt(..) => kind == Kind::Alt,
                 Impl::Num(_) => b.sig.is_number() && !b.sig.is_op() && !b.sig.params.is_empty(),

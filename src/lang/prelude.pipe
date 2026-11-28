@@ -1,0 +1,4 @@
+# The prelude of the pipeline language, which every program reads before its own text.
+
+# The first element of the group g; none for an empty group.
+(def @inline (main g) (index 0 g))

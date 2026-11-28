@@ -81,11 +81,11 @@ eggy1 --passes "prepass=lowbits | (if mixed rewrite)" "expr"
 eggy1 --passes "file=my.pipe" "expr"                      # a source file of definitions and assignments
 ```
 
-A pipeline maps a list of equivalent candidates to another: `a | b` runs in sequence,
+A pipeline maps a group (an ordered set of equivalent terms) to another: `a | b` runs in sequence,
 `(union a b)`, `(best K a b)`, `(first a b)`, `(fix N p)`, `(if COND a b)`, assignments `NAME = VALUE` (`(split_runs = 4 | p)`), `(on NAME)`/`(off NAME)`,
-group variables (`t = (lowbits | rewrite)`, `(save R)`/`(load R)`), conditions such as
-`(mul >= 4 && !mixed)`, `(let NAME p)` definitions (those of `src/default.pipe` can be reused) and
-functions with parameters, `(def (with_budget n p) rewrites = n | p)`, called like built-ins.
+group variables (`t = (lowbits | rewrite)`, `(save R)`, `(R | rewrite)`), conditions such as
+`((mul main) >= 4 && !(mixed main))`, `(let NAME p)` definitions (those of `src/default.pipe` can be reused) and
+functions with parameters, `(def (with_budget n p:pipe) rewrites = n | p)`, called like built-ins.
 Pipelines are checked when read (unknown names, wrong arguments or types, group variables read
 before they are bound, passes outside the pipeline that can run them, recursion), and parts that
 do nothing give warnings. The full

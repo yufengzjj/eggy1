@@ -12,6 +12,7 @@ impl Passes {
     /// bound.
     pub(crate) fn check(&self) -> Result<(), String> {
         self.check_top()?;
+        self.check_flow()?;
         for (name, uses) in self.uses() {
             if let Some(r) = &uses.unsaved {
                 let how = match uses.kind(r) {
@@ -45,13 +46,32 @@ impl Passes {
                         Pipe::Bind(_, rhs) => rhs,
                         p => p,
                     };
-                    return Err(format!("{} has no candidates to work on at the top level of the program, which starts with none: start from a value, as in (parse \"x + y\") | ... or t = (parse \"x + y\")", show_stage(p)));
+                    return Err(format!("{} has no group to work on at the top level of the program, which starts with none: start from a value, as in (parse \"x + y\") | ... or t = (parse \"x + y\")", show_stage(p)));
                 }
                 Gives::Group => value |= gives_value(p),
                 Gives::Text if !value && matches!(p, Pipe::App(_, args) if args.is_empty()) => {
-                    return Err(format!("{} has no candidate to work on at the top level of the program, which starts with none: write its input, as in ({} (main t))", show(p), show(p)));
+                    return Err(format!("{} has no element to work on at the top level of the program, which starts with none: write its input, as in ({} (main t))", show(p), show(p)));
                 }
                 _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// What each step gives against what the next takes (`flow`), in the bodies of the
+    /// functions and the top-level steps.
+    fn check_flow(&self) -> Result<(), String> {
+        use super::flow::{Flow, expr, step};
+        let cx = &mut super::infer::Infer::none();
+        for d in &self.defs {
+            super::flow::body(d).map_err(|e| format!("{}: {e}", d.name))?;
+        }
+        let mut f = Flow::Group;
+        for t in &self.program {
+            match t.gives {
+                Gives::Num | Gives::Text => expr(cx, &t.pipe, f)?,
+                Gives::Fn => {}
+                _ => f = step(cx, &t.pipe, f)?,
             }
         }
         Ok(())
@@ -129,7 +149,7 @@ pub(crate) struct Uses {
     /// The group variables bound again where they are `pending`: the earlier value is never
     /// read.
     pub(crate) dead: Vec<String>,
-    /// The stages after a `|` that start with a group value, so drop the candidates before.
+    /// The steps after a `|` that give a value without taking the input, which is dropped.
     pub(crate) dropping: Vec<String>,
     /// The local variables bound or read as numbers or function values; the others are
     /// group variables.
@@ -167,6 +187,7 @@ impl Uses {
             Pipe::Bind(_, v) => self.expr(v),
             Pipe::Seq(ps) => self.seq(ps),
             Pipe::Expanded(m) if m.switch_names().is_some() => {}
+            Pipe::Expanded(m) if m.is_call() => m.steps.iter().for_each(|q| self.walk(q)),
             Pipe::Expanded(m) => m.args.iter().for_each(|a| self.walk(a)),
             // An `@inline` body is checked as written out where it is called.
             Pipe::App(Fun::Def(c), args) if c.def.inline => {
@@ -179,6 +200,13 @@ impl Uses {
                 self.call_args(c, args);
             }
             Pipe::Var(Slot::Param(..)) => {}
+            Pipe::Drop(q, number) => {
+                let s = show(p);
+                if !s.contains('#') {
+                    self.dropping.push(s);
+                }
+                if *number { self.expr(q) } else { self.walk(q) }
+            }
             e => self.expr(e),
         }
     }
@@ -207,12 +235,6 @@ impl Uses {
             }
         }
         ps.iter().for_each(|p| self.walk(p));
-        for p in ps.iter().skip(1).filter(|p| starts_with_value(p)) {
-            let s = show_stage(p);
-            if !s.contains('#') {
-                self.dropping.push(s);
-            }
-        }
         if let Some(a) = ps.last().filter(|p| binds(p)) {
             self.idle_assign.push(show(a));
         }
@@ -227,7 +249,7 @@ impl Uses {
             "show" | "parse" => args.iter().for_each(|a| self.walk(a)),
             "pre_done" => self.seen("t0"),
             "save" => self.bound(name(0)),
-            "load" | "label" => self.read(name(0)),
+            "label" => self.read(name(0)),
             "union" => args.iter().for_each(|p| self.walk(p)),
             "first" => {
                 self.walk(&args[0]);
@@ -396,6 +418,7 @@ impl Uses {
             }
             Pipe::Var(Slot::Local(r, Holds::Fn(_))) => self.read_as(r, FUNCTION),
             Pipe::Var(Slot::Local(r, Holds::Num)) => self.read_as(r, NUMBER),
+            Pipe::Expanded(m) if m.is_call() => m.steps.iter().for_each(|q| self.walk(q)),
             _ => {}
         }
     }
@@ -418,9 +441,9 @@ fn flat_stages(p: &Pipe) -> Vec<Pipe> {
     }
 }
 
-/// Whether the step `p` gives candidates that do not depend on its input: a group value, `load`.
+/// Whether the step `p` gives a group that does not depend on its input: it starts with a value.
 fn gives_value(p: &Pipe) -> bool {
-    starts_with_value(p) || matches!(p, Pipe::App(Fun::Builtin(b), _) if b.name == "load")
+    starts_with_value(p)
 }
 
 /// Whether the step `p` computes on candidates it is given before any of its steps gives a

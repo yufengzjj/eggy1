@@ -24,9 +24,9 @@ impl Default for Program {
 }
 
 impl Program {
-    /// A program with no items yet.
+    /// A program with no items yet but those of the prelude.
     pub fn new() -> Program {
-        Program { passes: Passes::base(), defs: Defs::new(), state: Lets::default() }
+        Program { passes: Passes::base(), defs: prelude(), state: Lets::default() }
     }
 
     /// The top-level items of `text` added in order; it imports files relative to the current
@@ -88,7 +88,17 @@ impl Passes {
         lets.notes.extend(d.notes.iter().cloned());
         let numeric = d.params.iter().any(|p| p.ty.is_expr());
         let head = std::iter::once(d.name.as_str()).chain(d.params.iter().map(|p| p.name.as_str())).collect::<Vec<_>>().join(" ");
-        let inline = d.kind == DefKind::Inline && (numeric || d.input.is_some() || d.timed);
+        // An `@inline` function whose body starts from its input and reads it nowhere else is put
+        // in place where it is called, as one without an input is.
+        let placed = match (&d.input, &d.pipe) {
+            (Some(g), Pipe::Seq(ps)) if d.kind == DefKind::Inline && !numeric && !d.timed && d.implicit.is_none() && matches!(&ps[0], Pipe::Var(Slot::Local(r, Holds::Group)) if r == g) => {
+                let (mut names, mut params) = (Vec::new(), Vec::new());
+                ps[1..].iter().for_each(|q| super::eval::reads(q, &mut names, &mut params));
+                !names.contains(g)
+            }
+            _ => false,
+        };
+        let inline = d.kind == DefKind::Inline && !placed && (numeric || d.input.is_some() || d.timed);
         let earlier = defs.get(&d.name).filter(|n| n.run).and_then(|n| n.def.clone());
         let ahead = lets.ahead.declared.iter().position(|n| *n == d.name).map(|i| lets.ahead.declared.remove(i)).is_some();
         let (pipe, def) = if d.kind == DefKind::Run || inline {
@@ -114,7 +124,8 @@ impl Passes {
         } else {
             (d.pipe, None)
         };
-        defs.insert(d.name.clone(), Named { pipe, flat: d.flat, run: d.kind == DefKind::Run, params: d.params, def });
+        let input = if placed { d.input.clone() } else { None };
+        defs.insert(d.name.clone(), Named { pipe, flat: d.flat && !placed, run: d.kind == DefKind::Run, params: d.params, def, input });
         if !lets.in_default() && (ahead || earlier.is_none()) {
             lets.defined.push((head, d.kind));
         }
@@ -163,7 +174,7 @@ impl Passes {
             };
             let def = std::sync::Arc::new(def);
             self.defs.push(def.clone());
-            defs.insert(h.name.clone(), Named { pipe: Call::bare(&def), flat: false, run: true, params: def.params.clone(), def: Some(def) });
+            defs.insert(h.name.clone(), Named { pipe: Call::bare(&def), flat: false, run: true, params: def.params.clone(), def: Some(def), input: None });
             lets.ahead.declared.push(h.name.clone());
         }
     }
@@ -218,7 +229,7 @@ impl Passes {
             PARSED.with(|g| *g.borrow_mut() = saved.3);
             lets.ahead.second = true;
             self.items(&items, vec![None; items.len()], &ahead, &found, defs, lets, lines, false).map_err(|e| match ahead.iter().map(|(_, h)| h).find(|h| !found.iter().any(|d| d.name == h.name) && e.contains(&h.name)) {
-                Some(h) => format!("{e}; {} is called before its definition, where a call reads it by its head: a function that gives candidates, its parameters of the types written", h.name),
+                Some(h) => format!("{e}; {} is called before its definition, where a call reads it by its head: a function that gives a group, its parameters of the types written", h.name),
                 None => e,
             })
         };
@@ -311,7 +322,7 @@ impl Passes {
             return Ok(());
         }
         lets.imported.push(key.clone());
-        let fresh = self.program.is_empty() && self.defs.is_empty() && defs.is_empty() && self.globals.is_empty();
+        let fresh = self.program.is_empty() && self.defs.is_empty() && defs.len() == PRELUDE.len() && self.globals.is_empty();
         if copy && key == "default" && fresh {
             let (p, d) = &*DEFAULT;
             *self = p.clone();
@@ -370,6 +381,21 @@ impl Passes {
     }
 }
 
+/// The names the prelude (`src/lang/prelude.pipe`) defines, which every program starts with.
+static PRELUDE: std::sync::LazyLock<Defs> = std::sync::LazyLock::new(|| {
+    let (mut passes, mut defs, mut lets) = (Passes::base(), Defs::new(), Lets::default());
+    lets.importing.push(("prelude".into(), None));
+    let mut globals = Vec::new();
+    parsing(&mut globals, || passes.apply_source(include_str!("prelude.pipe"), &mut defs, &mut lets, true)).unwrap_or_else(|e| panic!("src/lang/prelude.pipe: {e}"));
+    assert!(passes.defs.is_empty() && passes.program.is_empty(), "the prelude only puts functions in place");
+    defs
+});
+
+/// The names the prelude defines.
+pub fn prelude() -> Defs {
+    PRELUDE.clone()
+}
+
 /// `NAME = VALUE` split into its name and value.
 pub(crate) fn top_assignment(item: &str) -> Option<(&str, &str)> {
     let (name, val) = item.split_once('=')?;
@@ -422,8 +448,8 @@ pub(crate) struct Ahead {
 }
 
 impl Lets {
-    /// Whether the item read is in `default`.
+    /// Whether the item read is in `default` or the prelude.
     pub(crate) fn in_default(&self) -> bool {
-        self.importing.iter().any(|(k, _)| k == "default")
+        self.importing.iter().any(|(k, _)| k == "default" || k == "prelude")
     }
 }

@@ -39,8 +39,8 @@ pub fn preamble(cli: &Cli) -> String {
 pub fn statement(expr: &str, cut_note: bool) -> String {
     let input = format!("(parse {})", quoted(&expr.replace(['\n', '\r'], " ")));
     match cut_note {
-        true => format!("{input} | simplify | time_limit = none | (if was_cut (print \"time limit reached: the result is the smallest form found by then\")) | show\n"),
-        false => format!("{input} | simplify | show\n"),
+        true => format!("{input} | simplify | time_limit = none | (if was_cut (print \"time limit reached: the result is the smallest form found by then\")) | main | show\n"),
+        false => format!("{input} | simplify | main | show\n"),
     }
 }
 

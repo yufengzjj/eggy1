@@ -18,6 +18,9 @@ pub enum Ty {
     Any,
     /// `A->B`, `A->B->C` being `A->(B->C)`.
     Fn(Box<Ty>, Box<Ty>),
+    /// The result of a function declared without one (`print`, `assert`): a step that gives it
+    /// passes its input on.
+    Nothing,
 }
 
 impl Ty {
@@ -53,10 +56,10 @@ impl Ty {
         matches!(self, Ty::Fn(a, b) if matches!(**a, Ty::Term | Ty::Group) && matches!(**b, Ty::Num | Ty::Term | Ty::MaybeTerm | Ty::Group))
     }
 
-    /// Whether a value of this type can be given where `want` is wanted, converted as the
-    /// calling kinds convert at a joint: a function over terms runs on each candidate (or the
-    /// main one, for a group or a number), a `group->num` one on the one candidate it is given,
-    /// and a function giving a number, where a number is wanted, on the input of the step.
+    /// Whether a value of this type can be given where `want` is wanted, converted as a joint
+    /// converts: a function over terms giving candidates runs on each candidate of a group, a
+    /// `group->num` one on the one candidate it is given, and a function giving a number, where
+    /// a number is wanted, on the input of the step.
     pub fn fits(&self, want: &Ty) -> bool {
         if self == want {
             return true;
@@ -64,7 +67,7 @@ impl Ty {
         match (self, want) {
             (Ty::Fn(a, b), Ty::Fn(c, d)) => matches!(
                 (&**a, &**b, &**c, &**d),
-                (Ty::Term, Ty::Term | Ty::MaybeTerm | Ty::Group, Ty::Group, Ty::Group) | (Ty::Term, Ty::Num, Ty::Group, Ty::Num) | (Ty::Group, Ty::Num, Ty::Term, Ty::Num) | (Ty::Term, Ty::Term, Ty::Term, Ty::MaybeTerm)
+                (Ty::Term, Ty::Term | Ty::MaybeTerm | Ty::Group, Ty::Group, Ty::Group) | (Ty::Group, Ty::Num, Ty::Term, Ty::Num) | (Ty::Term, Ty::Term, Ty::Term, Ty::MaybeTerm)
             ),
             (Ty::Fn(_, b), Ty::Num) => **b == Ty::Num,
             _ => false,
@@ -97,7 +100,7 @@ impl Ty {
             Ty::Name => "a name",
             Ty::Text => "a text",
             Ty::Any => "a value",
-            _ => "a candidate",
+            _ => "a term",
         }
     }
 }
@@ -108,17 +111,10 @@ impl fmt::Display for Ty {
             _ if self.is_pipe() => write!(f, "pipe"),
             Ty::Fn(a, b) if matches!(**a, Ty::Fn(..)) && !a.is_pipe() => write!(f, "({a})->{b}"),
             Ty::Fn(a, b) => write!(f, "{a}->{b}"),
+            Ty::Nothing => Ok(()),
             t => write!(f, "{}", Ty::WORDS.iter().find(|(_, w)| w == t).unwrap().0),
         }
     }
-}
-
-fn noun(t: &Ty) -> &'static str {
-    noun_of(t.what())
-}
-
-fn noun_of(w: &str) -> &str {
-    w.strip_prefix("an ").or_else(|| w.strip_prefix("a ")).unwrap_or(w)
 }
 
 /// How often a parameter is written: once, one or more times (`TYPE...`), or maybe (`TYPE?`).
@@ -156,9 +152,9 @@ pub enum Kind {
     Each,
     /// `term -> term?`: on each candidate, no result dropping it.
     Alt,
-    /// `term -> group`: on the main candidate, the result replacing the list.
-    Main,
-    /// `term -> num`: on the main candidate, 0 without candidates.
+    /// `term -> group`: on each candidate, the results joined.
+    Join,
+    /// `term -> num`: on one candidate, 0 for none.
     TermNum,
     /// `group -> num`: on the whole list, 0 without candidates.
     GroupNum,
@@ -166,24 +162,27 @@ pub enum Kind {
     Pick,
     /// `text -> group`: the candidates read from a text.
     FromText,
-    /// `term -> text`: a text of the main candidate.
+    /// `term -> text`: a text of one candidate.
     TermText,
     /// An operator: no input, every operand written.
     Op,
+    /// No input and no result (`print`, `assert`): run for what it does, the input passing on.
+    Effect,
 }
 
 impl Kind {
-    pub const ALL: [(Kind, &'static str); 10] = [
-        (Kind::Group, "on the whole list (group -> group)"),
-        (Kind::Each, "on each candidate (term -> term)"),
-        (Kind::Alt, "alternatives, on each candidate, none when no form is found (term -> term?)"),
-        (Kind::Main, "on the main candidate, the result replacing the list (term -> group)"),
-        (Kind::TermNum, "numbers of the main candidate (term -> num)"),
-        (Kind::GroupNum, "numbers of the whole list (group -> num)"),
-        (Kind::Pick, "one candidate of the list, or none (group -> term?)"),
-        (Kind::FromText, "candidates read from a text (text -> group)"),
-        (Kind::TermText, "texts of the main candidate (term -> text)"),
+    pub const ALL: [(Kind, &'static str); 11] = [
+        (Kind::Group, "on the whole group (group -> group)"),
+        (Kind::Each, "on each element (term -> term)"),
+        (Kind::Alt, "alternatives, on each element, none when no form is found (term -> term?)"),
+        (Kind::Join, "on each element, the result groups joined (term -> group)"),
+        (Kind::TermNum, "numbers of one term (term -> num)"),
+        (Kind::GroupNum, "numbers of the whole group (group -> num)"),
+        (Kind::Pick, "one element of the group, or none (group -> term?)"),
+        (Kind::FromText, "a group read from a text (text -> group)"),
+        (Kind::TermText, "texts of one term (term -> text)"),
         (Kind::Op, "operators, written between their operands (! before its one)"),
+        (Kind::Effect, "no result: run for what they do, the input passing on"),
     ];
 
     pub(crate) fn of(input: &Ty, result: &Ty) -> Option<Kind> {
@@ -191,7 +190,7 @@ impl Kind {
             (Ty::Group, Ty::Group) => Kind::Group,
             (Ty::Term, Ty::Term) => Kind::Each,
             (Ty::Term, Ty::MaybeTerm) => Kind::Alt,
-            (Ty::Term, Ty::Group) => Kind::Main,
+            (Ty::Term, Ty::Group) => Kind::Join,
             (Ty::Term | Ty::MaybeTerm, Ty::Num) => Kind::TermNum,
             (Ty::Group, Ty::Num) => Kind::GroupNum,
             (Ty::Group, Ty::MaybeTerm) => Kind::Pick,
@@ -208,11 +207,11 @@ pub struct Sig {
     pub name: String,
     /// The parameters written in a call.
     pub params: Vec<Param>,
-    /// The implicit input, `term` or `group`; `None` for an operator.
+    /// The last parameter, which a call may leave out to take the step's input; `None` for an
+    /// operator and a function without a result.
     pub input: Option<Param>,
+    /// `Ty::Nothing` for a function declared without a result.
     pub result: Ty,
-    /// `@pipe`: `|` fills in the input, so it can be a step.
-    pub pipe: bool,
     /// `@timed`: a call past the time limit is skipped, giving its input.
     pub timed: bool,
     /// `@uncounted` (with `@timed`): its skip makes no cut and no `time_limit/skipped`.
@@ -232,12 +231,21 @@ impl Sig {
     }
 
     pub fn kind(&self) -> Kind {
-        self.input.as_ref().map_or(Kind::Op, |i| Kind::of(&i.ty, &self.result).unwrap())
+        match &self.input {
+            Some(i) => Kind::of(&i.ty, &self.result).unwrap(),
+            None if self.result == Ty::Nothing => Kind::Effect,
+            None => Kind::Op,
+        }
     }
 
     /// Whether it is an operator, written infix (`a + b`) or prefix (`!a`), not by name.
     pub fn is_op(&self) -> bool {
-        self.input.is_none()
+        self.input.is_none() && self.result != Ty::Nothing
+    }
+
+    /// Whether it gives no value, so a step of it passes its input on.
+    pub fn gives_nothing(&self) -> bool {
+        self.result == Ty::Nothing
     }
 
     /// Whether it gives a number, so belongs in expressions, not steps.
@@ -261,40 +269,27 @@ impl Sig {
         self.params.iter().any(|p| p.rep != Rep::Opt)
     }
 
-    /// The arguments a call takes, in words: `an expression and one or more pipelines`.
-    pub fn takes(&self) -> String {
-        let mut words: Vec<(String, usize)> = Vec::new();
-        for p in &self.params {
-            let w = match p.rep {
-                Rep::One => p.ty.what().to_string(),
-                Rep::Many => format!("one or more {}s", noun(&p.ty)),
-                Rep::Opt => format!("an optional {}", noun(&p.ty)),
-            };
-            match words.last_mut() {
-                Some((last, n)) if *last == w && p.rep == Rep::One => *n += 1,
-                _ => words.push((w, 1)),
-            }
-        }
-        let words: Vec<String> = words
-            .into_iter()
-            .map(|(w, n)| match n {
-                1 => w,
-                n => format!("{} {}s", ["two", "three", "four"].get(n - 2).copied().unwrap_or("several"), noun_of(&w)),
-            })
-            .collect();
-        match words.as_slice() {
-            [] => "no arguments".into(),
-            [a] => a.clone(),
-            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    /// How many arguments a call takes, the input among them: `3 arguments; | gives the last`.
+    pub fn arity(&self) -> String {
+        let input = usize::from(self.input.is_some());
+        let least = self.params.iter().filter(|p| p.rep != Rep::Opt).count() + input;
+        let opt = self.params.iter().filter(|p| p.rep == Rep::Opt).count();
+        let n = match (self.params.iter().any(|p| p.rep == Rep::Many), opt) {
+            (true, _) => format!("{least} or more arguments"),
+            (false, 0) if least == 1 => "1 argument".into(),
+            (false, 0) => format!("{least} arguments"),
+            (false, 1) => format!("{least} or {} arguments", least + 1),
+            (false, k) => format!("{least} to {} arguments", least + k),
+        };
+        match &self.input {
+            Some(i) if matches!(i.ty, Ty::Term | Ty::MaybeTerm | Ty::Group) => format!("{n}; | gives the last"),
+            _ => n,
         }
     }
 
     /// The declaration as `src/builtins.pipe` writes it.
     pub fn decl(&self) -> String {
         let mut attrs = String::new();
-        if self.pipe {
-            attrs += "@pipe ";
-        }
         if self.switch {
             attrs += "@switch ";
         }
@@ -315,7 +310,10 @@ impl fmt::Display for Sig {
         for p in self.params.iter().chain(&self.input) {
             write!(f, " {p}")?;
         }
-        write!(f, ") {}", self.result)
+        match self.result {
+            Ty::Nothing => write!(f, ")"),
+            ref r => write!(f, ") {r}"),
+        }
     }
 }
 

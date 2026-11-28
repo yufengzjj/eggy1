@@ -18,7 +18,7 @@ pub enum Pipe {
     /// A number; `NONE` is `none`.
     Num(u64),
     /// A name argument: a stats or origin name, an egglog label, a note register, or the group
-    /// variable a built-in binds or reads (`(save t)`, `(load t)`).
+    /// variable a built-in binds or reads (`(save t)`, `(label t)`).
     Name(String),
     /// A string literal (`text`), its escapes read.
     Text(String),
@@ -43,6 +43,10 @@ pub enum Pipe {
     Bind(Slot, std::sync::Arc<Pipe>),
     /// A macro call as written and what it expands to, which is what runs.
     Expanded(Box<Expanded>),
+    /// A step after `|` that gives a value without taking the input (a group variable, a call
+    /// with all its arguments written): it runs, its value is dropped and the input passes on.
+    /// The flag: it is an expression (a number or a text), not steps.
+    Drop(std::sync::Arc<Pipe>, bool),
 }
 
 /// A variable or parameter, resolved when parsed.
@@ -89,7 +93,8 @@ impl Fun {
     }
 }
 
-/// A macro call (`(smallest p)`, `(off NAME ...)`, `(on NAME ...)`) as written, `head` and
+/// A macro call (`(smallest p)`, `(off NAME ...)`, `(on NAME ...)`, a call of an `@inline`
+/// function put in place such as `(main r)`) as written, `head` and
 /// `args`, which `--show-passes`, errors, checks and warnings read, and its expansion, which
 /// runs.
 #[derive(Clone, Debug)]
@@ -106,6 +111,14 @@ pub struct Expanded {
 impl PartialEq for Expanded {
     fn eq(&self, o: &Expanded) -> bool {
         self.head == o.head && self.args == o.args
+    }
+}
+
+impl Expanded {
+    /// Whether it is the call of an `@inline` function put in place, not a macro of the
+    /// language.
+    pub fn is_call(&self) -> bool {
+        !matches!(self.head, "smallest" | "on" | "off")
     }
 }
 
@@ -148,10 +161,15 @@ impl Pipe {
         }
     }
 
-    /// Whether this gives a term? (`(main r)`, `(index i r)`): steps whose last picks one
-    /// candidate of a group.
+    /// Whether this gives a term? (`(main r)`, `(index i r)`, `main`): steps whose last picks
+    /// one element of a group.
     pub fn picks(&self) -> bool {
-        matches!(self, Pipe::Seq(ps) if matches!(ps.last(), Some(Pipe::App(Fun::Builtin(b), _)) if b.sig.kind() == super::types::Kind::Pick))
+        match self {
+            Pipe::App(Fun::Builtin(b), _) => b.sig.kind() == super::types::Kind::Pick,
+            Pipe::Seq(ps) => ps.last().is_some_and(Pipe::picks),
+            Pipe::Expanded(m) if m.is_call() => m.steps.last().is_some_and(Pipe::picks),
+            _ => false,
+        }
     }
 
     /// The global variable at `i`, read.
@@ -190,6 +208,8 @@ impl Pipe {
             Pipe::Bind(Slot::Local(_, Holds::Group), p) => f(p),
             Pipe::Bind(Slot::Local(_, Holds::Fn(t)), p) if t.is_step() => f(p),
             Pipe::Bind(_, e) => e.each_in_expr(f),
+            Pipe::Drop(q, false) => f(q),
+            Pipe::Drop(q, true) => q.each_in_expr(f),
             Pipe::Num(_) | Pipe::Name(_) | Pipe::Text(_) | Pipe::Var(_) => {}
         }
     }
@@ -216,11 +236,12 @@ pub(crate) fn op_of(p: &Pipe) -> Option<(Operator, &[Pipe])> {
     }
 }
 
-/// Whether `p` gives its candidates whatever its input: it starts with a group value.
+/// Whether `p` gives its group whatever its input: it starts with a group value.
 pub fn starts_with_value(p: &Pipe) -> bool {
     match p {
         Pipe::Var(Slot::Local(_, Holds::Group)) => true,
         Pipe::Seq(ps) => ps.first().is_some_and(starts_with_value),
+        Pipe::Expanded(m) if m.is_call() => m.steps.first().is_some_and(starts_with_value),
         Pipe::App(Fun::Def(c), _) => !c.def.step,
         Pipe::App(Fun::Builtin(b), _) => b.sig.kind() == super::types::Kind::FromText,
         _ => false,
@@ -335,8 +356,7 @@ fn app_args<'p>(b: &super::builtins::Builtin, args: &'p [Pipe]) -> Vec<(&'p Pipe
 }
 
 /// The position of the parameter of `params` that a call reads up to `)`, as a built-in's: the
-/// last one when it is the only pipeline parameter (written without parentheses unless it
-/// starts with a group value, which would read as the input).
+/// last one when it is the only pipeline parameter.
 fn read_to_close(params: &[Param]) -> Option<usize> {
     let last = params.len().checked_sub(1)?;
     (params.iter().filter(|p| p.ty.is_step()).count() == 1 && params[last].ty.is_step() && params[last].rep == Rep::One).then_some(last)
@@ -377,10 +397,22 @@ pub fn show(p: &Pipe) -> String {
         }
         Pipe::Seq(ps) if ps.len() > 1 => stages(ps).join(" | "),
         Pipe::Seq(ps) => form("seq", &stages(ps)),
-        Pipe::Expanded(m) => form(m.head, &m.args.iter().map(show).collect::<Vec<_>>()),
+        Pipe::Expanded(m) if m.args.is_empty() => m.head.to_string(),
+        Pipe::Expanded(m) => form(m.head, &m.args.iter().map(|a| if m.is_call() { stage(a) } else { show(a) }).collect::<Vec<_>>()),
+        Pipe::Drop(q, _) => match &**q {
+            // A call with its input written, as written: after `|` it drops its value.
+            Pipe::Seq(ps) if matches!(&ps[..], [Pipe::Var(Slot::Local(_, Holds::Group)), Pipe::App(..)]) => {
+                let (Pipe::Var(Slot::Local(g, _)), call) = (&ps[0], show(&ps[1])) else { unreachable!() };
+                match call.strip_suffix(')') {
+                    Some(c) if call.starts_with('(') => format!("{c} {g})"),
+                    _ => format!("({call} {g})"),
+                }
+            }
+            q => show(q),
+        },
         Pipe::App(Fun::Def(c), args) => {
             let last = read_to_close(&c.def.params);
-            let all: Vec<String> = args.iter().zip(&c.def.params).enumerate().map(|(i, (a, p))| if Some(i) == last && !starts_with_value(a) { show(a) } else { show_call_arg(a, p) }).chain(args.get(c.def.params.len()).map(stage)).collect();
+            let all: Vec<String> = args.iter().zip(&c.def.params).enumerate().map(|(i, (a, p))| if Some(i) == last { show(a) } else { show_call_arg(a, p) }).chain(args.get(c.def.params.len()).map(stage)).collect();
             if all.is_empty() { c.def.name.clone() } else { form(&c.def.name, &all) }
         }
         Pipe::Var(Slot::Param(_, n) | Slot::Local(n, _)) | Pipe::Name(n) => n.clone(),
@@ -436,7 +468,8 @@ pub(crate) fn pretty_at(p: &Pipe, indent: usize) -> String {
             lines.join(&format!("\n{}| ", " ".repeat(indent)))
         }
         Pipe::Seq(ps) => nested("seq", vec![], many(ps)),
-        Pipe::Expanded(m) if m.switch_names().is_none() => nested(m.head, vec![], m.args.iter().map(|a| (a, false)).collect()),
+        Pipe::Drop(q, false) => pretty_at(q, indent),
+        Pipe::Expanded(m) if m.switch_names().is_none() && !m.is_call() => nested(m.head, vec![], m.args.iter().map(|a| (a, false)).collect()),
         Pipe::App(Fun::Builtin(b), args) if b.sig.params.iter().any(|q| q.ty.is_step()) => {
             let all = app_args(b, args);
             let fixed = all.iter().filter(|(_, at)| at.is_none()).map(|(a, _)| show_fixed(a)).collect();
@@ -447,7 +480,7 @@ pub(crate) fn pretty_at(p: &Pipe, indent: usize) -> String {
             let params = &c.def.params;
             let names = params.iter().take_while(|p| matches!(p.ty, Ty::Name | Ty::Num)).count();
             let last = read_to_close(params);
-            let pipes: Vec<(&Pipe, bool)> = args.iter().zip(params).enumerate().skip(names).filter(|(_, (_, p))| p.ty.is_step()).map(|(i, (q, _))| (q, Some(i) != last || starts_with_value(q))).collect();
+            let pipes: Vec<(&Pipe, bool)> = args.iter().zip(params).enumerate().skip(names).filter(|(_, (_, p))| p.ty.is_step()).map(|(i, (q, _))| (q, Some(i) != last)).collect();
             if names + pipes.len() < args.len() {
                 return one;
             }
